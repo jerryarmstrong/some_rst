@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../" id="documentation_options" src="../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.timelines.data_processing.ml_util.aggregation_framework.conversion</p>
+<p>import com.twitter.algebird.DecayedValue
+import com.twitter.algebird.DecayedValueMonoid
+import com.twitter.algebird.Monoid
+import com.twitter.ml.api._
+import com.twitter.ml.api.constant.SharedFeatures
+import com.twitter.ml.api.util.FDsl._
+import com.twitter.ml.api.util.SRichDataRecord
+import com.twitter.summingbird.batch.BatchID
+import com.twitter.timelines.data_processing.ml_util.aggregation_framework.AggregationKey
+import com.twitter.timelines.data_processing.ml_util.aggregation_framework.TypedAggregateGroup
+import com.twitter.timelines.data_processing.ml_util.aggregation_framework.metrics.AggregateFeature
+import com.twitter.util.Duration
+import java.lang.{Double =&gt; JDouble}
+import java.lang.{Long =&gt; JLong}
+import scala.collection.JavaConverters._
+import scala.collection.mutable
+import java.{util =&gt; ju}</p>
+<dl>
+<dt>object AggregatesV2Adapter {</dt><dd><p>type AggregatesV2Tuple = (AggregationKey, (BatchID, DataRecord))</p>
+<p>val Epsilon: Double = 1e-6
+val decayedValueMonoid: Monoid[DecayedValue] = DecayedValueMonoid(Epsilon)</p>
+<dl>
+<dt>/*</dt><dd><ul class="simple">
+<li><p>Decays the storedValue from timestamp -&gt; sourceVersion</p></li>
+<li></li>
+<li><p>&#64;param storedValue value read from the aggregates v2 output store</p></li>
+<li><p>&#64;param timestamp timestamp corresponding to store value</p></li>
+<li><p>&#64;param sourceVersion timestamp of version to decay all values to uniformly</p></li>
+<li><p>&#64;param halfLife Half life duration to use for applying decay</p></li>
+<li></li>
+<li><p>By applying this function, the feature values for all users are decayed</p></li>
+<li><p>to sourceVersion. This is important to ensure that a user whose aggregates</p></li>
+<li><p>were updated long in the past does not have an artifically inflated count</p></li>
+<li><p>compared to one whose aggregates were updated (and hence decayed) more recently.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>def decayValueToSourceVersion(</dt><dd><p>storedValue: Double,
+timestamp: Long,
+sourceVersion: Long,
+halfLife: Duration</p>
+</dd>
+<dt>): Double =</dt><dd><dl>
+<dt>if (timestamp &gt; sourceVersion) {</dt><dd><p>storedValue</p>
+</dd>
+<dt>} else {</dt><dd><dl>
+<dt>decayedValueMonoid</dt><dd><dl class="simple">
+<dt>.plus(</dt><dd><p>DecayedValue.build(storedValue, timestamp, halfLife.inMilliseconds),
+DecayedValue.build(0, sourceVersion, halfLife.inMilliseconds)</p>
+</dd>
+</dl>
+<p>)
+.value</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>/*</dt><dd><ul class="simple">
+<li><p>Decays all the aggregate features occurring in the ‘’inputRecord’’</p></li>
+<li><p>to a given timestamp, and mutates the ‘’outputRecord’’ accordingly.</p></li>
+<li><p>Note that inputRecord and outputRecord can be the same if you want</p></li>
+<li><p>to mutate the input in place, the function does this correctly.</p></li>
+<li></li>
+<li><p>&#64;param inputRecord Input record to get features from</p></li>
+<li><p>&#64;param aggregates Aggregates to decay</p></li>
+<li><p>&#64;param decayTo Timestamp to decay to</p></li>
+<li><p>&#64;param trimThreshold Drop features below this trim threshold</p></li>
+<li><p>&#64;param outputRecord Output record to mutate</p></li>
+<li><p>&#64;return the mutated outputRecord</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>def mutateDecay(</dt><dd><p>inputRecord: DataRecord,
+aggregateFeaturesAndHalfLives: List[(Feature[_], Duration)],
+decayTo: Long,
+trimThreshold: Double,
+outputRecord: DataRecord</p>
+</dd>
+<dt>): DataRecord = {</dt><dd><p>val timestamp = inputRecord.getFeatureValue(SharedFeatures.TIMESTAMP).toLong</p>
+<dl>
+<dt>aggregateFeaturesAndHalfLives.foreach {</dt><dd><dl>
+<dt>case (aggregateFeature: Feature[_], halfLife: Duration) =&gt;</dt><dd><dl>
+<dt>if (aggregateFeature.getFeatureType() == FeatureType.CONTINUOUS) {</dt><dd><p>val continuousFeature = aggregateFeature.asInstanceOf[Feature[JDouble]]
+if (inputRecord.hasFeature(continuousFeature)) {</p>
+<blockquote>
+<div><p>val storedValue = inputRecord.getFeatureValue(continuousFeature).toDouble
+val decayedValue = decayValueToSourceVersion(storedValue, timestamp, decayTo, halfLife)
+if (math.abs(decayedValue) &gt; trimThreshold) {</p>
+<blockquote>
+<div><p>outputRecord.setFeatureValue(continuousFeature, decayedValue)</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>/* Update timestamp to version (now that we’ve decayed all aggregates) <a href="#id5"><span class="problematic" id="id6">*</span></a>/
+outputRecord.setFeatureValue(SharedFeatures.TIMESTAMP, decayTo)</p>
+<p>outputRecord</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>class AggregatesV2Adapter(</dt><dd><p>aggregates: Set[TypedAggregateGroup[_]],
+sourceVersion: Long,
+trimThreshold: Double)</p>
+<blockquote>
+<div><p>extends IRecordOneToManyAdapter[AggregatesV2Adapter.AggregatesV2Tuple] {</p>
+</div></blockquote>
+<p>import AggregatesV2Adapter._</p>
+<p>val keyFeatures: List[Feature[_]] = aggregates.flatMap(_.allOutputKeys).toList
+val aggregateFeatures: List[Feature[_]] = aggregates.flatMap(_.allOutputFeatures).toList
+val timestampFeatures: List[Feature[JLong]] = List(SharedFeatures.TIMESTAMP)
+val allFeatures: List[Feature[_]] = keyFeatures ++ aggregateFeatures ++ timestampFeatures</p>
+<p>val featureContext: FeatureContext = new FeatureContext(allFeatures.asJava)</p>
+<p>override def getFeatureContext: FeatureContext = featureContext</p>
+<dl>
+<dt>val aggregateFeaturesAndHalfLives: List[(Feature[_$3], Duration) forSome { type _$3 }] =</dt><dd><dl class="simple">
+<dt>aggregateFeatures.map { aggregateFeature: Feature[_] =&gt;</dt><dd><p>val halfLife = AggregateFeature.parseHalfLife(aggregateFeature)
+(aggregateFeature, halfLife)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>override def adaptToDataRecords(tuple: AggregatesV2Tuple): ju.List[DataRecord] = tuple match {</dt><dd><dl>
+<dt>case (key: AggregationKey, (batchId: BatchID, record: DataRecord)) =&gt; {</dt><dd><p>val resultRecord = new SRichDataRecord(new DataRecord, featureContext)</p>
+<p>val itr = resultRecord.continuousFeaturesIterator()
+val featuresToClear = mutable.Set[Feature[JDouble]]()
+while (itr.moveNext()) {</p>
+<blockquote>
+<div><p>val nextFeature = itr.getFeature
+if (!aggregateFeatures.contains(nextFeature)) {</p>
+<blockquote>
+<div><p>featuresToClear += nextFeature</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>featuresToClear.foreach(resultRecord.clearFeature)</p>
+<dl>
+<dt>keyFeatures.foreach { keyFeature: Feature[_] =&gt;</dt><dd><dl>
+<dt>if (keyFeature.getFeatureType == FeatureType.DISCRETE) {</dt><dd><dl class="simple">
+<dt>resultRecord.setFeatureValue(</dt><dd><p>keyFeature.asInstanceOf[Feature[JLong]],
+key.discreteFeaturesById(keyFeature.getDenseFeatureId)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>} else if (keyFeature.getFeatureType == FeatureType.STRING) {</dt><dd><dl class="simple">
+<dt>resultRecord.setFeatureValue(</dt><dd><p>keyFeature.asInstanceOf[Feature[String]],
+key.textFeaturesById(keyFeature.getDenseFeatureId)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>if (record.hasFeature(SharedFeatures.TIMESTAMP)) {</dt><dd><dl class="simple">
+<dt>mutateDecay(</dt><dd><p>record,
+aggregateFeaturesAndHalfLives,
+sourceVersion,
+trimThreshold,
+resultRecord)</p>
+</dd>
+</dl>
+<p>List(resultRecord.getRecord).asJava</p>
+</dd>
+<dt>} else {</dt><dd><p>List.empty[DataRecord].asJava</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../_sources/timelines/data_processing/ml_util/aggregation_framework/conversion/AggregatesV2Adapter.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

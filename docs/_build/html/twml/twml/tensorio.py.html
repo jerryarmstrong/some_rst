@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../" id="documentation_options" src="../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" />
+   
+  <link rel="stylesheet" href="../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p># pylint: disable=missing-docstring, bare-except, pointless-statement,
+# pointless-string-statement, redundant-unittest-assert, no-else-return,
+# no-member, old-style-class, dangerous-default-value, protected-access,
+# too-few-public-methods</p>
+<p>import os</p>
+<p>import numpy as np
+import yaml</p>
+<p>“””
+Utility to load tensors serialized by Deepbird V1.</p>
+<p>Note that Deepbird V1 serialize tensor names as &quot;weight&quot;.'1'.
+For user-friendliness, the quotes are removed from the tensor names.
+“””</p>
+<p># helper class used to assist hierarchical key access by remembering intermediate keys.
+class _KeyRecorder(object):</p>
+<blockquote>
+<div><dl>
+<dt>def __init__(self, tensorio, keys=[]):</dt><dd><p>self.tensorio = tensorio
+self.keys = keys</p>
+</dd>
+<dt>def __getitem__(self, k):</dt><dd><p>new_keys = self.keys + [str(k)]
+prefix = “.”.join(new_keys)</p>
+<p>key_list = self.tensorio.list_tensors()</p>
+<p># if we have a complete key, load the tensor.
+if prefix in key_list:</p>
+<blockquote>
+<div><p>return self.tensorio._load(prefix)</p>
+</div></blockquote>
+<p># we don’t have a complete key yet, but at least one tensor should start with this prefix.
+for k_value in key_list:</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if k_value.startswith(prefix):</dt><dd><p>return _KeyRecorder(self.tensorio, new_keys)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p># if no key starts with the prefix, this _key_recorder is not valid.
+raise ValueError(“Key not found: “ + prefix)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p># convert tensorio tensor type to numpy data type.
+# also returns element size in bytes.
+def _get_data_type(data_type):</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if data_type == ‘Double’:</dt><dd><p>return (np.float64, 8)</p>
+</dd>
+<dt>if data_type == ‘Float’:</dt><dd><p>return (np.float32, 4)</p>
+</dd>
+<dt>if data_type == ‘Int’:</dt><dd><p>return (np.int32, 4)</p>
+</dd>
+<dt>if data_type == ‘Long’:</dt><dd><p>return (np.int64, 8)</p>
+</dd>
+<dt>if data_type == ‘Byte’:</dt><dd><p>return (np.int8, 1)</p>
+</dd>
+</dl>
+<p>raise ValueError(‘Unexpected tensorio data type: ‘ + data_type)</p>
+</div></blockquote>
+<dl>
+<dt>class TensorIO(object):</dt><dd><p>“””
+Construct a TensorIO class.
+tensorio_path: a directory containing tensors serialized using tensorio. tar file not supported.
+mmap_tensor:</p>
+<blockquote>
+<div><p>By default, loaded tensors use mmap storage.
+Set this to false to not use mmap. Useful when loading multiple tensors.</p>
+</div></blockquote>
+<p>“””</p>
+<dl>
+<dt>def __init__(self, tensorio_path, mmap_tensor=True):</dt><dd><p>self._tensorio_path = tensorio_path
+self._mmap_tensor = mmap_tensor</p>
+<p># Make sure we can locate spec.yaml.
+yaml_file = os.path.join(tensorio_path, ‘spec.yaml’)
+if not os.path.exists(yaml_file):</p>
+<blockquote>
+<div><p>raise ValueError(‘Invalid tensorio path: no spec.yaml found.’)</p>
+</div></blockquote>
+<p># load spec.yaml.
+with open(yaml_file, ‘r’) as file_open:</p>
+<blockquote>
+<div><p># Note that tensor names in the yaml are like this: &quot;weight&quot;.'1'
+# For user-friendliness, we remove the quotes.
+_spec = yaml.safe_load(file_open)
+self._spec = {k.replace(”’”, ‘’).replace(‘”’, ‘’): v for (k, v) in _spec.items()}</p>
+</div></blockquote>
+</dd>
+<dt>def list_tensors(self):</dt><dd><p>“””
+Returns a list of tensors saved in the given path.
+“””
+return self._spec.keys()</p>
+</dd>
+<dt>def _load_tensor(self, name):</dt><dd><p>“””
+Load Tensor with the given name.
+Raise value error if the named tensor is not found.
+Returns a numpy array if the named tensor is found.
+“””
+tensor_info = self._spec[name]
+if tensor_info[‘type’] != ‘tensor’:</p>
+<blockquote>
+<div><p>raise ValueError(‘Trying to load a tensor of unknown type: ‘ + tensor_info[‘type’])</p>
+</div></blockquote>
+<p>filename = os.path.join(self._tensorio_path, tensor_info[‘filename’])
+(data_type, element_size) = _get_data_type(tensor_info[‘tensorType’])</p>
+<dl class="simple">
+<dt>np_array = np.memmap(</dt><dd><p>filename,
+dtype=data_type,
+mode=’r’,
+# -1 because lua offset is 1 based.
+offset=(tensor_info[‘offset’] - 1) * element_size,
+shape=tuple(tensor_info[‘size’]),
+order=’C’,</p>
+</dd>
+</dl>
+<p>)</p>
+<p>return np_array if self._mmap_tensor else np_array[:].copy()</p>
+</dd>
+<dt>def _load_nontensor_data(self, name):</dt><dd><p>“””
+Load non-tensor data with the given name.
+Returns a python string.
+“””
+tensor_info = self._spec[name]
+return tensor_info[‘data’]</p>
+</dd>
+<dt>def _load(self, name):</dt><dd><p>“””
+Load data serialized under the given name, it could be a tensor or regular data.
+“””
+if name not in self._spec:</p>
+<blockquote>
+<div><p>raise ValueError(‘The specified key {} is not found in {}’.format(name, self._tensorio_path))</p>
+</div></blockquote>
+<p>data_type = self._spec[name][‘type’]
+if data_type == ‘tensor’:</p>
+<blockquote>
+<div><p>return self._load_tensor(name)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>else:</dt><dd><p>return self._load_nontensor_data(name)</p>
+</dd>
+</dl>
+</dd>
+<dt>def load_all(self):</dt><dd><p>“””
+Load all tensors stored in the tensorio directory.
+Returns a dictionary from tensor name to numpy arrays.
+“””
+return {k: self._load(k) for k in self._spec}</p>
+</dd>
+</dl>
+<dl>
+<dt>def __getitem__(self, k):</dt><dd><p>“””
+Shorthand for _load_tensor, but also supports hierarchical access like: tensorio[‘a’][‘b’][‘1’]
+“””
+if k in self._spec:</p>
+<blockquote>
+<div><p># We have a full tensor name, directly load it.
+return self._load_tensor(k)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>else:</dt><dd><p>return _KeyRecorder(self)[k]</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../_sources/twml/twml/tensorio.py.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

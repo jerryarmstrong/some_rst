@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.ann.scalding.offline
+import com.twitter.ann.common.Distance
+import com.twitter.ann.common.Metric
+import com.twitter.cortex.ml.embeddings.common.EntityKind
+import com.twitter.ml.featurestore.lib.EntityId
+import com.twitter.scalding.typed.TypedPipe
+import com.twitter.scalding._
+import com.twitter.scalding_internal.job.TwitterExecutionApp</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>This job do an exhaustive search for nearest neighbours helpful for debugging recommendations</p></li>
+<li><p>for a given list of sample queryIds and entity embeddings for the recos to be made.</p></li>
+<li><p>Sample job script:</p></li>
+</ul>
+<blockquote>
+<div><p>./bazel bundle ann/src/main/scala/com/twitter/ann/scalding/offline:ann-offline-deploy</p>
+<p>oscar hdfs –screen –tee log.txt –hadoop-client-memory 6000 –hadoop-properties “yarn.app.mapreduce.am.resource.mb=6000;yarn.app.mapreduce.am.command-opts=’-Xmx7500m’;mapreduce.map.memory.mb=7500;mapreduce.reduce.java.opts=’-Xmx6000m’;mapreduce.reduce.memory.mb=7500;mapred.task.timeout=36000000;” –bundle ann-offline-deploy –min-split-size 284217728 –host hadoopnest1.smf1.twitter.com –tool com.twitter.ann.scalding.offline.KnnEntityRecoDebugJob – –neighbors 10 –metric InnerProduct –query_entity_kind user –search_space_entity_kind user –query.embedding_path /user/apoorvs/sample_embeddings –query.embedding_format tab –search_space.embedding_path /user/apoorvs/sample_embeddings –search_space.embedding_format tab –query_ids 974308319300149248 988871266244464640 2719685122 2489777564 –output_path /user/apoorvs/adhochadoop/test –reducers 100</p>
+</div></blockquote>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>object KnnEntityRecoDebugJob extends TwitterExecutionApp {</dt><dd><dl>
+<dt>override def job: Execution[Unit] = Execution.withId { implicit uniqueId =&gt;</dt><dd><dl class="simple">
+<dt>Execution.getArgs.flatMap { args: Args =&gt;</dt><dd><p>val queryEntityKind = EntityKind.getEntityKind(args(“query_entity_kind”))
+val searchSpaceEntityKind = EntityKind.getEntityKind(args(“search_space_entity_kind”))
+val metric = Metric.fromString(args(“metric”))
+run(queryEntityKind, searchSpaceEntityKind, metric, args)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private[this] def run[A &lt;: EntityId, B &lt;: EntityId, D &lt;: Distance[D]](</dt><dd><p>uncastQueryEntityKind: EntityKind[_],
+uncastSearchSpaceEntityKind: EntityKind[_],
+uncastMetric: Metric[_],
+args: Args</p>
+</dd>
+<dt>)(</dt><dd><p>implicit uniqueID: UniqueID</p>
+</dd>
+<dt>): Execution[Unit] = {</dt><dd><p>import KnnHelper._</p>
+<p>val numNeighbors = args.int(“neighbors”)
+val reducers = args.getOrElse(“reducers”, “100”).toInt</p>
+<p>val queryEntityKind = uncastQueryEntityKind.asInstanceOf[EntityKind[A]]
+val searchSpaceEntityKind = uncastSearchSpaceEntityKind.asInstanceOf[EntityKind[B]]
+val metric = uncastMetric.asInstanceOf[Metric[D]]</p>
+<p>// Filter the query entity embeddings with the queryIds
+val queryIds = args.list(“query_ids”)
+assert(queryIds.nonEmpty)
+val filterQueryIds: TypedPipe[A] = TypedPipe</p>
+<blockquote>
+<div><p>.from(queryIds)
+.map(queryEntityKind.stringInjection.invert(_).get)</p>
+</div></blockquote>
+<p>val queryEmbeddings = queryEntityKind.parser.getEmbeddingFormat(args, “query”).getEmbeddings</p>
+<p>// Get the neighbour embeddings
+val searchSpaceEmbeddings =</p>
+<blockquote>
+<div><p>searchSpaceEntityKind.parser.getEmbeddingFormat(args, “search_space”).getEmbeddings</p>
+</div></blockquote>
+<dl class="simple">
+<dt>val nearestNeighborString = findNearestNeighbours(</dt><dd><p>queryEmbeddings,
+searchSpaceEmbeddings,
+metric,
+numNeighbors,
+Some(filterQueryIds),
+reducers</p>
+</dd>
+<dt>)(queryEntityKind.ordering, uniqueID).map(</dt><dd><p>nearestNeighborsToString(_, queryEntityKind, searchSpaceEntityKind)</p>
+</dd>
+</dl>
+<p>)</p>
+<p>// Write the nearest neighbor string to one part file.
+nearestNeighborString</p>
+<blockquote>
+<div><p>.shard(1)
+.writeExecution(TypedTsv(args(“output_path”)))</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/ann/src/main/scala/com/twitter/ann/scalding/offline/KnnEntityRecoDebugJob.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

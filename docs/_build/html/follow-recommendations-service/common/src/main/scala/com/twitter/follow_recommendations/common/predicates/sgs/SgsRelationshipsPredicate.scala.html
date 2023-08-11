@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../../../" id="documentation_options" src="../../../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.follow_recommendations.common.predicates.sgs</p>
+<p>import com.google.common.annotations.VisibleForTesting
+import com.twitter.finagle.stats.NullStatsReceiver
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.follow_recommendations.common.base.Predicate
+import com.twitter.follow_recommendations.common.base.PredicateResult
+import com.twitter.follow_recommendations.common.models.CandidateUser
+import com.twitter.follow_recommendations.common.models.HasProfileId
+import com.twitter.follow_recommendations.common.models.FilterReason.FailOpen
+import com.twitter.follow_recommendations.common.models.FilterReason.InvalidRelationshipTypes
+import com.twitter.product_mixer.core.model.marshalling.request.HasClientContext
+import com.twitter.socialgraph.thriftscala.ExistsRequest
+import com.twitter.socialgraph.thriftscala.ExistsResult
+import com.twitter.socialgraph.thriftscala.LookupContext
+import com.twitter.socialgraph.thriftscala.Relationship
+import com.twitter.socialgraph.thriftscala.RelationshipType
+import com.twitter.stitch.Stitch
+import com.twitter.stitch.socialgraph.SocialGraph
+import com.twitter.timelines.configapi.HasParams
+import com.twitter.util.TimeoutException
+import com.twitter.util.logging.Logging</p>
+<p>import javax.inject.Inject
+import javax.inject.Singleton</p>
+<dl>
+<dt>case class RelationshipMapping(</dt><dd><p>relationshipType: RelationshipType,
+includeBasedOnRelationship: Boolean)</p>
+</dd>
+<dt>class SgsRelationshipsPredicate(</dt><dd><p>socialGraph: SocialGraph,
+relationshipMappings: Seq[RelationshipMapping],
+statsReceiver: StatsReceiver = NullStatsReceiver)</p>
+<blockquote>
+<div><p>extends Predicate[(HasClientContext with HasParams, CandidateUser)]
+with Logging {</p>
+</div></blockquote>
+<p>private val stats: StatsReceiver = statsReceiver.scope(this.getClass.getSimpleName)</p>
+<dl>
+<dt>override def apply(</dt><dd><p>pair: (HasClientContext with HasParams, CandidateUser)</p>
+</dd>
+<dt>): Stitch[PredicateResult] = {</dt><dd><p>val (target, candidate) = pair
+val timeout = target.params(SgsPredicateParams.SgsRelationshipsPredicateTimeout)
+SgsRelationshipsPredicate</p>
+<blockquote>
+<div><p>.extractUserId(target)
+.map { id =&gt;</p>
+<blockquote>
+<div><dl class="simple">
+<dt>val relationships = relationshipMappings.map { relationshipMapping: RelationshipMapping =&gt;</dt><dd><dl class="simple">
+<dt>Relationship(</dt><dd><p>relationshipMapping.relationshipType,
+relationshipMapping.includeBasedOnRelationship)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+val existsRequest = ExistsRequest(</p>
+<blockquote>
+<div><p>id,
+candidate.id,
+relationships = relationships,
+context = SgsRelationshipsPredicate.UnionLookupContext</p>
+</div></blockquote>
+<p>)
+socialGraph</p>
+<blockquote>
+<div><dl>
+<dt>.exists(existsRequest).map { existsResult: ExistsResult =&gt;</dt><dd><dl>
+<dt>if (existsResult.exists) {</dt><dd><dl>
+<dt>PredicateResult.Invalid(Set(InvalidRelationshipTypes(relationshipMappings</dt><dd><dl class="simple">
+<dt>.map { relationshipMapping: RelationshipMapping =&gt;</dt><dd><p>relationshipMapping.relationshipType</p>
+</dd>
+</dl>
+<p>}.mkString(”, “))))</p>
+</dd>
+</dl>
+</dd>
+<dt>} else {</dt><dd><p>PredicateResult.Valid</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}
+.within(timeout)(com.twitter.finagle.util.DefaultTimer)</p>
+</div></blockquote>
+</div></blockquote>
+<p>}
+// if no user id is present, return true by default
+.getOrElse(Stitch.value(PredicateResult.Valid))
+.rescue {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case e: TimeoutException =&gt;</dt><dd><p>stats.counter(“timeout”).incr()
+Stitch(PredicateResult.Invalid(Set(FailOpen)))</p>
+</dd>
+<dt>case e: Exception =&gt;</dt><dd><p>stats.counter(e.getClass.getSimpleName).incr()
+Stitch(PredicateResult.Invalid(Set(FailOpen)))</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>object SgsRelationshipsPredicate {</dt><dd><p>// OR Operation
+&#64;VisibleForTesting
+private[follow_recommendations] val UnionLookupContext = Some(</p>
+<blockquote>
+<div><p>LookupContext(performUnion = Some(true)))</p>
+</div></blockquote>
+<dl class="simple">
+<dt>private def extractUserId(target: HasClientContext with HasParams): Option[Long] = target match {</dt><dd><p>case profRequest: HasProfileId =&gt; Some(profRequest.profileId)
+case userRequest: HasClientContext with HasParams =&gt; userRequest.getOptionalUserId
+case _ =&gt; None</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;Singleton
+class InvalidTargetCandidateRelationshipTypesPredicate &#64;Inject() (</p>
+<blockquote>
+<div><dl class="simple">
+<dt>socialGraph: SocialGraph)</dt><dd><dl class="simple">
+<dt>extends SgsRelationshipsPredicate(</dt><dd><p>socialGraph,
+InvalidRelationshipTypesPredicate.InvalidRelationshipTypes) {}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</div></blockquote>
+<p>&#64;Singleton
+class NoteworthyAccountsSgsPredicate &#64;Inject() (</p>
+<blockquote>
+<div><dl class="simple">
+<dt>socialGraph: SocialGraph)</dt><dd><dl class="simple">
+<dt>extends SgsRelationshipsPredicate(</dt><dd><p>socialGraph,
+InvalidRelationshipTypesPredicate.NoteworthyAccountsInvalidRelationshipTypes)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</div></blockquote>
+<p>object InvalidRelationshipTypesPredicate {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>val InvalidRelationshipTypesExcludeFollowing: Seq[RelationshipMapping] = Seq(</dt><dd><p>RelationshipMapping(RelationshipType.HideRecommendations, true),
+RelationshipMapping(RelationshipType.Blocking, true),
+RelationshipMapping(RelationshipType.BlockedBy, true),
+RelationshipMapping(RelationshipType.Muting, true),
+RelationshipMapping(RelationshipType.MutedBy, true),
+RelationshipMapping(RelationshipType.ReportedAsSpam, true),
+RelationshipMapping(RelationshipType.ReportedAsSpamBy, true),
+RelationshipMapping(RelationshipType.ReportedAsAbuse, true),
+RelationshipMapping(RelationshipType.ReportedAsAbuseBy, true)</p>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>val InvalidRelationshipTypes: Seq[RelationshipMapping] = Seq(</dt><dd><p>RelationshipMapping(RelationshipType.FollowRequestOutgoing, true),
+RelationshipMapping(RelationshipType.Following, true),
+RelationshipMapping(</p>
+<blockquote>
+<div><p>RelationshipType.UsedToFollow,
+true</p>
+</div></blockquote>
+<p>) // this data is accessible for 90 days.</p>
+</dd>
+</dl>
+<p>) ++ InvalidRelationshipTypesExcludeFollowing</p>
+<dl class="simple">
+<dt>val NoteworthyAccountsInvalidRelationshipTypes: Seq[RelationshipMapping] = Seq(</dt><dd><p>RelationshipMapping(RelationshipType.Blocking, true),
+RelationshipMapping(RelationshipType.BlockedBy, true),
+RelationshipMapping(RelationshipType.Muting, true),
+RelationshipMapping(RelationshipType.MutedBy, true),
+RelationshipMapping(RelationshipType.ReportedAsSpam, true),
+RelationshipMapping(RelationshipType.ReportedAsSpamBy, true),
+RelationshipMapping(RelationshipType.ReportedAsAbuse, true),
+RelationshipMapping(RelationshipType.ReportedAsAbuseBy, true)</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../../../_sources/follow-recommendations-service/common/src/main/scala/com/twitter/follow_recommendations/common/predicates/sgs/SgsRelationshipsPredicate.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

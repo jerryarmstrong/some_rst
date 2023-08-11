@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.tweetypie
+package handler</p>
+<p>import com.twitter.finagle.stats.Counter
+import com.twitter.stitch.Stitch
+import com.twitter.tweetypie.repository.PlaceKey
+import com.twitter.tweetypie.repository.PlaceRepository
+import com.twitter.tweetypie.serverutil.ExceptionCounter
+import com.twitter.tweetypie.thriftscala._</p>
+<dl>
+<dt>object GeoStats {</dt><dd><dl>
+<dt>val topTenCountryCodes: Set[PlaceLanguage] =</dt><dd><p>Set(“US”, “JP”, “GB”, “ID”, “BR”, “SA”, “TR”, “MX”, “ES”, “CA”)</p>
+</dd>
+<dt>def apply(stats: StatsReceiver): Effect[Option[Place]] = {</dt><dd><p>val totalCount = stats.counter(“total”)
+val notFoundCount = stats.counter(“not_found”)
+val countryStats: Map[String, Counter] =</p>
+<blockquote>
+<div><p>topTenCountryCodes.map(cc =&gt; cc -&gt; stats.scope(“with_country_code”).counter(cc)).toMap</p>
+</div></blockquote>
+<dl>
+<dt>val placeTypeStats: Map[PlaceType, Counter] =</dt><dd><dl class="simple">
+<dt>Map(</dt><dd><p>PlaceType.Admin -&gt; stats.counter(“admin”),
+PlaceType.City -&gt; stats.counter(“city”),
+PlaceType.Country -&gt; stats.counter(“country”),
+PlaceType.Neighborhood -&gt; stats.counter(“neighborhood”),
+PlaceType.Poi -&gt; stats.counter(“poi”),
+PlaceType.Unknown -&gt; stats.counter(“unknown”)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>Effect.fromPartial {</dt><dd><dl class="simple">
+<dt>case Some(place) =&gt; {</dt><dd><p>totalCount.incr()
+placeTypeStats(place.`type`).incr()
+place.countryCode.foreach(cc =&gt; countryStats.get(cc).foreach(_.incr()))</p>
+</dd>
+</dl>
+<p>}
+case None =&gt; notFoundCount.incr()</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>object GeoBuilder {</dt><dd><p>case class Request(createGeo: TweetCreateGeo, userGeoEnabled: Boolean, language: String)</p>
+<p>case class Result(geoCoordinates: Option[GeoCoordinates], placeId: Option[PlaceId])</p>
+<p>type Type = FutureArrow[Request, Result]</p>
+<dl>
+<dt>def apply(placeRepo: PlaceRepository.Type, rgc: ReverseGeocoder, stats: StatsReceiver): Type = {</dt><dd><p>val exceptionCounters = ExceptionCounter(stats)</p>
+<dl class="simple">
+<dt>def ignoreFailures[A](future: Future[Option[A]]): Future[Option[A]] =</dt><dd><p>exceptionCounters(future).handle { case _ =&gt; None }</p>
+</dd>
+</dl>
+<p>def isValidPlaceId(placeId: String) = PlaceIdRegex.pattern.matcher(placeId).matches</p>
+<dl class="simple">
+<dt>def isValidLatLon(latitude: Double, longitude: Double): Boolean =</dt><dd><dl class="simple">
+<dt>latitude &gt;= -90.0 &amp;&amp; latitude &lt;= 90.0 &amp;&amp;</dt><dd><p>longitude &gt;= -180.0 &amp;&amp; longitude &lt;= 180.0 &amp;&amp;
+// some clients send (0.0, 0.0) for unknown reasons, but this is highly unlikely to be
+// valid and should be treated as if no coordinates were sent.  if a place Id is provided,
+// that will still be used.
+(latitude != 0.0 || longitude != 0.0)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>// Count the number of times we erase geo information based on user preferences.
+val geoErasedCounter = stats.counter(“geo_erased”)
+// Count the number of times we override a user’s preferences and add geo anyway.
+val geoOverriddenCounter = stats.counter(“geo_overridden”)</p>
+<p>val geoScope = stats.scope(“create_geotagged_tweet”)</p>
+<p>// Counter for geo tweets with neither lat lon nor place id data
+val noGeoCounter = geoScope.counter(“no_geo_info”)
+val invalidCoordinates = geoScope.counter(“invalid_coordinates”)
+val inValidPlaceId = geoScope.counter(“invalid_place_id”)
+val latlonStatsEffect = GeoStats(geoScope.scope(“from_latlon”))
+val placeIdStatsEffect = GeoStats(geoScope.scope(“from_place_id”))</p>
+<dl>
+<dt>def validateCoordinates(coords: GeoCoordinates): Option[GeoCoordinates] =</dt><dd><p>if (isValidLatLon(coords.latitude, coords.longitude)) Some(coords)
+else {</p>
+<blockquote>
+<div><p>invalidCoordinates.incr()
+None</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+<dt>def validatePlaceId(placeId: String): Option[String] =</dt><dd><p>if (isValidPlaceId(placeId)) Some(placeId)
+else {</p>
+<blockquote>
+<div><p>inValidPlaceId.incr()
+None</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+<dt>def getPlaceByRGC(coordinates: GeoCoordinates, language: String): Future[Option[Place]] =</dt><dd><dl class="simple">
+<dt>ignoreFailures(</dt><dd><p>rgc((coordinates, language)).onSuccess(latlonStatsEffect)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>def getPlaceById(placeId: String, language: String): Future[Option[Place]] =</dt><dd><dl class="simple">
+<dt>ignoreFailures(</dt><dd><dl class="simple">
+<dt>Stitch</dt><dd><p>.run(placeRepo(PlaceKey(placeId, language)).liftNotFoundToOption)
+.onSuccess(placeIdStatsEffect)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>FutureArrow[Request, Result] { request =&gt;</dt><dd><p>val createGeo = request.createGeo
+val allowGeo = createGeo.overrideUserGeoSetting || request.userGeoEnabled
+val overrideGeo = createGeo.overrideUserGeoSetting &amp;&amp; !request.userGeoEnabled</p>
+<dl>
+<dt>if (createGeo.placeId.isEmpty &amp;&amp; createGeo.coordinates.isEmpty) {</dt><dd><p>noGeoCounter.incr()
+Future.value(Result(None, None))</p>
+</dd>
+<dt>} else if (!allowGeo) {</dt><dd><p>// Record that we had geo information but had to erase it based on user preferences.
+geoErasedCounter.incr()
+Future.value(Result(None, None))</p>
+</dd>
+<dt>} else {</dt><dd><p>if (overrideGeo) geoOverriddenCounter.incr()</p>
+<p>// treat invalidate coordinates the same as no-coordinates
+val validatedCoordinates = createGeo.coordinates.flatMap(validateCoordinates)
+val validatedPlaceId = createGeo.placeId.flatMap(validatePlaceId)</p>
+<dl>
+<dt>for {</dt><dd><dl class="simple">
+<dt>place &lt;- (createGeo.placeId, validatedPlaceId, validatedCoordinates) match {</dt><dd><p>// if the request contains an invalid place id, we want to return None for the
+// place instead of reverse-geocoding the coordinates
+case (Some(_), None, _) =&gt; Future.None
+case (_, Some(placeId), _) =&gt; getPlaceById(placeId, request.language)
+case (_, _, Some(coords)) =&gt; getPlaceByRGC(coords, request.language)
+case _ =&gt; Future.None</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>} yield Result(validatedCoordinates, place.map(_.id))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/tweetypie/server/src/main/scala/com/twitter/tweetypie/handler/GeoBuilder.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

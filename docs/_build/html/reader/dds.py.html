@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../" id="documentation_options" src="../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../_static/doctools.js?v=888ff710"></script>
+    <script src="../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+   
+  <link rel="stylesheet" href="../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>“””Dataset service orchestrated by a TFJob
+“””
+from typing import Optional
+import uuid</p>
+<p>from tml.ml_logging.torch_logging import logging
+import tml.machines.environment as env</p>
+<p>import packaging.version
+import tensorflow as tf</p>
+<dl class="simple">
+<dt>try:</dt><dd><p>import tensorflow_io as tfio</p>
+</dd>
+<dt>except:</dt><dd><p>pass</p>
+</dd>
+<dt>from tensorflow.python.data.experimental.ops.data_service_ops import (</dt><dd><p>_from_dataset_id,
+_register_dataset,</p>
+</dd>
+</dl>
+<p>)
+import torch.distributed as dist</p>
+<dl>
+<dt>def maybe_start_dataset_service():</dt><dd><dl>
+<dt>if not env.has_readers():</dt><dd><p>return</p>
+</dd>
+<dt>if packaging.version.parse(tf.__version__) &lt; packaging.version.parse(“2.5”):</dt><dd><p>raise Exception(f”maybe_distribute_dataset requires TF &gt;= 2.5; got {tf.__version__}”)</p>
+</dd>
+<dt>if env.is_dispatcher():</dt><dd><p>logging.info(f”env.get_reader_port() = {env.get_reader_port()}”)
+logging.info(f”env.get_dds_journaling_dir() = {env.get_dds_journaling_dir()}”)
+work_dir = env.get_dds_journaling_dir()
+server = tf.data.experimental.service.DispatchServer(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>tf.data.experimental.service.DispatcherConfig(</dt><dd><p>port=env.get_reader_port(),
+protocol=”grpc”,
+work_dir=work_dir,
+fault_tolerant_mode=bool(work_dir),</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<p>)
+server.join()</p>
+</dd>
+<dt>elif env.is_reader():</dt><dd><p>logging.info(f”env.get_reader_port() = {env.get_reader_port()}”)
+logging.info(f”env.get_dds_dispatcher_address() = {env.get_dds_dispatcher_address()}”)
+logging.info(f”env.get_dds_worker_address() = {env.get_dds_worker_address()}”)
+server = tf.data.experimental.service.WorkerServer(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>tf.data.experimental.service.WorkerConfig(</dt><dd><p>port=env.get_reader_port(),
+dispatcher_address=env.get_dds_dispatcher_address(),
+worker_address=env.get_dds_worker_address(),
+protocol=”grpc”,</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<p>)
+server.join()</p>
+</dd>
+</dl>
+</dd>
+<dt>def register_dataset(</dt><dd><p>dataset: tf.data.Dataset, dataset_service: str, compression: Optional[str] = “AUTO”</p>
+</dd>
+<dt>):</dt><dd><dl>
+<dt>if dist.get_rank() == 0:</dt><dd><dl class="simple">
+<dt>dataset_id = _register_dataset(</dt><dd><p>service=dataset_service,
+dataset=dataset,
+compression=compression,</p>
+</dd>
+</dl>
+<p>)
+job_name = uuid.uuid4().hex[:8]
+id_and_job = [dataset_id.numpy(), job_name]
+logging.info(f”rank{dist.get_rank()}: Created dds job with {dataset_id.numpy()}, {job_name}”)</p>
+</dd>
+<dt>else:</dt><dd><p>id_and_job = [None, None]</p>
+</dd>
+</dl>
+<p>dist.broadcast_object_list(id_and_job, src=0)
+return tuple(id_and_job)</p>
+</dd>
+<dt>def distribute_from_dataset_id(</dt><dd><p>dataset_service: str,
+dataset_id: int,
+job_name: Optional[str],
+compression: Optional[str] = “AUTO”,
+prefetch: Optional[int] = tf.data.experimental.AUTOTUNE,</p>
+</dd>
+<dt>) -&gt; tf.data.Dataset:</dt><dd><p>logging.info(f”rank{dist.get_rank()}: Consuming dds job with {dataset_id}, {job_name}”)
+dataset = _from_dataset_id(</p>
+<blockquote>
+<div><p>processing_mode=”parallel_epochs”,
+service=dataset_service,
+dataset_id=dataset_id,
+job_name=job_name,
+element_spec=None,
+compression=compression,</p>
+</div></blockquote>
+<p>)
+if prefetch is not None:</p>
+<blockquote>
+<div><p>dataset = dataset.prefetch(prefetch)</p>
+</div></blockquote>
+<p>return dataset</p>
+</dd>
+<dt>def maybe_distribute_dataset(dataset: tf.data.Dataset) -&gt; tf.data.Dataset:</dt><dd><p>“””Torch-compatible and distributed-training-aware dataset service distributor.</p>
+<ul class="simple">
+<li><p>rank 0 process will register the given dataset.</p></li>
+<li><p>rank 0 process will broadcast job name and dataset id.</p></li>
+<li><p>all rank processes will consume from the same job/dataset.</p></li>
+</ul>
+<p>Without this, dataset workers will try to serve 1 job per rank process and OOM.</p>
+<p>“””
+if not env.has_readers():</p>
+<blockquote>
+<div><p>return dataset</p>
+</div></blockquote>
+<p>dataset_service = env.get_dds()</p>
+<p>logging.info(f”using DDS = {dataset_service}”)
+dataset_id, job_name = register_dataset(dataset=dataset, dataset_service=dataset_service)
+dataset = distribute_from_dataset_id(</p>
+<blockquote>
+<div><p>dataset_service=dataset_service, dataset_id=dataset_id, job_name=job_name</p>
+</div></blockquote>
+<p>)
+return dataset</p>
+</dd>
+<dt>if __name__ == “__main__”:</dt><dd><p>maybe_start_dataset_service()</p>
+</dd>
+</dl>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../_sources/reader/dds.py.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

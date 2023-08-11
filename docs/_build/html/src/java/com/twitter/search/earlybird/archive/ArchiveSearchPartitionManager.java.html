@@ -1,0 +1,692 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../" id="documentation_options" src="../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.earlybird.archive;</p>
+<p>import java.io.IOException;
+import java.util.Date;
+import java.util.List;
+import java.util.concurrent.TimeUnit;
+import javax.annotation.Nullable;</p>
+<p>import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Preconditions;
+import com.google.common.base.Predicate;
+import com.google.common.collect.Lists;</p>
+<p>import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;</p>
+<p>import com.twitter.common.util.Clock;
+import com.twitter.search.common.concurrent.ScheduledExecutorServiceFactory;
+import com.twitter.search.common.metrics.SearchCounter;
+import com.twitter.search.common.metrics.SearchStatsReceiver;
+import com.twitter.search.common.util.GCUtil;
+import com.twitter.search.common.util.io.recordreader.RecordReader;
+import com.twitter.search.common.util.zktrylock.ZooKeeperTryLockFactory;
+import com.twitter.search.earlybird.EarlybirdIndexConfig;
+import com.twitter.search.earlybird.EarlybirdStatus;
+import com.twitter.search.earlybird.ServerSetMember;
+import com.twitter.search.earlybird.archive.ArchiveTimeSlicer.ArchiveTimeSlice;
+import com.twitter.search.earlybird.common.config.EarlybirdConfig;
+import com.twitter.search.earlybird.util.ScrubGenUtil;
+import com.twitter.search.earlybird.document.TweetDocument;
+import com.twitter.search.earlybird.exception.CriticalExceptionHandler;
+import com.twitter.search.earlybird.partition.CompleteSegmentManager;
+import com.twitter.search.earlybird.partition.DynamicPartitionConfig;
+import com.twitter.search.earlybird.partition.MultiSegmentTermDictionaryManager;
+import com.twitter.search.earlybird.partition.PartitionConfig;
+import com.twitter.search.earlybird.partition.PartitionManager;
+import com.twitter.search.earlybird.partition.SearchIndexingMetricSet;
+import com.twitter.search.earlybird.partition.SegmentHdfsFlusher;
+import com.twitter.search.earlybird.partition.SegmentInfo;
+import com.twitter.search.earlybird.partition.SegmentLoader;
+import com.twitter.search.earlybird.partition.SegmentManager;
+import com.twitter.search.earlybird.partition.SegmentManager.Filter;
+import com.twitter.search.earlybird.partition.SegmentManager.Order;
+import com.twitter.search.earlybird.partition.SegmentOptimizer;
+import com.twitter.search.earlybird.partition.SegmentSyncConfig;
+import com.twitter.search.earlybird.partition.SegmentWarmer;
+import com.twitter.search.earlybird.partition.SimpleSegmentIndexer;
+import com.twitter.search.earlybird.partition.UserScrubGeoEventStreamIndexer;
+import com.twitter.search.earlybird.partition.UserUpdatesStreamIndexer;
+import com.twitter.search.earlybird.querycache.QueryCacheManager;
+import com.twitter.search.earlybird.segment.SegmentDataProvider;
+import com.twitter.search.earlybird.thrift.EarlybirdStatusCode;
+import com.twitter.search.earlybird.util.CoordinatedEarlybirdAction;
+import com.twitter.search.earlybird.util.CoordinatedEarlybirdActionInterface;
+import com.twitter.search.earlybird.util.CoordinatedEarlybirdActionLockFailed;</p>
+<dl>
+<dt>public class ArchiveSearchPartitionManager extends PartitionManager {</dt><dd><dl class="simple">
+<dt>private static final Logger LOG =</dt><dd><p>LoggerFactory.getLogger(ArchiveSearchPartitionManager.class);</p>
+</dd>
+</dl>
+<p>public static final String CONFIG_NAME = “archive”;</p>
+<p>private static final long ONE_DAY_MILLIS = TimeUnit.DAYS.toMillis(1);</p>
+<p>private final ArchiveTimeSlicer timeSlicer;
+private final ArchiveSegmentDataProvider segmentDataProvider;</p>
+<p>private final UserUpdatesStreamIndexer userUpdatesStreamIndexer;
+private final UserScrubGeoEventStreamIndexer userScrubGeoEventStreamIndexer;</p>
+<p>private final SegmentWarmer segmentWarmer;
+private final EarlybirdIndexConfig earlybirdIndexConfig;
+private final ZooKeeperTryLockFactory zkTryLockFactory;
+private final Clock clock;
+private final SegmentSyncConfig segmentSyncConfig;
+protected final SearchCounter gcAfterIndexing;</p>
+<p>// Used for coordinating daily updated across different replicas on the same hash partition,
+// to run them one at a time, and minimize the impact on query latencies.
+private final CoordinatedEarlybirdActionInterface coordinatedDailyUpdate;</p>
+<p>private final SearchIndexingMetricSet indexingMetricSet;</p>
+<p>// This is only used in tests where no coordination is needed.
+&#64;VisibleForTesting
+public ArchiveSearchPartitionManager(</p>
+<blockquote>
+<div><blockquote>
+<div><p>ZooKeeperTryLockFactory zooKeeperTryLockFactory,
+QueryCacheManager queryCacheManager,
+SegmentManager segmentManager,
+DynamicPartitionConfig dynamicPartitionConfig,
+UserUpdatesStreamIndexer userUpdatesStreamIndexer,
+UserScrubGeoEventStreamIndexer userScrubGeoEventStreamIndexer,
+SearchStatsReceiver searchStatsReceiver,
+ArchiveEarlybirdIndexConfig earlybirdIndexConfig,
+ScheduledExecutorServiceFactory executorServiceFactory,
+ScheduledExecutorServiceFactory userUpdateIndexerScheduledExecutorFactory,
+SearchIndexingMetricSet searchIndexingMetricSet,
+SegmentSyncConfig syncConfig,
+Clock clock,
+CriticalExceptionHandler criticalExceptionHandler)
+throws IOException {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>this(</dt><dd><p>zooKeeperTryLockFactory,
+queryCacheManager,
+segmentManager,
+dynamicPartitionConfig,
+userUpdatesStreamIndexer,
+userScrubGeoEventStreamIndexer,
+searchStatsReceiver,
+earlybirdIndexConfig,
+null,
+executorServiceFactory,
+userUpdateIndexerScheduledExecutorFactory,
+searchIndexingMetricSet,
+syncConfig,
+clock,
+criticalExceptionHandler);</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>public ArchiveSearchPartitionManager(</dt><dd><blockquote>
+<div><p>ZooKeeperTryLockFactory zooKeeperTryLockFactory,
+QueryCacheManager queryCacheManager,
+SegmentManager segmentManager,
+DynamicPartitionConfig dynamicPartitionConfig,
+UserUpdatesStreamIndexer userUpdatesStreamIndexer,
+UserScrubGeoEventStreamIndexer userScrubGeoEventStreamIndexer,
+SearchStatsReceiver searchStatsReceiver,
+ArchiveEarlybirdIndexConfig earlybirdIndexConfig,
+ServerSetMember serverSetMember,
+ScheduledExecutorServiceFactory executorServiceFactory,
+ScheduledExecutorServiceFactory userUpdateIndexerExecutorFactory,
+SearchIndexingMetricSet searchIndexingMetricSet,
+SegmentSyncConfig syncConfig,
+Clock clock,
+CriticalExceptionHandler criticalExceptionHandler) throws IOException {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>super(queryCacheManager, segmentManager, dynamicPartitionConfig, executorServiceFactory,</dt><dd><p>searchIndexingMetricSet, searchStatsReceiver, criticalExceptionHandler);</p>
+</dd>
+</dl>
+<p>Preconditions.checkState(syncConfig.getScrubGen().isPresent());
+Date scrubGen = ScrubGenUtil.parseScrubGenToDate(syncConfig.getScrubGen().get());</p>
+<p>this.zkTryLockFactory = zooKeeperTryLockFactory;
+final DailyStatusBatches dailyStatusBatches = new DailyStatusBatches(</p>
+<blockquote>
+<div><p>zkTryLockFactory,
+scrubGen);</p>
+</div></blockquote>
+<p>this.earlybirdIndexConfig = earlybirdIndexConfig;
+PartitionConfig curPartitionConfig = dynamicPartitionConfig.getCurrentPartitionConfig();</p>
+<p>this.indexingMetricSet = searchIndexingMetricSet;</p>
+<dl class="simple">
+<dt>this.timeSlicer = new ArchiveTimeSlicer(</dt><dd><p>EarlybirdConfig.getMaxSegmentSize(), dailyStatusBatches,
+curPartitionConfig.getTierStartDate(), curPartitionConfig.getTierEndDate(),
+earlybirdIndexConfig);</p>
+</dd>
+<dt>this.segmentDataProvider =</dt><dd><dl class="simple">
+<dt>new ArchiveSegmentDataProvider(</dt><dd><p>dynamicPartitionConfig,
+timeSlicer,
+this.earlybirdIndexConfig);</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>this.userUpdatesStreamIndexer = userUpdatesStreamIndexer;
+this.userScrubGeoEventStreamIndexer = userScrubGeoEventStreamIndexer;</p>
+<dl class="simple">
+<dt>this.coordinatedDailyUpdate = new CoordinatedEarlybirdAction(</dt><dd><p>zkTryLockFactory,
+“archive_daily_update”,
+dynamicPartitionConfig,
+serverSetMember,
+criticalExceptionHandler,
+syncConfig);</p>
+</dd>
+</dl>
+<p>this.segmentWarmer = new SegmentWarmer(criticalExceptionHandler);
+this.clock = clock;
+this.segmentSyncConfig = syncConfig;
+this.gcAfterIndexing = SearchCounter.export(“gc_after_indexing”);</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;Override
+public SegmentDataProvider getSegmentDataProvider() {</p>
+<blockquote>
+<div><p>return segmentDataProvider;</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+protected void startUp() throws Exception {</p>
+<blockquote>
+<div><p>LOG.info(“Using CompleteSegmentManager to index complete segments.”);</p>
+<p>// deferring handling of multi-segment term dictionary for the archive.
+// SEARCH-11952
+CompleteSegmentManager completeSegmentManager = new CompleteSegmentManager(</p>
+<blockquote>
+<div><p>zkTryLockFactory,
+segmentDataProvider,
+userUpdatesStreamIndexer,
+userScrubGeoEventStreamIndexer,
+segmentManager,
+null,
+indexingMetricSet,
+clock,
+MultiSegmentTermDictionaryManager.NOOP_INSTANCE,
+segmentSyncConfig,
+criticalExceptionHandler);</p>
+</div></blockquote>
+<p>completeSegmentManager.indexUserEvents();
+completeSegmentManager.indexCompleteSegments(</p>
+<blockquote>
+<div><p>() -&gt; segmentManager.getSegmentInfos(Filter.NeedsIndexing, Order.OLD_TO_NEW));</p>
+</div></blockquote>
+<p>// In the archive cluster, the current segment needs to be loaded too.
+List&lt;SegmentInfo&gt; allSegments =</p>
+<blockquote>
+<div><p>Lists.newArrayList(segmentManager.getSegmentInfos(Filter.All, Order.OLD_TO_NEW));</p>
+</div></blockquote>
+<p>completeSegmentManager.loadCompleteSegments(allSegments);</p>
+<p>completeSegmentManager.buildMultiSegmentTermDictionary();</p>
+<p>completeSegmentManager.warmSegments(allSegments);</p>
+<p>LOG.info(“Starting to run UserUpdatesKafkaConsumer”);
+new Thread(userUpdatesStreamIndexer::run, “userupdates-stream-indexer”).start();</p>
+<dl>
+<dt>if (EarlybirdConfig.consumeUserScrubGeoEvents()) {</dt><dd><p>LOG.info(“Starting to run UserScrubGeoEventKafkaConsumer”);
+new Thread(userScrubGeoEventStreamIndexer::run,</p>
+<blockquote>
+<div><p>“userScrubGeoEvent-stream-indexer”).start();</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>private static List&lt;ArchiveTimeSlice&gt; truncateSegmentList(List&lt;ArchiveTimeSlice&gt; segmentList,</dt><dd><blockquote>
+<div><p>int maxNumSegments) {</p>
+</div></blockquote>
+<p>// Maybe cut-off the beginning of the sorted list of IDs.
+if (maxNumSegments &gt; 0 &amp;&amp; maxNumSegments &lt; segmentList.size()) {</p>
+<blockquote>
+<div><p>return segmentList.subList(segmentList.size() - maxNumSegments, segmentList.size());</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>return segmentList;</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;Override
+protected void indexingLoop(boolean firstLoop) throws Exception {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (firstLoop) {</dt><dd><dl class="simple">
+<dt>EarlybirdStatus.beginEvent(</dt><dd><p>INDEX_CURRENT_SEGMENT, getSearchIndexingMetricSet().startupInCurrentSegment);</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>List&lt;ArchiveTimeSlice&gt; timeSlices = timeSlicer.getTimeSlicesInTierRange();
+PartitionConfig curPartitionConfig = dynamicPartitionConfig.getCurrentPartitionConfig();
+timeSlices = truncateSegmentList(timeSlices, curPartitionConfig.getMaxEnabledLocalSegments());</p>
+<dl>
+<dt>for (final ArchiveTimeSlice timeSlice<span class="classifier">timeSlices) {</span></dt><dd><p>// If any timeslice build failed, do not try to build timeslice after that to prevent
+// possible holes between timeslices.
+try {</p>
+<blockquote>
+<div><dl>
+<dt>if (!processArchiveTimeSlice(timeSlice)) {</dt><dd><dl class="simple">
+<dt>LOG.warn(“Building timeslice {} has failed, stopping future builds.”,</dt><dd><p>timeSlice.getDescription());</p>
+</dd>
+</dl>
+<p>indexingMetricSet.archiveTimeSliceBuildFailedCounter.increment();
+return;</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} catch (CoordinatedEarlybirdActionLockFailed e) {</dt><dd><p>// If the timeslice build failed because of lock coordination, we can wait for the next
+// iteration to build again.
+return;</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>if (firstLoop) {</dt><dd><dl class="simple">
+<dt>EarlybirdStatus.endEvent(</dt><dd><p>INDEX_CURRENT_SEGMENT, getSearchIndexingMetricSet().startupInCurrentSegment);</p>
+</dd>
+</dl>
+<p>LOG.info(“First indexing loop complete. Setting up query cache…”);
+EarlybirdStatus.beginEvent(</p>
+<blockquote>
+<div><p>SETUP_QUERY_CACHE, getSearchIndexingMetricSet().startupInQueryCacheUpdates);</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}
+setupQueryCacheIfNeeded();</p>
+<dl>
+<dt>if (EarlybirdStatus.isStarting() &amp;&amp; queryCacheManager.allTasksRan()) {</dt><dd><p>LOG.info(“Query cache setup complete. Becoming current now…”);
+EarlybirdStatus.endEvent(</p>
+<blockquote>
+<div><p>SETUP_QUERY_CACHE, getSearchIndexingMetricSet().startupInQueryCacheUpdates);</p>
+</div></blockquote>
+<p>becomeCurrent();
+EarlybirdStatus.recordEarlybirdEvent(“Archive Earlybird is current”);</p>
+</dd>
+</dl>
+<p>}</p>
+<p>updateIndexFreshnessStats(timeSlices);</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;VisibleForTesting
+protected boolean processArchiveTimeSlice(final ArchiveTimeSlice timeSlice)</p>
+<blockquote>
+<div><blockquote>
+<div><p>throws CoordinatedEarlybirdActionLockFailed, IOException {</p>
+</div></blockquote>
+<p>PartitionConfig curPartitionConfig = dynamicPartitionConfig.getCurrentPartitionConfig();
+long minStatusID = timeSlice.getMinStatusID(curPartitionConfig.getIndexingHashPartitionID());
+SegmentInfo segmentInfo = segmentManager.getSegmentInfo(minStatusID);
+if (segmentInfo == null) {</p>
+<blockquote>
+<div><p>return indexSegmentFromScratch(timeSlice);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else if (existingSegmentNeedsUpdating(timeSlice, segmentInfo)) {</dt><dd><p>return indexNewDayAndAppendExistingSegment(timeSlice, segmentInfo);</p>
+</dd>
+</dl>
+<p>}
+return true;</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;VisibleForTesting
+SegmentInfo newSegmentInfo(ArchiveTimeSlice timeSlice) throws IOException {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>return new SegmentInfo(segmentDataProvider.newArchiveSegment(timeSlice),</dt><dd><p>segmentManager.getEarlybirdSegmentFactory(), segmentSyncConfig);</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>private boolean indexNewDayAndAppendExistingSegment(final ArchiveTimeSlice timeSlice,</dt><dd><blockquote>
+<div><blockquote>
+<div><p>SegmentInfo segmentInfo)</p>
+</div></blockquote>
+<p>throws CoordinatedEarlybirdActionLockFailed, IOException {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>LOG.info(“Updating segment: {}; new endDate will be {} segmentInfo: {}”,</dt><dd><p>segmentInfo.getSegment().getTimeSliceID(), timeSlice.getEndDate(), segmentInfo);</p>
+</dd>
+</dl>
+<p>// Create another new SegmentInfo for indexing
+final SegmentInfo newSegmentInfoForIndexing = newSegmentInfo(timeSlice);
+// make a final reference of the old segment info to be passed into closure.
+final SegmentInfo oldSegmentInfo = segmentInfo;</p>
+<p>// Sanity check: the old and new segment should not share the same lucene directory.
+Preconditions.checkState(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>!newSegmentInfoForIndexing.getSyncInfo().getLocalLuceneSyncDir().equals(</dt><dd><p>oldSegmentInfo.getSyncInfo().getLocalLuceneSyncDir()));</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl class="simple">
+<dt>Preconditions.checkState(</dt><dd><dl class="simple">
+<dt>!newSegmentInfoForIndexing.getSyncInfo().getLocalSyncDir().equals(</dt><dd><p>oldSegmentInfo.getSyncInfo().getLocalSyncDir()));</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>final ArchiveSegment oldSegment = (ArchiveSegment) segmentInfo.getSegment();</p>
+<dl>
+<dt>return indexSegment(newSegmentInfoForIndexing, oldSegmentInfo, input -&gt; {</dt><dd><p>// we’re updating the segment - only index days after the old end date, but only if
+// we’re in the on-disk archive, and we’re sure that the previous days have already
+// been indexed.
+return !earlybirdIndexConfig.isIndexStoredOnDisk()</p>
+<blockquote>
+<div><p>// First time around, and the segment has not been indexed and optimized yet,
+// we will want to add all the days
+|| !oldSegmentInfo.isOptimized()
+|| oldSegmentInfo.getIndexSegment().getIndexStats().getStatusCount() == 0
+|| !oldSegment.getDataEndDate().before(timeSlice.getEndDate())
+// Index any new days
+|| input.after(oldSegment.getDataEndDate());</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>});</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private boolean existingSegmentNeedsUpdating(ArchiveTimeSlice timeSlice,</dt><dd><blockquote>
+<div><p>SegmentInfo segmentInfo) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>return ((ArchiveSegment) segmentInfo.getSegment())</dt><dd><p>.getDataEndDate().before(timeSlice.getEndDate())
+// First time around, the end date is the same as the timeSlice end date, but
+// the segment has not been indexed and optimized yet
+|| (!segmentInfo.isOptimized() &amp;&amp; !segmentInfo.wasIndexed())
+// If indexing failed, this index will not be marked as complete, and we will want
+// to reindex
+|| !segmentInfo.isComplete();</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private boolean indexSegmentFromScratch(ArchiveTimeSlice timeSlice) throws</dt><dd><blockquote>
+<div><p>CoordinatedEarlybirdActionLockFailed, IOException {</p>
+</div></blockquote>
+<p>SegmentInfo segmentInfo = newSegmentInfo(timeSlice);
+LOG.info(“Creating segment: “ + segmentInfo.getSegment().getTimeSliceID()</p>
+<blockquote>
+<div><ul class="simple">
+<li><p>“; new endDate will be “ + timeSlice.getEndDate() + “ segmentInfo: “ + segmentInfo);</p></li>
+</ul>
+</div></blockquote>
+<p>return indexSegment(segmentInfo, null, ArchiveSegment.MATCH_ALL_DATE_PREDICATE);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private void updateIndexFreshnessStats(List&lt;ArchiveTimeSlice&gt; timeSlices) {</dt><dd><dl>
+<dt>if (!timeSlices.isEmpty()) {</dt><dd><p>ArchiveTimeSlice lastTimeslice = timeSlices.get(timeSlices.size() - 1);</p>
+<p>// Add ~24 hours to start of end date to estimate freshest tweet time.
+indexingMetricSet.freshestTweetTimeMillis.set(</p>
+<blockquote>
+<div><p>lastTimeslice.getEndDate().getTime() + ONE_DAY_MILLIS);</p>
+</div></blockquote>
+<p>PartitionConfig curPartitionConfig = dynamicPartitionConfig.getCurrentPartitionConfig();
+long maxStatusId = lastTimeslice.getMaxStatusID(</p>
+<blockquote>
+<div><p>curPartitionConfig.getIndexingHashPartitionID());</p>
+</div></blockquote>
+<dl class="simple">
+<dt>if (maxStatusId &gt; indexingMetricSet.highestStatusId.get()) {</dt><dd><p>indexingMetricSet.highestStatusId.set(maxStatusId);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;Override
+public void shutDownIndexing() {</p>
+<blockquote>
+<div><p>LOG.info(“Shutting down.”);
+userUpdatesStreamIndexer.close();
+userScrubGeoEventStreamIndexer.close();
+LOG.info(“Closed User Event Kafka Consumers. Now Shutting down reader set.”);
+getSegmentDataProvider().getSegmentDataReaderSet().stopAll();</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Attempts to index new days of data into the provided segment, indexing only the days that</p></li>
+<li><p>match the “dateFilter” predicate.</p></li>
+<li><p>&#64;return true iff indexing succeeded, false otherwise.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+</dl>
+<p>&#64;VisibleForTesting
+protected boolean indexSegment(final SegmentInfo segmentInfo,</p>
+<blockquote>
+<div><blockquote>
+<div><blockquote>
+<div><p>&#64;Nullable final SegmentInfo segmentToAppend,
+final Predicate&lt;Date&gt; dateFilter)</p>
+</div></blockquote>
+<p>throws CoordinatedEarlybirdActionLockFailed, IOException {</p>
+</div></blockquote>
+<p>// Don’t coordinate while we’re starting up
+if (!EarlybirdStatus.isStarting()) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>return coordinatedDailyUpdate.execute(segmentInfo.getSegmentName(),</dt><dd><p>isCoordinated -&gt; innerIndexSegment(segmentInfo, segmentToAppend, dateFilter));</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>return innerIndexSegment(segmentInfo, segmentToAppend, dateFilter);</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>private boolean innerIndexSegment(SegmentInfo segmentInfo,</dt><dd><blockquote>
+<div><blockquote>
+<div><p>&#64;Nullable SegmentInfo segmentToAppend,
+Predicate&lt;Date&gt; dateFilter)</p>
+</div></blockquote>
+<p>throws IOException {</p>
+</div></blockquote>
+<p>// First try to load the new day from HDFS / Local disk
+if (new SegmentLoader(segmentSyncConfig, criticalExceptionHandler).load(segmentInfo)) {</p>
+<blockquote>
+<div><p>LOG.info(“Successful loaded segment for new day: “ + segmentInfo);
+segmentManager.putSegmentInfo(segmentInfo);
+gcAfterIndexing.increment();
+GCUtil.runGC();
+return true;</p>
+</div></blockquote>
+<p>}</p>
+<p>LOG.info(“Failed to load segment for new day. Will index segment: “ + segmentInfo);
+RecordReader&lt;TweetDocument&gt; tweetReader = ((ArchiveSegment) segmentInfo.getSegment())</p>
+<blockquote>
+<div><p>.getStatusRecordReader(earlybirdIndexConfig.createDocumentFactory(), dateFilter);</p>
+</div></blockquote>
+<dl>
+<dt>try {</dt><dd><p>// Read and index the statuses
+boolean success = newSimpleSegmentIndexer(tweetReader, segmentToAppend)</p>
+<blockquote>
+<div><p>.indexSegment(segmentInfo);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>if (!success) {</dt><dd><p>return false;</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>} finally {</dt><dd><p>tweetReader.stop();</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>if (!SegmentOptimizer.optimize(segmentInfo)) {</dt><dd><p>// We consider the whole indexing event as failed if we fail to optimize.
+LOG.error(“Failed to optimize segment: “ + segmentInfo);
+segmentInfo.deleteLocalIndexedSegmentDirectoryImmediately();
+return false;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>if (!segmentWarmer.warmSegmentIfNecessary(segmentInfo)) {</dt><dd><p>// We consider the whole indexing event as failed if we failed to warm (because we open
+// index readers in the warmer).
+LOG.error(“Failed to warm segment: “ + segmentInfo);
+segmentInfo.deleteLocalIndexedSegmentDirectoryImmediately();
+return false;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// Flush and upload segment to HDFS. If this fails, we just log a warning and return true.
+boolean success = new SegmentHdfsFlusher(zkTryLockFactory, segmentSyncConfig)</p>
+<blockquote>
+<div><p>.flushSegmentToDiskAndHDFS(segmentInfo);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>if (!success) {</dt><dd><p>LOG.warn(“Failed to flush segment to HDFS: “ + segmentInfo);</p>
+</dd>
+</dl>
+<p>}</p>
+<p>segmentManager.putSegmentInfo(segmentInfo);
+gcAfterIndexing.increment();
+GCUtil.runGC();
+return true;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;VisibleForTesting
+protected SimpleSegmentIndexer newSimpleSegmentIndexer(</p>
+<blockquote>
+<div><blockquote>
+<div><p>RecordReader&lt;TweetDocument&gt; tweetReader, SegmentInfo segmentToAppend) {</p>
+</div></blockquote>
+<p>return new SimpleSegmentIndexer(tweetReader, indexingMetricSet, segmentToAppend);</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public boolean isCaughtUpForTests() {</p>
+<blockquote>
+<div><p>return EarlybirdStatus.getStatusCode() == EarlybirdStatusCode.CURRENT;</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>public CoordinatedEarlybirdActionInterface getCoordinatedOptimizer() {</dt><dd><p>return this.coordinatedDailyUpdate;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public ArchiveTimeSlicer getTimeSlicer() {</dt><dd><p>return timeSlicer;</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../_sources/src/java/com/twitter/search/earlybird/archive/ArchiveSearchPartitionManager.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

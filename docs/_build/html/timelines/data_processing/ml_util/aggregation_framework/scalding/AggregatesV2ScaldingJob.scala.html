@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../" id="documentation_options" src="../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.timelines.data_processing.ml_util.aggregation_framework.scalding</p>
+<p>import com.twitter.bijection.thrift.CompactThriftCodec
+import com.twitter.bijection.Codec
+import com.twitter.bijection.Injection
+import com.twitter.ml.api._
+import com.twitter.ml.api.constant.SharedFeatures.TIMESTAMP
+import com.twitter.ml.api.util.CompactDataRecordConverter
+import com.twitter.ml.api.util.SRichDataRecord
+import com.twitter.scalding.Args
+import com.twitter.scalding_internal.dalv2.DALWrite.D
+import com.twitter.storehaus_internal.manhattan.ManhattanROConfig
+import com.twitter.summingbird.batch.option.Reducers
+import com.twitter.summingbird.batch.BatchID
+import com.twitter.summingbird.batch.Batcher
+import com.twitter.summingbird.batch.Timestamp
+import com.twitter.summingbird.option._
+import com.twitter.summingbird.scalding.Scalding
+import com.twitter.summingbird.scalding.batch.{BatchedStore =&gt; ScaldingBatchedStore}
+import com.twitter.summingbird.Options
+import com.twitter.summingbird.Producer
+import com.twitter.summingbird_internal.bijection.BatchPairImplicits._
+import com.twitter.summingbird_internal.runner.common.JobName
+import com.twitter.summingbird_internal.runner.scalding.GenericRunner
+import com.twitter.summingbird_internal.runner.scalding.ScaldingConfig
+import com.twitter.summingbird_internal.runner.scalding.StatebirdState
+import com.twitter.summingbird_internal.dalv2.DAL
+import com.twitter.summingbird_internal.runner.store_config._
+import com.twitter.timelines.data_processing.ml_util.aggregation_framework._
+import com.twitter.timelines.data_processing.ml_util.aggregation_framework.scalding.sources._
+import job.AggregatesV2Job
+import org.apache.hadoop.conf.Configuration
+/*</p>
+<blockquote>
+<div><ul class="simple">
+<li><p>Offline scalding version of summingbird job to compute aggregates v2.</p></li>
+<li><p>This is loosely based on the template created by sb-gen.</p></li>
+<li><p>Extend this trait in your own scalding job, and override the val</p></li>
+<li><p>“aggregatesToCompute” with your own desired set of aggregates.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</div></blockquote>
+<dl>
+<dt>trait AggregatesV2ScaldingJob {</dt><dd><p>val aggregatesToCompute: Set[TypedAggregateGroup[_]]</p>
+<dl class="simple">
+<dt>implicit val aggregationKeyInjection: Injection[AggregationKey, Array[Byte]] =</dt><dd><p>AggregationKeyInjection</p>
+</dd>
+</dl>
+<p>implicit val aggregationKeyOrdering: AggregationKeyOrdering.type = AggregationKeyOrdering</p>
+<p>implicit val dataRecordCodec: Injection[DataRecord, Array[Byte]] = CompactThriftCodec[DataRecord]</p>
+<dl class="simple">
+<dt>private implicit val compactDataRecordCodec: Injection[CompactDataRecord, Array[Byte]] =</dt><dd><p>CompactThriftCodec[CompactDataRecord]</p>
+</dd>
+</dl>
+<p>private val compactDataRecordConverter = new CompactDataRecordConverter()</p>
+<p>def numReducers: Int = -1</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Function that maps from a logical ‘’AggregateSource’’</p></li>
+<li><p>to an underlying physical source. The physical source</p></li>
+<li><p>for the scalding platform is a ScaldingAggregateSource.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>def dataRecordSourceToScalding(</dt><dd><p>source: AggregateSource</p>
+</dd>
+<dt>): Option[Producer[Scalding, DataRecord]] = {</dt><dd><dl>
+<dt>source match {</dt><dd><dl class="simple">
+<dt>case offlineSource: OfflineAggregateSource =&gt;</dt><dd><p>Some(ScaldingAggregateSource(offlineSource).source)</p>
+</dd>
+</dl>
+<p>case _ =&gt; None</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Creates and returns a versioned store using the config parameters</p></li>
+<li><p>with a specific number of versions to keep, and which can read from</p></li>
+<li><p>the most recent available version on HDFS rather than a specific</p></li>
+<li><p>version number. The store applies a timestamp correction based on the</p></li>
+<li><p>number of days of aggregate data skipped over at read time to ensure</p></li>
+<li><p>that skipping data plays nicely with halfLife decay.</p></li>
+<li></li>
+<li><p>&#64;param config         specifying the Manhattan store parameters</p></li>
+<li><p>&#64;param versionsToKeep number of old versions to keep</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>def getMostRecentLagCorrectingVersionedStoreWithRetention[</dt><dd><p>Key: Codec: Ordering,
+ValInStore: Codec,
+ValInMemory</p>
+</dd>
+<dt>](</dt><dd><p>config: OfflineStoreOnlyConfig[ManhattanROConfig],
+versionsToKeep: Int,
+lagCorrector: (ValInMemory, Long) =&gt; ValInMemory,
+packer: ValInMemory =&gt; ValInStore,
+unpacker: ValInStore =&gt; ValInMemory</p>
+</dd>
+<dt>): ScaldingBatchedStore[Key, ValInMemory] = {</dt><dd><dl class="simple">
+<dt>MostRecentLagCorrectingVersionedStore[Key, ValInStore, ValInMemory](</dt><dd><p>config.offline.hdfsPath.toString,
+packer = packer,
+unpacker = unpacker,
+versionsToKeep = versionsToKeep)(
+Injection.connect[(Key, (BatchID, ValInStore)), (Array[Byte], Array[Byte])],
+config.batcher,
+implicitly[Ordering[Key]],
+lagCorrector</p>
+</dd>
+</dl>
+<p>).withInitialBatch(config.batcher.batchOf(config.startTime.value))</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def mutablyCorrectDataRecordTimestamp(</dt><dd><p>record: DataRecord,
+lagToCorrectMillis: Long</p>
+</dd>
+<dt>): DataRecord = {</dt><dd><p>val richRecord = SRichDataRecord(record)
+if (richRecord.hasFeature(TIMESTAMP)) {</p>
+<blockquote>
+<div><p>val timestamp = richRecord.getFeatureValue(TIMESTAMP).toLong
+richRecord.setFeatureValue(TIMESTAMP, timestamp + lagToCorrectMillis)</p>
+</div></blockquote>
+<p>}
+record</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Function that maps from a logical ‘’AggregateStore’’</p></li>
+<li><p>to an underlying physical store. The physical store for</p></li>
+<li><p>scalding is a HDFS VersionedKeyValSource dataset.</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+<dt>def aggregateStoreToScalding(</dt><dd><p>store: AggregateStore</p>
+</dd>
+<dt>): Option[Scalding#Store[AggregationKey, DataRecord]] = {</dt><dd><dl>
+<dt>store match {</dt><dd><dl>
+<dt>case offlineStore: OfflineAggregateDataRecordStore =&gt;</dt><dd><dl>
+<dt>Some(</dt><dd><dl class="simple">
+<dt>getMostRecentLagCorrectingVersionedStoreWithRetention[</dt><dd><p>AggregationKey,
+DataRecord,
+DataRecord](
+offlineStore,
+versionsToKeep = offlineStore.batchesToKeep,
+lagCorrector = mutablyCorrectDataRecordTimestamp,
+packer = Injection.identity[DataRecord],
+unpacker = Injection.identity[DataRecord]</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>case offlineStore: OfflineAggregateDataRecordStoreWithDAL =&gt;</dt><dd><dl>
+<dt>Some(</dt><dd><dl class="simple">
+<dt>DAL.versionedKeyValStore[AggregationKey, DataRecord](</dt><dd><p>dataset = offlineStore.dalDataset,
+pathLayout = D.Suffix(offlineStore.offline.hdfsPath.toString),
+batcher = offlineStore.batcher,
+maybeStartTime = Some(offlineStore.startTime),
+maxErrors = offlineStore.maxKvSourceFailures</p>
+</dd>
+</dl>
+<p>))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>case _ =&gt; None</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def generate(args: Args): ScaldingConfig = new ScaldingConfig {</dt><dd><p>val jobName = JobName(args(“job_name”))</p>
+<dl>
+<dt>/*</dt><dd><ul class="simple">
+<li><p>Add registrars for chill serialization for user-defined types.</p></li>
+<li><p>We use the default: an empty List().</p></li>
+</ul>
+<p><a href="#id9"><span class="problematic" id="id10">*</span></a>/</p>
+</dd>
+</dl>
+<p>override def registrars = List()</p>
+<p>/* Use transformConfig to set Hadoop options. <a href="#id11"><span class="problematic" id="id12">*</span></a>/
+override def transformConfig(config: Map[String, AnyRef]): Map[String, AnyRef] =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>super.transformConfig(config) ++ Map(</dt><dd><p>“mapreduce.output.fileoutputformat.compress” -&gt; “true”,
+“mapreduce.output.fileoutputformat.compress.codec” -&gt; “com.hadoop.compression.lzo.LzoCodec”,
+“mapreduce.output.fileoutputformat.compress.type” -&gt; “BLOCK”</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<dl>
+<dt>/*</dt><dd><ul class="simple">
+<li><p>Use getNamedOptions to set Summingbird runtime options</p></li>
+<li><p>The options we set are:</p></li>
+<li><ol class="arabic simple">
+<li><p>Set monoid to non-commutative to disable map-side</p></li>
+</ol>
+</li>
+<li><p>aggregation and force all aggregation to reducers (provides a 20% speedup)</p></li>
+</ul>
+<p><a href="#id13"><span class="problematic" id="id14">*</span></a>/</p>
+</dd>
+<dt>override def getNamedOptions: Map[String, Options] = Map(</dt><dd><dl class="simple">
+<dt>“DEFAULT” -&gt; Options()</dt><dd><p>.set(MonoidIsCommutative(false))
+.set(Reducers(numReducers))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>)</p>
+<p>implicit val batcher: Batcher = Batcher.ofHours(24)</p>
+<p>/* State implementation that uses Statebird (go/statebird) to track the batches processed. <a href="#id15"><span class="problematic" id="id16">*</span></a>/
+def getWaitingState(hadoopConfig: Configuration, startDate: Option[Timestamp], batches: Int) =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>StatebirdState(</dt><dd><p>jobName,
+startDate,
+batches,
+args.optional(“statebird_service_destination”),
+args.optional(“statebird_client_id_name”)</p>
+</dd>
+</dl>
+<p>)(batcher)</p>
+</div></blockquote>
+<dl>
+<dt>val sourceNameFilter: Option[Set[String]] =</dt><dd><p>args.optional(“input_sources”).map(_.split(“,”).toSet)</p>
+</dd>
+<dt>val storeNameFilter: Option[Set[String]] =</dt><dd><p>args.optional(“output_stores”).map(_.split(“,”).toSet)</p>
+</dd>
+<dt>val filteredAggregates =</dt><dd><dl class="simple">
+<dt>AggregatesV2Job.filterAggregates(</dt><dd><p>aggregates = aggregatesToCompute,
+sourceNames = sourceNameFilter,
+storeNames = storeNameFilter</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>override val graph =</dt><dd><dl class="simple">
+<dt>AggregatesV2Job.generateJobGraph[Scalding](</dt><dd><p>filteredAggregates,
+dataRecordSourceToScalding,
+aggregateStoreToScalding</p>
+</dd>
+</dl>
+<p>)(DataRecordAggregationMonoid(filteredAggregates))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+def main(args: Array[String]): Unit = {</p>
+<blockquote>
+<div><p>GenericRunner(args, generate(_))</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../_sources/timelines/data_processing/ml_util/aggregation_framework/scalding/AggregatesV2ScaldingJob.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

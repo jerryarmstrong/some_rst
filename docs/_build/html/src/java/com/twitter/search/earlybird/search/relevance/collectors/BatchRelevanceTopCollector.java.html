@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.earlybird.search.relevance.collectors;</p>
+<p>import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.TimeUnit;</p>
+<p>import com.twitter.common.collections.Pair;
+import com.twitter.common.util.Clock;
+import com.twitter.search.common.features.thrift.ThriftSearchResultFeatures;
+import com.twitter.search.common.metrics.SearchTimerStats;
+import com.twitter.search.common.schema.base.ImmutableSchemaInterface;
+import com.twitter.search.common.schema.earlybird.EarlybirdCluster;
+import com.twitter.search.common.search.EarlyTerminationState;
+import com.twitter.search.earlybird.common.userupdates.UserTable;
+import com.twitter.search.earlybird.search.relevance.LinearScoringData;
+import com.twitter.search.earlybird.search.relevance.RelevanceSearchRequestInfo;
+import com.twitter.search.earlybird.search.relevance.RelevanceSearchResults;
+import com.twitter.search.earlybird.search.relevance.scoring.BatchHit;
+import com.twitter.search.earlybird.search.relevance.scoring.ScoringFunction;
+import com.twitter.search.earlybird.stats.EarlybirdSearcherStats;
+import com.twitter.search.earlybird.thrift.ThriftSearchRelevanceOptions;
+import com.twitter.search.earlybird.thrift.ThriftSearchResultExtraMetadata;
+import com.twitter.search.earlybird.thrift.ThriftSearchResultMetadata;</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>BatchRelevanceTopCollector is similar to the <cite>RelevanceTopCollector</cite> in what it outputs:</p></li>
+<li><p>Collects the top numResults by score, filtering out duplicates</p></li>
+<li><p>and results with scores equal to Flat.MIN_VALUE.</p></li>
+<li><p>The way that it achieves that is different though: it will score documents through the batch score</p></li>
+<li><p>function instead of scoring documents one by one.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>public class BatchRelevanceTopCollector extends RelevanceTopCollector {</dt><dd><p>protected final List&lt;BatchHit&gt; hits;</p>
+<dl>
+<dt>public BatchRelevanceTopCollector(</dt><dd><blockquote>
+<div><p>ImmutableSchemaInterface schema,
+RelevanceSearchRequestInfo searchRequestInfo,
+ScoringFunction scoringFunction,
+EarlybirdSearcherStats searcherStats,
+EarlybirdCluster cluster,
+UserTable userTable,
+Clock clock,
+int requestDebugMode) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>super(schema, searchRequestInfo, scoringFunction, searcherStats, cluster, userTable, clock,</dt><dd><p>requestDebugMode);</p>
+</dd>
+</dl>
+<p>this.hits = new ArrayList&lt;&gt;((int) getMaxHitsToProcess());</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;Override
+protected void doCollectWithScore(long tweetID, float score) throws IOException {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>Pair&lt;LinearScoringData, ThriftSearchResultFeatures&gt; pair =</dt><dd><p>scoringFunction.collectFeatures(score);</p>
+</dd>
+</dl>
+<p>ThriftSearchResultMetadata metadata = collectMetadata();
+hits.add(new BatchHit(pair.getFirst(),</p>
+<blockquote>
+<div><p>pair.getSecond(),
+metadata,
+tweetID,
+currTimeSliceID));</p>
+</div></blockquote>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public EarlyTerminationState innerShouldCollectMore() {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (hits.size() &gt;= getMaxHitsToProcess()) {</dt><dd><p>return setEarlyTerminationState(EarlyTerminationState.TERMINATED_MAX_HITS_EXCEEDED);</p>
+</dd>
+</dl>
+<p>}
+return EarlyTerminationState.COLLECTING;</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+protected RelevanceSearchResults doGetRelevanceResults() throws IOException {</p>
+<blockquote>
+<div><p>final long scoringStartNanos = getClock().nowNanos();
+float[] scores = scoringFunction.batchScore(hits);
+final long scoringEndNanos = getClock().nowNanos();
+addToOverallScoringTimeNanos(scoringStartNanos, scoringEndNanos);
+exportBatchScoringTime(scoringEndNanos - scoringStartNanos);</p>
+<dl>
+<dt>for (int i = 0; i &lt; hits.size(); i++) {</dt><dd><p>BatchHit hit = hits.get(i);
+ThriftSearchResultMetadata metadata = hit.getMetadata();</p>
+<dl class="simple">
+<dt>if (!metadata.isSetExtraMetadata()) {</dt><dd><p>metadata.setExtraMetadata(new ThriftSearchResultExtraMetadata());</p>
+</dd>
+</dl>
+<p>}
+metadata.getExtraMetadata().setFeatures(hit.getFeatures());</p>
+<p>// Populate the ThriftSearchResultMetadata post batch scoring with information from the
+// LinearScoringData, which now includes a score.
+scoringFunction.populateResultMetadataBasedOnScoringData(</p>
+<blockquote>
+<div><p>searchRequestInfo.getSearchQuery().getResultMetadataOptions(),
+metadata,
+hit.getScoringData());</p>
+</div></blockquote>
+<dl class="simple">
+<dt>collectWithScoreInternal(</dt><dd><p>hit.getTweetID(),
+hit.getTimeSliceID(),
+scores[i],
+metadata</p>
+</dd>
+</dl>
+<p>);</p>
+</dd>
+</dl>
+<p>}
+return getRelevanceResultsInternal();</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>private void exportBatchScoringTime(long scoringTimeNanos) {</dt><dd><p>ThriftSearchRelevanceOptions relevanceOptions = searchRequestInfo.getRelevanceOptions();
+if (relevanceOptions.isSetRankingParams()</p>
+<blockquote>
+<div><blockquote>
+<div><p>&amp;&amp; relevanceOptions.getRankingParams().isSetSelectedTensorflowModel()) {</p>
+</div></blockquote>
+<p>String model = relevanceOptions.getRankingParams().getSelectedTensorflowModel();
+SearchTimerStats batchScoringPerModelTimer = SearchTimerStats.export(</p>
+<blockquote>
+<div><p>String.format(“batch_scoring_time_for_model_%s”, model),
+TimeUnit.NANOSECONDS,
+false,
+true);</p>
+</div></blockquote>
+<p>batchScoringPerModelTimer.timerIncrement(scoringTimeNanos);</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/src/java/com/twitter/search/earlybird/search/relevance/collectors/BatchRelevanceTopCollector.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

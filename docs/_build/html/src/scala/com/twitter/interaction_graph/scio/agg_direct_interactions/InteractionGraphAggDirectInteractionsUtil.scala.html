@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../" id="documentation_options" src="../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.interaction_graph.scio.agg_direct_interactions</p>
+<p>import com.spotify.scio.ScioMetrics
+import com.spotify.scio.values.SCollection
+import com.twitter.interaction_graph.scio.common.FeatureGeneratorUtil
+import com.twitter.interaction_graph.scio.common.FeatureKey
+import com.twitter.interaction_graph.scio.common.InteractionGraphRawInput
+import com.twitter.interaction_graph.scio.common.UserUtil.DUMMY_USER_ID
+import com.twitter.interaction_graph.thriftscala.Edge
+import com.twitter.interaction_graph.thriftscala.FeatureName
+import com.twitter.interaction_graph.thriftscala.Vertex
+import com.twitter.timelineservice.thriftscala.ContextualizedFavoriteEvent
+import com.twitter.timelineservice.thriftscala.FavoriteEventUnion.Favorite
+import com.twitter.tweetsource.common.thriftscala.UnhydratedFlatTweet
+import com.twitter.tweetypie.thriftscala.TweetMediaTagEvent</p>
+<p>object InteractionGraphAggDirectInteractionsUtil {</p>
+<blockquote>
+<div><p>val DefaultFeatureValue = 1L</p>
+<dl>
+<dt>def favouriteFeatures(</dt><dd><p>rawFavorites: SCollection[ContextualizedFavoriteEvent]</p>
+</dd>
+<dt>): SCollection[(FeatureKey, Long)] = {</dt><dd><dl>
+<dt>rawFavorites</dt><dd><p>.withName(“fav features”)
+.flatMap { event =&gt;</p>
+<blockquote>
+<div><dl>
+<dt>event.event match {</dt><dd><dl>
+<dt>case Favorite(e) if e.userId != e.tweetUserId =&gt;</dt><dd><p>ScioMetrics.counter(“process”, “fav”).inc()
+Some(</p>
+<blockquote>
+<div><p>FeatureKey(e.userId, e.tweetUserId, FeatureName.NumFavorites) -&gt; DefaultFeatureValue)</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>case _ =&gt; None</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def mentionFeatures(</dt><dd><p>tweetSource: SCollection[UnhydratedFlatTweet]</p>
+</dd>
+<dt>): SCollection[(FeatureKey, Long)] = {</dt><dd><dl>
+<dt>tweetSource</dt><dd><p>.withName(“mention features”)
+.flatMap {</p>
+<blockquote>
+<div><dl>
+<dt>case s if s.shareSourceTweetId.isEmpty =&gt; // only for non-retweets</dt><dd><dl>
+<dt>s.atMentionedUserIds</dt><dd><dl>
+<dt>.map { users =&gt;</dt><dd><dl class="simple">
+<dt>users.toSet.map { uid: Long =&gt;</dt><dd><p>ScioMetrics.counter(“process”, “mention”).inc()
+FeatureKey(s.userId, uid, FeatureName.NumMentions) -&gt; DefaultFeatureValue</p>
+</dd>
+</dl>
+<p>}.toSeq</p>
+</dd>
+</dl>
+<p>}
+.getOrElse(Nil)</p>
+</dd>
+</dl>
+</dd>
+<dt>case _ =&gt;</dt><dd><p>Nil</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def photoTagFeatures(</dt><dd><p>rawPhotoTags: SCollection[TweetMediaTagEvent]</p>
+</dd>
+<dt>): SCollection[(FeatureKey, Long)] = {</dt><dd><dl>
+<dt>rawPhotoTags</dt><dd><p>.withName(“photo tag features”)
+.flatMap { p =&gt;</p>
+<blockquote>
+<div><p>p.taggedUserIds.map { (p.userId, _) }</p>
+</div></blockquote>
+<p>}
+.collect {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case (src, dst) if src != dst =&gt;</dt><dd><p>ScioMetrics.counter(“process”, “photo tag”).inc()
+FeatureKey(src, dst, FeatureName.NumPhotoTags) -&gt; DefaultFeatureValue</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def retweetFeatures(</dt><dd><p>tweetSource: SCollection[UnhydratedFlatTweet]</p>
+</dd>
+<dt>): SCollection[(FeatureKey, Long)] = {</dt><dd><dl>
+<dt>tweetSource</dt><dd><p>.withName(“retweet features”)
+.collect {</p>
+<blockquote>
+<div><dl>
+<dt>case s if s.shareSourceUserId.exists(_ != s.userId) =&gt;</dt><dd><p>ScioMetrics.counter(“process”, “share tweet”).inc()
+FeatureKey(</p>
+<blockquote>
+<div><p>s.userId,
+s.shareSourceUserId.get,
+FeatureName.NumRetweets) -&gt; DefaultFeatureValue</p>
+</div></blockquote>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def quotedTweetFeatures(</dt><dd><p>tweetSource: SCollection[UnhydratedFlatTweet]</p>
+</dd>
+<dt>): SCollection[(FeatureKey, Long)] = {</dt><dd><dl>
+<dt>tweetSource</dt><dd><p>.withName(“quoted tweet features”)
+.collect {</p>
+<blockquote>
+<div><dl>
+<dt>case t if t.quotedTweetUserId.isDefined =&gt;</dt><dd><p>ScioMetrics.counter(“process”, “quote tweet”).inc()
+FeatureKey(</p>
+<blockquote>
+<div><p>t.userId,
+t.quotedTweetUserId.get,
+FeatureName.NumTweetQuotes) -&gt; DefaultFeatureValue</p>
+</div></blockquote>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def replyTweetFeatures(</dt><dd><p>tweetSource: SCollection[UnhydratedFlatTweet]</p>
+</dd>
+<dt>): SCollection[(FeatureKey, Long)] = {</dt><dd><dl>
+<dt>tweetSource</dt><dd><p>.withName(“reply tweet features”)
+.collect {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case t if t.inReplyToUserId.isDefined =&gt;</dt><dd><p>ScioMetrics.counter(“process”, “reply tweet”).inc()
+FeatureKey(t.userId, t.inReplyToUserId.get, FeatureName.NumReplies) -&gt; DefaultFeatureValue</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>// we create edges to a dummy user id since creating a tweet has no destination id
+def createTweetFeatures(</p>
+<blockquote>
+<div><p>tweetSource: SCollection[UnhydratedFlatTweet]</p>
+</div></blockquote>
+<dl>
+<dt>): SCollection[(FeatureKey, Long)] = {</dt><dd><dl class="simple">
+<dt>tweetSource.withName(“create tweet features”).map { tweet =&gt;</dt><dd><p>ScioMetrics.counter(“process”, “create tweet”).inc()
+FeatureKey(tweet.userId, DUMMY_USER_ID, FeatureName.NumCreateTweets) -&gt; DefaultFeatureValue</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def process(</dt><dd><p>rawFavorites: SCollection[ContextualizedFavoriteEvent],
+tweetSource: SCollection[UnhydratedFlatTweet],
+rawPhotoTags: SCollection[TweetMediaTagEvent],
+safeUsers: SCollection[Long]</p>
+</dd>
+<dt>): (SCollection[Vertex], SCollection[Edge]) = {</dt><dd><p>val favouriteInput = favouriteFeatures(rawFavorites)
+val mentionInput = mentionFeatures(tweetSource)
+val photoTagInput = photoTagFeatures(rawPhotoTags)
+val retweetInput = retweetFeatures(tweetSource)
+val quotedTweetInput = quotedTweetFeatures(tweetSource)
+val replyInput = replyTweetFeatures(tweetSource)
+val createTweetInput = createTweetFeatures(tweetSource)</p>
+<dl>
+<dt>val allInput = SCollection.unionAll(</dt><dd><dl class="simple">
+<dt>Seq(</dt><dd><p>favouriteInput,
+mentionInput,
+photoTagInput,
+retweetInput,
+quotedTweetInput,
+replyInput,
+createTweetInput</p>
+</dd>
+</dl>
+<p>))</p>
+</dd>
+<dt>val filteredFeatureInput = allInput</dt><dd><p>.keyBy(_._1.src)
+.intersectByKey(safeUsers) // filter for safe users
+.values
+.collect {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case (FeatureKey(src, dst, feature), featureValue) if src != dst =&gt;</dt><dd><p>FeatureKey(src, dst, feature) -&gt; featureValue</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+.sumByKey
+.map {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case (FeatureKey(src, dst, feature), featureValue) =&gt;</dt><dd><p>val age = 1
+InteractionGraphRawInput(src, dst, feature, age, featureValue)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>FeatureGeneratorUtil.getFeatures(filteredFeatureInput)</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../_sources/src/scala/com/twitter/interaction_graph/scio/agg_direct_interactions/InteractionGraphAggDirectInteractionsUtil.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

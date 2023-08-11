@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../" id="documentation_options" src="../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.earlybird.index;</p>
+<p>import java.io.IOException;</p>
+<p>import com.google.common.base.Preconditions;</p>
+<p>import org.apache.lucene.index.LeafReader;
+import org.apache.lucene.index.NumericDocValues;
+import org.apache.lucene.search.DocIdSetIterator;</p>
+<p>import com.twitter.search.common.schema.earlybird.EarlybirdFieldConstants;
+import com.twitter.search.common.util.analysis.IntTermAttributeImpl;
+import com.twitter.search.common.util.io.flushable.DataDeserializer;
+import com.twitter.search.common.util.io.flushable.DataSerializer;
+import com.twitter.search.common.util.io.flushable.FlushInfo;
+import com.twitter.search.common.util.io.flushable.Flushable;
+import com.twitter.search.core.earlybird.index.DocIDToTweetIDMapper;
+import com.twitter.search.core.earlybird.index.TimeMapper;
+import com.twitter.search.core.earlybird.index.column.ColumnStrideFieldIndex;</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>A few caveats when using this class:</p></li>
+<li><ul>
+<li><p>This class only supports in-order createdAt!</p></li>
+</ul>
+</li>
+<li><ul>
+<li><p>Before actually using this class, one must call prepareToRead() with a Lucene AtomicReader</p></li>
+</ul>
+</li>
+<li><ul>
+<li><p>prepareToRead() will load docID to createdAt mapping into memory, if not already done.</p></li>
+</ul>
+</li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>public class DocValuesBasedTimeMapper implements TimeMapper {</dt><dd><p>private LeafReader reader;
+private ColumnStrideFieldIndex docValues;</p>
+<p>protected int minTimestamp = ILLEGAL_TIME;
+protected int maxTimestamp = ILLEGAL_TIME;</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>When indexing finishes, this method should be called with a index reader that</p></li>
+<li><p>can see all documents.</p></li>
+<li><p>&#64;param leafReader Lucene index reader used to access “TweetID” to “createdAt” mapping.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>public void initializeWithLuceneReader(LeafReader leafReader, ColumnStrideFieldIndex csf)</dt><dd><blockquote>
+<div><p>throws IOException {</p>
+</div></blockquote>
+<p>reader = Preconditions.checkNotNull(leafReader);
+docValues = Preconditions.checkNotNull(csf);</p>
+<p>// Find the min and max timestamps.
+// See SEARCH-5534
+// In the archive, tweets are always sorted in descending order by tweet ID, but
+// that does not mean that the documents are necessarily sorted by time. We’ve observed tweet ID
+// generation be decoupled from timestamp creation (i.e. a larger tweet ID having a smaller
+// created_at time).
+minTimestamp = Integer.MAX_VALUE;
+maxTimestamp = Integer.MIN_VALUE;</p>
+<dl>
+<dt>NumericDocValues onDiskDocValues = reader.getNumericDocValues(</dt><dd><p>EarlybirdFieldConstants.EarlybirdFieldConstant.CREATED_AT_CSF_FIELD.getFieldName());</p>
+</dd>
+<dt>for (int i = 0; i &lt; reader.maxDoc(); ++i) {</dt><dd><p>Preconditions.checkArgument(onDiskDocValues.advanceExact(i));
+int timestamp = (int) onDiskDocValues.longValue();
+docValues.setValue(i, timestamp);</p>
+<dl class="simple">
+<dt>if (timestamp &lt; minTimestamp) {</dt><dd><p>minTimestamp = timestamp;</p>
+</dd>
+</dl>
+<p>}
+if (timestamp &gt; maxTimestamp) {</p>
+<blockquote>
+<div><p>maxTimestamp = timestamp;</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;Override
+public int getLastTime() {</p>
+<blockquote>
+<div><p>return maxTimestamp;</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public int getFirstTime() {</p>
+<blockquote>
+<div><p>return minTimestamp;</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public int getTime(int docID) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (docID &lt; 0 || docID &gt; reader.maxDoc()) {</dt><dd><p>return ILLEGAL_TIME;</p>
+</dd>
+</dl>
+<p>}
+return (int) docValues.get(docID);</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public int findFirstDocId(int timeSeconds, int smallestDocID) throws IOException {</p>
+<blockquote>
+<div><p>// In the full archive, the smallest doc id corresponds to largest timestamp.
+if (timeSeconds &gt; maxTimestamp) {</p>
+<blockquote>
+<div><p>return smallestDocID;</p>
+</div></blockquote>
+<p>}
+if (timeSeconds &lt; minTimestamp) {</p>
+<blockquote>
+<div><p>return reader.maxDoc() - 1;</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>int docId = DocValuesHelper.getLargestDocIdWithCeilOfValue(</dt><dd><p>reader,
+EarlybirdFieldConstants.EarlybirdFieldConstant.CREATED_AT_FIELD.getFieldName(),
+IntTermAttributeImpl.copyIntoNewBytesRef(timeSeconds));</p>
+</dd>
+<dt>if (docId == DocIdSetIterator.NO_MORE_DOCS) {</dt><dd><p>return ILLEGAL_TIME;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>return docId;</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public TimeMapper optimize(DocIDToTweetIDMapper originalTweetIdMapper,</p>
+<blockquote>
+<div><blockquote>
+<div><p>DocIDToTweetIDMapper optimizedTweetIdMapper) {</p>
+</div></blockquote>
+<p>// DocValuesBasedTimerMapper instances are not flushed or loaded,
+// so their optimization is a no-op.
+return this;</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public Flushable.Handler&lt;DocValuesBasedTimeMapper&gt; getFlushHandler() {</p>
+<blockquote>
+<div><p>// EarlybirdIndexSegmentData will still try to flush the DocValuesBasedTimeMapper for the
+// respective segment, so we need to pass in a DocValuesBasedTimeMapper instance to this
+// flusher: otherwise, Flushable.Handler.flush() will throw a NullPointerException.
+return new FlushHandler(new DocValuesBasedTimeMapper());</p>
+</div></blockquote>
+<p>}</p>
+<p>// Full archive earlybirds don’t actually flush or load the DocValuesBasedTimeMapper. This is
+// why doFlush() is a no-op, and doLoad() returns a new DocValuesBasedTimeMapper instance
+// (initializeWithLuceneReader() will be called at load time to initialize this new
+// DocValuesBasedTimeMapper instance).
+public static class FlushHandler extends Flushable.Handler&lt;DocValuesBasedTimeMapper&gt; {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>public FlushHandler() {</dt><dd><p>super();</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public FlushHandler(DocValuesBasedTimeMapper objectToFlush) {</dt><dd><p>super(objectToFlush);</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;Override
+protected void doFlush(FlushInfo flushInfo, DataSerializer out) {
+}</p>
+<p>&#64;Override
+protected DocValuesBasedTimeMapper doLoad(FlushInfo flushInfo, DataDeserializer in) {</p>
+<blockquote>
+<div><p>return new DocValuesBasedTimeMapper();</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../_sources/src/java/com/twitter/search/earlybird/index/DocValuesBasedTimeMapper.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

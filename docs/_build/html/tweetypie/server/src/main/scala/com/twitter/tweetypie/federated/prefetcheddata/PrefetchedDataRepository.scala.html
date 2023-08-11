@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../../" id="documentation_options" src="../../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.tweetypie
+package federated
+package prefetcheddata</p>
+<p>import com.twitter.consumer_privacy.mention_controls.thriftscala.UnmentionInfo
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.gizmoduck.thriftscala.LookupContext
+import com.twitter.gizmoduck.thriftscala.QueryFields
+import com.twitter.gizmoduck.thriftscala.UserResult
+import com.twitter.spam.rtf.thriftscala.SafetyLevel
+import com.twitter.stitch.compat.LegacySeqGroup
+import com.twitter.stitch.SeqGroup
+import com.twitter.stitch.Stitch
+import com.twitter.strato.graphql.thriftscala.CacheMissStrategy
+import com.twitter.strato.graphql.thriftscala.PrefetchedData
+import com.twitter.strato.graphql.thriftscala.TweetResult
+import com.twitter.tweetypie.backends.Gizmoduck
+import com.twitter.tweetypie.thriftscala.Tweet
+import com.twitter.util.Throwables
+import com.twitter.vibes.thriftscala.VibeV2
+import com.twitter.weaverbird.common.GetRequestContext
+import com.twitter.weaverbird.common.PerTOOAppCallerStats
+import com.twitter.weaverbird.common.RequestContext
+import com.twitter.weaverbird.converters.tweet.WeaverbirdEntitySetMutations
+import com.twitter.weaverbird.converters.tweet.WeaverbirdTweetMutations
+import com.twitter.weaverbird.hydrators._
+import com.twitter.weaverbird.mappers.ApiTweetPrefetchedMapper
+import com.twitter.weaverbird.repositories.UserRepository
+import com.twitter.weaverbird.converters.common.EntityRenderingOptions</p>
+<dl class="simple">
+<dt>private[federated] final case class PrefetchedDataRequest(</dt><dd><p>tweet: Tweet,
+sourceTweet: Option[Tweet],
+quotedTweet: Option[Tweet],
+unmentionInfo: Option[UnmentionInfo] = None,
+vibe: Option[VibeV2] = None,
+safetyLevel: SafetyLevel,
+requestContext: RequestContext)</p>
+</dd>
+</dl>
+<p>private[federated] final case class PrefetchedDataResponse(value: PrefetchedData)</p>
+<dl>
+<dt>private[federated] object PrefetchedDataResponse {</dt><dd><p>// For NotFound, there is no subsequent result or quoted_tweet_results field, so both
+// settings are false here. These deciders will be removed post migration.
+private[this] val prefetchedMapper = new ApiTweetPrefetchedMapper(</p>
+<blockquote>
+<div><p>skipTweetResultPrefetchItem = () =&gt; false</p>
+</div></blockquote>
+<p>)
+def notFound(tweetId: Long): PrefetchedDataResponse =</p>
+<blockquote>
+<div><dl>
+<dt>PrefetchedDataResponse(</dt><dd><dl class="simple">
+<dt>value = prefetchedMapper.getPrefetchedData(</dt><dd><p>tweetId = tweetId,
+apiTweet = None,
+tweetResult = None</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private[federated] object PrefetchedDataRepository {</dt><dd><dl>
+<dt>def apply(</dt><dd><p>thriftTweetToApiTweet: ThriftTweetToApiTweet,
+prefetchedMapper: ApiTweetPrefetchedMapper,
+statsReceiver: StatsReceiver,</p>
+</dd>
+<dt>): PrefetchedDataRequest =&gt; Stitch[PrefetchedDataResponse] =</dt><dd><dl>
+<dt>(request: PrefetchedDataRequest) =&gt; {</dt><dd><dl class="simple">
+<dt>val thriftTweetToApiTweetRequest = ThriftTweetToApiTweetRequest(</dt><dd><p>tweet = request.tweet,
+sourceTweet = request.sourceTweet,
+quotedTweet = request.quotedTweet,
+// For Tweet writes, filteredReason will always be None.
+filteredReason = None,
+safetyLevel = request.safetyLevel,
+requestContext = request.requestContext,
+entityRenderingOptions = EntityRenderingOptions()</p>
+</dd>
+</dl>
+<p>)</p>
+<p>val successCounter = statsReceiver.counter(“success”)
+val failuresCounter = statsReceiver.counter(“failures”)
+val failuresScope = statsReceiver.scope(“failures”)</p>
+<dl>
+<dt>thriftTweetToApiTweet</dt><dd><p>.arrow(thriftTweetToApiTweetRequest)
+.onSuccess(_ =&gt; successCounter.incr())
+.onFailure { t =&gt;</p>
+<blockquote>
+<div><p>failuresCounter.incr()
+failuresScope.counter(Throwables.mkString(t): _*).incr()</p>
+</div></blockquote>
+<p>}
+.map((resp: ThriftTweetToApiTweetResponse) =&gt; {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>val prefetchedData: PrefetchedData = prefetchedMapper.getPrefetchedData(</dt><dd><p>tweetId = request.tweet.id,
+apiTweet = Some(resp.apiTweet),
+// since ApiTweet was hydrate, we can fabricate a TweetResult.Tweet
+tweetResult = Some(TweetResult.Tweet(request.tweet.id)),
+unmentionInfo = request.unmentionInfo,
+editControl = request.tweet.editControl,
+previousCounts = request.tweet.previousCounts,
+vibe = request.vibe,
+editPerspective = request.tweet.editPerspective,
+noteTweet = request.tweet.noteTweet</p>
+</dd>
+</dl>
+<p>)</p>
+<p>// Notify GraphQL API to not attempt hydration for missing
+// ApiTweet/TweetResult fields. This is only needed on the
+// Tweet write path since the newly created Tweet may not
+// be fully persisted yet in tbird Manhattan.
+val shortCircuitedPrefetchedData = prefetchedData.copy(</p>
+<blockquote>
+<div><p>onCacheMiss = CacheMissStrategy.ShortCircuitExisting</p>
+</div></blockquote>
+<p>)</p>
+<p>PrefetchedDataResponse(shortCircuitedPrefetchedData)</p>
+</div></blockquote>
+<p>})</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private[federated] object PrefetchedDataRepositoryBuilder {</dt><dd><dl>
+<dt>def apply(</dt><dd><p>getUserResultsById: Gizmoduck.GetById,
+statsReceiver: StatsReceiver</p>
+</dd>
+<dt>): PrefetchedDataRequest =&gt; Stitch[PrefetchedDataResponse] = {</dt><dd><p>val repoStats = statsReceiver.scope(“repositories”)</p>
+<dl>
+<dt>case class GetUserResultById(</dt><dd><p>queryFields: Set[QueryFields],
+lookupContext: LookupContext,</p>
+</dd>
+<dt>) extends SeqGroup[UserId, UserResult] {</dt><dd><dl class="simple">
+<dt>override def run(keys: Seq[UserId]): Future[Seq[Try[UserResult]]] =</dt><dd><p>LegacySeqGroup.liftToSeqTry(getUserResultsById((lookupContext, keys, queryFields)))</p>
+</dd>
+</dl>
+<p>override def maxSize: Int = 100</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>val stitchGetUserResultById: UserRepository.GetUserResultById =</dt><dd><dl class="simple">
+<dt>(userId: UserId, queryFields: Set[QueryFields], lookupContext: LookupContext) =&gt;</dt><dd><p>Stitch.call(userId, GetUserResultById(queryFields, lookupContext))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>val userRepository = new UserRepository(stitchGetUserResultById, repoStats)</p>
+<p>// Note, this is weaverbird.common.GetRequestContext
+val getRequestContext = new GetRequestContext()</p>
+<p>// TwiggyUserHydrator is needed to hydrate TwiggyUsers for CWC and misc. logic
+val twiggyUserHydrator = new TwiggyUserHydrator(userRepository, getRequestContext)</p>
+<dl>
+<dt>val weaverbirdMutations = new WeaverbirdTweetMutations(</dt><dd><dl class="simple">
+<dt>new WeaverbirdEntitySetMutations(</dt><dd><p>new PerTOOAppCallerStats(statsReceiver, getRequestContext)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>)</p>
+<dl class="simple">
+<dt>val prefetchedMapper = new ApiTweetPrefetchedMapper(</dt><dd><p>// do not skip this in mutation path as we depends on it
+skipTweetResultPrefetchItem = () =&gt; false</p>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>val thriftTweetToApiTweet: ThriftTweetToApiTweet =</dt><dd><dl class="simple">
+<dt>new FoundThriftTweetToApiTweet(</dt><dd><p>statsReceiver,
+twiggyUserHydrator,
+weaverbirdMutations</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>PrefetchedDataRepository(</dt><dd><p>thriftTweetToApiTweet,
+prefetchedMapper,
+repoStats.scope(“prefetched_data_repo”)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../../_sources/tweetypie/server/src/main/scala/com/twitter/tweetypie/federated/prefetcheddata/PrefetchedDataRepository.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

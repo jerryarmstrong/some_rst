@@ -1,0 +1,444 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.tweetypie.config</p>
+<p>import com.twitter.decider.Decider
+import com.twitter.decider.DeciderFactory
+import com.twitter.decider.LocalOverrides
+import com.twitter.featureswitches.v2.builder.FeatureSwitchesBuilder
+import com.twitter.finagle.filter.DarkTrafficFilter
+import com.twitter.finagle.stats.DefaultStatsReceiver
+import com.twitter.finagle.stats.NullStatsReceiver
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.finagle.thrift.Protocols
+import com.twitter.finagle.util.DefaultTimer
+import com.twitter.finagle.Filter
+import com.twitter.finagle.Service
+import com.twitter.finagle.SimpleFilter
+import com.twitter.quill.capture._
+import com.twitter.servo.util.MemoizingStatsReceiver
+import com.twitter.servo.util.WaitForServerSets
+import com.twitter.tweetypie.ThriftTweetService
+import com.twitter.tweetypie.client_id.ClientIdHelper
+import com.twitter.tweetypie.client_id.ConditionalServiceIdentifierStrategy
+import com.twitter.tweetypie.client_id.PreferForwardedServiceIdentifierForStrato
+import com.twitter.tweetypie.client_id.UseTransportServiceIdentifier
+import com.twitter.tweetypie.context.TweetypieContext
+import com.twitter.tweetypie.matching.Tokenizer
+import com.twitter.tweetypie.service._
+import com.twitter.tweetypie.thriftscala.TweetServiceInternal$FinagleService
+import com.twitter.util._
+import com.twitter.util.logging.Logger
+import scala.util.control.NonFatal</p>
+<p>class TweetServerBuilder(settings: TweetServiceSettings) {</p>
+<blockquote>
+<div><dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>A logger used by some of the built-in initializers.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+</dl>
+<p>val log: Logger = Logger(getClass)</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>The top-level stats receiver. Defaults to the default StatsReceiver</p></li>
+<li><p>embedded in Finagle.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>val statsReceiver: StatsReceiver =</dt><dd><p>new MemoizingStatsReceiver(DefaultStatsReceiver)</p>
+</dd>
+<dt>val hostStatsReceiver: StatsReceiver =</dt><dd><dl class="simple">
+<dt>if (settings.clientHostStats)</dt><dd><p>statsReceiver</p>
+</dd>
+<dt>else</dt><dd><p>NullStatsReceiver</p>
+</dd>
+</dl>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>A timer for scheduling various things.</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+</dl>
+<p>val timer: Timer = DefaultTimer</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Creates a decider instance by looking up the decider configuration information</p></li>
+<li><p>from the settings object.</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+<dt>val decider: Decider = {</dt><dd><p>val fileBased = DeciderFactory(settings.deciderBaseFilename, settings.deciderOverlayFilename)()</p>
+<p>// Use the tweetypie decider dashboard name for propagating decider overrides.
+LocalOverrides.decider(“tweetypie”).orElse(fileBased)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>val deciderGates: TweetypieDeciderGates = {</dt><dd><p>val deciderGates = TweetypieDeciderGates(decider, settings.deciderOverrides)</p>
+<p>// Write out the configuration overrides to the log so that it’s
+// easy to confirm how this instance has been customized.
+deciderGates.overrides.foreach {</p>
+<blockquote>
+<div><dl>
+<dt>case (overrideName, overrideValue) =&gt;</dt><dd><p>log.info(“Decider feature “ + overrideName + “ overridden to “ + overrideValue)
+if (deciderGates.unusedOverrides.contains(overrideName)) {</p>
+<blockquote>
+<div><p>log.error(“Unused decider override flag: “ + overrideName)</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<p>val scopedReceiver = statsReceiver.scope(“decider_values”)</p>
+<dl>
+<dt>deciderGates.availabilityMap.foreach {</dt><dd><dl>
+<dt>case (feature, value) =&gt;</dt><dd><dl class="simple">
+<dt>scopedReceiver.provideGauge(feature) {</dt><dd><p>// Default value of -1 indicates error state.
+value.getOrElse(-1).toFloat</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>deciderGates</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>val featureSwitchesWithExperiments = FeatureSwitchesBuilder</dt><dd><p>.createWithExperiments(“/features/tweetypie/main”)
+.build()</p>
+</dd>
+<dt>val featureSwitchesWithoutExperiments = FeatureSwitchesBuilder</dt><dd><p>.createWithNoExperiments(“/features/tweetypie/main”, Some(statsReceiver))
+.build()</p>
+</dd>
+</dl>
+<p>// <strong>*****</strong> initializer <strong>******</strong></p>
+<dl class="simple">
+<dt>private[this] def warmupTextTokenization(logger: Logger): Unit = {</dt><dd><p>logger.info(“Warming up text tokenization”)
+val watch = Stopwatch.start()
+Tokenizer.warmUp()
+logger.info(s”Warmed up text tokenization in ${watch()}”)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private[this] def runWarmup(tweetService: Activity[ThriftTweetService]): Unit = {</dt><dd><p>val tokenizationLogger = Logger(“com.twitter.tweetypie.TweetServerBuilder.TokenizationWarmup”)
+warmupTextTokenization(tokenizationLogger)</p>
+<p>val warmupLogger = Logger(“com.twitter.tweetypie.TweetServerBuilder.BackendWarmup”)
+// #1 warmup backends
+Await.ready(settings.backendWarmupSettings(backendClients, warmupLogger, timer))</p>
+<p>// #2 warmup Tweet Service
+Await.ready {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>tweetService.values.toFuture.map(_.get).map { service =&gt;</dt><dd><p>settings.warmupRequestsSettings.foreach(new TweetServiceWarmer(_)(service))</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private[this] def waitForServerSets(): Unit = {</dt><dd><p>val names = backendClients.referencedNames
+val startTime = Time.now
+log.info(“will wait for serversets: “ + names.mkString(”n”, “tn”, “”))</p>
+<dl class="simple">
+<dt>try {</dt><dd><p>Await.result(WaitForServerSets.ready(names, settings.waitForServerSetsTimeout, timer))
+val duration = Time.now.since(startTime)
+log.info(“resolved all serversets in “ + duration)</p>
+</dd>
+<dt>} catch {</dt><dd><p>case NonFatal(ex) =&gt; log.warn(“failed to resolve all serversets”, ex)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private[this] def initialize(tweetService: Activity[ThriftTweetService]): Unit = {</dt><dd><p>waitForServerSets()
+runWarmup(tweetService)</p>
+<p>// try to force a GC before starting to serve requests; this may or may not do anything
+System.gc()</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// <strong>*****</strong> builders <strong>******</strong></p>
+<dl>
+<dt>val clientIdHelper = new ClientIdHelper(</dt><dd><dl class="simple">
+<dt>new ConditionalServiceIdentifierStrategy(</dt><dd><p>condition = deciderGates.preferForwardedServiceIdentifierForClientId,
+ifTrue = PreferForwardedServiceIdentifierForStrato,
+ifFalse = UseTransportServiceIdentifier,</p>
+</dd>
+</dl>
+<p>),</p>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>val backendClients: BackendClients =</dt><dd><dl class="simple">
+<dt>BackendClients(</dt><dd><p>settings = settings,
+deciderGates = deciderGates,
+statsReceiver = statsReceiver,
+hostStatsReceiver = hostStatsReceiver,
+timer = timer,
+clientIdHelper = clientIdHelper,</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>val tweetService: Activity[ThriftTweetService] =</dt><dd><dl class="simple">
+<dt>TweetServiceBuilder(</dt><dd><p>settings = settings,
+statsReceiver = statsReceiver,
+timer = timer,
+deciderGates = deciderGates,
+featureSwitchesWithExperiments = featureSwitchesWithExperiments,
+featureSwitchesWithoutExperiments = featureSwitchesWithoutExperiments,
+backendClients = backendClients,
+clientIdHelper = clientIdHelper,</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>// Strato columns should use this tweetService
+def stratoTweetService: Activity[ThriftTweetService] =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>tweetService.map { service =&gt;</dt><dd><p>// Add quill functionality to the strato tweet service only
+val quillCapture = QuillCaptureBuilder(settings, deciderGates)
+new QuillTweetService(quillCapture, service)</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>def build: Activity[Service[Array[Byte], Array[Byte]]] = {</p>
+<blockquote>
+<div><p>val quillCapture = QuillCaptureBuilder(settings, deciderGates)</p>
+<dl>
+<dt>val darkTrafficFilter: SimpleFilter[Array[Byte], Array[Byte]] =</dt><dd><dl>
+<dt>if (!settings.trafficForkingEnabled) {</dt><dd><p>Filter.identity</p>
+</dd>
+<dt>} else {</dt><dd><dl class="simple">
+<dt>new DarkTrafficFilter(</dt><dd><p>backendClients.darkTrafficClient,
+_ =&gt; deciderGates.forkDarkTraffic(),
+statsReceiver</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>val serviceFilter =</dt><dd><dl class="simple">
+<dt>quillCapture</dt><dd><p>.getServerFilter(ThriftProto.server)
+.andThen(TweetypieContext.Local.filter[Array[Byte], Array[Byte]])
+.andThen(darkTrafficFilter)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>initialize(tweetService)</p>
+<p>// tweetService is an Activity[ThriftTweetService], so this callback
+// is called every time that Activity updates (on ConfigBus changes).
+tweetService.map { service =&gt;</p>
+<blockquote>
+<div><dl>
+<dt>val finagleService =</dt><dd><dl class="simple">
+<dt>new TweetServiceInternal$FinagleService(</dt><dd><p>service,
+protocolFactory = Protocols.binaryFactory(),
+stats = NullStatsReceiver,
+maxThriftBufferSize = settings.maxThriftBufferSize</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>serviceFilter andThen finagleService</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>object QuillCaptureBuilder {</dt><dd><dl>
+<dt>val tweetServiceWriteMethods: Set[String] =</dt><dd><dl class="simple">
+<dt>Set(</dt><dd><p>“async_delete”,
+“async_delete_additional_fields”,
+“async_erase_user_tweets”,
+“async_incr_fav_count”,
+“async_insert”,
+“async_set_additional_fields”,
+“async_set_retweet_visibility”,
+“async_takedown”,
+“async_undelete_tweet”,
+“async_update_possibly_sensitive_tweet”,
+“cascaded_delete_tweet”,
+“delete_additional_fields”,
+“delete_retweets”,
+“delete_tweets”,
+“erase_user_tweets”,
+“flush”,
+“incr_fav_count”,
+“insert”,
+“post_retweet”,
+“post_tweet”,
+“remove”,
+“replicated_delete_additional_fields”,
+“replicated_delete_tweet”,
+“replicated_delete_tweet2”,
+“replicated_incr_fav_count”,
+“replicated_insert_tweet2”,
+“replicated_scrub_geo”,
+“replicated_set_additional_fields”,
+“replicated_set_has_safety_labels”,
+“replicated_set_retweet_visibility”,
+“replicated_takedown”,
+“replicated_undelete_tweet2”,
+“replicated_update_possibly_sensitive_tweet”,
+“scrub_geo”,
+“scrub_geo_update_user_timestamp”,
+“set_additional_fields”,
+“set_has_safety_labels”,
+“set_retweet_visibility”,
+“set_tweet_user_takedown”,
+“takedown”,
+“undelete_tweet”</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>val tweetServiceReadMethods: Set[String] =</dt><dd><dl class="simple">
+<dt>Set(</dt><dd><p>“get_tweet_counts”,
+“get_tweet_fields”,
+“get_tweets”,
+“replicated_get_tweet_counts”,
+“replicated_get_tweet_fields”,
+“replicated_get_tweets”</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>def apply(settings: TweetServiceSettings, deciderGates: TweetypieDeciderGates): QuillCapture = {</dt><dd><dl>
+<dt>val writesStore = SimpleScribeMessageStore(“tweetypie_writes”)</dt><dd><p>.enabledBy(deciderGates.logWrites)</p>
+</dd>
+<dt>val readsStore = SimpleScribeMessageStore(“tweetypie_reads”)</dt><dd><p>.enabledBy(deciderGates.logReads)</p>
+</dd>
+<dt>val messageStore =</dt><dd><dl class="simple">
+<dt>MessageStore.selected {</dt><dd><p>case msg if tweetServiceWriteMethods.contains(msg.name) =&gt; writesStore
+case msg if tweetServiceReadMethods.contains(msg.name) =&gt; readsStore
+case _ =&gt; writesStore</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>new QuillCapture(Store.legacyStore(messageStore), Some(settings.thriftClientId.name))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/tweetypie/server/src/main/scala/com/twitter/tweetypie/config/TweetServerBuilder.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

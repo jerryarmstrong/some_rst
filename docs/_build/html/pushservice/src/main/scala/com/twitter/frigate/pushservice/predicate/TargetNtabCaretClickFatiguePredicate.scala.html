@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.frigate.pushservice.predicate</p>
+<p>import com.twitter.conversions.DurationOps._
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.frigate.common.base.TargetUser
+import com.twitter.frigate.common.candidate.CaretFeedbackHistory
+import com.twitter.frigate.common.candidate.FrigateHistory
+import com.twitter.frigate.common.candidate.HTLVisitHistory
+import com.twitter.frigate.common.candidate.TargetABDecider
+import com.twitter.frigate.common.history.History
+import com.twitter.frigate.common.predicate.FrigateHistoryFatiguePredicate.TimeSeries
+import com.twitter.frigate.common.predicate.ntab_caret_fatigue.NtabCaretClickFatiguePredicateHelper
+import com.twitter.frigate.common.rec_types.RecTypes
+import com.twitter.frigate.common.util.FeatureSwitchParams
+import com.twitter.frigate.pushservice.params.PushFeatureSwitchParams
+import com.twitter.hermit.predicate.NamedPredicate
+import com.twitter.hermit.predicate.Predicate
+import com.twitter.notificationservice.thriftscala.CaretFeedbackDetails
+import com.twitter.util.Duration
+import com.twitter.util.Future
+import com.twitter.frigate.common.predicate.{FatiguePredicate =&gt; CommonFatiguePredicate}</p>
+<dl>
+<dt>object TargetNtabCaretClickFatiguePredicate {</dt><dd><p>import NtabCaretClickFatiguePredicateHelper._</p>
+<p>private val MagicRecsCategory = “MagicRecs”</p>
+<dl>
+<dt>def apply[</dt><dd><p>T &lt;: TargetUser with TargetABDecider with CaretFeedbackHistory with FrigateHistory with HTLVisitHistory</p>
+</dd>
+<dt>](</dt><dd><dl class="simple">
+<dt>filterHistory: TimeSeries =&gt; TimeSeries =</dt><dd><p>CommonFatiguePredicate.recTypesOnlyFilter(RecTypes.sharedNTabCaretFatigueTypes),</p>
+</dd>
+<dt>filterCaretFeedbackHistory: TargetUser with TargetABDecider with CaretFeedbackHistory =&gt; Seq[</dt><dd><p>CaretFeedbackDetails</p>
+</dd>
+<dt>] =&gt; Seq[CaretFeedbackDetails] =</dt><dd><p>CaretFeedbackHistoryFilter.caretFeedbackHistoryFilter(Seq(MagicRecsCategory)),</p>
+</dd>
+</dl>
+<p>calculateFatiguePeriod: Seq[CaretFeedbackDetails] =&gt; Duration = calculateFatiguePeriodMagicRecs,
+useMostRecentDislikeTime: Boolean = false,
+name: String = “NtabCaretClickFatiguePredicate”</p>
+</dd>
+<dt>)(</dt><dd><p>implicit statsReceiver: StatsReceiver</p>
+</dd>
+</dl>
+<p>): NamedPredicate[T] = {</p>
+<blockquote>
+<div><p>val scopedStats = statsReceiver.scope(name)
+val crtStats = scopedStats.scope(“crt”)
+Predicate</p>
+<blockquote>
+<div><dl>
+<dt>.fromAsync { target: T =&gt;</dt><dd><dl>
+<dt>Future.join(target.history, target.caretFeedbacks).map {</dt><dd><dl>
+<dt>case (history, Some(feedbackDetails)) =&gt; {</dt><dd><dl class="simple">
+<dt>val feedbackDetailsDeduped = dedupFeedbackDetails(</dt><dd><p>filterCaretFeedbackHistory(target)(feedbackDetails),
+scopedStats</p>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>val fatiguePeriod =</dt><dd><dl>
+<dt>if (hasUserDislikeInLast30Days(feedbackDetailsDeduped) &amp;&amp; target.params(</dt><dd><blockquote>
+<div><p>PushFeatureSwitchParams.EnableReducedFatigueRulesForSeeLessOften)) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>durationToFilterMRForSeeLessOftenExpt(</dt><dd><p>feedbackDetailsDeduped,
+target.params(FeatureSwitchParams.NumberOfDaysToFilterMRForSeeLessOften),
+target.params(FeatureSwitchParams.NumberOfDaysToReducePushCapForSeeLessOften),
+scopedStats</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>} else {</dt><dd><p>calculateFatiguePeriod(feedbackDetailsDeduped)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>val crtlist = feedbackDetailsDeduped</dt><dd><dl>
+<dt>.flatMap { fd =&gt;</dt><dd><dl class="simple">
+<dt>fd.genericNotificationMetadata.map { gm =&gt;</dt><dd><p>gm.genericType.name</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}.distinct.sorted.mkString(“-“)</p>
+</dd>
+<dt>if (fatiguePeriod &gt; 0.days) {</dt><dd><p>crtStats.scope(crtlist).counter(“fatigued”).incr()</p>
+</dd>
+<dt>} else {</dt><dd><p>crtStats.scope(crtlist).counter(“non_fatigued”).incr()</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>val hasRecentSent =</dt><dd><p>hasRecentSend(History(filterHistory(history.history.toSeq).toMap), fatiguePeriod)</p>
+</dd>
+</dl>
+<p>!hasRecentSent</p>
+</dd>
+</dl>
+<p>}
+case _ =&gt; true</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}
+.withStats(scopedStats)
+.withName(name)</p>
+</div></blockquote>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/pushservice/src/main/scala/com/twitter/frigate/pushservice/predicate/TargetNtabCaretClickFatiguePredicate.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

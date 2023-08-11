@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.frigate.pushservice.ml</p>
+<p>import com.twitter.cortex.deepbird.thriftjava.ModelSelector
+import com.twitter.finagle.stats.Counter
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.frigate.common.base.CandidateDetails
+import com.twitter.frigate.common.base.FeatureMap
+import com.twitter.frigate.pushservice.model.PushTypes.PushCandidate
+import com.twitter.frigate.pushservice.model.PushTypes.Target
+import com.twitter.frigate.pushservice.params.PushMLModel
+import com.twitter.frigate.pushservice.params.PushModelName
+import com.twitter.frigate.pushservice.params.WeightedOpenOrNtabClickModel
+import com.twitter.nrel.heavyranker.PushCandidateHydrationContextWithModel
+import com.twitter.nrel.heavyranker.PushPredictionServiceStore
+import com.twitter.nrel.heavyranker.TargetFeatureMapWithModel
+import com.twitter.timelines.configapi.FSParam
+import com.twitter.util.Future</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>PushMLModelScorer scores the Candidates and populates their ML scores</p></li>
+<li></li>
+<li><p>&#64;param pushMLModel Enum to specify which model to use for scoring the Candidates</p></li>
+<li><p>&#64;param modelToPredictionServiceStoreMap Supports all other prediction services. Specifies model ID -&gt; dbv2 ReadableStore</p></li>
+<li><p>&#64;param defaultDBv2PredictionServiceStore: Supports models that are not specified in the previous maps (which will be directly configured in the config repo)</p></li>
+<li><p>&#64;param scoringStats StatsReceiver for scoping stats</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>class PushMLModelScorer(</dt><dd><p>pushMLModel: PushMLModel.Value,
+modelToPredictionServiceStoreMap: Map[</p>
+<blockquote>
+<div><p>WeightedOpenOrNtabClickModel.ModelNameType,
+PushPredictionServiceStore</p>
+</div></blockquote>
+<p>],
+defaultDBv2PredictionServiceStore: PushPredictionServiceStore,
+scoringStats: StatsReceiver) {</p>
+<dl>
+<dt>val queriesOutsideTheModelMaps: StatsReceiver =</dt><dd><p>scoringStats.scope(“queries_outside_the_model_maps”)</p>
+</dd>
+<dt>val totalQueriesOutsideTheModelMaps: Counter =</dt><dd><p>queriesOutsideTheModelMaps.counter(“total”)</p>
+</dd>
+<dt>private def scoreByBatchPredictionForModelFromMultiModelService(</dt><dd><p>predictionServiceStore: PushPredictionServiceStore,
+modelVersion: WeightedOpenOrNtabClickModel.ModelNameType,
+candidatesDetails: Seq[CandidateDetails[PushCandidate]],
+useCommonFeatures: Boolean,
+overridePushMLModel: PushMLModel.Value</p>
+</dd>
+<dt>): Seq[CandidateDetails[PushCandidate]] = {</dt><dd><dl class="simple">
+<dt>val modelName =</dt><dd><p>PushModelName(overridePushMLModel, modelVersion).toString</p>
+</dd>
+</dl>
+<p>val modelSelector = new ModelSelector()
+modelSelector.setId(modelName)</p>
+<dl class="simple">
+<dt>val candidateHydrationWithFeaturesMap = candidatesDetails.map { candidatesDetail =&gt;</dt><dd><dl class="simple">
+<dt>(</dt><dd><p>candidatesDetail.candidate.candidateHydrationContext,
+candidatesDetail.candidate.candidateFeatureMap())</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+if (candidatesDetails.nonEmpty) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>val candidatesWithScore = predictionServiceStore.getBatchPredictionsForModel(</dt><dd><p>candidatesDetails.head.candidate.target.targetHydrationContext,
+candidatesDetails.head.candidate.target.featureMap,
+candidateHydrationWithFeaturesMap,
+Some(modelSelector),
+useCommonFeatures</p>
+</dd>
+</dl>
+<p>)
+candidatesDetails.zip(candidatesWithScore).foreach {</p>
+<blockquote>
+<div><dl>
+<dt>case (candidateDetail, (_, scoreOptFut)) =&gt;</dt><dd><dl class="simple">
+<dt>candidateDetail.candidate.populateQualityModelScore(</dt><dd><p>overridePushMLModel,
+modelVersion,
+scoreOptFut</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>candidatesDetails</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def scoreByBatchPrediction(</dt><dd><p>modelVersion: WeightedOpenOrNtabClickModel.ModelNameType,
+candidatesDetails: Seq[CandidateDetails[PushCandidate]],
+useCommonFeaturesForDBv2Service: Boolean,
+overridePushMLModel: PushMLModel.Value</p>
+</dd>
+<dt>): Seq[CandidateDetails[PushCandidate]] = {</dt><dd><dl>
+<dt>if (modelToPredictionServiceStoreMap.contains(modelVersion)) {</dt><dd><dl class="simple">
+<dt>scoreByBatchPredictionForModelFromMultiModelService(</dt><dd><p>modelToPredictionServiceStoreMap(modelVersion),
+modelVersion,
+candidatesDetails,
+useCommonFeaturesForDBv2Service,
+overridePushMLModel</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>} else {</dt><dd><p>totalQueriesOutsideTheModelMaps.incr()
+queriesOutsideTheModelMaps.counter(modelVersion).incr()
+scoreByBatchPredictionForModelFromMultiModelService(</p>
+<blockquote>
+<div><p>defaultDBv2PredictionServiceStore,
+modelVersion,
+candidatesDetails,
+useCommonFeaturesForDBv2Service,
+overridePushMLModel</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def scoreByBatchPredictionForModelVersion(</dt><dd><p>target: Target,
+candidatesDetails: Seq[CandidateDetails[PushCandidate]],
+modelVersionParam: FSParam[WeightedOpenOrNtabClickModel.ModelNameType],
+useCommonFeaturesForDBv2Service: Boolean = true,
+overridePushMLModelOpt: Option[PushMLModel.Value] = None</p>
+</dd>
+<dt>): Seq[CandidateDetails[PushCandidate]] = {</dt><dd><dl class="simple">
+<dt>scoreByBatchPrediction(</dt><dd><p>target.params(modelVersionParam),
+candidatesDetails,
+useCommonFeaturesForDBv2Service,
+overridePushMLModelOpt.getOrElse(pushMLModel)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def singlePredicationForModelVersion(</dt><dd><p>modelVersion: String,
+candidate: PushCandidate,
+overridePushMLModelOpt: Option[PushMLModel.Value] = None</p>
+</dd>
+<dt>): Future[Option[Double]] = {</dt><dd><p>val modelSelector = new ModelSelector()
+modelSelector.setId(</p>
+<blockquote>
+<div><p>PushModelName(overridePushMLModelOpt.getOrElse(pushMLModel), modelVersion).toString</p>
+</div></blockquote>
+<p>)
+if (modelToPredictionServiceStoreMap.contains(modelVersion)) {</p>
+<blockquote>
+<div><dl>
+<dt>modelToPredictionServiceStoreMap(modelVersion).get(</dt><dd><dl class="simple">
+<dt>PushCandidateHydrationContextWithModel(</dt><dd><p>candidate.target.targetHydrationContext,
+candidate.target.featureMap,
+candidate.candidateHydrationContext,
+candidate.candidateFeatureMap(),
+Some(modelSelector)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<dl>
+<dt>} else {</dt><dd><p>totalQueriesOutsideTheModelMaps.incr()
+queriesOutsideTheModelMaps.counter(modelVersion).incr()
+defaultDBv2PredictionServiceStore.get(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>PushCandidateHydrationContextWithModel(</dt><dd><p>candidate.target.targetHydrationContext,
+candidate.target.featureMap,
+candidate.candidateHydrationContext,
+candidate.candidateFeatureMap(),
+Some(modelSelector)</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def singlePredictionForTargetLevel(</dt><dd><p>modelVersion: String,
+targetId: Long,
+featureMap: Future[FeatureMap]</p>
+</dd>
+<dt>): Future[Option[Double]] = {</dt><dd><p>val modelSelector = new ModelSelector()
+modelSelector.setId(</p>
+<blockquote>
+<div><p>PushModelName(pushMLModel, modelVersion).toString</p>
+</div></blockquote>
+<p>)
+defaultDBv2PredictionServiceStore.getForTargetLevel(</p>
+<blockquote>
+<div><p>TargetFeatureMapWithModel(targetId, featureMap, Some(modelSelector))</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def getScoreHistogramCounters(</dt><dd><p>stats: StatsReceiver,
+scopeName: String,
+histogramBinSize: Double</p>
+</dd>
+<dt>): IndexedSeq[Counter] = {</dt><dd><p>val histogramScopedStatsReceiver = stats.scope(scopeName)
+val numBins = math.ceil(1.0 / histogramBinSize).toInt</p>
+<dl>
+<dt>(0 to numBins) map { k =&gt;</dt><dd><dl>
+<dt>if (k == 0)</dt><dd><p>histogramScopedStatsReceiver.counter(“candidates_with_scores_zero”)</p>
+</dd>
+<dt>else {</dt><dd><dl class="simple">
+<dt>val counterName = “candidates_with_scores_from_%s_to_%s”.format(</dt><dd><p>“%.2f”.format(histogramBinSize * (k - 1)).replace(“.”, “”),
+“%.2f”.format(math.min(1.0, histogramBinSize * k)).replace(“.”, “”))</p>
+</dd>
+</dl>
+<p>histogramScopedStatsReceiver.counter(counterName)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/pushservice/src/main/scala/com/twitter/frigate/pushservice/ml/PushMLModelScorer.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

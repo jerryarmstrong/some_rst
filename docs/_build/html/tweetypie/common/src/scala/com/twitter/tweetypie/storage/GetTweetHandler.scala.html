@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../" id="documentation_options" src="../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.tweetypie.storage</p>
+<p>import com.twitter.conversions.DurationOps._
+import com.twitter.finagle.stats.Counter
+import com.twitter.finagle.stats.NullStatsReceiver
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.logging.Logger
+import com.twitter.snowflake.id.SnowflakeId
+import com.twitter.stitch.Stitch
+import com.twitter.stitch.StitchSeqGroup
+import com.twitter.storage.client.manhattan.kv.DeniedManhattanException
+import com.twitter.storage.client.manhattan.kv.ManhattanException
+import com.twitter.tweetypie.storage.TweetStateRecord.BounceDeleted
+import com.twitter.tweetypie.storage.TweetStateRecord.HardDeleted
+import com.twitter.tweetypie.storage.TweetStateRecord.SoftDeleted
+import com.twitter.tweetypie.storage.TweetStorageClient.GetTweet
+import com.twitter.tweetypie.storage.TweetUtils._
+import com.twitter.util.Duration
+import com.twitter.util.Return
+import com.twitter.util.Throw
+import com.twitter.util.Time</p>
+<dl>
+<dt>object GetTweetHandler {</dt><dd><p>private[this] val logger = Logger(getClass)</p>
+<p>// Logging racy reads for later validation.</p>
+<p>val RacyTweetWindow: Duration = 10.seconds</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>If this read is soon after the tweet was created, then we would usually</p></li>
+<li><p>expect it to be served from cache. This early read indicates that this</p></li>
+<li><p>tweet is prone to consistency issues, so we log what’s present in</p></li>
+<li><p>Manhattan at the time of the read for later analysis.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>private[this] def logRacyRead(tweetId: TweetId, records: Seq[TweetManhattanRecord]): Unit =</dt><dd><dl>
+<dt>if (SnowflakeId.isSnowflakeId(tweetId)) {</dt><dd><p>val tweetAge = Time.now.since(SnowflakeId(tweetId).time)
+if (tweetAge &lt;= RacyTweetWindow) {</p>
+<blockquote>
+<div><p>val sb = new StringBuilder
+sb.append(“racy_tweet_readt”)</p>
+<blockquote>
+<div><p>.append(tweetId)
+.append(’t’)
+.append(tweetAge.inMilliseconds) // Log the age for analysis purposes</p>
+</div></blockquote>
+<dl>
+<dt>records.foreach { rec =&gt;</dt><dd><dl>
+<dt>sb.append(’t’)</dt><dd><p>.append(rec.lkey)</p>
+</dd>
+<dt>rec.value.timestamp.foreach { ts =&gt;</dt><dd><p>// If there is a timestamp for this key, log it so that we can tell
+// later on whether a value should have been present. We expect
+// keys written in a single write to have the same timestamp, and
+// generally, keys written in separate writes will have different
+// timestamps. The timestamp value is optional in Manhattan, but
+// we expect there to always be a value for the timestamp.
+sb.append(‘:’)</p>
+<blockquote>
+<div><p>.append(ts.inMilliseconds)</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}
+logger.info(sb.toString)</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Convert a set of records from Manhattan into a GetTweet.Response.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>def tweetResponseFromRecords(</dt><dd><p>tweetId: TweetId,
+mhRecords: Seq[TweetManhattanRecord],
+statsReceiver: StatsReceiver = NullStatsReceiver</p>
+</dd>
+<dt>): GetTweet.Response =</dt><dd><dl>
+<dt>if (mhRecords.isEmpty) {</dt><dd><p>GetTweet.Response.NotFound</p>
+</dd>
+<dt>} else {</dt><dd><p>// If no internal fields are present or no required fields present, we consider the tweet
+// as not returnable (even if some additional fields are present)
+def tweetFromRecords(tweetId: TweetId, mhRecords: Seq[TweetManhattanRecord]) = {</p>
+<blockquote>
+<div><p>val storedTweet = buildStoredTweet(tweetId, mhRecords)
+if (storedTweet.getFieldBlobs(expectedFields).nonEmpty) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (isValid(storedTweet)) {</dt><dd><p>statsReceiver.counter(“valid”).incr()
+Some(StorageConversions.fromStoredTweet(storedTweet))</p>
+</dd>
+<dt>} else {</dt><dd><p>log.info(s”Invalid Tweet Id: $tweetId”)
+statsReceiver.counter(“invalid”).incr()
+None</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>// The Tweet contained none of the fields defined in <cite>expectedFields</cite>
+log.info(s”Expected Fields Not Present Tweet Id: $tweetId”)
+statsReceiver.counter(“expected_fields_not_present”).incr()
+None</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>val stateRecord = TweetStateRecord.mostRecent(mhRecords)
+stateRecord match {</p>
+<blockquote>
+<div><p>// some  other cases don’t require an attempt to construct a Tweet
+case Some(_: SoftDeleted) | Some(_: HardDeleted) =&gt; GetTweet.Response.Deleted</p>
+<p>// all other cases require an attempt to construct a Tweet, which may not be successful
+case _ =&gt;</p>
+<blockquote>
+<div><p>logRacyRead(tweetId, mhRecords)
+(stateRecord, tweetFromRecords(tweetId, mhRecords)) match {</p>
+<blockquote>
+<div><p>// BounceDeleted contains the Tweet data so that callers can access data on the the
+// tweet (e.g. hard delete daemon requires conversationId and userId. There are no
+// plans for Tweetypie server to make use of the returned tweet at this time.
+case (Some(_: BounceDeleted), Some(tweet)) =&gt; GetTweet.Response.BounceDeleted(tweet)
+case (Some(_: BounceDeleted), None) =&gt; GetTweet.Response.Deleted
+case (_, Some(tweet)) =&gt; GetTweet.Response.Found(tweet)
+case _ =&gt; GetTweet.Response.NotFound</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>def apply(read: ManhattanOperations.Read, statsReceiver: StatsReceiver): GetTweet = {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>object stats {</dt><dd><p>val getTweetScope = statsReceiver.scope(“getTweet”)
+val deniedCounter: Counter = getTweetScope.counter(“mh_denied”)
+val mhExceptionCounter: Counter = getTweetScope.counter(“mh_exception”)
+val nonFatalExceptionCounter: Counter = getTweetScope.counter(“non_fatal_exception”)
+val notFoundCounter: Counter = getTweetScope.counter(“not_found”)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>object mhGroup extends StitchSeqGroup[TweetId, Seq[TweetManhattanRecord]] {</dt><dd><dl class="simple">
+<dt>override def run(tweetIds: Seq[TweetId]): Stitch[Seq[Seq[TweetManhattanRecord]]] = {</dt><dd><p>Stats.addWidthStat(“getTweet”, “tweetIds”, tweetIds.size, statsReceiver)
+Stitch.traverse(tweetIds)(read(_))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>tweetId =&gt;</dt><dd><dl>
+<dt>if (tweetId &lt;= 0) {</dt><dd><p>Stitch.NotFound</p>
+</dd>
+<dt>} else {</dt><dd><dl>
+<dt>Stitch</dt><dd><p>.call(tweetId, mhGroup)
+.map(mhRecords =&gt; tweetResponseFromRecords(tweetId, mhRecords, stats.getTweetScope))
+.liftToTry
+.map {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case Throw(mhException: DeniedManhattanException) =&gt;</dt><dd><p>stats.deniedCounter.incr()
+Throw(RateLimited(“”, mhException))</p>
+</dd>
+</dl>
+<p>// Encountered some other Manhattan error
+case t &#64; Throw(_: ManhattanException) =&gt;</p>
+<blockquote>
+<div><p>stats.mhExceptionCounter.incr()
+t</p>
+</div></blockquote>
+<p>// Something else happened
+case t &#64; Throw(ex) =&gt;</p>
+<blockquote>
+<div><p>stats.nonFatalExceptionCounter.incr()
+TweetUtils.log</p>
+<blockquote>
+<div><p>.warning(ex, s”Unhandled exception in GetTweetHandler for tweetId: $tweetId”)</p>
+</div></blockquote>
+<p>t</p>
+</div></blockquote>
+<dl class="simple">
+<dt>case r &#64; Return(GetTweet.Response.NotFound) =&gt;</dt><dd><p>stats.notFoundCounter.incr()
+r</p>
+</dd>
+</dl>
+<p>case r &#64; Return(_) =&gt; r</p>
+</div></blockquote>
+<p>}
+.lowerFromTry</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../_sources/tweetypie/common/src/scala/com/twitter/tweetypie/storage/GetTweetHandler.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

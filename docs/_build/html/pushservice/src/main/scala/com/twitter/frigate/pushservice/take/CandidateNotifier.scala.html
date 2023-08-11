@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.frigate.pushservice.take</p>
+<p>import com.twitter.conversions.DurationOps._
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.frigate.common.base.Stats.track
+import com.twitter.frigate.common.logger.MRLogger
+import com.twitter.frigate.common.store.Fail
+import com.twitter.frigate.common.store.IbisResponse
+import com.twitter.frigate.common.store.InvalidConfiguration
+import com.twitter.frigate.common.store.NoRequest
+import com.twitter.frigate.common.store.Sent
+import com.twitter.frigate.common.util.CasLock
+import com.twitter.frigate.common.util.PushServiceUtil.InvalidConfigResponse
+import com.twitter.frigate.common.util.PushServiceUtil.NtabWriteOnlyResponse
+import com.twitter.frigate.common.util.PushServiceUtil.SendFailedResponse
+import com.twitter.frigate.common.util.PushServiceUtil.SentResponse
+import com.twitter.frigate.pushservice.predicate.CasLockPredicate
+import com.twitter.frigate.pushservice.model.PushTypes.PushCandidate
+import com.twitter.frigate.pushservice.take.history._
+import com.twitter.frigate.pushservice.util.CopyUtil
+import com.twitter.frigate.pushservice.thriftscala.PushResponse
+import com.twitter.frigate.pushservice.thriftscala.PushStatus
+import com.twitter.frigate.pushservice.util.OverrideNotificationUtil
+import com.twitter.frigate.thriftscala.ChannelName
+import com.twitter.util.Future</p>
+<dl>
+<dt>class CandidateNotifier(</dt><dd><p>notificationSender: NotificationSender,
+casLock: CasLock,
+historyWriter: HistoryWriter,
+eventBusWriter: EventBusWriter,
+ntabOnlyChannelSelector: NtabOnlyChannelSelector</p>
+</dd>
+<dt>)(</dt><dd><p>implicit statsReceiver: StatsReceiver) {</p>
+<dl class="simple">
+<dt>private lazy val casLockPredicate =</dt><dd><p>CasLockPredicate(casLock, expiryDuration = 10.minutes)(statsReceiver)</p>
+</dd>
+</dl>
+<p>private val candidateNotifierStats = statsReceiver.scope(this.getClass.getSimpleName)
+private val historyWriteCounter =</p>
+<blockquote>
+<div><p>candidateNotifierStats.counter(“simply_notifier_history_write_num”)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>private val loggedOutHistoryWriteCounter =</dt><dd><p>candidateNotifierStats.counter(“logged_out_simply_notifier_history_write_num”)</p>
+</dd>
+<dt>private val notificationSenderLatency =</dt><dd><p>candidateNotifierStats.scope(“notification_sender_send”)</p>
+</dd>
+</dl>
+<p>private val log = MRLogger(“CandidateNotifier”)</p>
+<dl>
+<dt>private def mapIbisResponse(ibisResponse: IbisResponse): PushResponse = {</dt><dd><dl class="simple">
+<dt>ibisResponse match {</dt><dd><p>case IbisResponse(Sent, _) =&gt; SentResponse
+case IbisResponse(Fail, _) =&gt; SendFailedResponse
+case IbisResponse(InvalidConfiguration, _) =&gt; InvalidConfigResponse
+case IbisResponse(NoRequest, _) =&gt; NtabWriteOnlyResponse</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><ul>
+<li><p>write to history store</p></li>
+</ul>
+</li>
+<li><ul>
+<li><p>send the notification</p></li>
+</ul>
+</li>
+<li><ul>
+<li><p>scribe the notification</p></li>
+</ul>
+</li>
+<li></li>
+<li><p>final modifier is to signal that this function cannot be overriden. There’s some critical logic</p></li>
+<li><p>in this function, and it’s helpful to know that no sub-class overrides it.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>final def notify(</dt><dd><p>candidate: PushCandidate,</p>
+</dd>
+<dt>): Future[PushResponse] = {</dt><dd><dl>
+<dt>if (candidate.target.isDarkWrite) {</dt><dd><p>notificationSender.sendIbisDarkWrite(candidate).map(mapIbisResponse)</p>
+</dd>
+<dt>} else {</dt><dd><dl>
+<dt>casLockPredicate(Seq(candidate)).flatMap { casLockResults =&gt;</dt><dd><dl>
+<dt>if (casLockResults.head || candidate.target.pushContext</dt><dd><blockquote>
+<div><p>.exists(_.skipFilters.contains(true))) {</p>
+</div></blockquote>
+<dl>
+<dt>Future</dt><dd><dl>
+<dt>.join(</dt><dd><p>candidate.target.isSilentPush,
+OverrideNotificationUtil</p>
+<blockquote>
+<div><p>.getOverrideInfo(candidate, candidateNotifierStats),</p>
+</div></blockquote>
+<p>CopyUtil.getCopyFeatures(candidate, candidateNotifierStats)</p>
+</dd>
+<dt>).flatMap {</dt><dd><dl>
+<dt>case (isSilentPush, overrideInfoOpt, copyFeaturesMap) =&gt;</dt><dd><p>val channels = ntabOnlyChannelSelector.selectChannel(candidate)
+channels.flatMap { channels =&gt;</p>
+<blockquote>
+<div><dl>
+<dt>candidate</dt><dd><dl>
+<dt>.frigateNotificationForPersistence(</dt><dd><p>channels,
+isSilentPush,
+overrideInfoOpt,
+copyFeaturesMap.keySet).flatMap { frigateNotificationForPersistence =&gt;
+val result = if (candidate.target.isDarkWrite) {</p>
+<blockquote>
+<div><p>candidateNotifierStats.counter(“dark_write”).incr()
+Future.Unit</p>
+</div></blockquote>
+<dl>
+<dt>} else {</dt><dd><p>historyWriteCounter.incr()
+historyWriter</p>
+<blockquote>
+<div><p>.writeSendToHistory(candidate, frigateNotificationForPersistence)</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}
+result.flatMap { _ =&gt;</p>
+<blockquote>
+<div><dl>
+<dt>track(notificationSenderLatency)(</dt><dd><dl>
+<dt>notificationSender</dt><dd><p>.notify(channels, candidate)
+.map { ibisResponse =&gt;</p>
+<blockquote>
+<div><dl class="simple">
+<dt>eventBusWriter</dt><dd><p>.writeToEventBus(candidate, frigateNotificationForPersistence)</p>
+</dd>
+</dl>
+<p>mapIbisResponse(ibisResponse)</p>
+</div></blockquote>
+<p>})</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+<dt>} else {</dt><dd><p>candidateNotifierStats.counter(“filtered_by_cas_lock”).incr()
+Future.value(PushResponse(PushStatus.Filtered, Some(casLockPredicate.name)))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>final def loggedOutNotify(</dt><dd><p>candidate: PushCandidate,</p>
+</dd>
+<dt>): Future[PushResponse] = {</dt><dd><dl>
+<dt>if (candidate.target.isDarkWrite) {</dt><dd><p>notificationSender.sendIbisDarkWrite(candidate).map(mapIbisResponse)</p>
+</dd>
+<dt>} else {</dt><dd><dl>
+<dt>casLockPredicate(Seq(candidate)).flatMap { casLockResults =&gt;</dt><dd><dl>
+<dt>if (casLockResults.head || candidate.target.pushContext</dt><dd><blockquote>
+<div><p>.exists(_.skipFilters.contains(true))) {</p>
+</div></blockquote>
+<dl>
+<dt>val response = candidate.target.isSilentPush.flatMap { isSilentPush =&gt;</dt><dd><dl>
+<dt>candidate</dt><dd><dl>
+<dt>.frigateNotificationForPersistence(</dt><dd><p>Seq(ChannelName.PushNtab),
+isSilentPush,
+None,
+Set.empty).flatMap { frigateNotificationForPersistence =&gt;
+val result = if (candidate.target.isDarkWrite) {</p>
+<blockquote>
+<div><p>candidateNotifierStats.counter(“logged_out_dark_write”).incr()
+Future.Unit</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>loggedOutHistoryWriteCounter.incr()
+historyWriter.writeSendToHistory(candidate, frigateNotificationForPersistence)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>result.flatMap { _ =&gt;</dt><dd><dl>
+<dt>track(notificationSenderLatency)(</dt><dd><dl>
+<dt>notificationSender</dt><dd><p>.loggedOutNotify(candidate)
+.map { ibisResponse =&gt;</p>
+<blockquote>
+<div><p>mapIbisResponse(ibisResponse)</p>
+</div></blockquote>
+<p>})</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+response</p>
+</dd>
+<dt>} else {</dt><dd><p>candidateNotifierStats.counter(“filtered_by_cas_lock”).incr()
+Future.value(PushResponse(PushStatus.Filtered, Some(casLockPredicate.name)))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/pushservice/src/main/scala/com/twitter/frigate/pushservice/take/CandidateNotifier.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

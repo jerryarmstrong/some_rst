@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../" id="documentation_options" src="../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.feature_update_service;</p>
+<p>import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
+import javax.inject.Inject;
+import javax.inject.Named;</p>
+<p>import scala.runtime.BoxedUnit;</p>
+<p>import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.Lists;</p>
+<p>import org.apache.kafka.clients.producer.ProducerRecord;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;</p>
+<p>import com.twitter.common.util.Clock;
+import com.twitter.common_internal.text.version.PenguinVersion;
+import com.twitter.decider.Decider;
+import com.twitter.finagle.mux.ClientDiscardedRequestException;
+import com.twitter.finagle.thrift.ClientId;
+import com.twitter.finatra.kafka.producers.BlockingFinagleKafkaProducer;
+import com.twitter.inject.annotations.Flag;
+import com.twitter.search.common.decider.DeciderUtil;
+import com.twitter.search.common.indexing.thriftjava.ThriftVersionedEvents;
+import com.twitter.search.common.metrics.SearchCounter;
+import com.twitter.search.common.metrics.SearchRateCounter;
+import com.twitter.search.common.schema.thriftjava.ThriftIndexingEvent;
+import com.twitter.search.common.schema.thriftjava.ThriftIndexingEventType;
+import com.twitter.search.feature_update_service.modules.EarlybirdUtilModule;
+import com.twitter.search.feature_update_service.modules.FinagleKafkaProducerModule;
+import com.twitter.search.feature_update_service.stats.FeatureUpdateStats;
+import com.twitter.search.feature_update_service.thriftjava.FeatureUpdateRequest;
+import com.twitter.search.feature_update_service.thriftjava.FeatureUpdateResponse;
+import com.twitter.search.feature_update_service.thriftjava.FeatureUpdateResponseCode;
+import com.twitter.search.feature_update_service.thriftjava.FeatureUpdateService;
+import com.twitter.search.feature_update_service.util.FeatureUpdateValidator;
+import com.twitter.search.ingester.model.IngesterThriftVersionedEvents;
+import com.twitter.tweetypie.thriftjava.GetTweetFieldsOptions;
+import com.twitter.tweetypie.thriftjava.GetTweetFieldsRequest;
+import com.twitter.tweetypie.thriftjava.TweetInclude;
+import com.twitter.tweetypie.thriftjava.TweetService;
+import com.twitter.tweetypie.thriftjava.TweetVisibilityPolicy;
+import com.twitter.util.ExecutorServiceFuturePool;
+import com.twitter.util.Function;
+import com.twitter.util.Future;
+import com.twitter.util.Futures;</p>
+<p>import static com.twitter.tweetypie.thriftjava.Tweet._Fields.CORE_DATA;</p>
+<dl>
+<dt>public class FeatureUpdateController implements FeatureUpdateService.ServiceIface {</dt><dd><p>private static final Logger LOG = LoggerFactory.getLogger(FeatureUpdateController.class);
+private static final Logger REQUEST_LOG =</p>
+<blockquote>
+<div><p>LoggerFactory.getLogger(“feature_update_service_requests”);</p>
+</div></blockquote>
+<p>private static final String KAFKA_SEND_COUNT_FORMAT = “kafka_%s_partition_%d_send_count”;
+private static final String WRITE_TO_KAFKA_DECIDER_KEY = “write_events_to_kafka_update_events”;
+private static final String WRITE_TO_KAFKA_DECIDER_KEY_REALTIME_CG =</p>
+<blockquote>
+<div><p>“write_events_to_kafka_update_events_realtime_cg”;</p>
+</div></blockquote>
+<dl class="simple">
+<dt>private final SearchRateCounter droppedKafkaUpdateEvents =</dt><dd><p>SearchRateCounter.export(“dropped_kafka_update_events”);</p>
+</dd>
+<dt>private final SearchRateCounter droppedKafkaUpdateEventsRealtimeCg =</dt><dd><p>SearchRateCounter.export(“dropped_kafka_update_events_realtime_cg”);</p>
+</dd>
+</dl>
+<p>private final Clock clock;
+private final Decider decider;
+private final BlockingFinagleKafkaProducer&lt;Long, ThriftVersionedEvents&gt; kafkaProducer;
+private final BlockingFinagleKafkaProducer&lt;Long, ThriftVersionedEvents&gt; kafkaProducerRealtimeCg;</p>
+<p>private final List&lt;PenguinVersion&gt; penguinVersions;
+private final FeatureUpdateStats stats;
+private final String kafkaUpdateEventsTopicName;
+private final String kafkaUpdateEventsTopicNameRealtimeCg;
+private final ExecutorServiceFuturePool futurePool;
+private final TweetService.ServiceIface tweetService;</p>
+<p>&#64;Inject
+public FeatureUpdateController(</p>
+<blockquote>
+<div><p>Clock clock,
+Decider decider,
+&#64;Named(“KafkaProducer”)
+BlockingFinagleKafkaProducer&lt;Long, ThriftVersionedEvents&gt; kafkaProducer,
+&#64;Named(“KafkaProducerRealtimeCg”)
+BlockingFinagleKafkaProducer&lt;Long, ThriftVersionedEvents&gt; kafkaProducerRealtimeCg,
+&#64;Flag(EarlybirdUtilModule.PENGUIN_VERSIONS_FLAG) String penguinVersions,
+FeatureUpdateStats stats,
+&#64;Flag(FinagleKafkaProducerModule.KAFKA_TOPIC_NAME_UPDATE_EVENTS_FLAG)
+String kafkaUpdateEventsTopicName,
+&#64;Flag(FinagleKafkaProducerModule.KAFKA_TOPIC_NAME_UPDATE_EVENTS_FLAG_REALTIME_CG)
+String kafkaUpdateEventsTopicNameRealtimeCg,
+ExecutorServiceFuturePool futurePool,
+TweetService.ServiceIface tweetService</p>
+</div></blockquote>
+<dl class="simple">
+<dt>) {</dt><dd><p>this.clock = clock;
+this.decider = decider;
+this.kafkaProducer = kafkaProducer;
+this.kafkaProducerRealtimeCg = kafkaProducerRealtimeCg;
+this.penguinVersions = getPenguinVersions(penguinVersions);
+this.stats = stats;
+this.kafkaUpdateEventsTopicName = kafkaUpdateEventsTopicName;
+this.kafkaUpdateEventsTopicNameRealtimeCg = kafkaUpdateEventsTopicNameRealtimeCg;
+this.futurePool = futurePool;
+this.tweetService = tweetService;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;Override
+public Future&lt;FeatureUpdateResponse&gt; process(FeatureUpdateRequest featureUpdate) {</p>
+<blockquote>
+<div><p>long requestStartTimeMillis = clock.nowMillis();</p>
+<p>// Export overall and per-client request rate stats
+final String requestClientId;
+if (featureUpdate.getRequestClientId() != null</p>
+<blockquote>
+<div><blockquote>
+<div><p>&amp;&amp; !featureUpdate.getRequestClientId().isEmpty()) {</p>
+</div></blockquote>
+<p>requestClientId = featureUpdate.getRequestClientId();</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else if (ClientId.current().nonEmpty()) {</dt><dd><p>requestClientId =  ClientId.current().get().name();</p>
+</dd>
+<dt>} else {</dt><dd><p>requestClientId = “unknown”;</p>
+</dd>
+</dl>
+<p>}
+stats.clientRequest(requestClientId);
+REQUEST_LOG.info(“{} {}”, requestClientId, featureUpdate);</p>
+<p>FeatureUpdateResponse errorResponse = FeatureUpdateValidator.validate(featureUpdate);
+if (errorResponse != null) {</p>
+<blockquote>
+<div><p>stats.clientResponse(requestClientId, errorResponse.getResponseCode());
+LOG.warn(“client error: clientID {} - reason: {}”,</p>
+<blockquote>
+<div><p>requestClientId, errorResponse.getDetailMessage());</p>
+</div></blockquote>
+<p>return Future.value(errorResponse);</p>
+</div></blockquote>
+<p>}</p>
+<p>ThriftIndexingEvent event = featureUpdate.getEvent();
+return writeToKafka(event, requestStartTimeMillis)</p>
+<blockquote>
+<div><dl class="simple">
+<dt>.map(responsesList -&gt; {</dt><dd><p>stats.clientResponse(requestClientId, FeatureUpdateResponseCode.SUCCESS);
+// only when both Realtime &amp; RealtimeCG succeed, then it will return a success flag
+return new FeatureUpdateResponse(FeatureUpdateResponseCode.SUCCESS);</p>
+</dd>
+</dl>
+<p>})
+.handle(Function.func(throwable -&gt; {</p>
+<blockquote>
+<div><p>FeatureUpdateResponseCode responseCode;
+// if either Realtime or RealtimeCG throws an exception, it will return a failure
+if (throwable instanceof ClientDiscardedRequestException) {</p>
+<blockquote>
+<div><p>responseCode = FeatureUpdateResponseCode.CLIENT_CANCEL_ERROR;
+LOG.info(“ClientDiscardedRequestException received from client: “ + requestClientId,</p>
+<blockquote>
+<div><p>throwable);</p>
+</div></blockquote>
+</div></blockquote>
+<dl>
+<dt>} else {</dt><dd><p>responseCode = FeatureUpdateResponseCode.TRANSIENT_ERROR;
+LOG.error(“Error occurred while writing to output stream: “</p>
+<blockquote>
+<div><ul class="simple">
+<li><p>kafkaUpdateEventsTopicName + “, “</p></li>
+<li><p>kafkaUpdateEventsTopicNameRealtimeCg, throwable);</p></li>
+</ul>
+</div></blockquote>
+</dd>
+</dl>
+<p>}
+stats.clientResponse(requestClientId, responseCode);
+return new FeatureUpdateResponse(responseCode)</p>
+<blockquote>
+<div><p>.setDetailMessage(throwable.getMessage());</p>
+</div></blockquote>
+</div></blockquote>
+<p>}));</p>
+</div></blockquote>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>In writeToKafka(), we use Futures.collect() to aggregate results for two RPC calls</p></li>
+<li><p>Futures.collect() means that if either one of the Future fails then it will return an Exception</p></li>
+<li><p>only when both Realtime &amp; RealtimeCG succeed, then it will return a success flag</p></li>
+<li><p>The FeatureUpdateResponse is more like an ACK message, and the upstream (feature update ingester)</p></li>
+<li><p>will not be affected much even if it failed (as long as the kafka message is written)</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>private Future&lt;List&lt;BoxedUnit&gt;&gt; writeToKafka(ThriftIndexingEvent event,</dt><dd><blockquote>
+<div><p>long requestStartTimeMillis) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>return Futures.collect(Lists.newArrayList(</dt><dd><dl class="simple">
+<dt>writeToKafkaInternal(event, WRITE_TO_KAFKA_DECIDER_KEY, droppedKafkaUpdateEvents,</dt><dd><p>kafkaUpdateEventsTopicName, -1, kafkaProducer),</p>
+</dd>
+<dt>Futures.flatten(getUserId(event.getUid()).map(</dt><dd><p>userId -&gt; writeToKafkaInternal(event, WRITE_TO_KAFKA_DECIDER_KEY_REALTIME_CG,
+droppedKafkaUpdateEventsRealtimeCg,
+kafkaUpdateEventsTopicNameRealtimeCg, userId, kafkaProducerRealtimeCg)))));</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private Future&lt;BoxedUnit&gt; writeToKafkaInternal(ThriftIndexingEvent event, String deciderKey,</dt><dd><blockquote>
+<div><p>SearchRateCounter droppedStats, String topicName, long userId,
+BlockingFinagleKafkaProducer&lt;Long, ThriftVersionedEvents&gt; producer) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>if (!DeciderUtil.isAvailableForRandomRecipient(decider, deciderKey)) {</dt><dd><p>droppedStats.increment();
+return Future.Unit();</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>ProducerRecord&lt;Long, ThriftVersionedEvents&gt; producerRecord = new ProducerRecord&lt;&gt;(</dt><dd><p>topicName,
+convertToThriftVersionedEvents(userId, event));</p>
+</dd>
+<dt>try {</dt><dd><dl>
+<dt>return Futures.flatten(futurePool.apply(() -&gt;</dt><dd><dl>
+<dt>producer.send(producerRecord)</dt><dd><dl>
+<dt>.map(record -&gt; {</dt><dd><dl class="simple">
+<dt>SearchCounter.export(String.format(</dt><dd><p>KAFKA_SEND_COUNT_FORMAT, record.topic(), record.partition())).increment();</p>
+</dd>
+</dl>
+<p>return BoxedUnit.UNIT;</p>
+</dd>
+</dl>
+<p>})));</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+<dt>} catch (Exception e) {</dt><dd><p>return Future.exception(e);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private List&lt;PenguinVersion&gt; getPenguinVersions(String penguinVersionsStr) {</dt><dd><p>String[] tokens = penguinVersionsStr.split(”\s*,\s*”);
+List&lt;PenguinVersion&gt; listOfPenguinVersions = Lists.newArrayListWithCapacity(tokens.length);
+for (String token : tokens) {</p>
+<blockquote>
+<div><p>listOfPenguinVersions.add(PenguinVersion.valueOf(token.toUpperCase()));</p>
+</div></blockquote>
+<p>}
+LOG.info(String.format(“Using Penguin Versions: %s”, listOfPenguinVersions));
+return listOfPenguinVersions;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private Future&lt;Long&gt; getUserId(long tweetId) {</dt><dd><p>TweetInclude tweetInclude = new TweetInclude();
+tweetInclude.setTweetFieldId(CORE_DATA.getThriftFieldId());
+GetTweetFieldsOptions getTweetFieldsOptions = new GetTweetFieldsOptions().setTweet_includes(</p>
+<blockquote>
+<div><p>Collections.singleton(tweetInclude)).setVisibilityPolicy(
+TweetVisibilityPolicy.NO_FILTERING);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>GetTweetFieldsRequest getTweetFieldsRequest = new GetTweetFieldsRequest().setTweetIds(</dt><dd><p>Arrays.asList(tweetId)).setOptions(getTweetFieldsOptions);</p>
+</dd>
+<dt>try {</dt><dd><dl class="simple">
+<dt>return tweetService.get_tweet_fields(getTweetFieldsRequest).map(</dt><dd><dl class="simple">
+<dt>tweetFieldsResults -&gt; tweetFieldsResults.get(</dt><dd><p>0).tweetResult.getFound().tweet.core_data.user_id);</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+<dt>} catch (Exception e) {</dt><dd><p>return Future.exception(e);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private ThriftVersionedEvents convertToThriftVersionedEvents(</dt><dd><blockquote>
+<div><p>long userId, ThriftIndexingEvent event) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>ThriftIndexingEvent thriftIndexingEvent = event.deepCopy()</dt><dd><p>.setEventType(ThriftIndexingEventType.PARTIAL_UPDATE);</p>
+</dd>
+<dt>ImmutableMap.Builder&lt;Byte, ThriftIndexingEvent&gt; versionedEventsBuilder =</dt><dd><p>new ImmutableMap.Builder&lt;&gt;();</p>
+</dd>
+<dt>for (PenguinVersion penguinVersion<span class="classifier">penguinVersions) {</span></dt><dd><p>versionedEventsBuilder.put(penguinVersion.getByteValue(), thriftIndexingEvent);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>IngesterThriftVersionedEvents thriftVersionedEvents =</dt><dd><p>new IngesterThriftVersionedEvents(userId, versionedEventsBuilder.build());</p>
+</dd>
+</dl>
+<p>thriftVersionedEvents.setId(thriftIndexingEvent.getUid());
+return thriftVersionedEvents;</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../_sources/src/java/com/twitter/search/feature_update_service/FeatureUpdateController.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

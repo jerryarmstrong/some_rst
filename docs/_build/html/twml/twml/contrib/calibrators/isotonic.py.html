@@ -1,0 +1,474 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../" id="documentation_options" src="../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p># pylint: disable=arguments-differ, unused-argument
+‘’’ Contains Isotonic Calibration’’’</p>
+<p>from .calibrator import CalibrationFeature, Calibrator</p>
+<p>from absl import logging
+import numpy as np
+from sklearn.isotonic import isotonic_regression
+import tensorflow.compat.v1 as tf
+import tensorflow_hub as hub
+import twml
+import twml.layers</p>
+<p>DEFAULT_SAMPLE_WEIGHT = 1</p>
+<dl>
+<dt>def sort_values(inputs, target, weight, ascending=True):</dt><dd><p>‘’’
+Sorts arrays based on the first array.</p>
+<dl class="simple">
+<dt>Arguments:</dt><dd><dl class="simple">
+<dt>inputs:</dt><dd><p>1D array which will dictate the order which the remainder 2 arrays will be sorted</p>
+</dd>
+<dt>target:</dt><dd><p>1D array</p>
+</dd>
+<dt>weight:</dt><dd><p>1D array</p>
+</dd>
+<dt>ascending:</dt><dd><p>Boolean. If set to True (the default), sorts values in ascending order.</p>
+</dd>
+</dl>
+</dd>
+<dt>Returns:</dt><dd><dl class="simple">
+<dt>sorted inputs:</dt><dd><p>1D array sorted by the order of <cite>ascending</cite></p>
+</dd>
+<dt>sorted targets:</dt><dd><p>1D array</p>
+</dd>
+<dt>sorted weight:</dt><dd><p>1D array</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>‘’’
+# assert that the length of inputs and target are the same
+if len(inputs) != len(target):</p>
+<blockquote>
+<div><blockquote>
+<div><p>raise ValueError(‘Expecting inputs and target sizes to match’)</p>
+</div></blockquote>
+<p># assert that the length of inputs and weight are the same</p>
+</div></blockquote>
+<dl class="simple">
+<dt>if len(inputs) != len(weight):</dt><dd><p>raise ValueError(‘Expecting inputs and weight sizes to match’)</p>
+</dd>
+</dl>
+<p>inds = inputs.argsort()
+if not ascending:</p>
+<blockquote>
+<div><p>inds = inds[::-1]</p>
+</div></blockquote>
+<p>return inputs[inds], target[inds], weight[inds]</p>
+</dd>
+<dt>class IsotonicFeature(CalibrationFeature):</dt><dd><p>‘’’
+IsotonicFeature adds values, weights and targets to each feature and then runs
+isotonic regression by calling <a class="reference external" href="http://scikit-learn.org/stable/auto_examples/plot_isotonic_regression.html">sklearn.isotonic.isotonic_regression</a>
+‘’’</p>
+<dl>
+<dt>def _get_bin_boundaries(self, n_samples, bins, similar_bins):</dt><dd><p>“””
+Calculates the sample indices that define bin boundaries</p>
+<dl class="simple">
+<dt>Arguments:</dt><dd><dl class="simple">
+<dt>n_samples:</dt><dd><p>(int) number of samples</p>
+</dd>
+<dt>bins:</dt><dd><p>(int) number of bins. Needs to be smaller or equal than n_samples.</p>
+</dd>
+<dt>similar_bins:</dt><dd><p>(bool) If True, samples will be distributed in bins of equal size (up to one sample).
+If False bins will be filled with step = N_samples//bins, and last bin will contain all remaining samples.
+Note that equal_bins=False can create a last bins with a very large number of samples.</p>
+</dd>
+</dl>
+</dd>
+<dt>Returns:</dt><dd><p>(list[int]) List of sample indices defining bin boundaries</p>
+</dd>
+</dl>
+<p>“””</p>
+<dl>
+<dt>if bins &gt; n_samples:</dt><dd><dl class="simple">
+<dt>raise ValueError(</dt><dd><p>“The number of bins needs to be less than or equal to the number of samples. ”
+“Currently bins={0} and n_samples={1}.”.format(bins, n_samples)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>step = n_samples // bins</p>
+<dl class="simple">
+<dt>if similar_bins:</dt><dd><p># dtype=int will floor the linspace
+bin_boundaries = np.linspace(0, n_samples - step, num=bins, dtype=int)</p>
+</dd>
+<dt>else:</dt><dd><p>bin_boundaries = range(0, step * bins, step)</p>
+</dd>
+</dl>
+<p>bin_boundaries = np.append(bin_boundaries, n_samples)</p>
+<p>return bin_boundaries</p>
+</dd>
+<dt>def calibrate(self, bins, similar_bins=False, debug=False):</dt><dd><p>‘’’Calibrates the IsotonicFeature into calibrated weights and bias.</p>
+<ol class="arabic simple">
+<li><p>Sorts the values of the feature class, based on the order of values</p></li>
+<li><p>Performs isotonic regression using sklearn.isotonic.isotonic_regression</p></li>
+<li><p>Performs the binning of the samples, in order to obtain the final weight and bias</p></li>
+</ol>
+<blockquote>
+<div><p>which will be used for inference</p>
+</div></blockquote>
+<p>Note that this method can only be called once.</p>
+<dl class="simple">
+<dt>Arguments:</dt><dd><dl class="simple">
+<dt>bins:</dt><dd><p>number of bins.</p>
+</dd>
+<dt>similar_bins:</dt><dd><p>If True, samples will be distributed in bins of equal size (up to one sample).
+If False bins will be filled with step = N_samples//bins, and last bin will contain all remaining samples.
+Note that equal_bins=False can create a last bins with a very large number of samples.</p>
+</dd>
+<dt>debug:</dt><dd><p>Defaults to False. If debug is set to true, output other parameters useful for debugging.</p>
+</dd>
+</dl>
+</dd>
+<dt>Returns:</dt><dd><p>[calibrated weight, calibrated bias]</p>
+</dd>
+</dl>
+<p>‘’’
+if self._calibrated:</p>
+<blockquote>
+<div><p>raise RuntimeError(“Can only calibrate once”)</p>
+</div></blockquote>
+<p># parse through the dict to obtain the targets, weights and values
+self._concat_arrays()
+feature_targets = self._features_dict[‘targets’]
+feature_values = self._features_dict[‘values’]
+feature_weights = self._features_dict[‘weights’]
+srtd_feature_values, srtd_feature_targets, srtd_feature_weights = sort_values(</p>
+<blockquote>
+<div><p>inputs=feature_values,
+target=feature_targets,
+weight=feature_weights</p>
+</div></blockquote>
+<p>)
+calibrated_feature_values = isotonic_regression(</p>
+<blockquote>
+<div><p>srtd_feature_targets, sample_weight=srtd_feature_weights)</p>
+</div></blockquote>
+<p># create the final outputs for the prediction of each class
+bpreds = []
+btargets = []
+bweights = []
+rpreds = []</p>
+<p># Create bin boundaries
+bin_boundaries = self._get_bin_boundaries(</p>
+<blockquote>
+<div><p>len(calibrated_feature_values), bins, similar_bins=similar_bins)</p>
+</div></blockquote>
+<dl>
+<dt>for sidx, eidx in zip(bin_boundaries, bin_boundaries[1:]):</dt><dd><p># separate each one of the arrays based on their respective bins
+lpreds = srtd_feature_values[int(sidx):int(eidx)]
+lrpreds = calibrated_feature_values[int(sidx):int(eidx)]
+ltargets = srtd_feature_targets[int(sidx):int(eidx)]
+lweights = srtd_feature_weights[int(sidx):int(eidx)]</p>
+<p># calculate the outputs (including the bpreds and rpreds)
+bpreds.append(np.sum(lpreds * lweights) / (np.squeeze(np.sum(lweights))))
+rpreds.append(np.sum(lrpreds * lweights) / (np.squeeze(np.sum(lweights))))
+btargets.append(np.sum(ltargets * lweights) / (np.squeeze(np.sum(lweights))))
+bweights.append(np.squeeze(np.sum(lweights)))</p>
+</dd>
+</dl>
+<p># transposing the bpreds and rpreds which will be used as input to the inference step
+bpreds = np.asarray(bpreds).T
+rpreds = np.asarray(rpreds).T
+btargets = np.asarray(btargets).T
+bweights = np.asarray(bweights).T
+# setting _calibrated to be True which is necessary in order to prevent it to re-calibrate
+self._calibrated = True
+if debug:</p>
+<blockquote>
+<div><p>return bpreds, rpreds, btargets, bweights</p>
+</div></blockquote>
+<p>return bpreds, rpreds</p>
+</dd>
+</dl>
+</dd>
+<dt>class IsotonicCalibrator(Calibrator):</dt><dd><p>‘’’ Accumulates features and their respective values for isotonic calibration.
+Internally, each feature’s values is accumulated via its own isotonicFeature object.
+The steps for calibration are typically as follows:</p>
+<blockquote>
+<div><ol class="arabic simple">
+<li><p>accumulate feature values from batches by calling <code class="docutils literal notranslate"><span class="pre">accumulate()</span></code>;</p></li>
+<li><p>calibrate all feature into Isotonic <code class="docutils literal notranslate"><span class="pre">bpreds</span></code>, <code class="docutils literal notranslate"><span class="pre">rpreds</span></code> by calling <code class="docutils literal notranslate"><span class="pre">calibrate()</span></code>; and</p></li>
+<li><p>convert to a <code class="docutils literal notranslate"><span class="pre">twml.layers.Isotonic</span></code> layer by calling <code class="docutils literal notranslate"><span class="pre">to_layer()</span></code>.</p></li>
+</ol>
+</div></blockquote>
+<p>‘’’</p>
+<dl>
+<dt>def __init__(self, n_bin, similar_bins=False, <a href="#id1"><span class="problematic" id="id2">**</span></a>kwargs):</dt><dd><p>‘’’ Constructs an isotonicCalibrator instance.</p>
+<dl class="simple">
+<dt>Arguments:</dt><dd><dl class="simple">
+<dt>n_bin:</dt><dd><p>the number of bins per feature to use for isotonic.
+Note that each feature actually maps to <code class="docutils literal notranslate"><span class="pre">n_bin+1</span></code> output IDs.</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>‘’’
+super(IsotonicCalibrator, self).__init__(<a href="#id3"><span class="problematic" id="id4">**</span></a>kwargs)
+self._n_bin = n_bin
+self._similar_bins = similar_bins
+self._ys_input = []
+self._xs_input = []
+self._isotonic_feature_dict = {}</p>
+</dd>
+<dt>def accumulate_feature(self, output):</dt><dd><p>‘’’
+Wrapper around accumulate for trainer API.
+Arguments:</p>
+<blockquote>
+<div><p>output: output of prediction of build_graph for calibrator</p>
+</div></blockquote>
+<p>‘’’
+weights = output[‘weights’] if ‘weights’ in output else None
+return self.accumulate(output[‘predictions’], output[‘targets’], weights)</p>
+</dd>
+<dt>def accumulate(self, predictions, targets, weights=None):</dt><dd><p>‘’’
+Accumulate a single batch of class predictions, class targets and class weights.
+These are accumulated until calibrate() is called.</p>
+<dl class="simple">
+<dt>Arguments:</dt><dd><dl class="simple">
+<dt>predictions:</dt><dd><p>float matrix of class values. Each dimension corresponds to a different class.
+Shape is <code class="docutils literal notranslate"><span class="pre">[n,</span> <span class="pre">d]</span></code>, where d is the number of classes.</p>
+</dd>
+<dt>targets:</dt><dd><p>float matrix of class targets. Each dimension corresponds to a different class.
+Shape <code class="docutils literal notranslate"><span class="pre">[n,</span> <span class="pre">d]</span></code>, where d is the number of classes.</p>
+</dd>
+<dt>weights:</dt><dd><p>Defaults to weights of 1.
+1D array containing the weights of each prediction.</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>‘’’
+if predictions.shape != targets.shape:</p>
+<blockquote>
+<div><dl class="simple">
+<dt>raise ValueError(</dt><dd><p>‘Expecting predictions.shape == targets.shape, got %s and %s instead’ %
+(str(predictions.shape), str(targets.shape)))</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl class="simple">
+<dt>if weights is not None:</dt><dd><dl class="simple">
+<dt>if weights.ndim != 1:</dt><dd><p>raise ValueError(‘Expecting 1D weight, got %dD instead’ % weights.ndim)</p>
+</dd>
+<dt>elif weights.size != predictions.shape[0]:</dt><dd><dl class="simple">
+<dt>raise ValueError(</dt><dd><p>‘Expecting predictions.shape[0] == weights.size, got %d != %d instead’ %
+(predictions.shape[0], weights.size))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p># iterate through the rows of predictions and sets one class to each row
+if weights is None:</p>
+<blockquote>
+<div><p>weights = np.full(predictions.shape[0], fill_value=DEFAULT_SAMPLE_WEIGHT)</p>
+</div></blockquote>
+<dl>
+<dt>for class_key in range(predictions.shape[1]):</dt><dd><p># gets the predictions and targets for that class
+class_predictions = predictions[:, class_key]
+class_targets = targets[:, class_key]
+if class_key not in self._isotonic_feature_dict:</p>
+<blockquote>
+<div><p>isotonic_feature = IsotonicFeature(class_key)
+self._isotonic_feature_dict[class_key] = isotonic_feature</p>
+</div></blockquote>
+<dl class="simple">
+<dt>else:</dt><dd><p>isotonic_feature = self._isotonic_feature_dict[class_key]</p>
+</dd>
+<dt>isotonic_feature.add_values({‘values’: class_predictions, ‘weights’: weights,</dt><dd><p>‘targets’: class_targets})</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+<dt>def calibrate(self, debug=False):</dt><dd><p>‘’’
+Calibrates each IsotonicFeature after accumulation is complete.
+Results are stored in <code class="docutils literal notranslate"><span class="pre">self._ys_input</span></code> and <code class="docutils literal notranslate"><span class="pre">self._xs_input</span></code></p>
+<dl class="simple">
+<dt>Arguments:</dt><dd><dl class="simple">
+<dt>debug:</dt><dd><p>Defaults to False. If set to true, returns the <code class="docutils literal notranslate"><span class="pre">xs_input</span></code> and <code class="docutils literal notranslate"><span class="pre">ys_input</span></code>.</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>‘’’
+super(IsotonicCalibrator, self).calibrate()
+bias_temp = []
+weight_temp = []
+logging.info(“Beginning isotonic calibration.”)
+isotonic_features_dict = self._isotonic_feature_dict
+for class_id in isotonic_features_dict:</p>
+<blockquote>
+<div><p>bpreds, rpreds = isotonic_features_dict[class_id].calibrate(bins=self._n_bin, similar_bins=self._similar_bins)
+weight_temp.append(bpreds)
+bias_temp.append(rpreds)</p>
+</div></blockquote>
+<p># save isotonic results onto a matrix
+self._xs_input = np.array(weight_temp, dtype=np.float32)
+self._ys_input = np.array(bias_temp, dtype=np.float32)
+logging.info(“Isotonic calibration finished.”)
+if debug:</p>
+<blockquote>
+<div><p>return np.array(weight_temp), np.array(bias_temp)</p>
+</div></blockquote>
+<p>return None</p>
+</dd>
+<dt>def save(self, save_dir, name=”default”, verbose=False):</dt><dd><p>‘’’Save the calibrator into the given save_directory.
+Arguments:</p>
+<blockquote>
+<div><dl class="simple">
+<dt>save_dir:</dt><dd><p>name of the saving directory. Default (string): “default”.</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>‘’’
+if not self._calibrated:</p>
+<blockquote>
+<div><p>raise RuntimeError(“Expecting prior call to calibrate().Cannot save() prior to calibrate()”)</p>
+</div></blockquote>
+<p># This module allows for the calibrator to save be saved as part of
+# Tensorflow Hub (this will allow it to be used in further steps)
+logging.info(“You probably do not need to save the isotonic layer. </p>
+<blockquote>
+<div><p>So feel free to set save to False in the Trainer. Additionally this only saves the layer not the whole graph.”)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>def calibrator_module():</dt><dd><p>‘’’
+Way to save Isotonic layer
+‘’’
+# The input to isotonic is a dense layer
+inputs = tf.placeholder(tf.float32)
+calibrator_layer = self.to_layer()
+output = calibrator_layer(inputs)
+# creates the signature to the calibrator module
+hub.add_signature(inputs=inputs, outputs=output, name=name)</p>
+</dd>
+</dl>
+<p># exports the module to the save_dir
+spec = hub.create_module_spec(calibrator_module)
+with tf.Graph().as_default():</p>
+<blockquote>
+<div><p>module = hub.Module(spec)
+with tf.Session() as session:</p>
+<blockquote>
+<div><p>module.export(save_dir, session)</p>
+</div></blockquote>
+</div></blockquote>
+</dd>
+<dt>def to_layer(self):</dt><dd><p>“”” Returns a twml.layers.Isotonic Layer that can be used for feature discretization.
+“””
+if not self._calibrated:</p>
+<blockquote>
+<div><p>raise RuntimeError(“Expecting prior call to calibrate()”)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>isotonic_layer = twml.layers.Isotonic(</dt><dd><p>n_unit=self._xs_input.shape[0], n_bin=self._xs_input.shape[1],
+xs_input=self._xs_input, ys_input=self._ys_input,
+<a href="#id5"><span class="problematic" id="id6">**</span></a>self._kwargs)</p>
+</dd>
+</dl>
+<p>return isotonic_layer</p>
+</dd>
+<dt>def get_layer_args(self, name=None):</dt><dd><p>“”” Returns layer args. See <code class="docutils literal notranslate"><span class="pre">Calibrator.get_layer_args</span></code> for more detailed documentation “””
+return {‘n_unit’: self._xs_input.shape[0], ‘n_bin’: self._xs_input.shape[1]}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../_sources/twml/twml/contrib/calibrators/isotonic.py.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

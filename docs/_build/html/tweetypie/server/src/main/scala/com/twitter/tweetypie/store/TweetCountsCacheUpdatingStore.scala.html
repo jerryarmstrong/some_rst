@@ -1,0 +1,521 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.tweetypie
+package store</p>
+<p>import com.twitter.concurrent.Serialized
+import com.twitter.servo.cache.LockingCache.Handler
+import com.twitter.servo.cache._
+import com.twitter.tweetypie.repository.BookmarksKey
+import com.twitter.tweetypie.repository.FavsKey
+import com.twitter.tweetypie.repository.QuotesKey
+import com.twitter.tweetypie.repository.RepliesKey
+import com.twitter.tweetypie.repository.RetweetsKey
+import com.twitter.tweetypie.repository.TweetCountKey
+import com.twitter.util.Duration
+import com.twitter.util.Timer
+import scala.collection.mutable</p>
+<dl>
+<dt>trait TweetCountsCacheUpdatingStore</dt><dd><blockquote>
+<div><p>extends TweetStoreBase[TweetCountsCacheUpdatingStore]
+with InsertTweet.Store
+with AsyncInsertTweet.Store
+with ReplicatedInsertTweet.Store
+with DeleteTweet.Store
+with AsyncDeleteTweet.Store
+with ReplicatedDeleteTweet.Store
+with UndeleteTweet.Store
+with ReplicatedUndeleteTweet.Store
+with AsyncIncrFavCount.Store
+with ReplicatedIncrFavCount.Store
+with AsyncIncrBookmarkCount.Store
+with ReplicatedIncrBookmarkCount.Store
+with AsyncSetRetweetVisibility.Store
+with ReplicatedSetRetweetVisibility.Store
+with Flush.Store {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>def wrap(w: TweetStore.Wrap): TweetCountsCacheUpdatingStore = {</dt><dd><dl class="simple">
+<dt>new TweetStoreWrapper(w, this)</dt><dd><p>with TweetCountsCacheUpdatingStore
+with InsertTweet.StoreWrapper
+with AsyncInsertTweet.StoreWrapper
+with ReplicatedInsertTweet.StoreWrapper
+with DeleteTweet.StoreWrapper
+with AsyncDeleteTweet.StoreWrapper
+with ReplicatedDeleteTweet.StoreWrapper
+with UndeleteTweet.StoreWrapper
+with ReplicatedUndeleteTweet.StoreWrapper
+with AsyncIncrFavCount.StoreWrapper
+with ReplicatedIncrFavCount.StoreWrapper
+with AsyncIncrBookmarkCount.StoreWrapper
+with ReplicatedIncrBookmarkCount.StoreWrapper
+with AsyncSetRetweetVisibility.StoreWrapper
+with ReplicatedSetRetweetVisibility.StoreWrapper
+with Flush.StoreWrapper</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>An implementation of TweetStore that updates tweet-specific counts in</p></li>
+<li><p>the CountsCache.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>object TweetCountsCacheUpdatingStore {</dt><dd><p>private type Action = TweetCountKey =&gt; Future[Unit]</p>
+<dl>
+<dt>def keys(tweetId: TweetId): Seq[TweetCountKey] =</dt><dd><dl class="simple">
+<dt>Seq(</dt><dd><p>RetweetsKey(tweetId),
+RepliesKey(tweetId),
+FavsKey(tweetId),
+QuotesKey(tweetId),
+BookmarksKey(tweetId))</p>
+</dd>
+</dl>
+</dd>
+<dt>def relatedKeys(tweet: Tweet): Seq[TweetCountKey] =</dt><dd><dl class="simple">
+<dt>Seq(</dt><dd><p>getReply(tweet).flatMap(_.inReplyToStatusId).map(RepliesKey(_)),
+getQuotedTweet(tweet).map(quotedTweet =&gt; QuotesKey(quotedTweet.tweetId)),
+getShare(tweet).map(share =&gt; RetweetsKey(share.sourceStatusId))</p>
+</dd>
+</dl>
+<p>).flatten</p>
+</dd>
+</dl>
+<p>// pick all keys except quotes key
+def relatedKeysWithoutQuotesKey(tweet: Tweet): Seq[TweetCountKey] =</p>
+<blockquote>
+<div><p>relatedKeys(tweet).filterNot(_.isInstanceOf[QuotesKey])</p>
+</div></blockquote>
+<dl>
+<dt>def apply(countsStore: CachedCountsStore): TweetCountsCacheUpdatingStore = {</dt><dd><p>val incr: Action = key =&gt; countsStore.incr(key, 1)
+val decr: Action = key =&gt; countsStore.incr(key, -1)
+val init: Action = key =&gt; countsStore.add(key, 0)
+val delete: Action = key =&gt; countsStore.delete(key)</p>
+<p>def initCounts(tweetId: TweetId) = Future.join(keys(tweetId).map(init))
+def incrRelatedCounts(tweet: Tweet, excludeQuotesKey: Boolean = false) = {</p>
+<blockquote>
+<div><dl>
+<dt>Future.join {</dt><dd><dl class="simple">
+<dt>if (excludeQuotesKey) {</dt><dd><p>relatedKeysWithoutQuotesKey(tweet).map(incr)</p>
+</dd>
+<dt>} else {</dt><dd><p>relatedKeys(tweet).map(incr)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}
+def deleteCounts(tweetId: TweetId) = Future.join(keys(tweetId).map(delete))</p>
+<p>// Decrement all the counters if is the last quote, otherwise avoid decrementing quote counters
+def decrRelatedCounts(tweet: Tweet, isLastQuoteOfQuoter: Boolean = false) = {</p>
+<blockquote>
+<div><dl>
+<dt>Future.join {</dt><dd><dl class="simple">
+<dt>if (isLastQuoteOfQuoter) {</dt><dd><p>relatedKeys(tweet).map(decr)</p>
+</dd>
+<dt>} else {</dt><dd><p>relatedKeysWithoutQuotesKey(tweet).map(decr)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>def updateFavCount(tweetId: TweetId, delta: Int) =</dt><dd><p>countsStore.incr(FavsKey(tweetId), delta).unit</p>
+</dd>
+<dt>def updateBookmarkCount(tweetId: TweetId, delta: Int) =</dt><dd><p>countsStore.incr(BookmarksKey(tweetId), delta).unit</p>
+</dd>
+</dl>
+<p>// these are use specifically for setRetweetVisibility
+def incrRetweetCount(tweetId: TweetId) = incr(RetweetsKey(tweetId))
+def decrRetweetCount(tweetId: TweetId) = decr(RetweetsKey(tweetId))</p>
+<dl>
+<dt>new TweetCountsCacheUpdatingStore {</dt><dd><dl>
+<dt>override val insertTweet: FutureEffect[InsertTweet.Event] =</dt><dd><p>FutureEffect[InsertTweet.Event](e =&gt; initCounts(e.tweet.id))</p>
+</dd>
+<dt>override val asyncInsertTweet: FutureEffect[AsyncInsertTweet.Event] =</dt><dd><dl class="simple">
+<dt>FutureEffect[AsyncInsertTweet.Event] { e =&gt;</dt><dd><p>incrRelatedCounts(e.cachedTweet.tweet, e.quoterHasAlreadyQuotedTweet)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>override val retryAsyncInsertTweet: FutureEffect[</dt><dd><p>TweetStoreRetryEvent[AsyncInsertTweet.Event]</p>
+</dd>
+<dt>] =</dt><dd><p>FutureEffect.unit[TweetStoreRetryEvent[AsyncInsertTweet.Event]]</p>
+</dd>
+<dt>override val replicatedInsertTweet: FutureEffect[ReplicatedInsertTweet.Event] =</dt><dd><dl class="simple">
+<dt>FutureEffect[ReplicatedInsertTweet.Event] { e =&gt;</dt><dd><dl class="simple">
+<dt>Future</dt><dd><dl class="simple">
+<dt>.join(</dt><dd><p>initCounts(e.tweet.id),
+incrRelatedCounts(e.tweet, e.quoterHasAlreadyQuotedTweet)).unit</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>override val deleteTweet: FutureEffect[DeleteTweet.Event] =</dt><dd><p>FutureEffect[DeleteTweet.Event](e =&gt; deleteCounts(e.tweet.id))</p>
+</dd>
+<dt>override val asyncDeleteTweet: FutureEffect[AsyncDeleteTweet.Event] =</dt><dd><p>FutureEffect[AsyncDeleteTweet.Event](e =&gt; decrRelatedCounts(e.tweet, e.isLastQuoteOfQuoter))</p>
+</dd>
+<dt>override val retryAsyncDeleteTweet: FutureEffect[</dt><dd><p>TweetStoreRetryEvent[AsyncDeleteTweet.Event]</p>
+</dd>
+<dt>] =</dt><dd><p>FutureEffect.unit[TweetStoreRetryEvent[AsyncDeleteTweet.Event]]</p>
+</dd>
+<dt>override val replicatedDeleteTweet: FutureEffect[ReplicatedDeleteTweet.Event] =</dt><dd><dl class="simple">
+<dt>FutureEffect[ReplicatedDeleteTweet.Event] { e =&gt;</dt><dd><dl class="simple">
+<dt>Future</dt><dd><p>.join(deleteCounts(e.tweet.id), decrRelatedCounts(e.tweet, e.isLastQuoteOfQuoter)).unit</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>override val undeleteTweet: FutureEffect[UndeleteTweet.Event] =</dt><dd><dl class="simple">
+<dt>FutureEffect[UndeleteTweet.Event] { e =&gt;</dt><dd><p>incrRelatedCounts(e.tweet, e.quoterHasAlreadyQuotedTweet)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>override val replicatedUndeleteTweet: FutureEffect[ReplicatedUndeleteTweet.Event] =</dt><dd><dl class="simple">
+<dt>FutureEffect[ReplicatedUndeleteTweet.Event] { e =&gt;</dt><dd><p>incrRelatedCounts(e.tweet, e.quoterHasAlreadyQuotedTweet)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>override val asyncIncrFavCount: FutureEffect[AsyncIncrFavCount.Event] =</dt><dd><p>FutureEffect[AsyncIncrFavCount.Event](e =&gt; updateFavCount(e.tweetId, e.delta))</p>
+</dd>
+<dt>override val replicatedIncrFavCount: FutureEffect[ReplicatedIncrFavCount.Event] =</dt><dd><p>FutureEffect[ReplicatedIncrFavCount.Event](e =&gt; updateFavCount(e.tweetId, e.delta))</p>
+</dd>
+<dt>override val asyncIncrBookmarkCount: FutureEffect[AsyncIncrBookmarkCount.Event] =</dt><dd><p>FutureEffect[AsyncIncrBookmarkCount.Event](e =&gt; updateBookmarkCount(e.tweetId, e.delta))</p>
+</dd>
+<dt>override val replicatedIncrBookmarkCount: FutureEffect[ReplicatedIncrBookmarkCount.Event] =</dt><dd><dl class="simple">
+<dt>FutureEffect[ReplicatedIncrBookmarkCount.Event] { e =&gt;</dt><dd><p>updateBookmarkCount(e.tweetId, e.delta)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>override val asyncSetRetweetVisibility: FutureEffect[AsyncSetRetweetVisibility.Event] =</dt><dd><dl class="simple">
+<dt>FutureEffect[AsyncSetRetweetVisibility.Event] { e =&gt;</dt><dd><p>if (e.visible) incrRetweetCount(e.srcId) else decrRetweetCount(e.srcId)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>override val retryAsyncSetRetweetVisibility: FutureEffect[</dt><dd><p>TweetStoreRetryEvent[AsyncSetRetweetVisibility.Event]</p>
+</dd>
+<dt>] =</dt><dd><p>FutureEffect.unit[TweetStoreRetryEvent[AsyncSetRetweetVisibility.Event]]</p>
+</dd>
+<dt>override val replicatedSetRetweetVisibility: FutureEffect[</dt><dd><p>ReplicatedSetRetweetVisibility.Event</p>
+</dd>
+<dt>] =</dt><dd><dl class="simple">
+<dt>FutureEffect[ReplicatedSetRetweetVisibility.Event] { e =&gt;</dt><dd><p>if (e.visible) incrRetweetCount(e.srcId) else decrRetweetCount(e.srcId)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>override val flush: FutureEffect[Flush.Event] =</dt><dd><dl class="simple">
+<dt>FutureEffect[Flush.Event] { e =&gt; Future.collect(e.tweetIds.map(deleteCounts)).unit }</dt><dd><p>.onlyIf(_.flushCounts)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>A simple trait around the cache operations needed by TweetCountsCacheUpdatingStore.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>trait CachedCountsStore {</dt><dd><p>def add(key: TweetCountKey, count: Count): Future[Unit]
+def delete(key: TweetCountKey): Future[Unit]
+def incr(key: TweetCountKey, delta: Count): Future[Unit]</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>object CachedCountsStore {</dt><dd><dl>
+<dt>def fromLockingCache(cache: LockingCache[TweetCountKey, Cached[Count]]): CachedCountsStore =</dt><dd><dl class="simple">
+<dt>new CachedCountsStore {</dt><dd><dl class="simple">
+<dt>def add(key: TweetCountKey, count: Count): Future[Unit] =</dt><dd><p>cache.add(key, toCached(count)).unit</p>
+</dd>
+<dt>def delete(key: TweetCountKey): Future[Unit] =</dt><dd><p>cache.delete(key).unit</p>
+</dd>
+<dt>def incr(key: TweetCountKey, delta: Count): Future[Unit] =</dt><dd><p>cache.lockAndSet(key, IncrDecrHandler(delta)).unit</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>def toCached(count: Count): Cached[Count] = {</dt><dd><p>val now = Time.now
+Cached(Some(count), CachedValueStatus.Found, now, Some(now))</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>case class IncrDecrHandler(delta: Long) extends Handler[Cached[Count]] {</dt><dd><dl class="simple">
+<dt>override def apply(inCache: Option[Cached[Count]]): Option[Cached[Count]] =</dt><dd><p>inCache.flatMap(incrCount)</p>
+</dd>
+<dt>private[this] def incrCount(oldCached: Cached[Count]): Option[Cached[Count]] = {</dt><dd><p>oldCached.value.map { oldCount =&gt; oldCached.copy(value = Some(saferIncr(oldCount))) }</p>
+</dd>
+</dl>
+<p>}</p>
+<p>private[this] def saferIncr(value: Long) = math.max(0, value + delta)</p>
+<p>override lazy val toString: String = “IncrDecrHandler(%s)”.format(delta)</p>
+</dd>
+</dl>
+<p>}</p>
+<p>object QueueIsFullException extends Exception</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>An implementation of CachedCountsStore that can queue and aggregate multiple incr</p></li>
+<li><p>updates to the same key together.  Currently, updates for a key only start to aggregate</p></li>
+<li><p>after there is a failure to incr on the underlying store, which often indicates contention</p></li>
+<li><p>due to a high level of updates.  After a failure, a key is promoted into a “tracked” state,</p></li>
+<li><p>and subsequent updates are aggregated together.  Periodically, the aggregated updates will</p></li>
+<li><p>be flushed. If the flush for a key succeeds and no more updates have come in during the flush,</p></li>
+<li><p>then the key is demoted out of the tracked state.  Otherwise, updates continue to aggregate</p></li>
+<li><p>until the next flush attempt.</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>class AggregatingCachedCountsStore(</dt><dd><p>underlying: CachedCountsStore,
+timer: Timer,
+flushInterval: Duration,
+maxSize: Int,
+stats: StatsReceiver)</p>
+<blockquote>
+<div><p>extends CachedCountsStore
+with Serialized {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>private[this] val pendingUpdates: mutable.Map[TweetCountKey, Count] =</dt><dd><p>new mutable.HashMap[TweetCountKey, Count]</p>
+</dd>
+</dl>
+<p>private[this] var trackingCount: Int = 0</p>
+<p>private[this] val promotionCounter = stats.counter(“promotions”)
+private[this] val demotionCounter = stats.counter(“demotions”)
+private[this] val updateCounter = stats.counter(“aggregated_updates”)
+private[this] val overflowCounter = stats.counter(“overflows”)
+private[this] val flushFailureCounter = stats.counter(“flush_failures”)
+private[this] val trackingCountGauge = stats.addGauge(“tracking”)(trackingCount.toFloat)</p>
+<p>timer.schedule(flushInterval) { flush() }</p>
+<dl>
+<dt>def add(key: TweetCountKey, count: Count): Future[Unit] =</dt><dd><p>underlying.add(key, count)</p>
+</dd>
+<dt>def delete(key: TweetCountKey): Future[Unit] =</dt><dd><p>underlying.delete(key)</p>
+</dd>
+<dt>def incr(key: TweetCountKey, delta: Count): Future[Unit] =</dt><dd><dl>
+<dt>aggregateIfTracked(key, delta).flatMap {</dt><dd><p>case true =&gt; Future.Unit
+case false =&gt;</p>
+<blockquote>
+<div><dl class="simple">
+<dt>underlying</dt><dd><p>.incr(key, delta)
+.rescue { case _ =&gt; aggregate(key, delta) }</p>
+</dd>
+</dl>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Queues an update to be aggregated and applied to a key at a later time, but only if we are</p></li>
+<li><p>already aggregating updates for the key.</p></li>
+<li></li>
+<li><p>&#64;return true the delta was aggregated, false if the key is not being tracked</p></li>
+<li><p>and the incr should be attempted directly.</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+<dt>private[this] def aggregateIfTracked(key: TweetCountKey, delta: Count): Future[Boolean] =</dt><dd><dl>
+<dt>serialized {</dt><dd><dl>
+<dt>pendingUpdates.get(key) match {</dt><dd><p>case None =&gt; false
+case Some(current) =&gt;</p>
+<blockquote>
+<div><p>updateCounter.incr()
+pendingUpdates(key) = current + delta
+true</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Queues an update to be aggregated and applied to a key at a later time.</p></li>
+</ul>
+<p><a href="#id9"><span class="problematic" id="id10">*</span></a>/</p>
+</dd>
+<dt>private[this] def aggregate(key: TweetCountKey, delta: Count): Future[Unit] =</dt><dd><dl>
+<dt>serialized {</dt><dd><p>val alreadyTracked = pendingUpdates.contains(key)</p>
+<dl>
+<dt>if (!alreadyTracked) {</dt><dd><dl class="simple">
+<dt>if (pendingUpdates.size &lt; maxSize)</dt><dd><p>promotionCounter.incr()</p>
+</dd>
+<dt>else {</dt><dd><p>overflowCounter.incr()
+throw CachedCountsStore.QueueIsFullException</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>(pendingUpdates.get(key).getOrElse(0L) + delta) match {</dt><dd><dl class="simple">
+<dt>case 0 =&gt;</dt><dd><p>pendingUpdates.remove(key)
+demotionCounter.incr()</p>
+</dd>
+<dt>case aggregatedDelta =&gt;</dt><dd><p>pendingUpdates(key) = aggregatedDelta</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>trackingCount = pendingUpdates.size</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>private[this] def flush(): Future[Unit] = {</dt><dd><dl class="simple">
+<dt>for {</dt><dd><p>// make a copy of the updates to flush, so that updates can continue to be queued
+// while the flush is in progress.  if an individual flush succeeds, then we
+// go back and update pendingUpdates.
+updates &lt;- serialized { pendingUpdates.toSeq.toList }
+() &lt;- Future.join(for ((key, delta) &lt;- updates) yield flush(key, delta))</p>
+</dd>
+</dl>
+<p>} yield ()</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private[this] def flush(key: TweetCountKey, delta: Count): Future[Unit] =</dt><dd><dl class="simple">
+<dt>underlying</dt><dd><p>.incr(key, delta)
+.flatMap(_ =&gt; aggregate(key, -delta))
+.handle { case ex =&gt; flushFailureCounter.incr() }</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/tweetypie/server/src/main/scala/com/twitter/tweetypie/store/TweetCountsCacheUpdatingStore.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

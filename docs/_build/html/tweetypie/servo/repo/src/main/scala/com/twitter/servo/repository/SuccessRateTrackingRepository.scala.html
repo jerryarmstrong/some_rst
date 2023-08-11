@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../../" id="documentation_options" src="../../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.servo.repository</p>
+<p>import com.twitter.finagle.mux.ClientDiscardedRequestException
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.finagle.{CancelledConnectionException, CancelledRequestException}
+import com.twitter.servo.util.{Gate, SuccessRateTracker}
+import com.twitter.util.Throwables.RootCause
+import java.util.concurrent.CancellationException</p>
+<p>object SuccessRateTrackingRepository {</p>
+<blockquote>
+<div><dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>(successes, failures)</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+</dl>
+<p>type SuccessRateObserver = (Int, Int) =&gt; Unit</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Identifies [[Throwable]]s that should not be counted as failures.</p></li>
+<li></li>
+<li><p>This is a total function instead of a partial function so it can reliably recurse on itself</p></li>
+<li><p>to find a root cause.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>def isCancellation(t: Throwable): Boolean =</dt><dd><dl class="simple">
+<dt>t match {</dt><dd><p>// We don’t consider CancelledRequestExceptions or CancelledConnectionExceptions to be
+// failures in order not to tarnish our success rate on upstream request cancellations.
+case _: CancelledRequestException =&gt; true
+case _: CancelledConnectionException =&gt; true
+// non-finagle backends can throw CancellationExceptions when their futures are cancelled.
+case _: CancellationException =&gt; true
+// Mux servers can return ClientDiscardedRequestException.
+case _: ClientDiscardedRequestException =&gt; true
+// Most of these exceptions can be wrapped in com.twitter.finagle.Failure
+case RootCause(t) =&gt; isCancellation(t)
+case _ =&gt; false</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Return a Success Rate (SR) tracking repository along with the gate controlling it.</p></li>
+<li></li>
+<li><p>&#64;param stats Provides availability gauge</p></li>
+<li><p>&#64;param availabilityFromSuccessRate function to calculate availability given SR</p></li>
+<li><p>&#64;param tracker strategy for tracking (usually recent) SR</p></li>
+<li><p>&#64;param shouldIgnore don’t count certain exceptions as failures, e.g. cancellations</p></li>
+<li><p>&#64;return tuple of (SR tracking repo, gate closing if SR drops too far)</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>def withGate[Q &lt;: Seq[K], K, V](</dt><dd><p>stats: StatsReceiver,
+availabilityFromSuccessRate: Double =&gt; Double,
+tracker: SuccessRateTracker,
+shouldIgnore: Throwable =&gt; Boolean = isCancellation</p>
+</dd>
+<dt>): (KeyValueRepository[Q, K, V] =&gt; KeyValueRepository[Q, K, V], Gate[Unit]) = {</dt><dd><p>val successRateGate = tracker.observedAvailabilityGate(availabilityFromSuccessRate, stats)</p>
+<p>(new SuccessRateTrackingRepository[Q, K, V](_, tracker.record, shouldIgnore), successRateGate)</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>A KeyValueRepository that provides feedback on query success rate to</p></li>
+<li><p>a SuccessRateObserver.  Both found and not found are considered successful</p></li>
+<li><p>responses, while failures are not. Cancellations are ignored by default.</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+<dt>class SuccessRateTrackingRepository[Q &lt;: Seq[K], K, V](</dt><dd><p>underlying: KeyValueRepository[Q, K, V],
+observer: SuccessRateTrackingRepository.SuccessRateObserver,
+shouldIgnore: Throwable =&gt; Boolean = SuccessRateTrackingRepository.isCancellation)</p>
+<blockquote>
+<div><p>extends KeyValueRepository[Q, K, V] {</p>
+</div></blockquote>
+<dl>
+<dt>def apply(query: Q) =</dt><dd><dl>
+<dt>underlying(query) onSuccess { kvr =&gt;</dt><dd><dl class="simple">
+<dt>val nonIgnoredFailures = kvr.failed.values.foldLeft(0) {</dt><dd><p>case (count, t) if shouldIgnore(t) =&gt; count
+case (count, _) =&gt; count + 1</p>
+</dd>
+</dl>
+<p>}
+observer(kvr.found.size + kvr.notFound.size, nonIgnoredFailures)</p>
+</dd>
+<dt>} onFailure { t =&gt;</dt><dd><dl class="simple">
+<dt>if (!shouldIgnore(t)) {</dt><dd><p>observer(0, query.size)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../../_sources/tweetypie/servo/repo/src/main/scala/com/twitter/servo/repository/SuccessRateTrackingRepository.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

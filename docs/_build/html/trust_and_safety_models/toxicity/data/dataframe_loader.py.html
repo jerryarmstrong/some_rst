@@ -1,0 +1,483 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../" id="documentation_options" src="../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>from abc import ABC, abstractmethod
+from datetime import date
+from importlib import import_module
+import pickle</p>
+<dl class="simple">
+<dt>from toxicity_ml_pipeline.settings.default_settings_tox import (</dt><dd><p>CLIENT,
+EXISTING_TASK_VERSIONS,
+GCS_ADDRESS,
+TRAINING_DATA_LOCATION,</p>
+</dd>
+</dl>
+<p>)
+from toxicity_ml_pipeline.utils.helpers import execute_command, execute_query
+from toxicity_ml_pipeline.utils.queries import (</p>
+<blockquote>
+<div><p>FULL_QUERY,
+FULL_QUERY_W_TWEET_TYPES,
+PARSER_UDF,
+QUERY_SETTINGS,</p>
+</div></blockquote>
+<p>)</p>
+<p>import numpy as np
+import pandas</p>
+<p>class DataframeLoader(ABC):</p>
+<blockquote>
+<div><dl class="simple">
+<dt>def __init__(self, project):</dt><dd><p>self.project = project</p>
+</dd>
+</dl>
+<p>&#64;abstractmethod
+def produce_query(self):</p>
+<blockquote>
+<div><p>pass</p>
+</div></blockquote>
+<p>&#64;abstractmethod
+def load_data(self, test=False):</p>
+<blockquote>
+<div><p>pass</p>
+</div></blockquote>
+</div></blockquote>
+<dl>
+<dt>class ENLoader(DataframeLoader):</dt><dd><dl>
+<dt>def __init__(self, project, setting_file):</dt><dd><p>super(ENLoader, self).__init__(project=project)
+self.date_begin = setting_file.DATE_BEGIN
+self.date_end = setting_file.DATE_END
+TASK_VERSION = setting_file.TASK_VERSION
+if TASK_VERSION not in EXISTING_TASK_VERSIONS:</p>
+<blockquote>
+<div><p>raise ValueError</p>
+</div></blockquote>
+<p>self.task_version = TASK_VERSION
+self.query_settings = dict(QUERY_SETTINGS)
+self.full_query = FULL_QUERY</p>
+</dd>
+<dt>def produce_query(self, date_begin, date_end, task_version=None, <a href="#id1"><span class="problematic" id="id2">**</span></a>keys):</dt><dd><p>task_version = self.task_version if task_version is None else task_version</p>
+<dl>
+<dt>if task_version in keys[“table”]:</dt><dd><p>table_name = keys[“table”][task_version]
+print(f”Loading {table_name}”)</p>
+<dl class="simple">
+<dt>main_query = keys[“main”].format(</dt><dd><p>table=table_name,
+parser_udf=PARSER_UDF[task_version],
+date_begin=date_begin,
+date_end=date_end,</p>
+</dd>
+</dl>
+<p>)</p>
+<dl class="simple">
+<dt>return self.full_query.format(</dt><dd><p>main_table_query=main_query, date_begin=date_begin, date_end=date_end</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>return “”</p>
+</dd>
+<dt>def _reload(self, test, file_keyword):</dt><dd><p>query = f”SELECT * from <cite>{TRAINING_DATA_LOCATION.format(project=self.project)}_{file_keyword}</cite>”</p>
+<dl>
+<dt>if test:</dt><dd><p>query += “ ORDER BY RAND() LIMIT 1000”</p>
+</dd>
+<dt>try:</dt><dd><p>df = execute_query(client=CLIENT, query=query)</p>
+</dd>
+<dt>except Exception:</dt><dd><dl class="simple">
+<dt>print(</dt><dd><p>“Loading from BQ failed, trying to load from GCS. ”
+“NB: use this option only for intermediate files, which will be deleted at the end of ”
+“the project.”</p>
+</dd>
+</dl>
+<p>)
+copy_cmd = f”gsutil cp {GCS_ADDRESS.format(project=self.project)}/training_data/{file_keyword}.pkl .”
+execute_command(copy_cmd)
+try:</p>
+<blockquote>
+<div><dl class="simple">
+<dt>with open(f”{file_keyword}.pkl”, “rb”) as file:</dt><dd><p>df = pickle.load(file)</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl class="simple">
+<dt>except Exception:</dt><dd><p>return None</p>
+</dd>
+<dt>if test:</dt><dd><p>df = df.sample(frac=1)
+return df.iloc[:1000]</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>return df</p>
+</dd>
+<dt>def load_data(self, test=False, <a href="#id3"><span class="problematic" id="id4">**</span></a>kwargs):</dt><dd><dl>
+<dt>if “reload” in kwargs and kwargs[“reload”]:</dt><dd><p>df = self._reload(test, kwargs[“reload”])
+if df is not None and df.shape[0] &gt; 0:</p>
+<blockquote>
+<div><p>return df</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>df = None
+query_settings = self.query_settings
+if test:</p>
+<blockquote>
+<div><p>query_settings = {“fairness”: self.query_settings[“fairness”]}
+query_settings[“fairness”][“main”] += “ LIMIT 500”</p>
+</div></blockquote>
+<dl>
+<dt>for table, query_info in query_settings.items():</dt><dd><dl class="simple">
+<dt>curr_query = self.produce_query(</dt><dd><p>date_begin=self.date_begin, date_end=self.date_end, <a href="#id5"><span class="problematic" id="id6">**</span></a>query_info</p>
+</dd>
+</dl>
+<p>)
+if curr_query == “”:</p>
+<blockquote>
+<div><p>continue</p>
+</div></blockquote>
+<p>curr_df = execute_query(client=CLIENT, query=curr_query)
+curr_df[“origin”] = table
+df = curr_df if df is None else pandas.concat((df, curr_df))</p>
+</dd>
+</dl>
+<p>df[“loading_date”] = date.today()
+df[“date”] = pandas.to_datetime(df.date)
+return df</p>
+</dd>
+<dt>def load_precision_set(</dt><dd><p>self, begin_date=”…”, end_date=”…”, with_tweet_types=False, task_version=3.5</p>
+</dd>
+<dt>):</dt><dd><dl class="simple">
+<dt>if with_tweet_types:</dt><dd><p>self.full_query = FULL_QUERY_W_TWEET_TYPES</p>
+</dd>
+</dl>
+<p>query_settings = self.query_settings
+curr_query = self.produce_query(</p>
+<blockquote>
+<div><p>date_begin=begin_date,
+date_end=end_date,
+task_version=task_version,
+<a href="#id7"><span class="problematic" id="id8">**</span></a>query_settings[“precision”],</p>
+</div></blockquote>
+<p>)
+curr_df = execute_query(client=CLIENT, query=curr_query)</p>
+<p>curr_df.rename(columns={“media_url”: “media_presence”}, inplace=True)
+return curr_df</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>class ENLoaderWithSampling(ENLoader):</p>
+<blockquote>
+<div><dl class="simple">
+<dt>keywords = {</dt><dd><p>“politics”: [</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl class="simple">
+<dt>…</dt><dd><p>],
+“insults”: [</p>
+</dd>
+</dl>
+<dl class="simple">
+<dt>…</dt><dd><p>],
+“race”: [</p>
+</dd>
+</dl>
+<dl>
+<dt>…</dt><dd><blockquote>
+<div><p>],</p>
+</div></blockquote>
+<p>}
+n = …
+N = …</p>
+<dl>
+<dt>def __init__(self, project):</dt><dd><p>self.raw_loader = ENLoader(project=project)
+if project == …:</p>
+<blockquote>
+<div><p>self.project = project</p>
+</div></blockquote>
+<dl class="simple">
+<dt>else:</dt><dd><p>raise ValueError</p>
+</dd>
+</dl>
+</dd>
+<dt>def sample_with_weights(self, df, n):</dt><dd><p>w = df[“label”].value_counts(normalize=True)[1]
+dist = np.full((df.shape[0],), w)
+sampled_df = df.sample(n=n, weights=dist, replace=False)
+return sampled_df</p>
+</dd>
+<dt>def sample_keywords(self, df, N, group):</dt><dd><p>print(”nmatching”, group, “keywords…”)</p>
+<p>keyword_list = self.keywords[group]
+match_df = df.loc[df.text.str.lower().str.contains(“|”.join(keyword_list), regex=True)]</p>
+<p>print(“sampling N/3 from”, group)
+if match_df.shape[0] &lt;= N / 3:</p>
+<blockquote>
+<div><dl class="simple">
+<dt>print(</dt><dd><p>“WARNING: Sampling only”,
+match_df.shape[0],
+“instead of”,
+N / 3,
+“examples from race focused tweets due to insufficient data”,</p>
+</dd>
+</dl>
+<p>)
+sample_df = match_df</p>
+</div></blockquote>
+<dl>
+<dt>else:</dt><dd><dl class="simple">
+<dt>print(</dt><dd><p>“sampling”,
+group,
+“at”,
+round(match_df[“label”].value_counts(normalize=True)[1], 3),
+“% action rate”,</p>
+</dd>
+</dl>
+<p>)
+sample_df = self.sample_with_weights(match_df, int(N / 3))</p>
+</dd>
+</dl>
+<p>print(sample_df.shape)
+print(sample_df.label.value_counts(normalize=True))</p>
+<p>print(”nshape of df before dropping sampled rows after”, group, “matching..”, df.shape[0])
+df = df.loc[</p>
+<blockquote>
+<div><p>df.index.difference(sample_df.index),</p>
+</div></blockquote>
+<p>]
+print(”nshape of df after dropping sampled rows after”, group, “matching..”, df.shape[0])</p>
+<p>return df, sample_df</p>
+</dd>
+<dt>def sample_first_set_helper(self, train_df, first_set, new_n):</dt><dd><dl>
+<dt>if first_set == “prev”:</dt><dd><p>fset = train_df.loc[train_df[“origin”].isin([“prevalence”, “causal prevalence”])]
+print(</p>
+<blockquote>
+<div><p>“sampling prev at”, round(fset[“label”].value_counts(normalize=True)[1], 3), “% action rate”</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+<dt>else:</dt><dd><p>fset = train_df</p>
+</dd>
+</dl>
+<p>n_fset = self.sample_with_weights(fset, new_n)
+print(“len of sampled first set”, n_fset.shape[0])
+print(n_fset.label.value_counts(normalize=True))</p>
+<p>return n_fset</p>
+</dd>
+<dt>def sample(self, df, first_set, second_set, keyword_sampling, n, N):</dt><dd><p>train_df = df[df.origin != “precision”]
+val_test_df = df[df.origin == “precision”]</p>
+<p>print(”nsampling first set of data”)
+new_n = n - N if second_set is not None else n
+n_fset = self.sample_first_set_helper(train_df, first_set, new_n)</p>
+<p>print(”nsampling second set of data”)
+train_df = train_df.loc[</p>
+<blockquote>
+<div><p>train_df.index.difference(n_fset.index),</p>
+</div></blockquote>
+<p>]</p>
+<dl>
+<dt>if second_set is None:</dt><dd><p>print(“no second set sampling being done”)
+df = n_fset.append(val_test_df)
+return df</p>
+</dd>
+<dt>if second_set == “prev”:</dt><dd><p>sset = train_df.loc[train_df[“origin”].isin([“prevalence”, “causal prevalence”])]</p>
+</dd>
+<dt>elif second_set == “fdr”:</dt><dd><p>sset = train_df.loc[train_df[“origin”] == “fdr”]</p>
+</dd>
+<dt>else:</dt><dd><p>sset = train_df</p>
+</dd>
+<dt>if keyword_sampling == True:</dt><dd><p>print(“sampling based off of keywords defined…”)
+print(“second set is”, second_set, “with length”, sset.shape[0])</p>
+<p>sset, n_politics = self.sample_keywords(sset, N, “politics”)
+sset, n_insults = self.sample_keywords(sset, N, “insults”)
+sset, n_race = self.sample_keywords(sset, N, “race”)</p>
+<p>n_sset = n_politics.append([n_insults, n_race])
+print(“len of sampled second set”, n_sset.shape[0])</p>
+</dd>
+<dt>else:</dt><dd><dl class="simple">
+<dt>print(</dt><dd><p>“No keyword sampling. Instead random sampling from”,
+second_set,
+“at”,
+round(sset[“label”].value_counts(normalize=True)[1], 3),
+“% action rate”,</p>
+</dd>
+</dl>
+<p>)
+n_sset = self.sample_with_weights(sset, N)
+print(“len of sampled second set”, n_sset.shape[0])
+print(n_sset.label.value_counts(normalize=True))</p>
+</dd>
+</dl>
+<p>df = n_fset.append([n_sset, val_test_df])
+df = df.sample(frac=1).reset_index(drop=True)</p>
+<p>return df</p>
+</dd>
+<dt>def load_data(</dt><dd><p>self, first_set=”prev”, second_set=None, keyword_sampling=False, test=False, <a href="#id9"><span class="problematic" id="id10">**</span></a>kwargs</p>
+</dd>
+<dt>):</dt><dd><p>n = kwargs.get(“n”, self.n)
+N = kwargs.get(“N”, self.N)</p>
+<p>df = self.raw_loader.load_data(test=test, <a href="#id11"><span class="problematic" id="id12">**</span></a>kwargs)
+return self.sample(df, first_set, second_set, keyword_sampling, n, N)</p>
+</dd>
+</dl>
+</dd>
+<dt>class I18nLoader(DataframeLoader):</dt><dd><dl>
+<dt>def __init__(self):</dt><dd><p>super().__init__(project=…)
+from archive.settings…. import ACCEPTED_LANGUAGES, QUERY_SETTINGS</p>
+<p>self.accepted_languages = ACCEPTED_LANGUAGES
+self.query_settings = dict(QUERY_SETTINGS)</p>
+</dd>
+<dt>def produce_query(self, language, query, dataset, table, lang):</dt><dd><p>query = query.format(dataset=dataset, table=table)
+add_query = f”AND reviewed.{lang}=’{language}’”
+query += add_query</p>
+<p>return query</p>
+</dd>
+<dt>def query_keys(self, language, task=2, size=”50”):</dt><dd><dl>
+<dt>if task == 2:</dt><dd><dl class="simple">
+<dt>if language == “ar”:</dt><dd><p>self.query_settings[“adhoc_v2”][“table”] = “…”</p>
+</dd>
+<dt>elif language == “tr”:</dt><dd><p>self.query_settings[“adhoc_v2”][“table”] = “…”</p>
+</dd>
+<dt>elif language == “es”:</dt><dd><p>self.query_settings[“adhoc_v2”][“table”] = f”…”</p>
+</dd>
+<dt>else:</dt><dd><p>self.query_settings[“adhoc_v2”][“table”] = “…”</p>
+</dd>
+</dl>
+<p>return self.query_settings[“adhoc_v2”]</p>
+</dd>
+<dt>if task == 3:</dt><dd><p>return self.query_settings[“adhoc_v3”]</p>
+</dd>
+</dl>
+<p>raise ValueError(f”There are no other tasks than 2 or 3. {task} does not exist.”)</p>
+</dd>
+<dt>def load_data(self, language, test=False, task=2):</dt><dd><dl>
+<dt>if language not in self.accepted_languages:</dt><dd><dl class="simple">
+<dt>raise ValueError(</dt><dd><p>f”Language not in the data {language}. Accepted values are “ f”{self.accepted_languages}”</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>print(”…. adhoc data”)
+key_dict = self.query_keys(language=language, task=task)
+query_adhoc = self.produce_query(language=language, <a href="#id13"><span class="problematic" id="id14">**</span></a>key_dict)
+if test:</p>
+<blockquote>
+<div><p>query_adhoc += “ LIMIT 500”</p>
+</div></blockquote>
+<p>adhoc_df = execute_query(CLIENT, query_adhoc)</p>
+<dl>
+<dt>if not (test or language == “tr” or task == 3):</dt><dd><dl>
+<dt>if language == “es”:</dt><dd><p>print(”…. additional adhoc data”)
+key_dict = self.query_keys(language=language, size=”100”)
+query_adhoc = self.produce_query(language=language, <a href="#id15"><span class="problematic" id="id16">**</span></a>key_dict)
+adhoc_df = pandas.concat(</p>
+<blockquote>
+<div><p>(adhoc_df, execute_query(CLIENT, query_adhoc)), axis=0, ignore_index=True</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>print(”…. prevalence data”)
+query_prev = self.produce_query(language=language, <a href="#id17"><span class="problematic" id="id18">**</span></a>self.query_settings[“prevalence_v2”])
+prev_df = execute_query(CLIENT, query_prev)
+prev_df[“description”] = “Prevalence”
+adhoc_df = pandas.concat((adhoc_df, prev_df), axis=0, ignore_index=True)</p>
+</dd>
+</dl>
+<p>return self.clean(adhoc_df)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../_sources/trust_and_safety_models/toxicity/data/dataframe_loader.py.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

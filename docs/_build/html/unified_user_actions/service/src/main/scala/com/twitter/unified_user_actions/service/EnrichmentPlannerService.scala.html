@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.unified_user_actions.service</p>
+<p>import com.twitter.app.Flag
+import com.twitter.conversions.DurationOps._
+import com.twitter.conversions.StorageUnitOps._
+import com.twitter.decider.Decider
+import com.twitter.decider.SimpleRecipient
+import com.twitter.finatra.decider.modules.DeciderModule
+import com.twitter.finatra.kafka.domain.AckMode
+import com.twitter.finatra.kafka.domain.KafkaGroupId
+import com.twitter.finatra.kafka.domain.KafkaTopic
+import com.twitter.finatra.kafka.producers.FinagleKafkaProducerConfig
+import com.twitter.finatra.kafka.producers.KafkaProducerConfig
+import com.twitter.finatra.kafka.producers.TwitterKafkaProducerConfig
+import com.twitter.finatra.kafka.serde.ScalaSerdes
+import com.twitter.finatra.kafka.serde.UnKeyed
+import com.twitter.finatra.kafka.serde.UnKeyedSerde
+import com.twitter.finatra.kafkastreams.config.KafkaStreamsConfig
+import com.twitter.finatra.kafkastreams.config.SecureKafkaStreamsConfig
+import com.twitter.finatra.kafkastreams.dsl.FinatraDslToCluster
+import com.twitter.inject.TwitterModule
+import com.twitter.unified_user_actions.enricher.driver.EnrichmentDriver
+import com.twitter.unified_user_actions.enricher.hydrator.NoopHydrator
+import com.twitter.unified_user_actions.enricher.internal.thriftscala.EnrichmentEnvelop
+import com.twitter.unified_user_actions.enricher.internal.thriftscala.EnrichmentInstruction.NotificationTweetEnrichment
+import com.twitter.unified_user_actions.enricher.internal.thriftscala.EnrichmentInstruction.TweetEnrichment
+import com.twitter.unified_user_actions.enricher.internal.thriftscala.EnrichmentKey
+import com.twitter.unified_user_actions.enricher.internal.thriftscala.EnrichmentPlan
+import com.twitter.unified_user_actions.enricher.internal.thriftscala.EnrichmentStage
+import com.twitter.unified_user_actions.enricher.internal.thriftscala.EnrichmentStageStatus
+import com.twitter.unified_user_actions.enricher.internal.thriftscala.EnrichmentStageType
+import com.twitter.unified_user_actions.enricher.partitioner.DefaultPartitioner
+import com.twitter.unified_user_actions.enricher.partitioner.DefaultPartitioner.NullKey
+import com.twitter.unified_user_actions.thriftscala.Item
+import com.twitter.unified_user_actions.thriftscala.UnifiedUserAction
+import com.twitter.util.Await
+import com.twitter.util.Future
+import org.apache.kafka.common.record.CompressionType
+import org.apache.kafka.streams.StreamsBuilder
+import org.apache.kafka.streams.scala.kstream.Consumed
+import org.apache.kafka.streams.scala.kstream.KStream
+import org.apache.kafka.streams.scala.kstream.Produced
+object EnrichmentPlannerServiceMain extends EnrichmentPlannerService {</p>
+<blockquote>
+<div><p>val ApplicationId = “uua-enrichment-planner”
+val InputTopic = “unified_user_actions”
+val OutputPartitionedTopic = “unified_user_actions_keyed_dev”
+val SamplingDecider = “EnrichmentPlannerSampling”</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>This service is the first step (planner) of the UUA Enrichment process.</p></li>
+<li><p>It does the following:</p></li>
+<li><ol class="arabic simple">
+<li><p>Read Prod UUA topic unified_user_actions from the Prod cluster and write to (see below) either Prod cluster (prod) or Dev cluster (dev/staging)</p></li>
+</ol>
+</li>
+<li><ol class="arabic simple" start="2">
+<li><p>For the write, it optionally randomly downsample the events when publishing, controlled by a Decider</p></li>
+</ol>
+</li>
+<li><ol class="arabic simple" start="3">
+<li><p>The output’s key would be the first step of the repartitioning, most likely the EnrichmentKey of the Tweet type.</p></li>
+</ol>
+</li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>class EnrichmentPlannerService extends FinatraDslToCluster with SecureKafkaStreamsConfig {</dt><dd><p>import EnrichmentPlannerServiceMain._</p>
+<dl>
+<dt>val kafkaOutputCluster: Flag[String] = flag(</dt><dd><p>name = “kafka.output.server”,
+default = “”,
+help =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>“””The output Kafka cluster.</dt><dd><p><a href="#id3"><span class="problematic" id="id4">|</span></a>This is needed since we read from a cluster and potentially output to a different cluster.
+<a href="#id5"><span class="problematic" id="id6">|</span></a>”””.stripMargin</p>
+</dd>
+</dl>
+</div></blockquote>
+</dd>
+</dl>
+<p>)</p>
+<dl class="simple">
+<dt>val kafkaOutputEnableTls: Flag[Boolean] = flag(</dt><dd><p>name = “kafka.output.enable.tls”,
+default = true,
+help = “”</p>
+</dd>
+</dl>
+<p>)</p>
+<dl class="simple">
+<dt>override val modules: Seq[TwitterModule] = Seq(</dt><dd><p>DeciderModule</p>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>override protected def configureKafkaStreams(builder: StreamsBuilder): Unit = {</dt><dd><p>val decider = injector.instance[Decider]
+val driver = new EnrichmentDriver(</p>
+<blockquote>
+<div><p>finalOutputTopic = NoopHydrator.OutputTopic,
+partitionedTopic = OutputPartitionedTopic,
+hydrator = new NoopHydrator,
+partitioner = new DefaultPartitioner)</p>
+</div></blockquote>
+<dl>
+<dt>val builderWithoutOutput = builder.asScala</dt><dd><p>.stream(InputTopic)(Consumed.`with`(UnKeyedSerde, ScalaSerdes.Thrift[UnifiedUserAction]))
+// this maps and filters out the nil envelop before further processing
+.flatMapValues { uua =&gt;</p>
+<blockquote>
+<div><dl>
+<dt>(uua.item match {</dt><dd><dl>
+<dt>case Item.TweetInfo(_) =&gt;</dt><dd><dl>
+<dt>Some(EnrichmentEnvelop(</dt><dd><p>envelopId = uua.hashCode.toLong,
+uua = uua,
+plan = EnrichmentPlan(Seq(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>EnrichmentStage(</dt><dd><p>status = EnrichmentStageStatus.Initialized,
+stageType = EnrichmentStageType.Repartition,
+instructions = Seq(TweetEnrichment)</p>
+</dd>
+</dl>
+<p>),
+EnrichmentStage(</p>
+<blockquote>
+<div><p>status = EnrichmentStageStatus.Initialized,
+stageType = EnrichmentStageType.Hydration,
+instructions = Seq(TweetEnrichment)</p>
+</div></blockquote>
+<p>),</p>
+</div></blockquote>
+<p>))</p>
+</dd>
+</dl>
+<p>))</p>
+</dd>
+<dt>case Item.NotificationInfo(_) =&gt;</dt><dd><dl>
+<dt>Some(EnrichmentEnvelop(</dt><dd><p>envelopId = uua.hashCode.toLong,
+uua = uua,
+plan = EnrichmentPlan(Seq(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>EnrichmentStage(</dt><dd><p>status = EnrichmentStageStatus.Initialized,
+stageType = EnrichmentStageType.Repartition,
+instructions = Seq(NotificationTweetEnrichment)</p>
+</dd>
+</dl>
+<p>),
+EnrichmentStage(</p>
+<blockquote>
+<div><p>status = EnrichmentStageStatus.Initialized,
+stageType = EnrichmentStageType.Hydration,
+instructions = Seq(NotificationTweetEnrichment)</p>
+</div></blockquote>
+<p>),</p>
+</div></blockquote>
+<p>))</p>
+</dd>
+</dl>
+<p>))</p>
+</dd>
+</dl>
+<p>case _ =&gt; None</p>
+</dd>
+</dl>
+<p>}).seq</p>
+</div></blockquote>
+<p>}
+// execute our driver logics
+.flatMap((_: UnKeyed, envelop: EnrichmentEnvelop) =&gt; {</p>
+<blockquote>
+<div><p>// flatMap and Await.result is used here because our driver interface allows for
+// both synchronous (repartition logic) and async operations (hydration logic), but in here
+// we purely just need to repartition synchronously, and thus the flatMap + Await.result
+// is used to simplify and make testing much easier.
+val (keyOpt, value) = Await.result(driver.execute(NullKey, Future.value(envelop)))
+keyOpt.map(key =&gt; (key, value)).seq</p>
+</div></blockquote>
+<p>})
+// then finally we sample based on the output keys
+.filter((key, _) =&gt;</p>
+<blockquote>
+<div><p>decider.isAvailable(feature = SamplingDecider, Some(SimpleRecipient(key.id))))</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>configureOutput(builderWithoutOutput)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def configureOutput(kstream: KStream[EnrichmentKey, EnrichmentEnvelop]): Unit = {</dt><dd><dl>
+<dt>if (kafkaOutputCluster().nonEmpty &amp;&amp; kafkaOutputCluster() != bootstrapServer()) {</dt><dd><dl>
+<dt>kstream.toCluster(</dt><dd><p>cluster = kafkaOutputCluster(),
+topic = KafkaTopic(OutputPartitionedTopic),
+clientId = s”$ApplicationId-output-producer”,
+kafkaProducerConfig =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (kafkaOutputEnableTls())</dt><dd><dl class="simple">
+<dt>FinagleKafkaProducerConfig[EnrichmentKey, EnrichmentEnvelop](kafkaProducerConfig =</dt><dd><p>KafkaProducerConfig(TwitterKafkaProducerConfig().requestTimeout(1.minute).configMap))</p>
+</dd>
+</dl>
+</dd>
+<dt>else</dt><dd><dl class="simple">
+<dt>FinagleKafkaProducerConfig[EnrichmentKey, EnrichmentEnvelop](</dt><dd><dl class="simple">
+<dt>kafkaProducerConfig = KafkaProducerConfig()</dt><dd><p>.requestTimeout(1.minute)),</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+</div></blockquote>
+<p>statsReceiver = statsReceiver,
+commitInterval = 15.seconds</p>
+</dd>
+</dl>
+<p>)(Produced.`with`(ScalaSerdes.Thrift[EnrichmentKey], ScalaSerdes.Thrift[EnrichmentEnvelop]))</p>
+</dd>
+<dt>} else {</dt><dd><dl class="simple">
+<dt>kstream.to(OutputPartitionedTopic)(</dt><dd><p>Produced.`with`(ScalaSerdes.Thrift[EnrichmentKey], ScalaSerdes.Thrift[EnrichmentEnvelop]))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>override def streamsProperties(config: KafkaStreamsConfig): KafkaStreamsConfig = {</dt><dd><dl class="simple">
+<dt>super</dt><dd><p>.streamsProperties(config)
+.consumer.groupId(KafkaGroupId(ApplicationId))
+.consumer.clientId(s”$ApplicationId-consumer”)
+.consumer.requestTimeout(30.seconds)
+.consumer.sessionTimeout(30.seconds)
+.consumer.fetchMin(1.megabyte)
+.consumer.fetchMax(5.megabyte)
+.consumer.receiveBuffer(32.megabytes)
+.consumer.maxPollInterval(1.minute)
+.consumer.maxPollRecords(50000)
+.producer.clientId(s”$ApplicationId-producer”)
+.producer.batchSize(16.kilobytes)
+.producer.bufferMemorySize(256.megabyte)
+.producer.requestTimeout(30.seconds)
+.producer.compressionType(CompressionType.LZ4)
+.producer.ackMode(AckMode.ALL)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/unified_user_actions/service/src/main/scala/com/twitter/unified_user_actions/service/EnrichmentPlannerService.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

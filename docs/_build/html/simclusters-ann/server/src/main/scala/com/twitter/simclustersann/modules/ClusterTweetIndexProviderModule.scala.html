@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.simclustersann.modules</p>
+<p>import com.google.inject.Provides
+import com.twitter.conversions.DurationOps._
+import com.twitter.decider.Decider
+import com.twitter.finagle.memcached.Client
+import com.twitter.finagle.mtls.authentication.ServiceIdentifier
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.hermit.store.common.ObservedCachedReadableStore
+import com.twitter.hermit.store.common.ObservedMemcachedReadableStore
+import com.twitter.inject.TwitterModule
+import com.twitter.inject.annotations.Flag
+import com.twitter.relevance_platform.common.injection.LZ4Injection
+import com.twitter.relevance_platform.common.injection.SeqObjectInjection
+import com.twitter.relevance_platform.simclustersann.multicluster.ClusterConfig
+import com.twitter.relevance_platform.simclustersann.multicluster.ClusterTweetIndexStoreConfig
+import com.twitter.simclusters_v2.common.ClusterId
+import com.twitter.simclusters_v2.common.ModelVersions
+import com.twitter.simclusters_v2.common.TweetId
+import com.twitter.simclusters_v2.summingbird.stores.ClusterKey
+import com.twitter.simclusters_v2.summingbird.stores.TopKTweetsForClusterKeyReadableStore
+import com.twitter.simclusters_v2.thriftscala.EmbeddingType
+import com.twitter.simclustersann.common.FlagNames
+import com.twitter.storehaus.ReadableStore</p>
+<p>import javax.inject.Singleton</p>
+<p>object ClusterTweetIndexProviderModule extends TwitterModule {</p>
+<blockquote>
+<div><p>&#64;Singleton
+&#64;Provides
+// Provides ClusterTweetIndex Store based on different maxResults settings on the same store
+// Create a different provider if index is in a different store
+def providesClusterTweetIndex(</p>
+<blockquote>
+<div><p>&#64;Flag(FlagNames.MaxTopTweetPerCluster) maxTopTweetPerCluster: Int,
+&#64;Flag(FlagNames.CacheAsyncUpdate) asyncUpdate: Boolean,
+clusterConfig: ClusterConfig,
+serviceIdentifier: ServiceIdentifier,
+stats: StatsReceiver,
+decider: Decider,
+simClustersANNCacheClient: Client</p>
+</div></blockquote>
+<dl>
+<dt>): ReadableStore[ClusterId, Seq[(TweetId, Double)]] = {</dt><dd><p>// Build the underling cluster-to-tweet store
+val topTweetsForClusterStore = clusterConfig.clusterTweetIndexStoreConfig match {</p>
+<blockquote>
+<div><p>// If the config returns Manhattan tweet index config, we read from a RO MH store
+case manhattanConfig: ClusterTweetIndexStoreConfig.Manhattan =&gt;</p>
+<blockquote>
+<div><dl class="simple">
+<dt>TopKTweetsForClusterKeyReadableStore.getClusterToTopKTweetsStoreFromManhattanRO(</dt><dd><p>maxTopTweetPerCluster,
+manhattanConfig,
+serviceIdentifier)</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl class="simple">
+<dt>case memCacheConfig: ClusterTweetIndexStoreConfig.Memcached =&gt;</dt><dd><dl class="simple">
+<dt>TopKTweetsForClusterKeyReadableStore.getClusterToTopKTweetsStoreFromMemCache(</dt><dd><p>maxTopTweetPerCluster,
+memCacheConfig,
+serviceIdentifier)</p>
+</dd>
+</dl>
+</dd>
+<dt>case _ =&gt;</dt><dd><p>// Bad instance
+ReadableStore.empty</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<p>val embeddingType: EmbeddingType = clusterConfig.candidateTweetEmbeddingType
+val modelVersion: String = ModelVersions.toKnownForModelVersion(clusterConfig.modelVersion)</p>
+<dl>
+<dt>val store: ReadableStore[ClusterId, Seq[(TweetId, Double)]] =</dt><dd><dl class="simple">
+<dt>topTweetsForClusterStore.composeKeyMapping { id: ClusterId =&gt;</dt><dd><p>ClusterKey(id, modelVersion, embeddingType)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>val memcachedTopTweetsForClusterStore =</dt><dd><dl>
+<dt>ObservedMemcachedReadableStore.fromCacheClient(</dt><dd><p>backingStore = store,
+cacheClient = simClustersANNCacheClient,
+ttl = 15.minutes,
+asyncUpdate = asyncUpdate</p>
+</dd>
+<dt>)(</dt><dd><p>valueInjection = LZ4Injection.compose(SeqObjectInjection[(Long, Double)]()),
+statsReceiver = stats.scope(“cluster_tweet_index_mem_cache”),
+keyToString = { k =&gt;</p>
+<blockquote>
+<div><p>// prod cache key : SimClusters_LZ4/cluster_to_tweet/clusterId_embeddingType_modelVersion
+s”scz:c2t:${k}_${embeddingType}_${modelVersion}_$maxTopTweetPerCluster”</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>val cachedStore: ReadableStore[ClusterId, Seq[(TweetId, Double)]] = {</dt><dd><dl class="simple">
+<dt>ObservedCachedReadableStore.from[ClusterId, Seq[(TweetId, Double)]](</dt><dd><p>memcachedTopTweetsForClusterStore,
+ttl = 10.minute,
+maxKeys = 150000,
+cacheName = “cluster_tweet_index_cache”,
+windowSize = 10000L</p>
+</dd>
+</dl>
+<p>)(stats.scope(“cluster_tweet_index_store”))</p>
+</dd>
+</dl>
+<p>}
+cachedStore</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/simclusters-ann/server/src/main/scala/com/twitter/simclustersann/modules/ClusterTweetIndexProviderModule.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

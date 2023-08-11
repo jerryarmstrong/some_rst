@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../" id="documentation_options" src="../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.simclusters_v2.scalding.topic_recommendations.model_based_topic_recommendations</p>
+<p>import com.twitter.scalding.{DateRange, Days, Stat, TypedPipe, UniqueID}
+import com.twitter.scalding_internal.dalv2.DAL
+import com.twitter.scalding_internal.dalv2.remote_access.{ExplicitLocation, Proc3Atla}
+import com.twitter.scalding_internal.multiformat.format.keyval.KeyVal
+import com.twitter.simclusters_v2.common.{Language, TopicId, UserId}
+import com.twitter.simclusters_v2.hdfs_sources.FavTfgTopicEmbeddingsScalaDataset
+import com.twitter.simclusters_v2.scalding.embedding.common.ExternalDataSources
+import com.twitter.simclusters_v2.summingbird.stores.UserInterestedInReadableStore
+import com.twitter.simclusters_v2.thriftscala.{</p>
+<blockquote>
+<div><p>EmbeddingType,
+InternalId,
+LocaleEntityId,
+ModelVersion,
+SimClustersEmbeddingId</p>
+</div></blockquote>
+<p>}
+import java.util.TimeZone</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>DataSources object to read datasets for the model based topic recommendations</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+</dl>
+<p>object DataSources {</p>
+<blockquote>
+<div><p>private val topicEmbeddingDataset = FavTfgTopicEmbeddingsScalaDataset
+private val topicEmbeddingType = EmbeddingType.FavTfgTopic</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Get user InterestedIn data, filter popular clusters and return fav-scores interestedIn embedding for user</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>def getUserInterestedInData(</dt><dd><p>implicit dateRange: DateRange,
+timeZone: TimeZone,
+uniqueID: UniqueID</p>
+</dd>
+<dt>): TypedPipe[(UserId, Map[Int, Double])] = {</dt><dd><p>val numUserInterestedInInput = Stat(“num_user_interested_in”)
+ExternalDataSources.simClustersInterestInSource</p>
+<blockquote>
+<div><dl>
+<dt>.map {</dt><dd><dl>
+<dt>case KeyVal(userId, clustersUserIsInterestedIn) =&gt;</dt><dd><dl>
+<dt>val clustersPostFiltering = clustersUserIsInterestedIn.clusterIdToScores.filter {</dt><dd><dl>
+<dt>case (clusterId, clusterScores) =&gt;</dt><dd><p>// filter out popular clusters (i.e clusters with &gt; 5M users interested in it) from the user embedding
+clusterScores.numUsersInterestedInThisClusterUpperBound.exists(</p>
+<blockquote>
+<div><p>_ &lt; UserInterestedInReadableStore.MaxClusterSizeForUserInterestedInDataset)</p>
+</div></blockquote>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+numUserInterestedInInput.inc()
+(userId, clustersPostFiltering.mapValues(_.favScore.getOrElse(0.0)).toMap)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def getPerLanguageTopicEmbeddings(</dt><dd><p>implicit dateRange: DateRange,
+timeZone: TimeZone,
+uniqueID: UniqueID</p>
+</dd>
+<dt>): TypedPipe[((TopicId, Language), Map[Int, Double])] = {</dt><dd><p>val numTFGPerLanguageEmbeddings = Stat(“num_per_language_tfg_embeddings”)
+DAL</p>
+<blockquote>
+<div><p>.readMostRecentSnapshotNoOlderThan(topicEmbeddingDataset, Days(30))
+.withRemoteReadPolicy(ExplicitLocation(Proc3Atla))
+.toTypedPipe
+.map {</p>
+<blockquote>
+<div><p>case KeyVal(k, v) =&gt; (k, v)</p>
+</div></blockquote>
+<dl>
+<dt>}.collect {</dt><dd><dl>
+<dt>case (</dt><dd><blockquote>
+<div><dl class="simple">
+<dt>SimClustersEmbeddingId(</dt><dd><p>embedType,
+ModelVersion.Model20m145kUpdated,
+InternalId.LocaleEntityId(LocaleEntityId(entityId, lang))),</p>
+</dd>
+</dl>
+<p>embedding) if (embedType == topicEmbeddingType) =&gt;</p>
+</div></blockquote>
+<p>numTFGPerLanguageEmbeddings.inc()
+((entityId, lang), embedding.embedding.map(_.toTuple).toMap)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}.forceToDisk</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../_sources/src/scala/com/twitter/simclusters_v2/scalding/topic_recommendations/model_based_topic_recommendations/DataSources.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

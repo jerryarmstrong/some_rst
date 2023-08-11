@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.cr_mixer.logging</p>
+<p>import com.twitter.cr_mixer.model.RelatedTweetCandidateGeneratorQuery
+import com.twitter.cr_mixer.model.InitialCandidate
+import com.twitter.cr_mixer.model.ModuleNames
+import com.twitter.cr_mixer.logging.ScribeLoggerUtils._
+import com.twitter.cr_mixer.param.decider.CrMixerDecider
+import com.twitter.cr_mixer.param.decider.DeciderConstants
+import com.twitter.cr_mixer.thriftscala.FetchCandidatesResult
+import com.twitter.cr_mixer.thriftscala.GetRelatedTweetsScribe
+import com.twitter.cr_mixer.thriftscala.PerformanceMetrics
+import com.twitter.cr_mixer.thriftscala.PreRankFilterResult
+import com.twitter.cr_mixer.thriftscala.RelatedTweetRequest
+import com.twitter.cr_mixer.thriftscala.RelatedTweetResponse
+import com.twitter.cr_mixer.thriftscala.RelatedTweetResult
+import com.twitter.cr_mixer.thriftscala.RelatedTweetTopLevelApiResult
+import com.twitter.cr_mixer.thriftscala.TweetCandidateWithMetadata
+import com.twitter.cr_mixer.util.CandidateGenerationKeyUtil
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.finagle.tracing.Trace
+import com.twitter.logging.Logger
+import com.twitter.simclusters_v2.common.UserId
+import com.twitter.util.Future
+import com.twitter.util.Stopwatch
+import javax.inject.Inject
+import javax.inject.Named
+import javax.inject.Singleton</p>
+<p>&#64;Singleton
+case class RelatedTweetScribeLogger &#64;Inject() (</p>
+<blockquote>
+<div><p>decider: CrMixerDecider,
+statsReceiver: StatsReceiver,
+&#64;Named(ModuleNames.RelatedTweetsLogger) relatedTweetsScribeLogger: Logger) {</p>
+<p>private val scopedStats = statsReceiver.scope(“RelatedTweetsScribeLogger”)
+private val topLevelApiStats = scopedStats.scope(“TopLevelApi”)
+private val topLevelApiNoUserIdStats = scopedStats.scope(“TopLevelApiNoUserId”)
+private val upperFunnelsStats = scopedStats.scope(“UpperFunnels”)
+private val upperFunnelsNoUserIdStats = scopedStats.scope(“UpperFunnelsNoUserId”)</p>
+<dl>
+<dt>def scribeInitialCandidates(</dt><dd><p>query: RelatedTweetCandidateGeneratorQuery,
+getResultFn: =&gt; Future[Seq[Seq[InitialCandidate]]]</p>
+</dd>
+<dt>): Future[Seq[Seq[InitialCandidate]]] = {</dt><dd><dl class="simple">
+<dt>scribeResultsAndPerformanceMetrics(</dt><dd><p>RelatedTweetScribeMetadata.from(query),
+getResultFn,
+convertToResultFn = convertFetchCandidatesResult</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def scribePreRankFilterCandidates(</dt><dd><p>query: RelatedTweetCandidateGeneratorQuery,
+getResultFn: =&gt; Future[Seq[Seq[InitialCandidate]]]</p>
+</dd>
+<dt>): Future[Seq[Seq[InitialCandidate]]] = {</dt><dd><dl class="simple">
+<dt>scribeResultsAndPerformanceMetrics(</dt><dd><p>RelatedTweetScribeMetadata.from(query),
+getResultFn,
+convertToResultFn = convertPreRankFilterResult</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Scribe Top Level API Request / Response and performance metrics</p></li>
+<li><p>for the getRelatedTweets endpoint.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>def scribeGetRelatedTweets(</dt><dd><p>request: RelatedTweetRequest,
+startTime: Long,
+relatedTweetScribeMetadata: RelatedTweetScribeMetadata,
+getResultFn: =&gt; Future[RelatedTweetResponse]</p>
+</dd>
+<dt>): Future[RelatedTweetResponse] = {</dt><dd><p>val timer = Stopwatch.start()
+getResultFn.onSuccess { response =&gt;</p>
+<blockquote>
+<div><dl>
+<dt>relatedTweetScribeMetadata.clientContext.userId match {</dt><dd><dl>
+<dt>case Some(userId) =&gt;</dt><dd><dl>
+<dt>if (decider.isAvailableForId(userId, DeciderConstants.upperFunnelPerStepScribeRate)) {</dt><dd><p>topLevelApiStats.counter(relatedTweetScribeMetadata.product.originalName).incr()
+val latencyMs = timer().inMilliseconds
+val result = convertTopLevelAPIResult(request, response, startTime)
+val traceId = Trace.id.traceId.toLong
+val scribeMsg =</p>
+<blockquote>
+<div><p>buildScribeMessage(result, relatedTweetScribeMetadata, latencyMs, traceId)</p>
+</div></blockquote>
+<p>scribeResult(scribeMsg)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>case _ =&gt;</dt><dd><p>topLevelApiNoUserIdStats.counter(relatedTweetScribeMetadata.product.originalName).incr()</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Scribe Per-step intermediate results and performance metrics</p></li>
+<li><p>for each step: fetch candidates, filters.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>private def scribeResultsAndPerformanceMetrics[T](</dt><dd><p>relatedTweetScribeMetadata: RelatedTweetScribeMetadata,
+getResultFn: =&gt; Future[T],
+convertToResultFn: (T, UserId) =&gt; RelatedTweetResult</p>
+</dd>
+<dt>): Future[T] = {</dt><dd><p>val timer = Stopwatch.start()
+getResultFn.onSuccess { input =&gt;</p>
+<blockquote>
+<div><dl>
+<dt>relatedTweetScribeMetadata.clientContext.userId match {</dt><dd><dl>
+<dt>case Some(userId) =&gt;</dt><dd><dl>
+<dt>if (decider.isAvailableForId(userId, DeciderConstants.upperFunnelPerStepScribeRate)) {</dt><dd><p>upperFunnelsStats.counter(relatedTweetScribeMetadata.product.originalName).incr()
+val latencyMs = timer().inMilliseconds
+val result = convertToResultFn(input, userId)
+val traceId = Trace.id.traceId.toLong
+val scribeMsg =</p>
+<blockquote>
+<div><p>buildScribeMessage(result, relatedTweetScribeMetadata, latencyMs, traceId)</p>
+</div></blockquote>
+<p>scribeResult(scribeMsg)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>case _ =&gt;</dt><dd><p>upperFunnelsNoUserIdStats.counter(relatedTweetScribeMetadata.product.originalName).incr()</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def convertTopLevelAPIResult(</dt><dd><p>request: RelatedTweetRequest,
+response: RelatedTweetResponse,
+startTime: Long</p>
+</dd>
+<dt>): RelatedTweetResult = {</dt><dd><dl>
+<dt>RelatedTweetResult.RelatedTweetTopLevelApiResult(</dt><dd><dl class="simple">
+<dt>RelatedTweetTopLevelApiResult(</dt><dd><p>timestamp = startTime,
+request = request,
+response = response</p>
+</dd>
+</dl>
+<p>))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def convertFetchCandidatesResult(</dt><dd><p>candidatesSeq: Seq[Seq[InitialCandidate]],
+requestUserId: UserId</p>
+</dd>
+<dt>): RelatedTweetResult = {</dt><dd><dl>
+<dt>val tweetCandidatesWithMetadata = candidatesSeq.flatMap { candidates =&gt;</dt><dd><dl>
+<dt>candidates.map { candidate =&gt;</dt><dd><dl class="simple">
+<dt>TweetCandidateWithMetadata(</dt><dd><p>tweetId = candidate.tweetId,
+candidateGenerationKey = None</p>
+</dd>
+</dl>
+<p>) // do not hydrate candidateGenerationKey to save cost</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}
+RelatedTweetResult.FetchCandidatesResult(</p>
+<blockquote>
+<div><p>FetchCandidatesResult(Some(tweetCandidatesWithMetadata)))</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def convertPreRankFilterResult(</dt><dd><p>candidatesSeq: Seq[Seq[InitialCandidate]],
+requestUserId: UserId</p>
+</dd>
+<dt>): RelatedTweetResult = {</dt><dd><dl>
+<dt>val tweetCandidatesWithMetadata = candidatesSeq.flatMap { candidates =&gt;</dt><dd><dl>
+<dt>candidates.map { candidate =&gt;</dt><dd><dl class="simple">
+<dt>val candidateGenerationKey =</dt><dd><p>CandidateGenerationKeyUtil.toThrift(candidate.candidateGenerationInfo, requestUserId)</p>
+</dd>
+<dt>TweetCandidateWithMetadata(</dt><dd><p>tweetId = candidate.tweetId,
+candidateGenerationKey = Some(candidateGenerationKey),
+authorId = Some(candidate.tweetInfo.authorId),
+score = Some(candidate.getSimilarityScore),
+numCandidateGenerationKeys = None</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}
+RelatedTweetResult.PreRankFilterResult(PreRankFilterResult(Some(tweetCandidatesWithMetadata)))</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def buildScribeMessage(</dt><dd><p>relatedTweetResult: RelatedTweetResult,
+relatedTweetScribeMetadata: RelatedTweetScribeMetadata,
+latencyMs: Long,
+traceId: Long</p>
+</dd>
+<dt>): GetRelatedTweetsScribe = {</dt><dd><dl class="simple">
+<dt>GetRelatedTweetsScribe(</dt><dd><p>uuid = relatedTweetScribeMetadata.requestUUID,
+internalId = relatedTweetScribeMetadata.internalId,
+relatedTweetResult = relatedTweetResult,
+requesterId = relatedTweetScribeMetadata.clientContext.userId,
+guestId = relatedTweetScribeMetadata.clientContext.guestId,
+traceId = Some(traceId),
+performanceMetrics = Some(PerformanceMetrics(Some(latencyMs))),
+impressedBuckets = getImpressedBuckets(scopedStats)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private def scribeResult(</dt><dd><p>scribeMsg: GetRelatedTweetsScribe</p>
+</dd>
+<dt>): Unit = {</dt><dd><p>publish(logger = relatedTweetsScribeLogger, codec = GetRelatedTweetsScribe, message = scribeMsg)</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/cr-mixer/server/src/main/scala/com/twitter/cr_mixer/logging/RelatedTweetScribeLogger.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

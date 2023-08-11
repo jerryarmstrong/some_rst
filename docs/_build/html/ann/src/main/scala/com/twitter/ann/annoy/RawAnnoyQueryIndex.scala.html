@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../" id="documentation_options" src="../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.ann.annoy</p>
+<p>import com.spotify.annoy.{ANNIndex, IndexType}
+import com.twitter.ann.annoy.AnnoyCommon._
+import com.twitter.ann.common._
+import com.twitter.ann.common.EmbeddingType._
+import com.twitter.mediaservices.commons.codec.ArrayByteBufferCodec
+import com.twitter.search.common.file.{AbstractFile, LocalFile}
+import com.twitter.util.{Future, FuturePool}
+import java.io.File
+import scala.collection.JavaConverters._</p>
+<dl>
+<dt>private[annoy] object RawAnnoyQueryIndex {</dt><dd><dl>
+<dt>private[annoy] def apply[D &lt;: Distance[D]](</dt><dd><p>dimension: Int,
+metric: Metric[D],
+futurePool: FuturePool,
+directory: AbstractFile</p>
+</dd>
+<dt>): Queryable[Long, AnnoyRuntimeParams, D] = {</dt><dd><p>val metadataFile = directory.getChild(MetaDataFileName)
+val indexFile = directory.getChild(IndexFileName)
+val metadata = MetadataCodec.decode(</p>
+<blockquote>
+<div><p>ArrayByteBufferCodec.encode(metadataFile.getByteSource.read())</p>
+</div></blockquote>
+<p>)</p>
+<p>val existingDimension = metadata.dimension
+assert(</p>
+<blockquote>
+<div><p>existingDimension == dimension,
+s”Dimensions do not match. requested: $dimension existing: $existingDimension”</p>
+</div></blockquote>
+<p>)</p>
+<p>val existingMetric = Metric.fromThrift(metadata.distanceMetric)
+assert(</p>
+<blockquote>
+<div><p>existingMetric == metric,
+s”DistanceMetric do not match. requested: $metric existing: $existingMetric”</p>
+</div></blockquote>
+<p>)</p>
+<p>val index = loadIndex(indexFile, dimension, annoyMetric(metric))
+new RawAnnoyQueryIndex[D](</p>
+<blockquote>
+<div><p>dimension,
+metric,
+metadata.numOfTrees,
+index,
+futurePool</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private[this] def annoyMetric(metric: Metric[_]): IndexType = {</dt><dd><dl class="simple">
+<dt>metric match {</dt><dd><p>case L2 =&gt; IndexType.EUCLIDEAN
+case Cosine =&gt; IndexType.ANGULAR
+case _ =&gt; throw new RuntimeException(“Not supported: “ + metric)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private[this] def loadIndex(</dt><dd><p>indexFile: AbstractFile,
+dimension: Int,
+indexType: IndexType</p>
+</dd>
+<dt>): ANNIndex = {</dt><dd><p>var localIndexFile = indexFile</p>
+<p>// If not a local file copy to local, so that it can be memory mapped.
+if (!indexFile.isInstanceOf[LocalFile]) {</p>
+<blockquote>
+<div><p>val tempFile = File.createTempFile(IndexFileName, null)
+tempFile.deleteOnExit()</p>
+<p>val temp = new LocalFile(tempFile)
+indexFile.copyTo(temp)
+localIndexFile = temp</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>new ANNIndex(</dt><dd><p>dimension,
+localIndexFile.getPath(),
+indexType</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private[this] class RawAnnoyQueryIndex[D &lt;: Distance[D]](</dt><dd><p>dimension: Int,
+metric: Metric[D],
+numOfTrees: Int,
+index: ANNIndex,
+futurePool: FuturePool)</p>
+<blockquote>
+<div><p>extends Queryable[Long, AnnoyRuntimeParams, D]
+with AutoCloseable {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>override def query(</dt><dd><p>embedding: EmbeddingVector,
+numOfNeighbours: Int,
+runtimeParams: AnnoyRuntimeParams</p>
+</dd>
+<dt>): Future[List[Long]] = {</dt><dd><dl class="simple">
+<dt>queryWithDistance(embedding, numOfNeighbours, runtimeParams)</dt><dd><p>.map(_.map(_.neighbor))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>override def queryWithDistance(</dt><dd><p>embedding: EmbeddingVector,
+numOfNeighbours: Int,
+runtimeParams: AnnoyRuntimeParams</p>
+</dd>
+<dt>): Future[List[NeighborWithDistance[Long, D]]] = {</dt><dd><dl>
+<dt>futurePool {</dt><dd><p>val queryVector = embedding.toArray
+val neigboursToRequest = neighboursToRequest(numOfNeighbours, runtimeParams)
+val neigbours = index</p>
+<blockquote>
+<div><p>.getNearestWithDistance(queryVector, neigboursToRequest)
+.asScala
+.take(numOfNeighbours)
+.map { nn =&gt;</p>
+<blockquote>
+<div><p>val id = nn.getFirst.toLong
+val distance = metric.fromAbsoluteDistance(nn.getSecond)
+NeighborWithDistance(id, distance)</p>
+</div></blockquote>
+<p>}
+.toList</p>
+</div></blockquote>
+<p>neigbours</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// Annoy java lib do not expose param for numOfNodesToExplore.
+// Default number is numOfTrees*numOfNeigbours.
+// Simple hack is to artificially increase the numOfNeighbours to be requested and then just cap it before returning.
+private[this] def neighboursToRequest(</p>
+<blockquote>
+<div><p>numOfNeighbours: Int,
+annoyParams: AnnoyRuntimeParams</p>
+</div></blockquote>
+<dl>
+<dt>): Int = {</dt><dd><dl>
+<dt>annoyParams.nodesToExplore match {</dt><dd><dl>
+<dt>case Some(nodesToExplore) =&gt; {</dt><dd><p>val neigboursToRequest = nodesToExplore / numOfTrees
+if (neigboursToRequest &lt; numOfNeighbours)</p>
+<blockquote>
+<div><p>numOfNeighbours</p>
+</div></blockquote>
+<dl class="simple">
+<dt>else</dt><dd><p>neigboursToRequest</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+case _ =&gt; numOfNeighbours</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// To close the memory map based file resource.
+override def close(): Unit = index.close()</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../_sources/ann/src/main/scala/com/twitter/ann/annoy/RawAnnoyQueryIndex.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

@@ -1,0 +1,621 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../" id="documentation_options" src="../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p># checkstyle: noqa</p>
+<p>import time
+from collections import defaultdict</p>
+<p>from com.twitter.mlmetastore.modelrepo.client import ModelRepoClient
+from com.twitter.mlmetastore.modelrepo.core import FeatureImportance, FeatureNames
+from twitter.deepbird.io.util import match_feature_regex_list</p>
+<dl class="simple">
+<dt>from twml.contrib.feature_importances.helpers import (</dt><dd><p>_get_feature_name_from_config,
+_get_feature_types_from_records,
+_get_metrics_hook,
+_expand_prefix,
+longest_common_prefix,
+write_list_to_hdfs_gfile)</p>
+</dd>
+</dl>
+<p>from twml.contrib.feature_importances.feature_permutation import PermutedInputFnFactory
+from twml.tracking import ExperimentTracker</p>
+<p>from tensorflow.compat.v1 import logging
+from requests.exceptions import HTTPError, RetryError
+from queue import Queue</p>
+<p>SERIAL = “serial”
+TREE = “tree”
+INDIVIDUAL = “Individual”
+GROUP = “Group”
+ROC_AUC = “roc_auc”
+RCE = “rce”
+LOSS = “loss”</p>
+<dl>
+<dt>def _repartition(feature_list_queue, fnames_ftypes, split_feature_group_on_period):</dt><dd><p>“””
+Iterate through letters to partition each feature by prefix, and then put each tuple</p>
+<blockquote>
+<div><p>(prefix, feature_partition) into the feature_list_queue</p>
+</div></blockquote>
+<dl class="simple">
+<dt>Args:</dt><dd><p>prefix (str): The prefix shared by each feature in list_of_feature_types
+feature_list_queue (Queue&lt;(str, list&lt;(str, str)&gt;)&gt;): The queue of feature groups
+fnames_ftypes (list&lt;(str, str)&gt;): List of (fname, ftype) pairs. Each fname begins with prefix
+split_feature_group_on_period (str): If true, require that feature groups end in a period</p>
+</dd>
+<dt>Returns:</dt><dd><p>Updated queue with each group in fnames_ftypes</p>
+</dd>
+</dl>
+<p>“””
+assert len(fnames_ftypes) &gt; 1</p>
+<p>split_character = “.” if split_feature_group_on_period else None
+# Compute the longest prefix of the words
+prefix = longest_common_prefix(</p>
+<blockquote>
+<div><p>strings=[fname for fname, _ in fnames_ftypes], split_character=split_character)</p>
+</div></blockquote>
+<p># Separate the features by prefix
+prefix_to_features = defaultdict(list)
+for fname, ftype in fnames_ftypes:</p>
+<blockquote>
+<div><p>assert fname.startswith(prefix)
+new_prefix = _expand_prefix(fname=fname, prefix=prefix, split_character=split_character)
+prefix_to_features[new_prefix].append((fname, ftype))</p>
+</div></blockquote>
+<p># Add all of the new partitions to the queue
+for new_prefix, fname_ftype_list in prefix_to_features.items():</p>
+<blockquote>
+<div><dl class="simple">
+<dt>extended_new_prefix = longest_common_prefix(</dt><dd><p>strings=[fname for fname, _ in fname_ftype_list], split_character=split_character)</p>
+</dd>
+</dl>
+<p>assert extended_new_prefix.startswith(new_prefix)
+feature_list_queue.put((extended_new_prefix, fname_ftype_list))</p>
+</div></blockquote>
+<p>return feature_list_queue</p>
+</dd>
+<dt>def _infer_if_is_metric_larger_the_better(stopping_metric):</dt><dd><p># Infers whether a metric should be interpreted such that larger numbers are better (e.g. ROC_AUC), as opposed to
+#   larger numbers being worse (e.g. LOSS)
+if stopping_metric is None:</p>
+<blockquote>
+<div><p>raise ValueError(“Error: Stopping Metric cannot be None”)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>elif stopping_metric.startswith(LOSS):</dt><dd><p>logging.info(“Interpreting {} to be a metric where larger numbers are worse”.format(stopping_metric))
+is_metric_larger_the_better = False</p>
+</dd>
+<dt>else:</dt><dd><p>logging.info(“Interpreting {} to be a metric where larger numbers are better”.format(stopping_metric))
+is_metric_larger_the_better = True</p>
+</dd>
+</dl>
+<p>return is_metric_larger_the_better</p>
+</dd>
+<dt>def _check_whether_tree_should_expand(baseline_performance, computed_performance, sensitivity, stopping_metric, is_metric_larger_the_better):</dt><dd><p>“””
+Returns True if</p>
+<blockquote>
+<div><ul class="simple">
+<li><p>the metric is positive (e.g. ROC_AUC) and computed_performance is nontrivially smaller than the baseline_performance</p></li>
+<li><p>the metric is negative (e.g. LOSS) and computed_performance is nontrivially larger than the baseline_performance</p></li>
+</ul>
+</div></blockquote>
+<p>“””
+difference = ((baseline_performance[stopping_metric] - computed_performance[stopping_metric]) /</p>
+<blockquote>
+<div><p>baseline_performance[stopping_metric])</p>
+</div></blockquote>
+<dl class="simple">
+<dt>if not is_metric_larger_the_better:</dt><dd><p>difference = -difference</p>
+</dd>
+<dt>logging.info(</dt><dd><p>“Found a {} difference of {}. Sensitivity is {}.”.format(“positive” if is_metric_larger_the_better else “negative”, difference, sensitivity))</p>
+</dd>
+</dl>
+<p>return difference &gt; sensitivity</p>
+</dd>
+<dt>def _compute_multiple_permuted_performances_from_trainer(</dt><dd><blockquote>
+<div><p>factory, fname_ftypes, trainer, parse_fn, record_count):</p>
+</div></blockquote>
+<p>“””Compute performances with fname and fype permuted
+“””
+metrics_hook = _get_metrics_hook(trainer)
+trainer._estimator.evaluate(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>input_fn=factory.get_permuted_input_fn(</dt><dd><p>batch_size=trainer._params.eval_batch_size, parse_fn=parse_fn, fname_ftypes=fname_ftypes),</p>
+</dd>
+</dl>
+<p>steps=(record_count + trainer._params.eval_batch_size) // trainer._params.eval_batch_size,
+hooks=[metrics_hook],
+checkpoint_path=trainer.best_or_latest_checkpoint)</p>
+</div></blockquote>
+<p>return metrics_hook.metric_values</p>
+</dd>
+<dt>def _get_extra_feature_group_performances(factory, trainer, parse_fn, extra_groups, feature_to_type, record_count):</dt><dd><p>“””Compute performance differences for the extra feature groups
+“””
+extra_group_feature_performance_results = {}
+for group_name, raw_feature_regex_list in extra_groups.items():</p>
+<blockquote>
+<div><p>start = time.time()
+fnames = match_feature_regex_list(</p>
+<blockquote>
+<div><p>features=feature_to_type.keys(),
+feature_regex_list=[regex for regex in raw_feature_regex_list],
+preprocess=False,
+as_dict=False)</p>
+</div></blockquote>
+<p>fnames_ftypes = [(fname, feature_to_type[fname]) for fname in fnames]</p>
+<p>logging.info(“Extracted extra group {} with features {}”.format(group_name, fnames_ftypes))
+extra_group_feature_performance_results[group_name] = _compute_multiple_permuted_performances_from_trainer(</p>
+<blockquote>
+<div><p>factory=factory, fname_ftypes=fnames_ftypes,
+trainer=trainer, parse_fn=parse_fn, record_count=record_count)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>logging.info(”nnImportances computed for {} in {} seconds nn”.format(</dt><dd><p>group_name, int(time.time() - start)))</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>return extra_group_feature_performance_results</p>
+</dd>
+<dt>def _feature_importances_tree_algorithm(</dt><dd><blockquote>
+<div><p>data_dir, trainer, parse_fn, fnames, stopping_metric, file_list=None, datarecord_filter_fn=None, split_feature_group_on_period=True,
+record_count=99999, is_metric_larger_the_better=None, sensitivity=0.025, extra_groups=None, dont_build_tree=False):</p>
+</div></blockquote>
+<p>“””Tree algorithm for feature and feature group importances. This algorithm build a prefix tree of
+the feature names and then traverses the tree with a BFS. At each node (aka group of features with
+a shared prefix) the algorithm computes the performance of the model when we permute all features
+in the group. The algorithm only zooms-in on groups that impact the performance by more than
+sensitivity. As a result, features that affect the model performance by less than sensitivity will
+not have an exact importance.
+Args:</p>
+<blockquote>
+<div><dl class="simple">
+<dt>data_dir: (str): The location of the training or testing data to compute importances over.</dt><dd><p>If None, the trainer._eval_files are used</p>
+</dd>
+</dl>
+<p>trainer: (DataRecordTrainer): A DataRecordTrainer object
+parse_fn: (function): The parse_fn used by eval_input_fn
+fnames (list&lt;string&gt;): The list of feature names
+stopping_metric (str): The metric to use to determine when to stop expanding trees
+file_list (list&lt;str&gt;): The list of filenames. Exactly one of file_list and data_dir should be</p>
+<blockquote>
+<div><p>provided</p>
+</div></blockquote>
+<dl class="simple">
+<dt>datarecord_filter_fn (function): a function takes a single data sample in com.twitter.ml.api.ttypes.DataRecord format</dt><dd><p>and return a boolean value, to indicate if this data record should be kept in feature importance module or not.</p>
+</dd>
+<dt>split_feature_group_on_period (boolean): If true, split feature groups by period rather than on</dt><dd><p>optimal prefix</p>
+</dd>
+</dl>
+<p>record_count (int): The number of records to compute importances over
+is_metric_larger_the_better (boolean): If true, assume that stopping_metric is a metric where larger</p>
+<blockquote>
+<div><p>values are better (e.g. ROC-AUC)</p>
+</div></blockquote>
+<p>sensitivity (float): The smallest change in performance to continue to expand the tree
+extra_groups (dict&lt;str, list&lt;str&gt;&gt;): A dictionary mapping the name of extra feature groups to the list of</p>
+<blockquote>
+<div><p>the names of the features in the group. You should only supply a value for this argument if you have a set
+of features that you want to evaluate as a group but don’t share a prefix</p>
+</div></blockquote>
+<p>dont_build_tree (boolean): If True, don’t build the tree and only compute the extra_groups importances</p>
+</div></blockquote>
+<dl class="simple">
+<dt>Returns:</dt><dd><p>A dictionary that contains the individual and group feature importances</p>
+</dd>
+</dl>
+<p>“””
+factory = PermutedInputFnFactory(</p>
+<blockquote>
+<div><p>data_dir=data_dir, record_count=record_count, file_list=file_list, datarecord_filter_fn=datarecord_filter_fn)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>baseline_performance = _compute_multiple_permuted_performances_from_trainer(</dt><dd><p>factory=factory, fname_ftypes=[],
+trainer=trainer, parse_fn=parse_fn, record_count=record_count)</p>
+</dd>
+</dl>
+<p>out = {“None”: baseline_performance}</p>
+<dl class="simple">
+<dt>if stopping_metric not in baseline_performance:</dt><dd><dl class="simple">
+<dt>raise ValueError(“The stopping metric ‘{}’ not found in baseline_performance. Metrics are {}”.format(</dt><dd><p>stopping_metric, list(baseline_performance.keys())))</p>
+</dd>
+</dl>
+</dd>
+<dt>is_metric_larger_the_better = (</dt><dd><p>is_metric_larger_the_better if is_metric_larger_the_better is not None else _infer_if_is_metric_larger_the_better(stopping_metric))</p>
+</dd>
+</dl>
+<p>logging.info(“Using {} as the stopping metric for the tree algorithm”.format(stopping_metric))</p>
+<p>feature_to_type = _get_feature_types_from_records(records=factory.records, fnames=fnames)
+all_feature_types = list(feature_to_type.items())</p>
+<p>individual_feature_performances = {}
+feature_group_performances = {}
+if dont_build_tree:</p>
+<blockquote>
+<div><p>logging.info(“Not building feature importance trie. Will only compute importances for the extra_groups”)</p>
+</div></blockquote>
+<dl>
+<dt>else:</dt><dd><p>logging.info(“Building feature importance trie”)
+# Each element in the Queue will be a tuple of (prefix, list_of_feature_type_pairs) where
+#   each feature in list_of_feature_type_pairs will have have the prefix “prefix”
+feature_list_queue = _repartition(</p>
+<blockquote>
+<div><p>feature_list_queue=Queue(), fnames_ftypes=all_feature_types, split_feature_group_on_period=split_feature_group_on_period)</p>
+</div></blockquote>
+<dl>
+<dt>while not feature_list_queue.empty():</dt><dd><p># Pop the queue. We should never have an empty list in the queue
+prefix, fnames_ftypes = feature_list_queue.get()
+assert len(fnames_ftypes) &gt; 0</p>
+<p># Compute performance from permuting all features in fname_ftypes
+logging.info(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>“nnComputing importances for {} ({}…). {} elements left in the queue nn”.format(</dt><dd><p>prefix, fnames_ftypes[:5], feature_list_queue.qsize()))</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>start = time.time()
+computed_performance = _compute_multiple_permuted_performances_from_trainer(</p>
+<blockquote>
+<div><p>factory=factory, fname_ftypes=fnames_ftypes,
+trainer=trainer, parse_fn=parse_fn, record_count=record_count)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>logging.info(”nnImportances computed for {} in {} seconds nn”.format(</dt><dd><p>prefix, int(time.time() - start)))</p>
+</dd>
+<dt>if len(fnames_ftypes) == 1:</dt><dd><p>individual_feature_performances[fnames_ftypes[0][0]] = computed_performance</p>
+</dd>
+<dt>else:</dt><dd><p>feature_group_performances[prefix] = computed_performance</p>
+</dd>
+</dl>
+<p># Dig deeper into the features in fname_ftypes only if there is more than one feature in the
+#    list and the performance drop is nontrivial
+logging.info(“Checking performance for {} ({}…)”.format(prefix, fnames_ftypes[:5]))
+check = _check_whether_tree_should_expand(</p>
+<blockquote>
+<div><p>baseline_performance=baseline_performance, computed_performance=computed_performance,
+sensitivity=sensitivity, stopping_metric=stopping_metric, is_metric_larger_the_better=is_metric_larger_the_better)</p>
+</div></blockquote>
+<dl>
+<dt>if len(fnames_ftypes) &gt; 1 and check:</dt><dd><p>logging.info(“Expanding {} ({}…)”.format(prefix, fnames_ftypes[:5]))
+feature_list_queue = _repartition(</p>
+<blockquote>
+<div><p>feature_list_queue=feature_list_queue, fnames_ftypes=fnames_ftypes, split_feature_group_on_period=split_feature_group_on_period)</p>
+</div></blockquote>
+</dd>
+<dt>else:</dt><dd><p>logging.info(“Not expanding {} ({}…)”.format(prefix, fnames_ftypes[:5]))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p># Baseline performance is grouped in with individual_feature_importance_results
+individual_feature_performance_results = dict(</p>
+<blockquote>
+<div><p>out, <a href="#id1"><span class="problematic" id="id2">**</span></a>{k: v for k, v in individual_feature_performances.items()})</p>
+</div></blockquote>
+<p>group_feature_performance_results = {k: v for k, v in feature_group_performances.items()}</p>
+<dl>
+<dt>if extra_groups is not None:</dt><dd><p>logging.info(“Computing performances for extra groups {}”.format(extra_groups.keys()))
+for group_name, performances in _get_extra_feature_group_performances(</p>
+<blockquote>
+<div><blockquote>
+<div><p>factory=factory,
+trainer=trainer,
+parse_fn=parse_fn,
+extra_groups=extra_groups,
+feature_to_type=feature_to_type,
+record_count=record_count).items():</p>
+</div></blockquote>
+<p>group_feature_performance_results[group_name] = performances</p>
+</div></blockquote>
+</dd>
+<dt>else:</dt><dd><p>logging.info(“Not computing performances for extra groups”)</p>
+</dd>
+<dt>return {INDIVIDUAL: individual_feature_performance_results,</dt><dd><p>GROUP: group_feature_performance_results}</p>
+</dd>
+</dl>
+</dd>
+<dt>def _feature_importances_serial_algorithm(</dt><dd><blockquote>
+<div><p>data_dir, trainer, parse_fn, fnames, file_list=None, datarecord_filter_fn=None, factory=None, record_count=99999):</p>
+</div></blockquote>
+<p>“””Serial algorithm for feature importances. This algorithm computes the
+importance of each feature.
+“””
+factory = PermutedInputFnFactory(</p>
+<blockquote>
+<div><p>data_dir=data_dir, record_count=record_count, file_list=file_list, datarecord_filter_fn=datarecord_filter_fn)</p>
+</div></blockquote>
+<p>feature_to_type = _get_feature_types_from_records(records=factory.records, fnames=fnames)</p>
+<p>out = {}
+for fname, ftype in list(feature_to_type.items()) + [(None, None)]:</p>
+<blockquote>
+<div><p>logging.info(”nnComputing importances for {}nn”.format(fname))
+start = time.time()
+fname_ftypes = [(fname, ftype)] if fname is not None else []
+out[str(fname)] = _compute_multiple_permuted_performances_from_trainer(</p>
+<blockquote>
+<div><p>factory=factory, fname_ftypes=fname_ftypes,
+trainer=trainer, parse_fn=parse_fn, record_count=record_count)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>logging.info(”nnImportances computed for {} in {} seconds nn”.format(</dt><dd><p>fname, int(time.time() - start)))</p>
+</dd>
+</dl>
+</div></blockquote>
+<p># The serial algorithm does not compute group feature results.
+return {INDIVIDUAL: out, GROUP: {}}</p>
+</dd>
+<dt>def _process_feature_name_for_mldash(feature_name):</dt><dd><p># Using a forward slash in the name causes feature importance writing to fail because strato interprets it as
+#   part of a url
+return feature_name.replace(“/”, “__”)</p>
+</dd>
+<dt>def compute_feature_importances(</dt><dd><blockquote>
+<div><p>trainer, data_dir=None, feature_config=None, algorithm=TREE, parse_fn=None, datarecord_filter_fn=None, <a href="#id3"><span class="problematic" id="id4">**</span></a>kwargs):</p>
+</div></blockquote>
+<p>“””Perform a feature importance analysis on a trained model
+Args:</p>
+<blockquote>
+<div><p>trainer: (DataRecordTrainer): A DataRecordTrainer object
+data_dir: (str): The location of the training or testing data to compute importances over.</p>
+<blockquote>
+<div><p>If None, the trainer._eval_files are used</p>
+</div></blockquote>
+<dl class="simple">
+<dt>feature_config (contrib.FeatureConfig): The feature config object. If this is not provided, it</dt><dd><p>is taken from the trainer</p>
+</dd>
+</dl>
+<p>algorithm (str): The algorithm to use
+parse_fn: (function): The parse_fn used by eval_input_fn. By default this is</p>
+<blockquote>
+<div><p>feature_config.get_parse_fn()</p>
+</div></blockquote>
+<dl class="simple">
+<dt>datarecord_filter_fn (function): a function takes a single data sample in com.twitter.ml.api.ttypes.DataRecord format</dt><dd><p>and return a boolean value, to indicate if this data record should be kept in feature importance module or not.</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>“””</p>
+<p># We only use the trainer’s eval files if an override data_dir is not provided
+if data_dir is None:</p>
+<blockquote>
+<div><p>logging.info(“Using trainer._eval_files (found {} as files)”.format(trainer._eval_files))
+file_list = trainer._eval_files</p>
+</div></blockquote>
+<dl class="simple">
+<dt>else:</dt><dd><p>logging.info(“data_dir provided. Looking at {} for data.”.format(data_dir))
+file_list = None</p>
+</dd>
+</dl>
+<p>feature_config = feature_config or trainer._feature_config
+out = {}
+if not feature_config:</p>
+<blockquote>
+<div><p>logging.warn(“WARN: Not computing feature importance because trainer._feature_config is None”)
+out = None</p>
+</div></blockquote>
+<dl>
+<dt>else:</dt><dd><p>parse_fn = parse_fn if parse_fn is not None else feature_config.get_parse_fn()
+fnames = _get_feature_name_from_config(feature_config)
+logging.info(“Computing importances for {}”.format(fnames))
+logging.info(“Using the {} feature importance computation algorithm”.format(algorithm))
+algorithm = {</p>
+<blockquote>
+<div><p>SERIAL: _feature_importances_serial_algorithm,
+TREE: _feature_importances_tree_algorithm}[algorithm]</p>
+</div></blockquote>
+<p>out = algorithm(data_dir=data_dir, trainer=trainer, parse_fn=parse_fn, fnames=fnames, file_list=file_list, datarecord_filter_fn=datarecord_filter_fn, <a href="#id5"><span class="problematic" id="id6">**</span></a>kwargs)</p>
+</dd>
+</dl>
+<p>return out</p>
+</dd>
+<dt>def write_feature_importances_to_hdfs(</dt><dd><blockquote>
+<div><p>trainer, feature_importances, output_path=None, metric=”roc_auc”):</p>
+</div></blockquote>
+<p>“””Publish a feature importance analysis to hdfs as a tsv
+Args:</p>
+<blockquote>
+<div><p>(see compute_feature_importances for other args)
+trainer (Trainer)
+feature_importances (dict): Dictionary of feature importances
+output_path (str): The remote or local file to write the feature importances to. If not</p>
+<blockquote>
+<div><p>provided, this is inferred to be the trainer save dir</p>
+</div></blockquote>
+<p>metric (str): The metric to write to tsv</p>
+</div></blockquote>
+<p>“””
+# String formatting appends (Individual) or (Group) to feature name depending on type
+perfs = {“{} ({})”.format(k, importance_key) if k != “None” else k: v[metric]</p>
+<blockquote>
+<div><p>for importance_key, importance_value in feature_importances.items()
+for k, v in importance_value.items()}</p>
+</div></blockquote>
+<dl>
+<dt>output_path = (“{}/feature_importances-{}”.format(</dt><dd><p>trainer._save_dir[:-1] if trainer._save_dir.endswith(‘/’) else trainer._save_dir,
+output_path if output_path is not None else str(time.time())))</p>
+</dd>
+<dt>if len(perfs) &gt; 0:</dt><dd><p>logging.info(“Writing feature_importances for {} to hdfs”.format(perfs.keys()))
+entries = [</p>
+<blockquote>
+<div><dl class="simple">
+<dt>{</dt><dd><p>“name”: name,
+“drop”: perfs[“None”] - perfs[name],
+“pdrop”: 100 * (perfs[“None”] - perfs[name]) / (perfs[“None”] + 1e-8),
+“perf”: perfs[name]</p>
+</dd>
+</dl>
+<p>} for name in perfs.keys()]</p>
+</div></blockquote>
+<p>out = [“NametPerformance DroptPercent Performance DroptPerformance”]
+for entry in sorted(entries, key=lambda d: d[“drop”]):</p>
+<blockquote>
+<div><p>out.append(“{name}t{drop}t{pdrop}%t{perf}”.format(<a href="#id7"><span class="problematic" id="id8">**</span></a>entry))</p>
+</div></blockquote>
+<p>logging.info(”n”.join(out))
+write_list_to_hdfs_gfile(out, output_path)
+logging.info(“Wrote feature feature_importances to {}”.format(output_path))</p>
+</dd>
+<dt>else:</dt><dd><p>logging.info(“Not writing feature_importances to hdfs”)</p>
+</dd>
+</dl>
+<p>return output_path</p>
+</dd>
+<dt>def write_feature_importances_to_ml_dash(trainer, feature_importances, feature_config=None):</dt><dd><p># type: (DataRecordTrainer, FeatureConfig, dict) -&gt; None
+“””Publish feature importances + all feature names to ML Metastore
+Args:</p>
+<blockquote>
+<div><p>trainer: (DataRecordTrainer): A DataRecordTrainer object
+feature_config (contrib.FeatureConfig): The feature config object. If this is not provided, it</p>
+<blockquote>
+<div><p>is taken from the trainer</p>
+</div></blockquote>
+<p>feature_importances (dict, default=None): Dictionary of precomputed feature importances
+feature_importance_metric (str, default=None): The metric to write to ML Dashboard</p>
+</div></blockquote>
+<p>“””
+experiment_tracking_path = trainer.experiment_tracker.tracking_path</p>
+<blockquote>
+<div><p>if trainer.experiment_tracker.tracking_pathelse ExperimentTracker.guess_path(trainer._save_dir)</p>
+</div></blockquote>
+<p>logging.info(‘Computing feature importances for run: {}’.format(experiment_tracking_path))</p>
+<p>feature_importance_list = []
+for key in feature_importances:</p>
+<blockquote>
+<div><dl>
+<dt>for feature, imps in feature_importances[key].items():</dt><dd><p>logging.info(‘FEATURE NAME: {}’.format(feature))
+feature_name = feature.split(’ (‘).pop(0)
+for metric_name, value in imps.items():</p>
+<blockquote>
+<div><dl class="simple">
+<dt>try:</dt><dd><p>imps[metric_name] = float(value)
+logging.info(‘Wrote feature importance value {} for metric: {}’.format(str(value), metric_name))</p>
+</dd>
+<dt>except Exception as ex:</dt><dd><p>logging.error(“Skipping writing metric:{} to ML Metastore due to invalid metric value: {} or value type: {}. Exception: {}”.format(metric_name, str(value), type(value), str(ex)))
+pass</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl class="simple">
+<dt>feature_importance_list.append(FeatureImportance(</dt><dd><p>run_id=experiment_tracking_path,
+feature_name=_process_feature_name_for_mldash(feature_name),
+feature_importance_metrics=imps,
+is_group=key == GROUP</p>
+</dd>
+</dl>
+<p>))</p>
+</dd>
+</dl>
+</div></blockquote>
+</dd>
+<dt># setting feature config to match the one used in compute_feature_importances</dt><dd><p>feature_config = feature_config or trainer._feature_config
+feature_names = FeatureNames(</p>
+<blockquote>
+<div><p>run_id=experiment_tracking_path,
+names=list(feature_config.features.keys())</p>
+</div></blockquote>
+<p>)</p>
+<dl class="simple">
+<dt>try:</dt><dd><p>client = ModelRepoClient()
+logging.info(‘Writing feature importances to ML Metastore’)
+client.add_feature_importances(feature_importance_list)
+logging.info(‘Writing feature names to ML Metastore’)
+client.add_feature_names(feature_names)</p>
+</dd>
+<dt>except (HTTPError, RetryError) as err:</dt><dd><dl class="simple">
+<dt>logging.error(‘Feature importance is not being written due to: ‘</dt><dd><p>‘HTTPError when attempting to write to ML Metastore: n{}.’.format(err))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../_sources/twml/twml/contrib/feature_importances/feature_importances.py.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

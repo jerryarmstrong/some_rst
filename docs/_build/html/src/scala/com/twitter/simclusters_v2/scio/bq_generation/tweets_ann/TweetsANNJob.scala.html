@@ -1,0 +1,517 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../" id="documentation_options" src="../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.simclusters_v2.scio.bq_generation
+package tweets_ann</p>
+<p>import com.google.api.services.bigquery.model.TimePartitioning
+import com.spotify.scio.ScioContext
+import com.spotify.scio.coders.Coder
+import com.twitter.beam.io.dal.DAL
+import com.twitter.beam.io.fs.multiformat.PathLayout
+import com.twitter.beam.job.DateRangeOptions
+import com.twitter.conversions.DurationOps.richDurationFromInt
+import com.twitter.dal.client.dataset.KeyValDALDataset
+import com.twitter.scalding_internal.multiformat.format.keyval.KeyVal
+import com.twitter.scio_internal.coders.ThriftStructLazyBinaryScroogeCoder
+import com.twitter.scio_internal.job.ScioBeamJob
+import com.twitter.scrooge.ThriftStruct
+import com.twitter.simclusters_v2.scio.bq_generation.common.BQGenerationUtil.getMTSConsumerEmbeddingsFav90P20MSQL
+import com.twitter.simclusters_v2.scio.bq_generation.common.BQGenerationUtil.getInterestedIn2020SQL
+import com.twitter.simclusters_v2.scio.bq_generation.tweets_ann.TweetsANNFromBQ.getTweetRecommendationsBQ
+import com.twitter.simclusters_v2.hdfs_sources.OfflineTweetRecommendationsFromInterestedIn20M145K2020ScalaDataset
+import com.twitter.simclusters_v2.hdfs_sources.OfflineTweetRecommendationsFromInterestedIn20M145K2020Hl0El15ScalaDataset
+import com.twitter.simclusters_v2.hdfs_sources.OfflineTweetRecommendationsFromInterestedIn20M145K2020Hl2El15ScalaDataset
+import com.twitter.simclusters_v2.hdfs_sources.OfflineTweetRecommendationsFromInterestedIn20M145K2020Hl2El50ScalaDataset
+import com.twitter.simclusters_v2.hdfs_sources.OfflineTweetRecommendationsFromInterestedIn20M145K2020Hl8El50ScalaDataset
+import com.twitter.simclusters_v2.hdfs_sources.OfflineTweetRecommendationsFromMtsConsumerEmbeddingsScalaDataset
+import com.twitter.simclusters_v2.scio.bq_generation.common.BQTableDetails
+import com.twitter.simclusters_v2.thriftscala.CandidateTweets
+import com.twitter.simclusters_v2.thriftscala.CandidateTweetsList
+import com.twitter.tcdc.bqblaster.beam.syntax.BigQueryIOHelpers
+import com.twitter.tcdc.bqblaster.beam.BQBlasterIO.AvroConverter
+import com.twitter.tcdc.bqblaster.core.avro.TypedProjection
+import com.twitter.tcdc.bqblaster.core.transform.RootTransform
+import java.time.Instant
+import org.apache.beam.sdk.io.gcp.bigquery.BigQueryIO
+import org.joda.time.DateTime</p>
+<dl>
+<dt>trait TweetsANNJob extends ScioBeamJob[DateRangeOptions] {</dt><dd><p>// Configs to set for different type of embeddings and jobs
+val isAdhoc: Boolean
+val getConsumerEmbeddingsSQLFunc: (DateTime, Int) =&gt; String
+val outputTable: BQTableDetails
+val keyValDatasetOutputPath: String
+val tweetRecommentationsSnapshotDataset: KeyValDALDataset[KeyVal[Long, CandidateTweetsList]]
+val tweetEmbeddingsGenerationHalfLife: Int = Config.SimClustersTweetEmbeddingsGenerationHalfLife
+val tweetEmbeddingsGenerationEmbeddingLength: Int =</p>
+<blockquote>
+<div><p>Config.SimClustersTweetEmbeddingsGenerationEmbeddingLength</p>
+</div></blockquote>
+<p>// Base configs
+val projectId = “twttr-recos-ml-prod”
+val environment: DAL.Env = if (isAdhoc) DAL.Environment.Dev else DAL.Environment.Prod</p>
+<dl>
+<dt>override implicit def scroogeCoder[T &lt;: ThriftStruct: Manifest]: Coder[T] =</dt><dd><p>ThriftStructLazyBinaryScroogeCoder.scroogeCoder</p>
+</dd>
+<dt>override def configurePipeline(sc: ScioContext, opts: DateRangeOptions): Unit = {</dt><dd><p>// The time when the job is scheduled
+val queryTimestamp = opts.interval.getEnd</p>
+<p>// Read consumer embeddings SQL
+val consumerEmbeddingsSQL = getConsumerEmbeddingsSQLFunc(queryTimestamp, 14)</p>
+<p>// Generate tweet embeddings and tweet ANN results
+val tweetRecommendations =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>getTweetRecommendationsBQ(</dt><dd><p>sc,
+queryTimestamp,
+consumerEmbeddingsSQL,
+tweetEmbeddingsGenerationHalfLife,
+tweetEmbeddingsGenerationEmbeddingLength</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<p>// Setup BQ writer
+val ingestionTime = opts.getDate().value.getEnd.toDate
+val bqFieldsTransform = RootTransform</p>
+<blockquote>
+<div><p>.Builder()
+.withPrependedFields(“ingestionTime” -&gt; TypedProjection.fromConstant(ingestionTime))</p>
+</div></blockquote>
+<dl class="simple">
+<dt>val timePartitioning = new TimePartitioning()</dt><dd><p>.setType(“HOUR”).setField(“ingestionTime”).setExpirationMs(3.days.inMilliseconds)</p>
+</dd>
+<dt>val bqWriter = BigQueryIO</dt><dd><p>.write[CandidateTweets]
+.to(outputTable.toString)
+.withExtendedErrorInfo()
+.withTimePartitioning(timePartitioning)
+.withLoadJobProjectId(projectId)
+.withThriftSupport(bqFieldsTransform.build(), AvroConverter.Legacy)
+.withCreateDisposition(BigQueryIO.Write.CreateDisposition.CREATE_IF_NEEDED)
+.withWriteDisposition(BigQueryIO.Write.WriteDisposition.WRITE_APPEND)</p>
+</dd>
+</dl>
+<p>// Save Tweet ANN results to BQ
+tweetRecommendations</p>
+<blockquote>
+<div><dl>
+<dt>.map { userToTweetRecommendations =&gt;</dt><dd><dl class="simple">
+<dt>{</dt><dd><dl class="simple">
+<dt>CandidateTweets(</dt><dd><p>targetUserId = userToTweetRecommendations.userId,
+recommendedTweets = userToTweetRecommendations.tweetCandidates)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}
+.saveAsCustomOutput(s”WriteToBQTable - ${outputTable}”, bqWriter)</p>
+</div></blockquote>
+<p>// Save Tweet ANN results as KeyValSnapshotDataset
+tweetRecommendations</p>
+<blockquote>
+<div><dl>
+<dt>.map { userToTweetRecommendations =&gt;</dt><dd><dl class="simple">
+<dt>KeyVal(</dt><dd><p>userToTweetRecommendations.userId,
+CandidateTweetsList(userToTweetRecommendations.tweetCandidates))</p>
+</dd>
+</dl>
+</dd>
+<dt>}.saveAsCustomOutput(</dt><dd><p>name = “WriteTweetRecommendationsToKeyValDataset”,
+DAL.writeVersionedKeyVal(</p>
+<blockquote>
+<div><p>tweetRecommentationsSnapshotDataset,
+PathLayout.VersionedPath(prefix =</p>
+<blockquote>
+<div><dl>
+<dt>((if (!isAdhoc)</dt><dd><blockquote>
+<div><p>Config.RootMHPath</p>
+</div></blockquote>
+<dl class="simple">
+<dt>else</dt><dd><p>Config.AdhocRootPath)</p>
+</dd>
+</dl>
+<ul class="simple">
+<li><p>keyValDatasetOutputPath)),</p></li>
+</ul>
+</dd>
+</dl>
+</div></blockquote>
+<p>instant = Instant.ofEpochMilli(opts.interval.getEndMillis - 1L),
+environmentOverride = environment,</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Scio job for adhoc run for tweet recommendations from IIKF 2020</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>object IIKF2020TweetsANNBQAdhocJob extends TweetsANNJob {</dt><dd><p>override val isAdhoc = true
+override val getConsumerEmbeddingsSQLFunc = getInterestedIn2020SQL
+override val outputTable = BQTableDetails(</p>
+<blockquote>
+<div><p>“twttr-recos-ml-prod”,
+“multi_type_simclusters”,
+“offline_tweet_recommendations_from_interested_in_20M_145K_2020_adhoc”)</p>
+</div></blockquote>
+<p>override val keyValDatasetOutputPath = Config.IIKFANNOutputPath
+override val tweetRecommentationsSnapshotDataset: KeyValDALDataset[</p>
+<blockquote>
+<div><p>KeyVal[Long, CandidateTweetsList]</p>
+</div></blockquote>
+<dl class="simple">
+<dt>] =</dt><dd><p>OfflineTweetRecommendationsFromInterestedIn20M145K2020ScalaDataset</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Scio job for adhoc run for tweet recommendations from IIKF 2020 with</p></li>
+<li><ul>
+<li><p>Half life = 8hrs</p></li>
+</ul>
+</li>
+<li><ul>
+<li><p>Embedding Length = 50</p></li>
+</ul>
+</li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>object IIKF2020Hl8El50TweetsANNBQAdhocJob extends TweetsANNJob {</dt><dd><p>override val isAdhoc = true
+override val getConsumerEmbeddingsSQLFunc = getInterestedIn2020SQL
+override val outputTable = BQTableDetails(</p>
+<blockquote>
+<div><p>“twttr-recos-ml-prod”,
+“multi_type_simclusters”,
+“offline_tweet_recommendations_from_interested_in_20M_145K_2020_HL_8_EL_50_adhoc”)</p>
+</div></blockquote>
+<p>override val keyValDatasetOutputPath = Config.IIKFHL8EL50ANNOutputPath
+override val tweetEmbeddingsGenerationEmbeddingLength: Int = 50
+override val tweetRecommentationsSnapshotDataset: KeyValDALDataset[</p>
+<blockquote>
+<div><p>KeyVal[Long, CandidateTweetsList]</p>
+</div></blockquote>
+<dl class="simple">
+<dt>] = {</dt><dd><p>OfflineTweetRecommendationsFromInterestedIn20M145K2020Hl8El50ScalaDataset</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Scio job for adhoc run for tweet recommendations from MTS Consumer Embeddings</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>object MTSConsumerEmbeddingsTweetsANNBQAdhocJob extends TweetsANNJob {</dt><dd><p>override val isAdhoc = true
+override val getConsumerEmbeddingsSQLFunc = getMTSConsumerEmbeddingsFav90P20MSQL
+override val outputTable = BQTableDetails(</p>
+<blockquote>
+<div><p>“twttr-recos-ml-prod”,
+“multi_type_simclusters”,
+“offline_tweet_recommendations_from_mts_consumer_embeddings_adhoc”)</p>
+</div></blockquote>
+<p>override val keyValDatasetOutputPath = Config.MTSConsumerEmbeddingsANNOutputPath
+override val tweetRecommentationsSnapshotDataset: KeyValDALDataset[</p>
+<blockquote>
+<div><p>KeyVal[Long, CandidateTweetsList]</p>
+</div></blockquote>
+<dl class="simple">
+<dt>] =</dt><dd><p>OfflineTweetRecommendationsFromMtsConsumerEmbeddingsScalaDataset</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>/**
+Scio job for batch run for tweet recommendations from IIKF 2020
+The schedule cmd needs to be run only if there is any change in the config</p>
+<blockquote>
+<div><p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</div></blockquote>
+<dl>
+<dt>object IIKF2020TweetsANNBQBatchJob extends TweetsANNJob {</dt><dd><p>override val isAdhoc = false
+override val getConsumerEmbeddingsSQLFunc = getInterestedIn2020SQL
+override val outputTable = BQTableDetails(</p>
+<blockquote>
+<div><p>“twttr-bq-cassowary-prod”,
+“user”,
+“offline_tweet_recommendations_from_interested_in_20M_145K_2020”)</p>
+</div></blockquote>
+<p>override val keyValDatasetOutputPath = Config.IIKFANNOutputPath
+override val tweetRecommentationsSnapshotDataset: KeyValDALDataset[</p>
+<blockquote>
+<div><p>KeyVal[Long, CandidateTweetsList]</p>
+</div></blockquote>
+<dl class="simple">
+<dt>] =</dt><dd><p>OfflineTweetRecommendationsFromInterestedIn20M145K2020ScalaDataset</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>/**
+Scio job for batch run for tweet recommendations from IIKF 2020 with parameter setup:</p>
+<blockquote>
+<div><ul class="simple">
+<li><p>Half Life: None, no decay, direct sum</p></li>
+<li><p>Embedding Length: 15</p></li>
+</ul>
+</div></blockquote>
+<dl>
+<dt>The schedule cmd needs to be run only if there is any change in the config</dt><dd><p><a href="#id9"><span class="problematic" id="id10">*</span></a>/</p>
+</dd>
+<dt>object IIKF2020Hl0El15TweetsANNBQBatchJob extends TweetsANNJob {</dt><dd><p>override val isAdhoc = false
+override val getConsumerEmbeddingsSQLFunc = getInterestedIn2020SQL
+override val outputTable = BQTableDetails(</p>
+<blockquote>
+<div><p>“twttr-bq-cassowary-prod”,
+“user”,
+“offline_tweet_recommendations_from_interested_in_20M_145K_2020_HL_0_EL_15”)</p>
+</div></blockquote>
+<p>override val keyValDatasetOutputPath = Config.IIKFHL0EL15ANNOutputPath
+override val tweetEmbeddingsGenerationHalfLife: Int = -1
+override val tweetRecommentationsSnapshotDataset: KeyValDALDataset[</p>
+<blockquote>
+<div><p>KeyVal[Long, CandidateTweetsList]</p>
+</div></blockquote>
+<dl class="simple">
+<dt>] =</dt><dd><p>OfflineTweetRecommendationsFromInterestedIn20M145K2020Hl0El15ScalaDataset</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>/**
+Scio job for batch run for tweet recommendations from IIKF 2020 with parameter setup:</p>
+<blockquote>
+<div><ul class="simple">
+<li><p>Half Life: 2hrs</p></li>
+<li><p>Embedding Length: 15</p></li>
+</ul>
+</div></blockquote>
+<dl>
+<dt>The schedule cmd needs to be run only if there is any change in the config</dt><dd><p><a href="#id11"><span class="problematic" id="id12">*</span></a>/</p>
+</dd>
+<dt>object IIKF2020Hl2El15TweetsANNBQBatchJob extends TweetsANNJob {</dt><dd><p>override val isAdhoc = false
+override val getConsumerEmbeddingsSQLFunc = getInterestedIn2020SQL
+override val outputTable = BQTableDetails(</p>
+<blockquote>
+<div><p>“twttr-bq-cassowary-prod”,
+“user”,
+“offline_tweet_recommendations_from_interested_in_20M_145K_2020_HL_2_EL_15”)</p>
+</div></blockquote>
+<p>override val keyValDatasetOutputPath = Config.IIKFHL2EL15ANNOutputPath
+override val tweetEmbeddingsGenerationHalfLife: Int = 7200000 // 2hrs in ms
+override val tweetRecommentationsSnapshotDataset: KeyValDALDataset[</p>
+<blockquote>
+<div><p>KeyVal[Long, CandidateTweetsList]</p>
+</div></blockquote>
+<dl class="simple">
+<dt>] =</dt><dd><p>OfflineTweetRecommendationsFromInterestedIn20M145K2020Hl2El15ScalaDataset</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>/**
+Scio job for batch run for tweet recommendations from IIKF 2020 with parameter setup:</p>
+<blockquote>
+<div><ul class="simple">
+<li><p>Half Life: 2hrs</p></li>
+<li><p>Embedding Length: 50</p></li>
+</ul>
+</div></blockquote>
+<dl>
+<dt>The schedule cmd needs to be run only if there is any change in the config</dt><dd><p><a href="#id13"><span class="problematic" id="id14">*</span></a>/</p>
+</dd>
+<dt>object IIKF2020Hl2El50TweetsANNBQBatchJob extends TweetsANNJob {</dt><dd><p>override val isAdhoc = false
+override val getConsumerEmbeddingsSQLFunc = getInterestedIn2020SQL
+override val outputTable = BQTableDetails(</p>
+<blockquote>
+<div><p>“twttr-bq-cassowary-prod”,
+“user”,
+“offline_tweet_recommendations_from_interested_in_20M_145K_2020_HL_2_EL_50”)</p>
+</div></blockquote>
+<p>override val keyValDatasetOutputPath = Config.IIKFHL2EL50ANNOutputPath
+override val tweetEmbeddingsGenerationHalfLife: Int = 7200000 // 2hrs in ms
+override val tweetEmbeddingsGenerationEmbeddingLength: Int = 50
+override val tweetRecommentationsSnapshotDataset: KeyValDALDataset[</p>
+<blockquote>
+<div><p>KeyVal[Long, CandidateTweetsList]</p>
+</div></blockquote>
+<dl class="simple">
+<dt>] =</dt><dd><p>OfflineTweetRecommendationsFromInterestedIn20M145K2020Hl2El50ScalaDataset</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>/**
+Scio job for batch run for tweet recommendations from IIKF 2020 with parameter setup:</p>
+<blockquote>
+<div><ul class="simple">
+<li><p>Half Life: 8hrs</p></li>
+<li><p>Embedding Length: 50</p></li>
+</ul>
+</div></blockquote>
+<dl>
+<dt>The schedule cmd needs to be run only if there is any change in the config</dt><dd><p><a href="#id15"><span class="problematic" id="id16">*</span></a>/</p>
+</dd>
+<dt>object IIKF2020Hl8El50TweetsANNBQBatchJob extends TweetsANNJob {</dt><dd><p>override val isAdhoc = false
+override val getConsumerEmbeddingsSQLFunc = getInterestedIn2020SQL
+override val outputTable = BQTableDetails(</p>
+<blockquote>
+<div><p>“twttr-bq-cassowary-prod”,
+“user”,
+“offline_tweet_recommendations_from_interested_in_20M_145K_2020_HL_8_EL_50”)</p>
+</div></blockquote>
+<p>override val keyValDatasetOutputPath = Config.IIKFHL8EL50ANNOutputPath
+override val tweetEmbeddingsGenerationEmbeddingLength: Int = 50
+override val tweetRecommentationsSnapshotDataset: KeyValDALDataset[</p>
+<blockquote>
+<div><p>KeyVal[Long, CandidateTweetsList]</p>
+</div></blockquote>
+<dl class="simple">
+<dt>] =</dt><dd><p>OfflineTweetRecommendationsFromInterestedIn20M145K2020Hl8El50ScalaDataset</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>/**
+Scio job for batch run for tweet recommendations from MTS Consumer Embeddings
+The schedule cmd needs to be run only if there is any change in the config</p>
+<blockquote>
+<div><p><a href="#id17"><span class="problematic" id="id18">*</span></a>/</p>
+</div></blockquote>
+<dl>
+<dt>object MTSConsumerEmbeddingsTweetsANNBQBatchJob extends TweetsANNJob {</dt><dd><p>override val isAdhoc = false
+override val getConsumerEmbeddingsSQLFunc = getMTSConsumerEmbeddingsFav90P20MSQL
+override val outputTable = BQTableDetails(</p>
+<blockquote>
+<div><p>“twttr-bq-cassowary-prod”,
+“user”,
+“offline_tweet_recommendations_from_mts_consumer_embeddings”)</p>
+</div></blockquote>
+<p>override val keyValDatasetOutputPath = Config.MTSConsumerEmbeddingsANNOutputPath
+override val tweetRecommentationsSnapshotDataset: KeyValDALDataset[</p>
+<blockquote>
+<div><p>KeyVal[Long, CandidateTweetsList]</p>
+</div></blockquote>
+<dl class="simple">
+<dt>] =</dt><dd><p>OfflineTweetRecommendationsFromMtsConsumerEmbeddingsScalaDataset</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../_sources/src/scala/com/twitter/simclusters_v2/scio/bq_generation/tweets_ann/TweetsANNJob.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

@@ -1,0 +1,620 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.core.earlybird.index.inverted;</p>
+<p>import java.io.IOException;
+import java.util.Comparator;
+import java.util.Map;</p>
+<p>import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Preconditions;</p>
+<p>import org.apache.lucene.index.PostingsEnum;
+import org.apache.lucene.index.Terms;
+import org.apache.lucene.index.TermsEnum;
+import org.apache.lucene.search.DocIdSetIterator;
+import org.apache.lucene.util.BytesRef;
+import org.apache.lucene.util.packed.PackedInts;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;</p>
+<p>import com.twitter.search.common.metrics.SearchCounter;
+import com.twitter.search.common.schema.base.EarlybirdFieldType;
+import com.twitter.search.common.util.hash.BDZAlgorithm;
+import com.twitter.search.common.util.hash.BDZAlgorithm.MPHFNotFoundException;
+import com.twitter.search.common.util.hash.KeysSource;
+import com.twitter.search.common.util.io.flushable.DataDeserializer;
+import com.twitter.search.common.util.io.flushable.DataSerializer;
+import com.twitter.search.common.util.io.flushable.FlushInfo;
+import com.twitter.search.common.util.io.flushable.Flushable;
+import com.twitter.search.core.earlybird.facets.FacetIDMap.FacetField;
+import com.twitter.search.core.earlybird.index.DocIDToTweetIDMapper;
+import com.twitter.search.core.earlybird.index.EarlybirdIndexSegmentAtomicReader;</p>
+<dl>
+<dt>public class OptimizedMemoryIndex extends InvertedIndex implements Flushable {</dt><dd><p>private static final Logger LOG = LoggerFactory.getLogger(OptimizedMemoryIndex.class);
+private static final Comparator&lt;BytesRef&gt; BYTES_REF_COMPARATOR = Comparator.naturalOrder();</p>
+<dl class="simple">
+<dt>private static final SearchCounter MPH_NOT_FOUND_COUNT =</dt><dd><p>SearchCounter.export(“twitter_optimized_index_mph_not_found_count”);</p>
+</dd>
+</dl>
+<p>private final PackedInts.Reader numPostings;
+private final PackedInts.Reader postingListPointers;
+private final PackedInts.Reader offensiveCounters;
+private final MultiPostingLists postingLists;</p>
+<p>private final TermDictionary dictionary;</p>
+<p>private final int numDocs;
+private final int sumTotalTermFreq;
+private final int sumTermDocFreq;</p>
+<dl>
+<dt>private OptimizedMemoryIndex(EarlybirdFieldType fieldType,</dt><dd><blockquote>
+<div><p>int numDocs,
+int sumTermDocFreq,
+int sumTotalTermFreq,
+PackedInts.Reader numPostings,
+PackedInts.Reader postingListPointers,
+PackedInts.Reader offensiveCounters,
+MultiPostingLists postingLists,
+TermDictionary dictionary) {</p>
+</div></blockquote>
+<p>super(fieldType);
+this.numDocs = numDocs;
+this.sumTermDocFreq = sumTermDocFreq;
+this.sumTotalTermFreq = sumTotalTermFreq;
+this.numPostings = numPostings;
+this.postingListPointers = postingListPointers;
+this.offensiveCounters = offensiveCounters;
+this.postingLists = postingLists;
+this.dictionary = dictionary;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>public OptimizedMemoryIndex(</dt><dd><blockquote>
+<div><p>EarlybirdFieldType fieldType,
+String field,
+InvertedRealtimeIndex source,
+Map&lt;Integer, int[]&gt; termIDMapper,
+FacetField facetField,
+DocIDToTweetIDMapper originalTweetIdMapper,
+DocIDToTweetIDMapper optimizedTweetIdMapper) throws IOException {</p>
+</div></blockquote>
+<p>super(fieldType);</p>
+<p>numDocs = source.getNumDocs();
+sumTermDocFreq = source.getSumTermDocFreq();
+sumTotalTermFreq = source.getSumTotalTermFreq();</p>
+<p>Preconditions.checkNotNull(originalTweetIdMapper, “The segment must have a tweet ID mapper.”);
+Preconditions.checkNotNull(optimizedTweetIdMapper,</p>
+<blockquote>
+<div><p>“The optimized tweet ID mapper cannot be null.”);</p>
+</div></blockquote>
+<p>// We rely on the fact that new terms always have a greater term ID. We ignore all terms that
+// are equal to or greater than numTerms, as they may be incompletely applied. If new terms are
+// added while optimizing, they will be re-added when we re-apply updates.
+final KeysSource termsIterator = source.getKeysSource();
+int numTerms = termsIterator.getNumberOfKeys();
+int maxPublishedPointer = source.getMaxPublishedPointer();</p>
+<p>int[] tempPostingListPointers = new int[numTerms];</p>
+<p>BDZAlgorithm termsHashFunction = null;</p>
+<p>final boolean supportTermTextLookup = facetField != null || fieldType.isSupportTermTextLookup();
+if (supportTermTextLookup) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>try {</dt><dd><p>termsHashFunction = new BDZAlgorithm(termsIterator);</p>
+</dd>
+<dt>} catch (MPHFNotFoundException e) {</dt><dd><p>// we couldn’t find a mphf for this field
+// no problem, this can happen for very small fields
+// - just use the fst in that case
+LOG.warn(“Unable to build MPH for field: {}”, field);
+MPH_NOT_FOUND_COUNT.increment();</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>// Make sure to only call the expensive computeNumPostings() once.
+int[] numPostingsSource = computeNumPostings(source, numTerms, maxPublishedPointer);</p>
+<p>// The BDZ Algorithm returns a function from bytesref to term ID. However, these term IDs are
+// different than the original term IDs (it’s a hash function, not a hash _table_), so we have
+// to remap the term IDs to match the ones generated by BDZ. We track that using the termIDMap.
+int[] termIDMap = null;</p>
+<dl>
+<dt>if (termsHashFunction != null) {</dt><dd><p>termsIterator.rewind();
+termIDMap = BDZAlgorithm.createIdMap(termsHashFunction, termsIterator);
+if (facetField != null) {</p>
+<blockquote>
+<div><p>termIDMapper.put(facetField.getFacetId(), termIDMap);</p>
+</div></blockquote>
+<p>}</p>
+<p>PackedInts.Reader termPointers = getPackedInts(source.getTermPointers(), termIDMap);
+this.numPostings = getPackedInts(numPostingsSource, termIDMap);
+this.offensiveCounters = source.getOffensiveCounters() == null ? null</p>
+<blockquote>
+<div><p>: getPackedInts(source.getOffensiveCounters(), termIDMap);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>this.dictionary = new MPHTermDictionary(</dt><dd><p>numTerms,
+termsHashFunction,
+termPointers,
+source.getTermPool(),
+TermPointerEncoding.DEFAULT_ENCODING);</p>
+</dd>
+</dl>
+</dd>
+<dt>} else {</dt><dd><dl class="simple">
+<dt>this.dictionary = FSTTermDictionary.buildFST(</dt><dd><p>source.getTermPool(),
+source.getTermPointers(),
+numTerms,
+BYTES_REF_COMPARATOR,
+supportTermTextLookup,
+TermPointerEncoding.DEFAULT_ENCODING);</p>
+</dd>
+</dl>
+<p>this.numPostings = getPackedInts(numPostingsSource);
+this.offensiveCounters = source.getOffensiveCounters() == null ? null</p>
+<blockquote>
+<div><p>: getPackedInts(source.getOffensiveCounters());</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<p>TermsEnum allTerms = source.createTermsEnum(maxPublishedPointer);</p>
+<dl>
+<dt>this.postingLists = new MultiPostingLists(</dt><dd><p>!fieldType.hasPositions(),
+numPostingsSource,
+source.getMaxPosition());</p>
+</dd>
+<dt>for (int termID = 0; termID &lt; numTerms; termID++) {</dt><dd><p>allTerms.seekExact(termID);
+PostingsEnum postingsEnum = new OptimizingPostingsEnumWrapper(</p>
+<blockquote>
+<div><p>allTerms.postings(null), originalTweetIdMapper, optimizedTweetIdMapper);</p>
+</div></blockquote>
+<p>int mappedTermID = termIDMap != null ? termIDMap[termID] : termID;
+tempPostingListPointers[mappedTermID] =</p>
+<blockquote>
+<div><p>postingLists.copyPostingList(postingsEnum, numPostingsSource[termID]);</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<p>this.postingListPointers = getPackedInts(tempPostingListPointers);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private static int[] map(int[] source, int[] map) {</dt><dd><p>int[] target = new int[map.length];
+for (int i = 0; i &lt; map.length; i++) {</p>
+<blockquote>
+<div><p>target[map[i]] = source[i];</p>
+</div></blockquote>
+<p>}
+return target;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>static PackedInts.Reader getPackedInts(int[] values) {</dt><dd><p>return getPackedInts(values, null);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private static PackedInts.Reader getPackedInts(int[] values, int[] map) {</dt><dd><p>int[] mappedValues = values;
+if (map != null) {</p>
+<blockquote>
+<div><p>mappedValues = map(mappedValues, map);</p>
+</div></blockquote>
+<p>}</p>
+<p>// first determine max value
+long maxValue = Long.MIN_VALUE;
+for (int value : mappedValues) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (value &gt; maxValue) {</dt><dd><p>maxValue = value;</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>PackedInts.Mutable packed =</dt><dd><dl class="simple">
+<dt>PackedInts.getMutable(mappedValues.length, PackedInts.bitsRequired(maxValue),</dt><dd><p>PackedInts.DEFAULT);</p>
+</dd>
+</dl>
+</dd>
+<dt>for (int i = 0; i &lt; mappedValues.length; i++) {</dt><dd><p>packed.set(i, mappedValues[i]);</p>
+</dd>
+</dl>
+<p>}</p>
+<p>return packed;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Returns per-term array containing the number of posting in this index for each term.</p></li>
+<li><p>This call is extremely slow.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>private static int[] computeNumPostings(</dt><dd><p>InvertedRealtimeIndex source,
+int numTerms,
+int maxPublishedPointer</p>
+</dd>
+<dt>) throws IOException {</dt><dd><p>int[] numPostings = new int[numTerms];
+TermsEnum allTerms = source.createTermsEnum(maxPublishedPointer);</p>
+<dl>
+<dt>for (int termID = 0; termID &lt; numTerms; termID++) {</dt><dd><p>allTerms.seekExact(termID);
+PostingsEnum docsEnum = allTerms.postings(null);
+while (docsEnum.nextDoc() != DocIdSetIterator.NO_MORE_DOCS) {</p>
+<blockquote>
+<div><p>numPostings[termID] += docsEnum.freq();</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>return numPostings;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;Override
+public int getNumDocs() {</p>
+<blockquote>
+<div><p>return numDocs;</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public int getSumTotalTermFreq() {</p>
+<blockquote>
+<div><p>return sumTotalTermFreq;</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public int getSumTermDocFreq() {</p>
+<blockquote>
+<div><p>return sumTermDocFreq;</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>public OptimizedPostingLists getPostingLists() {</dt><dd><p>Preconditions.checkState(hasPostingLists());
+return postingLists;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>int getPostingListPointer(int termID) {</dt><dd><p>Preconditions.checkState(hasPostingLists());
+return (int) postingListPointers.get(termID);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>int getNumPostings(int termID) {</dt><dd><p>Preconditions.checkState(hasPostingLists());
+return (int) numPostings.get(termID);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public boolean getTerm(int termID, BytesRef text, BytesRef termPayload) {</dt><dd><p>return dictionary.getTerm(termID, text, termPayload);</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;Override
+public FacetLabelAccessor getLabelAccessor() {</p>
+<blockquote>
+<div><dl>
+<dt>return new FacetLabelAccessor() {</dt><dd><p>&#64;Override
+protected boolean seek(long termID) {</p>
+<blockquote>
+<div><dl>
+<dt>if (termID != EarlybirdIndexSegmentAtomicReader.TERM_NOT_FOUND) {</dt><dd><p>hasTermPayload = getTerm((int) termID, termRef, termPayload);
+offensiveCount = offensiveCounters != null</p>
+<blockquote>
+<div><p>? (int) offensiveCounters.get((int) termID) : 0;</p>
+</div></blockquote>
+<p>return true;</p>
+</dd>
+<dt>} else {</dt><dd><p>return false;</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>};</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public Terms createTerms(int maxPublishedPointer) {</p>
+<blockquote>
+<div><p>return new OptimizedIndexTerms(this);</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public TermsEnum createTermsEnum(int maxPublishedPointer) {</p>
+<blockquote>
+<div><p>return dictionary.createTermsEnum(this);</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public int lookupTerm(BytesRef term) throws IOException {</p>
+<blockquote>
+<div><p>return dictionary.lookupTerm(term);</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public int getLargestDocIDForTerm(int termID) throws IOException {</p>
+<blockquote>
+<div><p>Preconditions.checkState(hasPostingLists());
+if (termID == EarlybirdIndexSegmentAtomicReader.TERM_NOT_FOUND) {</p>
+<blockquote>
+<div><p>return EarlybirdIndexSegmentAtomicReader.TERM_NOT_FOUND;</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><dl class="simple">
+<dt>return postingLists.getLargestDocID((int) postingListPointers.get(termID),</dt><dd><p>(int) numPostings.get(termID));</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public int getDF(int termID) {</p>
+<blockquote>
+<div><p>return (int) numPostings.get(termID);</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public int getNumTerms() {</p>
+<blockquote>
+<div><p>return dictionary.getNumTerms();</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public void getTerm(int termID, BytesRef text) {</p>
+<blockquote>
+<div><p>dictionary.getTerm(termID, text, null);</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>&#64;VisibleForTesting TermDictionary getTermDictionary() {</dt><dd><p>return dictionary;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;Override
+public FlushHandler getFlushHandler() {</p>
+<blockquote>
+<div><p>return new FlushHandler(this);</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>public boolean hasPostingLists() {</dt><dd><dl class="simple">
+<dt>return postingListPointers != null</dt><dd><p>&amp;&amp; postingLists != null
+&amp;&amp; numPostings != null;</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;VisibleForTesting
+OptimizedPostingLists getOptimizedPostingLists() {</p>
+<blockquote>
+<div><p>return postingLists;</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>public static class FlushHandler extends Flushable.Handler&lt;OptimizedMemoryIndex&gt; {</dt><dd><p>private static final String NUM_DOCS_PROP_NAME = “numDocs”;
+private static final String SUM_TOTAL_TERM_FREQ_PROP_NAME = “sumTotalTermFreq”;
+private static final String SUM_TERM_DOC_FREQ_PROP_NAME = “sumTermDocFreq”;
+private static final String USE_MIN_PERFECT_HASH_PROP_NAME = “useMinimumPerfectHashFunction”;
+private static final String SKIP_POSTING_LIST_PROP_NAME = “skipPostingLists”;
+private static final String HAS_OFFENSIVE_COUNTERS_PROP_NAME = “hasOffensiveCounters”;
+public static final String IS_OPTIMIZED_PROP_NAME = “isOptimized”;</p>
+<p>private final EarlybirdFieldType fieldType;</p>
+<dl class="simple">
+<dt>public FlushHandler(EarlybirdFieldType fieldType) {</dt><dd><p>super();
+this.fieldType = fieldType;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public FlushHandler(OptimizedMemoryIndex objectToFlush) {</dt><dd><p>super(objectToFlush);
+fieldType = objectToFlush.fieldType;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;Override
+protected void doFlush(FlushInfo flushInfo, DataSerializer out) throws IOException {</p>
+<blockquote>
+<div><p>long startTime = getClock().nowMillis();
+OptimizedMemoryIndex objectToFlush = getObjectToFlush();
+boolean useHashFunction = objectToFlush.dictionary instanceof MPHTermDictionary;
+boolean skipPostingLists = !objectToFlush.hasPostingLists();</p>
+<p>flushInfo.addIntProperty(NUM_DOCS_PROP_NAME, objectToFlush.numDocs);
+flushInfo.addIntProperty(SUM_TERM_DOC_FREQ_PROP_NAME, objectToFlush.sumTermDocFreq);
+flushInfo.addIntProperty(SUM_TOTAL_TERM_FREQ_PROP_NAME, objectToFlush.sumTotalTermFreq);
+flushInfo.addBooleanProperty(USE_MIN_PERFECT_HASH_PROP_NAME, useHashFunction);
+flushInfo.addBooleanProperty(SKIP_POSTING_LIST_PROP_NAME, skipPostingLists);
+flushInfo.addBooleanProperty(HAS_OFFENSIVE_COUNTERS_PROP_NAME,</p>
+<blockquote>
+<div><p>objectToFlush.offensiveCounters != null);</p>
+</div></blockquote>
+<p>flushInfo.addBooleanProperty(IS_OPTIMIZED_PROP_NAME, true);</p>
+<dl class="simple">
+<dt>if (!skipPostingLists) {</dt><dd><p>out.writePackedInts(objectToFlush.postingListPointers);
+out.writePackedInts(objectToFlush.numPostings);</p>
+</dd>
+</dl>
+<p>}
+if (objectToFlush.offensiveCounters != null) {</p>
+<blockquote>
+<div><p>out.writePackedInts(objectToFlush.offensiveCounters);</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>if (!skipPostingLists) {</dt><dd><dl class="simple">
+<dt>objectToFlush.postingLists.getFlushHandler().flush(</dt><dd><p>flushInfo.newSubProperties(“postingLists”), out);</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+objectToFlush.dictionary.getFlushHandler().flush(flushInfo.newSubProperties(“dictionary”),</p>
+<blockquote>
+<div><p>out);</p>
+</div></blockquote>
+<p>getFlushTimerStats().timerIncrement(getClock().nowMillis() - startTime);</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+protected OptimizedMemoryIndex doLoad(</p>
+<blockquote>
+<div><blockquote>
+<div><p>FlushInfo flushInfo, DataDeserializer in) throws IOException {</p>
+</div></blockquote>
+<p>long startTime = getClock().nowMillis();
+boolean useHashFunction = flushInfo.getBooleanProperty(USE_MIN_PERFECT_HASH_PROP_NAME);
+boolean skipPostingLists = flushInfo.getBooleanProperty(SKIP_POSTING_LIST_PROP_NAME);</p>
+<p>PackedInts.Reader postingListPointers = skipPostingLists ? null : in.readPackedInts();
+PackedInts.Reader numPostings = skipPostingLists ? null : in.readPackedInts();
+PackedInts.Reader offensiveCounters =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>flushInfo.getBooleanProperty(HAS_OFFENSIVE_COUNTERS_PROP_NAME)</dt><dd><p>? in.readPackedInts() : null;</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl class="simple">
+<dt>MultiPostingLists postingLists =  skipPostingLists ? null</dt><dd><dl class="simple">
+<dt>: (new MultiPostingLists.FlushHandler())</dt><dd><p>.load(flushInfo.getSubProperties(“postingLists”), in);</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>TermDictionary dictionary;
+if (useHashFunction) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>dictionary = (new MPHTermDictionary.FlushHandler(TermPointerEncoding.DEFAULT_ENCODING))</dt><dd><p>.load(flushInfo.getSubProperties(“dictionary”), in);</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><dl class="simple">
+<dt>dictionary = (new FSTTermDictionary.FlushHandler(TermPointerEncoding.DEFAULT_ENCODING))</dt><dd><p>.load(flushInfo.getSubProperties(“dictionary”), in);</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+getLoadTimerStats().timerIncrement(getClock().nowMillis() - startTime);</p>
+<dl class="simple">
+<dt>return new OptimizedMemoryIndex(fieldType,</dt><dd><p>flushInfo.getIntProperty(NUM_DOCS_PROP_NAME),
+flushInfo.getIntProperty(SUM_TERM_DOC_FREQ_PROP_NAME),
+flushInfo.getIntProperty(SUM_TOTAL_TERM_FREQ_PROP_NAME),
+numPostings,
+postingListPointers,
+offensiveCounters,
+postingLists,
+dictionary);</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/src/java/com/twitter/search/core/earlybird/index/inverted/OptimizedMemoryIndex.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

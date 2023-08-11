@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.cr_mixer.similarity_engine</p>
+<p>import com.twitter.cr_mixer.model.SimilarityEngineInfo
+import com.twitter.cr_mixer.model.TweetWithScore
+import com.twitter.cr_mixer.param.GlobalParams
+import com.twitter.cr_mixer.param.TweetBasedUserVideoGraphParams
+import com.twitter.cr_mixer.thriftscala.SimilarityEngineType
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.frigate.common.util.StatsUtil
+import com.twitter.recos.user_video_graph.thriftscala.RelatedTweetResponse
+import com.twitter.recos.user_video_graph.thriftscala.ConsumersBasedRelatedTweetRequest
+import com.twitter.recos.user_video_graph.thriftscala.TweetBasedRelatedTweetRequest
+import com.twitter.recos.user_video_graph.thriftscala.UserVideoGraph
+import com.twitter.simclusters_v2.common.TweetId
+import com.twitter.simclusters_v2.thriftscala.InternalId
+import com.twitter.storehaus.ReadableStore
+import com.twitter.snowflake.id.SnowflakeId
+import com.twitter.timelines.configapi
+import com.twitter.twistly.thriftscala.TweetRecentEngagedUsers
+import com.twitter.util.Duration
+import javax.inject.Singleton
+import com.twitter.util.Future
+import com.twitter.util.Time
+import scala.concurrent.duration.HOURS</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>This store looks for similar tweets from UserVideoGraph for a Source TweetId</p></li>
+<li><p>For a query tweet,User Video Graph (UVG),</p></li>
+<li><p>lets us find out which other video tweets share a lot of the same engagers with the query tweet</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+</dl>
+<p>&#64;Singleton
+case class TweetBasedUserVideoGraphSimilarityEngine(</p>
+<blockquote>
+<div><p>userVideoGraphService: UserVideoGraph.MethodPerEndpoint,
+tweetEngagedUsersStore: ReadableStore[TweetId, TweetRecentEngagedUsers],
+statsReceiver: StatsReceiver)</p>
+<blockquote>
+<div><dl class="simple">
+<dt>extends ReadableStore[</dt><dd><p>TweetBasedUserVideoGraphSimilarityEngine.Query,
+Seq[TweetWithScore]</p>
+</dd>
+</dl>
+<p>] {</p>
+</div></blockquote>
+<p>import TweetBasedUserVideoGraphSimilarityEngine._</p>
+<p>private val stats = statsReceiver.scope(this.getClass.getSimpleName)
+private val fetchCandidatesStat = stats.scope(“fetchCandidates”)
+private val fetchCoverageExpansionCandidatesStat = stats.scope(“fetchCoverageExpansionCandidates”)</p>
+<dl class="simple">
+<dt>override def get(</dt><dd><p>query: TweetBasedUserVideoGraphSimilarityEngine.Query</p>
+</dd>
+</dl>
+<p>): Future[Option[Seq[TweetWithScore]]] = {</p>
+<blockquote>
+<div><dl>
+<dt>query.sourceId match {</dt><dd><dl class="simple">
+<dt>case InternalId.TweetId(tweetId) if query.enableCoverageExpansionAllTweet =&gt;</dt><dd><p>getCoverageExpansionCandidates(tweetId, query)</p>
+</dd>
+<dt>case InternalId.TweetId(tweetId) if query.enableCoverageExpansionOldTweet =&gt; // For Home</dt><dd><p>if (isOldTweet(tweetId)) getCoverageExpansionCandidates(tweetId, query)
+else getCandidates(tweetId, query)</p>
+</dd>
+</dl>
+<p>case InternalId.TweetId(tweetId) =&gt; getCandidates(tweetId, query)
+case _ =&gt;</p>
+<blockquote>
+<div><p>Future.value(None)</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>private def getCandidates(</dt><dd><p>tweetId: TweetId,
+query: TweetBasedUserVideoGraphSimilarityEngine.Query</p>
+</dd>
+<dt>): Future[Option[Seq[TweetWithScore]]] = {</dt><dd><dl>
+<dt>StatsUtil.trackOptionItemsStats(fetchCandidatesStat) {</dt><dd><dl>
+<dt>val tweetBasedRelatedTweetRequest = {</dt><dd><dl class="simple">
+<dt>TweetBasedRelatedTweetRequest(</dt><dd><p>tweetId,
+maxResults = Some(query.maxResults),
+minCooccurrence = Some(query.minCooccurrence),
+excludeTweetIds = Some(Seq(tweetId)),
+minScore = Some(query.tweetBasedMinScore),
+maxTweetAgeInHours = Some(query.maxTweetAgeInHours)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}
+toTweetWithScore(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>userVideoGraphService.tweetBasedRelatedTweets(tweetBasedRelatedTweetRequest).map {</dt><dd><p>Some(_)</p>
+</dd>
+</dl>
+<p>})</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def getCoverageExpansionCandidates(</dt><dd><p>tweetId: TweetId,
+query: TweetBasedUserVideoGraphSimilarityEngine.Query</p>
+</dd>
+<dt>): Future[Option[Seq[TweetWithScore]]] = {</dt><dd><dl>
+<dt>StatsUtil</dt><dd><dl>
+<dt>.trackOptionItemsStats(fetchCoverageExpansionCandidatesStat) {</dt><dd><dl>
+<dt>tweetEngagedUsersStore</dt><dd><dl>
+<dt>.get(tweetId).flatMap {</dt><dd><dl>
+<dt>_.map { tweetRecentEngagedUsers =&gt;</dt><dd><dl>
+<dt>val consumerSeedSet =</dt><dd><dl>
+<dt>tweetRecentEngagedUsers.recentEngagedUsers</dt><dd><dl class="simple">
+<dt>.map {</dt><dd><p>_.userId</p>
+</dd>
+</dl>
+<p>}.take(query.maxConsumerSeedsNum)</p>
+</dd>
+</dl>
+</dd>
+<dt>val consumersBasedRelatedTweetRequest =</dt><dd><dl class="simple">
+<dt>ConsumersBasedRelatedTweetRequest(</dt><dd><p>consumerSeedSet = consumerSeedSet,
+maxResults = Some(query.maxResults),
+minCooccurrence = Some(query.minCooccurrence),
+excludeTweetIds = Some(Seq(tweetId)),
+minScore = Some(query.consumersBasedMinScore),
+maxTweetAgeInHours = Some(query.maxTweetAgeInHours)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>toTweetWithScore(userVideoGraphService</dt><dd><dl class="simple">
+<dt>.consumersBasedRelatedTweets(consumersBasedRelatedTweetRequest).map {</dt><dd><p>Some(_)</p>
+</dd>
+</dl>
+<p>})</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}.getOrElse(Future.value(None))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>object TweetBasedUserVideoGraphSimilarityEngine {</p>
+<blockquote>
+<div><p>private val oldTweetCap: Duration = Duration(24, HOURS)</p>
+<dl class="simple">
+<dt>def toSimilarityEngineInfo(score: Double): SimilarityEngineInfo = {</dt><dd><dl class="simple">
+<dt>SimilarityEngineInfo(</dt><dd><p>similarityEngineType = SimilarityEngineType.TweetBasedUserVideoGraph,
+modelId = None,
+score = Some(score))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def toTweetWithScore(</dt><dd><p>relatedTweetResponseFut: Future[Option[RelatedTweetResponse]]</p>
+</dd>
+<dt>): Future[Option[Seq[TweetWithScore]]] = {</dt><dd><dl>
+<dt>relatedTweetResponseFut.map { relatedTweetResponseOpt =&gt;</dt><dd><dl>
+<dt>relatedTweetResponseOpt.map { relatedTweetResponse =&gt;</dt><dd><dl class="simple">
+<dt>val candidates =</dt><dd><p>relatedTweetResponse.tweets.map(tweet =&gt; TweetWithScore(tweet.tweetId, tweet.score))</p>
+</dd>
+</dl>
+<p>candidates</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def isOldTweet(tweetId: TweetId): Boolean = {</dt><dd><dl class="simple">
+<dt>SnowflakeId</dt><dd><p>.timeFromIdOpt(tweetId).forall { tweetTime =&gt; tweetTime &lt; Time.now - oldTweetCap }</p>
+</dd>
+</dl>
+<p>// If there’s no snowflake timestamp, we have no idea when this tweet happened.</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>case class Query(</dt><dd><p>sourceId: InternalId,
+maxResults: Int,
+minCooccurrence: Int,
+tweetBasedMinScore: Double,
+consumersBasedMinScore: Double,
+maxTweetAgeInHours: Int,
+maxConsumerSeedsNum: Int,
+enableCoverageExpansionOldTweet: Boolean,
+enableCoverageExpansionAllTweet: Boolean)</p>
+</dd>
+<dt>def fromParams(</dt><dd><p>sourceId: InternalId,
+params: configapi.Params,</p>
+</dd>
+<dt>): EngineQuery[Query] = {</dt><dd><dl>
+<dt>EngineQuery(</dt><dd><dl>
+<dt>Query(</dt><dd><p>sourceId = sourceId,
+maxResults = params(GlobalParams.MaxCandidateNumPerSourceKeyParam),
+minCooccurrence = params(TweetBasedUserVideoGraphParams.MinCoOccurrenceParam),
+tweetBasedMinScore = params(TweetBasedUserVideoGraphParams.TweetBasedMinScoreParam),
+consumersBasedMinScore = params(TweetBasedUserVideoGraphParams.ConsumersBasedMinScoreParam),
+maxTweetAgeInHours = params(GlobalParams.MaxTweetAgeHoursParam).inHours,
+maxConsumerSeedsNum = params(TweetBasedUserVideoGraphParams.MaxConsumerSeedsNumParam),
+enableCoverageExpansionOldTweet =</p>
+<blockquote>
+<div><p>params(TweetBasedUserVideoGraphParams.EnableCoverageExpansionOldTweetParam),</p>
+</div></blockquote>
+<dl class="simple">
+<dt>enableCoverageExpansionAllTweet =</dt><dd><p>params(TweetBasedUserVideoGraphParams.EnableCoverageExpansionAllTweetParam)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>),
+params</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/cr-mixer/server/src/main/scala/com/twitter/cr_mixer/similarity_engine/TweetBasedUserVideoGraphSimilarityEngine.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

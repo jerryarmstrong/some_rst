@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../" id="documentation_options" src="../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>from typing import Mapping, Tuple, Union
+import torch
+import torchrec
+import numpy as np
+import tensorflow as tf</p>
+<dl>
+<dt>def keyed_tensor_from_tensors_dict(</dt><dd><p>tensor_map: Mapping[str, torch.Tensor]</p>
+</dd>
+<dt>) -&gt; “torchrec.KeyedTensor”:</dt><dd><p>“””
+Convert a dictionary of torch tensor to torchrec keyed tensor
+Args:</p>
+<blockquote>
+<div><p>tensor_map:</p>
+</div></blockquote>
+<p>Returns:</p>
+<p>“””
+keys = list(tensor_map.keys())
+# We expect batch size to be first dim. However, if we get a shape [Batch_size],
+# KeyedTensor will not find the correct batch_size. So, in those cases we make sure the shape is
+# [Batch_size x 1].
+values = [</p>
+<blockquote>
+<div><p>tensor_map[key] if len(tensor_map[key].shape) &gt; 1 else torch.unsqueeze(tensor_map[key], -1)
+for key in keys</p>
+</div></blockquote>
+<p>]
+return torchrec.KeyedTensor.from_tensor_list(keys, values)</p>
+</dd>
+<dt>def _compute_jagged_tensor_from_tensor(tensor: torch.Tensor) -&gt; Tuple[torch.Tensor, torch.Tensor]:</dt><dd><dl class="simple">
+<dt>if tensor.is_sparse:</dt><dd><p>x = tensor.coalesce()  # Ensure that the indices are ordered.
+lengths = torch.bincount(x.indices()[0])
+values = x.values()</p>
+</dd>
+<dt>else:</dt><dd><p>values = tensor
+lengths = torch.ones(tensor.shape[0], dtype=torch.int32, device=tensor.device)</p>
+</dd>
+</dl>
+<p>return values, lengths</p>
+</dd>
+<dt>def jagged_tensor_from_tensor(tensor: torch.Tensor) -&gt; “torchrec.JaggedTensor”:</dt><dd><p>“””
+Convert a torch tensor to torchrec jagged tensor.
+Note: Currently only support shape of [Batch_size] or [Batch_size x N] for dense tensors.</p>
+<blockquote>
+<div><dl class="simple">
+<dt>For sparse tensor the shape of .values() should be [Batch_size] or [Batch_size x N]; the</dt><dd><p>dense_shape of the sparse tensor can be arbitrary.</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl class="simple">
+<dt>Args:</dt><dd><p>tensor: a torch (sparse) tensor.</p>
+</dd>
+</dl>
+<p>Returns:
+“””
+values, lengths = _compute_jagged_tensor_from_tensor(tensor)
+return torchrec.JaggedTensor(values=values, lengths=lengths)</p>
+</dd>
+<dt>def keyed_jagged_tensor_from_tensors_dict(</dt><dd><p>tensor_map: Mapping[str, torch.Tensor]</p>
+</dd>
+<dt>) -&gt; “torchrec.KeyedJaggedTensor”:</dt><dd><p>“””
+Convert a dictionary of (sparse) torch tensors to torchrec keyed jagged tensor.
+Note: Currently only support shape of [Batch_size] or [Batch_size x 1] for dense tensors.</p>
+<blockquote>
+<div><dl class="simple">
+<dt>For sparse tensor the shape of .values() should be [Batch_size] or [Batch_size x 1]; the</dt><dd><p>dense_shape of the sparse tensor can be arbitrary.</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl class="simple">
+<dt>Args:</dt><dd><p>tensor_map:</p>
+</dd>
+</dl>
+<p>Returns:</p>
+<p>“””</p>
+<dl>
+<dt>if not tensor_map:</dt><dd><dl class="simple">
+<dt>return torchrec.KeyedJaggedTensor(</dt><dd><p>keys=[],
+values=torch.zeros(0, dtype=torch.int),
+lengths=torch.zeros(0, dtype=torch.int),</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>values = []
+lengths = []
+for tensor in tensor_map.values():</p>
+<blockquote>
+<div><p>tensor_val, tensor_len = _compute_jagged_tensor_from_tensor(tensor)
+values.append(torch.squeeze(tensor_val))
+lengths.append(tensor_len)</p>
+</div></blockquote>
+<p>values = torch.cat(values, axis=0)
+lengths = torch.cat(lengths, axis=0)</p>
+<dl class="simple">
+<dt>return torchrec.KeyedJaggedTensor(</dt><dd><p>keys=list(tensor_map.keys()),
+values=values,
+lengths=lengths,</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>def _tf_to_numpy(tf_tensor: tf.Tensor) -&gt; np.ndarray:</dt><dd><p>return tf_tensor._numpy()  # noqa</p>
+</dd>
+<dt>def _dense_tf_to_torch(tensor: tf.Tensor, pin_memory: bool) -&gt; torch.Tensor:</dt><dd><p>tensor = _tf_to_numpy(tensor)
+# Pytorch does not support bfloat16, up cast to float32 to keep the same number of bits on exponent
+if tensor.dtype.name == “bfloat16”:</p>
+<blockquote>
+<div><p>tensor = tensor.astype(np.float32)</p>
+</div></blockquote>
+<p>tensor = torch.from_numpy(tensor)
+if pin_memory:</p>
+<blockquote>
+<div><p>tensor = tensor.pin_memory()</p>
+</div></blockquote>
+<p>return tensor</p>
+</dd>
+<dt>def sparse_or_dense_tf_to_torch(</dt><dd><p>tensor: Union[tf.Tensor, tf.SparseTensor], pin_memory: bool</p>
+</dd>
+<dt>) -&gt; torch.Tensor:</dt><dd><dl>
+<dt>if isinstance(tensor, tf.SparseTensor):</dt><dd><dl class="simple">
+<dt>tensor = torch.sparse_coo_tensor(</dt><dd><p>_dense_tf_to_torch(tensor.indices, pin_memory).t(),
+_dense_tf_to_torch(tensor.values, pin_memory),
+torch.Size(_tf_to_numpy(tensor.dense_shape)),</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>else:</dt><dd><p>tensor = _dense_tf_to_torch(tensor, pin_memory)</p>
+</dd>
+</dl>
+<p>return tensor</p>
+</dd>
+</dl>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../_sources/projects/home/recap/data/util.py.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

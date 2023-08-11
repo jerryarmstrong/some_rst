@@ -1,0 +1,598 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.representationscorer.twistlyfeatures</p>
+<p>import com.twitter.finagle.stats.Counter
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.representationscorer.common.TweetId
+import com.twitter.representationscorer.common.UserId
+import com.twitter.representationscorer.scorestore.ScoreStore
+import com.twitter.representationscorer.thriftscala.SimClustersRecentEngagementSimilarities
+import com.twitter.simclusters_v2.thriftscala.EmbeddingType
+import com.twitter.simclusters_v2.thriftscala.InternalId
+import com.twitter.simclusters_v2.thriftscala.ModelVersion
+import com.twitter.simclusters_v2.thriftscala.ScoreId
+import com.twitter.simclusters_v2.thriftscala.ScoreInternalId
+import com.twitter.simclusters_v2.thriftscala.ScoringAlgorithm
+import com.twitter.simclusters_v2.thriftscala.SimClustersEmbeddingId
+import com.twitter.simclusters_v2.thriftscala.SimClustersEmbeddingPairScoreId
+import com.twitter.stitch.Stitch
+import javax.inject.Inject</p>
+<dl>
+<dt>class Scorer &#64;Inject() (</dt><dd><p>fetchEngagementsFromUSS: Long =&gt; Stitch[Engagements],
+scoreStore: ScoreStore,
+stats: StatsReceiver) {</p>
+<p>import Scorer._</p>
+<p>private val scoreStats = stats.scope(“score”)
+private val scoreCalculationStats = scoreStats.scope(“calculation”)
+private val scoreResultStats = scoreStats.scope(“result”)</p>
+<p>private val scoresNonEmptyCounter = scoreResultStats.scope(“all”).counter(“nonEmpty”)
+private val scoresNonZeroCounter = scoreResultStats.scope(“all”).counter(“nonZero”)</p>
+<p>private val tweetScoreStats = scoreCalculationStats.scope(“tweetScore”).stat(“latency”)
+private val userScoreStats = scoreCalculationStats.scope(“userScore”).stat(“latency”)</p>
+<p>private val favNonZero = scoreResultStats.scope(“favs”).counter(“nonZero”)
+private val favNonEmpty = scoreResultStats.scope(“favs”).counter(“nonEmpty”)</p>
+<p>private val retweetsNonZero = scoreResultStats.scope(“retweets”).counter(“nonZero”)
+private val retweetsNonEmpty = scoreResultStats.scope(“retweets”).counter(“nonEmpty”)</p>
+<p>private val followsNonZero = scoreResultStats.scope(“follows”).counter(“nonZero”)
+private val followsNonEmpty = scoreResultStats.scope(“follows”).counter(“nonEmpty”)</p>
+<p>private val sharesNonZero = scoreResultStats.scope(“shares”).counter(“nonZero”)
+private val sharesNonEmpty = scoreResultStats.scope(“shares”).counter(“nonEmpty”)</p>
+<p>private val repliesNonZero = scoreResultStats.scope(“replies”).counter(“nonZero”)
+private val repliesNonEmpty = scoreResultStats.scope(“replies”).counter(“nonEmpty”)</p>
+<p>private val originalTweetsNonZero = scoreResultStats.scope(“originalTweets”).counter(“nonZero”)
+private val originalTweetsNonEmpty = scoreResultStats.scope(“originalTweets”).counter(“nonEmpty”)</p>
+<p>private val videoViewsNonZero = scoreResultStats.scope(“videoViews”).counter(“nonZero”)
+private val videoViewsNonEmpty = scoreResultStats.scope(“videoViews”).counter(“nonEmpty”)</p>
+<p>private val blockNonZero = scoreResultStats.scope(“block”).counter(“nonZero”)
+private val blockNonEmpty = scoreResultStats.scope(“block”).counter(“nonEmpty”)</p>
+<p>private val muteNonZero = scoreResultStats.scope(“mute”).counter(“nonZero”)
+private val muteNonEmpty = scoreResultStats.scope(“mute”).counter(“nonEmpty”)</p>
+<p>private val reportNonZero = scoreResultStats.scope(“report”).counter(“nonZero”)
+private val reportNonEmpty = scoreResultStats.scope(“report”).counter(“nonEmpty”)</p>
+<p>private val dontlikeNonZero = scoreResultStats.scope(“dontlike”).counter(“nonZero”)
+private val dontlikeNonEmpty = scoreResultStats.scope(“dontlike”).counter(“nonEmpty”)</p>
+<p>private val seeFewerNonZero = scoreResultStats.scope(“seeFewer”).counter(“nonZero”)
+private val seeFewerNonEmpty = scoreResultStats.scope(“seeFewer”).counter(“nonEmpty”)</p>
+<dl>
+<dt>private def getTweetScores(</dt><dd><p>candidateTweetId: TweetId,
+sourceTweetIds: Seq[TweetId]</p>
+</dd>
+<dt>): Stitch[Seq[ScoreResult]] = {</dt><dd><dl class="simple">
+<dt>val getScoresStitch = Stitch.traverse(sourceTweetIds) { sourceTweetId =&gt;</dt><dd><dl class="simple">
+<dt>scoreStore</dt><dd><p>.uniformScoringStoreStitch(getTweetScoreId(sourceTweetId, candidateTweetId))
+.liftNotFoundToOption
+.map(score =&gt; ScoreResult(sourceTweetId, score.map(_.score)))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>Stitch.time(getScoresStitch).flatMap {</dt><dd><dl class="simple">
+<dt>case (tryResult, duration) =&gt;</dt><dd><p>tweetScoreStats.add(duration.inMillis)
+Stitch.const(tryResult)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def getUserScores(</dt><dd><p>tweetId: TweetId,
+authorIds: Seq[UserId]</p>
+</dd>
+<dt>): Stitch[Seq[ScoreResult]] = {</dt><dd><dl class="simple">
+<dt>val getScoresStitch = Stitch.traverse(authorIds) { authorId =&gt;</dt><dd><dl class="simple">
+<dt>scoreStore</dt><dd><p>.uniformScoringStoreStitch(getAuthorScoreId(authorId, tweetId))
+.liftNotFoundToOption
+.map(score =&gt; ScoreResult(authorId, score.map(_.score)))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>Stitch.time(getScoresStitch).flatMap {</dt><dd><dl class="simple">
+<dt>case (tryResult, duration) =&gt;</dt><dd><p>userScoreStats.add(duration.inMillis)
+Stitch.const(tryResult)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Get the [[SimClustersRecentEngagementSimilarities]] result containing the similarity</p></li>
+<li><p>features for the given userId-TweetId.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>def get(</dt><dd><p>userId: UserId,
+tweetId: TweetId</p>
+</dd>
+<dt>): Stitch[SimClustersRecentEngagementSimilarities] = {</dt><dd><p>get(userId, Seq(tweetId)).map(x =&gt; x.head)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Get a list of [[SimClustersRecentEngagementSimilarities]] results containing the similarity</p></li>
+<li><p>features for the given tweets of the user Id.</p></li>
+<li><p>Guaranteed to be the same number/order as requested.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>def get(</dt><dd><p>userId: UserId,
+tweetIds: Seq[TweetId]</p>
+</dd>
+<dt>): Stitch[Seq[SimClustersRecentEngagementSimilarities]] = {</dt><dd><dl>
+<dt>fetchEngagementsFromUSS(userId)</dt><dd><dl>
+<dt>.flatMap(engagements =&gt; {</dt><dd><p>// For each tweet received in the request, compute the similarity scores between them
+// and the user signals fetched from USS.
+Stitch</p>
+<blockquote>
+<div><dl class="simple">
+<dt>.join(</dt><dd><p>Stitch.traverse(tweetIds)(id =&gt; getTweetScores(id, engagements.tweetIds)),
+Stitch.traverse(tweetIds)(id =&gt; getUserScores(id, engagements.authorIds)),</p>
+</dd>
+</dl>
+<p>)
+.map {</p>
+<blockquote>
+<div><dl>
+<dt>case (tweetScoresSeq, userScoreSeq) =&gt;</dt><dd><p>// All seq have = size because when scores don’t exist, they are returned as Option
+(tweetScoresSeq, userScoreSeq).zipped.map { (tweetScores, userScores) =&gt;</p>
+<blockquote>
+<div><dl class="simple">
+<dt>computeSimilarityScoresPerTweet(</dt><dd><p>engagements,
+tweetScores.groupBy(_.id),
+userScores.groupBy(_.id))</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>})</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li></li>
+<li><p>Computes the [[SimClustersRecentEngagementSimilarities]]</p></li>
+<li><p>using the given tweet-tweet and user-tweet scores in TweetScoresMap</p></li>
+<li><p>and the user signals in [[Engagements]].</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>private def computeSimilarityScoresPerTweet(</dt><dd><p>engagements: Engagements,
+tweetScores: Map[TweetId, Seq[ScoreResult]],
+authorScores: Map[UserId, Seq[ScoreResult]]</p>
+</dd>
+<dt>): SimClustersRecentEngagementSimilarities = {</dt><dd><dl class="simple">
+<dt>val favs7d = engagements.favs7d.view</dt><dd><p>.flatMap(s =&gt; tweetScores.get(s.targetId))
+.flatten.flatMap(_.score)
+.force</p>
+</dd>
+<dt>val favs1d = engagements.favs1d.view</dt><dd><p>.flatMap(s =&gt; tweetScores.get(s.targetId))
+.flatten.flatMap(_.score)
+.force</p>
+</dd>
+<dt>val retweets7d = engagements.retweets7d.view</dt><dd><p>.flatMap(s =&gt; tweetScores.get(s.targetId))
+.flatten.flatMap(_.score)
+.force</p>
+</dd>
+<dt>val retweets1d = engagements.retweets1d.view</dt><dd><p>.flatMap(s =&gt; tweetScores.get(s.targetId))
+.flatten.flatMap(_.score)
+.force</p>
+</dd>
+<dt>val follows30d = engagements.follows30d.view</dt><dd><p>.flatMap(s =&gt; authorScores.get(s.targetId))
+.flatten.flatMap(_.score)
+.force</p>
+</dd>
+<dt>val follows7d = engagements.follows7d.view</dt><dd><p>.flatMap(s =&gt; authorScores.get(s.targetId))
+.flatten.flatMap(_.score)
+.force</p>
+</dd>
+<dt>val shares7d = engagements.shares7d.view</dt><dd><p>.flatMap(s =&gt; tweetScores.get(s.targetId))
+.flatten.flatMap(_.score)
+.force</p>
+</dd>
+<dt>val shares1d = engagements.shares1d.view</dt><dd><p>.flatMap(s =&gt; tweetScores.get(s.targetId))
+.flatten.flatMap(_.score)
+.force</p>
+</dd>
+<dt>val replies7d = engagements.replies7d.view</dt><dd><p>.flatMap(s =&gt; tweetScores.get(s.targetId))
+.flatten.flatMap(_.score)
+.force</p>
+</dd>
+<dt>val replies1d = engagements.replies1d.view</dt><dd><p>.flatMap(s =&gt; tweetScores.get(s.targetId))
+.flatten.flatMap(_.score)
+.force</p>
+</dd>
+<dt>val originalTweets7d = engagements.originalTweets7d.view</dt><dd><p>.flatMap(s =&gt; tweetScores.get(s.targetId))
+.flatten.flatMap(_.score)
+.force</p>
+</dd>
+<dt>val originalTweets1d = engagements.originalTweets1d.view</dt><dd><p>.flatMap(s =&gt; tweetScores.get(s.targetId))
+.flatten.flatMap(_.score)
+.force</p>
+</dd>
+<dt>val videoViews7d = engagements.videoPlaybacks7d.view</dt><dd><p>.flatMap(s =&gt; tweetScores.get(s.targetId))
+.flatten.flatMap(_.score)
+.force</p>
+</dd>
+<dt>val videoViews1d = engagements.videoPlaybacks1d.view</dt><dd><p>.flatMap(s =&gt; tweetScores.get(s.targetId))
+.flatten.flatMap(_.score)
+.force</p>
+</dd>
+<dt>val block30d = engagements.block30d.view</dt><dd><p>.flatMap(s =&gt; tweetScores.get(s.targetId))
+.flatten.flatMap(_.score)
+.force</p>
+</dd>
+<dt>val block7d = engagements.block7d.view</dt><dd><p>.flatMap(s =&gt; tweetScores.get(s.targetId))
+.flatten.flatMap(_.score)
+.force</p>
+</dd>
+<dt>val block1d = engagements.block1d.view</dt><dd><p>.flatMap(s =&gt; tweetScores.get(s.targetId))
+.flatten.flatMap(_.score)
+.force</p>
+</dd>
+<dt>val mute30d = engagements.mute30d.view</dt><dd><p>.flatMap(s =&gt; tweetScores.get(s.targetId))
+.flatten.flatMap(_.score)
+.force</p>
+</dd>
+<dt>val mute7d = engagements.mute7d.view</dt><dd><p>.flatMap(s =&gt; tweetScores.get(s.targetId))
+.flatten.flatMap(_.score)
+.force</p>
+</dd>
+<dt>val mute1d = engagements.mute1d.view</dt><dd><p>.flatMap(s =&gt; tweetScores.get(s.targetId))
+.flatten.flatMap(_.score)
+.force</p>
+</dd>
+<dt>val report30d = engagements.report30d.view</dt><dd><p>.flatMap(s =&gt; tweetScores.get(s.targetId))
+.flatten.flatMap(_.score)
+.force</p>
+</dd>
+<dt>val report7d = engagements.report7d.view</dt><dd><p>.flatMap(s =&gt; tweetScores.get(s.targetId))
+.flatten.flatMap(_.score)
+.force</p>
+</dd>
+<dt>val report1d = engagements.report1d.view</dt><dd><p>.flatMap(s =&gt; tweetScores.get(s.targetId))
+.flatten.flatMap(_.score)
+.force</p>
+</dd>
+<dt>val dontlike30d = engagements.dontlike30d.view</dt><dd><p>.flatMap(s =&gt; tweetScores.get(s.targetId))
+.flatten.flatMap(_.score)
+.force</p>
+</dd>
+<dt>val dontlike7d = engagements.dontlike7d.view</dt><dd><p>.flatMap(s =&gt; tweetScores.get(s.targetId))
+.flatten.flatMap(_.score)
+.force</p>
+</dd>
+<dt>val dontlike1d = engagements.dontlike1d.view</dt><dd><p>.flatMap(s =&gt; tweetScores.get(s.targetId))
+.flatten.flatMap(_.score)
+.force</p>
+</dd>
+<dt>val seeFewer30d = engagements.seeFewer30d.view</dt><dd><p>.flatMap(s =&gt; tweetScores.get(s.targetId))
+.flatten.flatMap(_.score)
+.force</p>
+</dd>
+<dt>val seeFewer7d = engagements.seeFewer7d.view</dt><dd><p>.flatMap(s =&gt; tweetScores.get(s.targetId))
+.flatten.flatMap(_.score)
+.force</p>
+</dd>
+<dt>val seeFewer1d = engagements.seeFewer1d.view</dt><dd><p>.flatMap(s =&gt; tweetScores.get(s.targetId))
+.flatten.flatMap(_.score)
+.force</p>
+</dd>
+<dt>val result = SimClustersRecentEngagementSimilarities(</dt><dd><p>fav1dLast10Max = max(favs1d),
+fav1dLast10Avg = avg(favs1d),
+fav7dLast10Max = max(favs7d),
+fav7dLast10Avg = avg(favs7d),
+retweet1dLast10Max = max(retweets1d),
+retweet1dLast10Avg = avg(retweets1d),
+retweet7dLast10Max = max(retweets7d),
+retweet7dLast10Avg = avg(retweets7d),
+follow7dLast10Max = max(follows7d),
+follow7dLast10Avg = avg(follows7d),
+follow30dLast10Max = max(follows30d),
+follow30dLast10Avg = avg(follows30d),
+share1dLast10Max = max(shares1d),
+share1dLast10Avg = avg(shares1d),
+share7dLast10Max = max(shares7d),
+share7dLast10Avg = avg(shares7d),
+reply1dLast10Max = max(replies1d),
+reply1dLast10Avg = avg(replies1d),
+reply7dLast10Max = max(replies7d),
+reply7dLast10Avg = avg(replies7d),
+originalTweet1dLast10Max = max(originalTweets1d),
+originalTweet1dLast10Avg = avg(originalTweets1d),
+originalTweet7dLast10Max = max(originalTweets7d),
+originalTweet7dLast10Avg = avg(originalTweets7d),
+videoPlayback1dLast10Max = max(videoViews1d),
+videoPlayback1dLast10Avg = avg(videoViews1d),
+videoPlayback7dLast10Max = max(videoViews7d),
+videoPlayback7dLast10Avg = avg(videoViews7d),
+block1dLast10Max = max(block1d),
+block1dLast10Avg = avg(block1d),
+block7dLast10Max = max(block7d),
+block7dLast10Avg = avg(block7d),
+block30dLast10Max = max(block30d),
+block30dLast10Avg = avg(block30d),
+mute1dLast10Max = max(mute1d),
+mute1dLast10Avg = avg(mute1d),
+mute7dLast10Max = max(mute7d),
+mute7dLast10Avg = avg(mute7d),
+mute30dLast10Max = max(mute30d),
+mute30dLast10Avg = avg(mute30d),
+report1dLast10Max = max(report1d),
+report1dLast10Avg = avg(report1d),
+report7dLast10Max = max(report7d),
+report7dLast10Avg = avg(report7d),
+report30dLast10Max = max(report30d),
+report30dLast10Avg = avg(report30d),
+dontlike1dLast10Max = max(dontlike1d),
+dontlike1dLast10Avg = avg(dontlike1d),
+dontlike7dLast10Max = max(dontlike7d),
+dontlike7dLast10Avg = avg(dontlike7d),
+dontlike30dLast10Max = max(dontlike30d),
+dontlike30dLast10Avg = avg(dontlike30d),
+seeFewer1dLast10Max = max(seeFewer1d),
+seeFewer1dLast10Avg = avg(seeFewer1d),
+seeFewer7dLast10Max = max(seeFewer7d),
+seeFewer7dLast10Avg = avg(seeFewer7d),
+seeFewer30dLast10Max = max(seeFewer30d),
+seeFewer30dLast10Avg = avg(seeFewer30d),</p>
+</dd>
+</dl>
+<p>)
+trackStats(result)
+result</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def trackStats(result: SimClustersRecentEngagementSimilarities): Unit = {</dt><dd><dl class="simple">
+<dt>val scores = Seq(</dt><dd><p>result.fav7dLast10Max,
+result.retweet7dLast10Max,
+result.follow30dLast10Max,
+result.share1dLast10Max,
+result.share7dLast10Max,
+result.reply7dLast10Max,
+result.originalTweet7dLast10Max,
+result.videoPlayback7dLast10Max,
+result.block30dLast10Max,
+result.mute30dLast10Max,
+result.report30dLast10Max,
+result.dontlike30dLast10Max,
+result.seeFewer30dLast10Max</p>
+</dd>
+</dl>
+<p>)</p>
+<p>val nonEmpty = scores.exists(_.isDefined)
+val nonZero = scores.exists { case Some(score) if score &gt; 0 =&gt; true; case _ =&gt; false }</p>
+<dl class="simple">
+<dt>if (nonEmpty) {</dt><dd><p>scoresNonEmptyCounter.incr()</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>if (nonZero) {</dt><dd><p>scoresNonZeroCounter.incr()</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// We use the largest window of a given type of score,
+// because the largest window is inclusive of smaller windows.
+trackSignalStats(favNonEmpty, favNonZero, result.fav7dLast10Avg)
+trackSignalStats(retweetsNonEmpty, retweetsNonZero, result.retweet7dLast10Avg)
+trackSignalStats(followsNonEmpty, followsNonZero, result.follow30dLast10Avg)
+trackSignalStats(sharesNonEmpty, sharesNonZero, result.share7dLast10Avg)
+trackSignalStats(repliesNonEmpty, repliesNonZero, result.reply7dLast10Avg)
+trackSignalStats(originalTweetsNonEmpty, originalTweetsNonZero, result.originalTweet7dLast10Avg)
+trackSignalStats(videoViewsNonEmpty, videoViewsNonZero, result.videoPlayback7dLast10Avg)
+trackSignalStats(blockNonEmpty, blockNonZero, result.block30dLast10Avg)
+trackSignalStats(muteNonEmpty, muteNonZero, result.mute30dLast10Avg)
+trackSignalStats(reportNonEmpty, reportNonZero, result.report30dLast10Avg)
+trackSignalStats(dontlikeNonEmpty, dontlikeNonZero, result.dontlike30dLast10Avg)
+trackSignalStats(seeFewerNonEmpty, seeFewerNonZero, result.seeFewer30dLast10Avg)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def trackSignalStats(nonEmpty: Counter, nonZero: Counter, score: Option[Double]): Unit = {</dt><dd><dl>
+<dt>if (score.nonEmpty) {</dt><dd><p>nonEmpty.incr()</p>
+<dl class="simple">
+<dt>if (score.get &gt; 0)</dt><dd><p>nonZero.incr()</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>object Scorer {</dt><dd><dl>
+<dt>def avg(s: Traversable[Double]): Option[Double] =</dt><dd><p>if (s.isEmpty) None else Some(s.sum / s.size)</p>
+</dd>
+<dt>def max(s: Traversable[Double]): Option[Double] =</dt><dd><p>if (s.isEmpty) None else Some(s.foldLeft(0.0D) { (curr, _max) =&gt; math.max(curr, _max) })</p>
+</dd>
+<dt>private def getAuthorScoreId(</dt><dd><p>userId: UserId,
+tweetId: TweetId</p>
+</dd>
+<dt>) = {</dt><dd><dl>
+<dt>ScoreId(</dt><dd><p>algorithm = ScoringAlgorithm.PairEmbeddingCosineSimilarity,
+internalId = ScoreInternalId.SimClustersEmbeddingPairScoreId(</p>
+<blockquote>
+<div><dl>
+<dt>SimClustersEmbeddingPairScoreId(</dt><dd><dl class="simple">
+<dt>SimClustersEmbeddingId(</dt><dd><p>internalId = InternalId.UserId(userId),
+modelVersion = ModelVersion.Model20m145k2020,
+embeddingType = EmbeddingType.FavBasedProducer</p>
+</dd>
+</dl>
+<p>),
+SimClustersEmbeddingId(</p>
+<blockquote>
+<div><p>internalId = InternalId.TweetId(tweetId),
+modelVersion = ModelVersion.Model20m145k2020,
+embeddingType = EmbeddingType.LogFavBasedTweet</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>))</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def getTweetScoreId(</dt><dd><p>sourceTweetId: TweetId,
+candidateTweetId: TweetId</p>
+</dd>
+<dt>) = {</dt><dd><dl>
+<dt>ScoreId(</dt><dd><p>algorithm = ScoringAlgorithm.PairEmbeddingCosineSimilarity,
+internalId = ScoreInternalId.SimClustersEmbeddingPairScoreId(</p>
+<blockquote>
+<div><dl>
+<dt>SimClustersEmbeddingPairScoreId(</dt><dd><dl class="simple">
+<dt>SimClustersEmbeddingId(</dt><dd><p>internalId = InternalId.TweetId(sourceTweetId),
+modelVersion = ModelVersion.Model20m145k2020,
+embeddingType = EmbeddingType.LogFavLongestL2EmbeddingTweet</p>
+</dd>
+</dl>
+<p>),
+SimClustersEmbeddingId(</p>
+<blockquote>
+<div><p>internalId = InternalId.TweetId(candidateTweetId),
+modelVersion = ModelVersion.Model20m145k2020,
+embeddingType = EmbeddingType.LogFavBasedTweet</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>))</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/representation-scorer/server/src/main/scala/com/twitter/representationscorer/twistlyfeatures/Scorer.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

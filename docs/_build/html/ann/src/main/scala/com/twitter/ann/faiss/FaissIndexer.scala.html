@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../" id="documentation_options" src="../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.ann.faiss</p>
+<p>import com.google.common.base.Preconditions
+import com.twitter.ann.common.Cosine
+import com.twitter.ann.common.Distance
+import com.twitter.ann.common.EntityEmbedding
+import com.twitter.ann.common.IndexOutputFile
+import com.twitter.ann.common.InnerProduct
+import com.twitter.ann.common.L2
+import com.twitter.ann.common.Metric
+import com.twitter.ml.api.embedding.EmbeddingMath
+import com.twitter.scalding.Execution
+import com.twitter.scalding.TypedPipe
+import com.twitter.search.common.file.AbstractFile
+import com.twitter.search.common.file.FileUtils
+import com.twitter.util.logging.Logging
+import java.io.File
+import scala.util.Random</p>
+<p>trait FaissIndexer extends Logging {</p>
+<blockquote>
+<div><dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Produce faiss index file specified by factory string</p></li>
+<li></li>
+<li><p>&#64;param pipe Embeddings to be indexed</p></li>
+<li><p>&#64;param sampleRate Fraction of embeddings used for training. Regardless of this parameter, all embeddings are present in the output.</p></li>
+<li><p>&#64;param factoryString Faiss factory string, see <a class="reference external" href="https://github.com/facebookresearch/faiss/wiki/The-index-factory">https://github.com/facebookresearch/faiss/wiki/The-index-factory</a></p></li>
+<li><p>&#64;param metric Metric to use</p></li>
+<li><p>&#64;param outputDirectory Directory where _SUCCESS and faiss.index will be written.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>def build[D &lt;: Distance[D]](</dt><dd><p>pipe: TypedPipe[EntityEmbedding[Long]],
+sampleRate: Float,
+factoryString: String,
+metric: Metric[D],
+outputDirectory: AbstractFile</p>
+</dd>
+<dt>): Execution[Unit] = {</dt><dd><p>outputDirectory.mkdirs()
+Preconditions.checkState(</p>
+<blockquote>
+<div><p>outputDirectory.canRead,
+“Failed to create parent directories for %s”,
+outputDirectory.toString)</p>
+</div></blockquote>
+<dl>
+<dt>val maybeNormalizedPipe = if (l2Normalize(metric)) {</dt><dd><dl class="simple">
+<dt>pipe.map { idAndEmbedding =&gt;</dt><dd><p>EntityEmbedding(idAndEmbedding.id, EmbeddingMath.Float.normalize(idAndEmbedding.embedding))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>} else {</dt><dd><p>pipe</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>maybeNormalizedPipe.toIterableExecution.flatMap { annEmbeddings =&gt;</dt><dd><p>logger.info(s”${factoryString}”)
+val t1 = System.nanoTime
+buildAndWriteFaissIndex(</p>
+<blockquote>
+<div><p>Random.shuffle(annEmbeddings),
+sampleRate,
+factoryString,
+metric,
+new IndexOutputFile(outputDirectory))</p>
+</div></blockquote>
+<p>val duration = (System.nanoTime - t1) / 1e9d
+logger.info(s”It took ${duration}s to build and index”)</p>
+<p>Execution.unit</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def buildAndWriteFaissIndex[D &lt;: Distance[D]](</dt><dd><p>entities: Iterable[EntityEmbedding[Long]],
+sampleRate: Float,
+factoryString: String,
+metricType: Metric[D],
+outputDirectory: IndexOutputFile</p>
+</dd>
+<dt>): Unit = {</dt><dd><p>val metric = parseMetric(metricType)
+val datasetSize = entities.size.toLong
+val dimensions = entities.head.embedding.length
+logger.info(s”There are $datasetSize embeddings”)
+logger.info(s”Faiss compile options are ${swigfaiss.get_compile_options()}”)
+logger.info(s”OMP threads count is ${swigfaiss.omp_get_max_threads()}”)</p>
+<p>val index = swigfaiss.index_factory(dimensions, factoryString, metric)
+index.setVerbose(true)
+val idMap = new IndexIDMap(index)</p>
+<p>val trainingSetSize = Math.min(datasetSize, Math.round(datasetSize * sampleRate))
+val ids = toIndexVector(entities)
+val fullDataset = toFloatVector(dimensions, entities)
+logger.info(“Finished bridging full dataset”)
+idMap.train(trainingSetSize, fullDataset.data())
+logger.info(“Finished training”)
+idMap.add_with_ids(datasetSize, fullDataset.data(), ids)
+logger.info(“Added data to the index”)</p>
+<p>val tmpFile = File.createTempFile(“faiss.index”, “.tmp”)
+swigfaiss.write_index(idMap, tmpFile.toString)
+logger.info(s”Wrote to tmp file ${tmpFile.toString}”)
+copyToOutputAndCreateSuccess(FileUtils.getFileHandle(tmpFile.toString), outputDirectory)
+logger.info(“Copied file”)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private def copyToOutputAndCreateSuccess(</dt><dd><p>tmpFile: AbstractFile,
+outputDirectory: IndexOutputFile</p>
+</dd>
+<dt>) = {</dt><dd><p>val outputFile = outputDirectory.createFile(“faiss.index”)
+logger.info(s”Final output file is ${outputFile.getPath()}”)
+outputFile.copyFrom(tmpFile.getByteSource.openStream())
+outputDirectory.createSuccessFile()</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def toFloatVector(</dt><dd><p>dimensions: Int,
+entities: Iterable[EntityEmbedding[Long]]</p>
+</dd>
+<dt>): FloatVector = {</dt><dd><p>require(entities.nonEmpty)</p>
+<p>val vector = new FloatVector()
+vector.reserve(dimensions.toLong * entities.size.toLong)
+for (entity &lt;- entities) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>for (value &lt;- entity.embedding) {</dt><dd><p>vector.push_back(value)</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>vector</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def toIndexVector(embeddings: Iterable[EntityEmbedding[Long]]): LongVector = {</dt><dd><p>require(embeddings.nonEmpty)</p>
+<p>val vector = new LongVector()
+vector.reserve(embeddings.size)
+for (embedding &lt;- embeddings) {</p>
+<blockquote>
+<div><p>vector.push_back(embedding.id)</p>
+</div></blockquote>
+<p>}</p>
+<p>vector</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private def parseMetric[D &lt;: Distance[D]](metric: Metric[D]): MetricType = metric match {</dt><dd><p>case L2 =&gt; MetricType.METRIC_L2
+case InnerProduct =&gt; MetricType.METRIC_INNER_PRODUCT
+case Cosine =&gt; MetricType.METRIC_INNER_PRODUCT
+case _ =&gt; throw new AbstractMethodError(s”Not implemented for metric ${metric}”)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private def l2Normalize[D &lt;: Distance[D]](metric: Metric[D]): Boolean = metric match {</dt><dd><p>case Cosine =&gt; true
+case _ =&gt; false</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>object FaissIndexer extends FaissIndexer {}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../_sources/ann/src/main/scala/com/twitter/ann/faiss/FaissIndexer.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

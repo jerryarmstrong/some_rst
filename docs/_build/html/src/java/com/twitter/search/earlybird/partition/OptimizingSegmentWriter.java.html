@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../" id="documentation_options" src="../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.earlybird.partition;</p>
+<p>import java.io.IOException;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.atomic.AtomicReference;</p>
+<p>import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Preconditions;
+import com.google.common.base.Stopwatch;
+import com.google.common.base.Verify;</p>
+<p>import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;</p>
+<p>import com.twitter.search.common.indexing.thriftjava.ThriftVersionedEvents;
+import com.twitter.search.common.util.GCUtil;
+import com.twitter.search.earlybird.EarlybirdStatus;
+import com.twitter.search.earlybird.common.CaughtUpMonitor;
+import com.twitter.search.earlybird.exception.CriticalExceptionHandler;
+import com.twitter.search.earlybird.index.EarlybirdSegment;
+import com.twitter.search.earlybird.util.CoordinatedEarlybirdActionInterface;
+import com.twitter.util.Future;
+import com.twitter.util.Promise;</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>This class optimizes a segment without blocking reads or writes.</p></li>
+<li></li>
+<li><p>In steady state operation (Indexing or Optimized), it delegates operations directly to a</p></li>
+<li><p>SegmentWriter.</p></li>
+<li></li>
+<li><p>Optimization is naturally a copying operation – we don’t need to mutate anything internally.</p></li>
+<li><p>We need to be able to apply updates to the unoptimized segment while we are creating</p></li>
+<li><p>the optimized segment. We also need to be able to apply these updates to the optimized segment,</p></li>
+<li><p>but we can’t apply updates while a segment is being optimized, because document IDs will be</p></li>
+<li><p>changing internally and posting lists could be any state. To deal with this, we queue updates</p></li>
+<li><p>that occur during optimization, and then apply them as the last step of optimization. At that</p></li>
+<li><p>point, the segment will be optimized and up to date, so we can swap the unoptimized segment for</p></li>
+<li><p>the optimized one.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>public class OptimizingSegmentWriter implements ISegmentWriter {</dt><dd><p>private static final Logger LOG = LoggerFactory.getLogger(OptimizingSegmentWriter.class);</p>
+<p>private final AtomicReference&lt;State&gt; state = new AtomicReference&lt;&gt;(State.Indexing);
+private final ConcurrentLinkedQueue&lt;ThriftVersionedEvents&gt; queuedEvents =</p>
+<blockquote>
+<div><p>new ConcurrentLinkedQueue&lt;&gt;();</p>
+</div></blockquote>
+<p>private final CriticalExceptionHandler criticalExceptionHandler;
+private final SearchIndexingMetricSet searchIndexingMetricSet;
+private final String segmentName;
+private final Promise&lt;SegmentInfo&gt; optimizationPromise = new Promise&lt;&gt;();</p>
+<p>// We use the lock to ensure that the optimizing thread and the writer thread do not attempt
+// to call indexThriftVersionedEvents on the underlying writer simultaneously.
+private final Object lock = new Object();
+// The reference to the current writer. Protected by lock.
+private final AtomicReference&lt;SegmentWriter&gt; segmentWriterReference;</p>
+<p>private final CaughtUpMonitor indexCaughtUpMonitor;</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>The state flow:</p></li>
+<li><p>Indexing -&gt; Optimizing -&gt;</p></li>
+<li><p>ONE OF:</p></li>
+<li><ul>
+<li><p>Optimized</p></li>
+</ul>
+</li>
+<li><ul>
+<li><p>FailedToOptimize</p></li>
+</ul>
+</li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+</dl>
+<p>&#64;VisibleForTesting
+enum State {</p>
+<blockquote>
+<div><p>Indexing,
+Optimizing,
+FailedToOptimize,
+Optimized,</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>public OptimizingSegmentWriter(</dt><dd><p>SegmentWriter segmentWriter,
+CriticalExceptionHandler criticalExceptionHandler,
+SearchIndexingMetricSet searchIndexingMetricSet,
+CaughtUpMonitor indexCaughtUpMonitor</p>
+</dd>
+<dt>) {</dt><dd><p>Preconditions.checkState(!segmentWriter.getSegmentInfo().isOptimized());
+segmentWriterReference = new AtomicReference&lt;&gt;(segmentWriter);</p>
+<p>this.criticalExceptionHandler = criticalExceptionHandler;
+this.searchIndexingMetricSet = searchIndexingMetricSet;
+this.segmentName = segmentWriter.getSegmentInfo().getSegmentName();
+this.indexCaughtUpMonitor = indexCaughtUpMonitor;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Start optimizing this segment in the background. Returns a Future that will complete when</p></li>
+<li><p>the optimization is complete.</p></li>
+<li><p>Acquires the optimizationAndFlushingCoordinationLock before attempting to optimize.</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>public Future&lt;SegmentInfo&gt; startOptimization(</dt><dd><blockquote>
+<div><p>CoordinatedEarlybirdActionInterface gcAction,
+OptimizationAndFlushingCoordinationLock optimizationAndFlushingCoordinationLock) {</p>
+</div></blockquote>
+<dl>
+<dt>new Thread(() -&gt; {</dt><dd><p>// Acquire lock to ensure that flushing is not in progress. If the lock is not available,
+// then wait until it is.
+LOG.info(“Acquire coordination lock before beginning gc_before_optimization action.”);
+try {</p>
+<blockquote>
+<div><p>optimizationAndFlushingCoordinationLock.lock();
+LOG.info(“Successfully acquired coordination lock for gc_before_optimization action.”);
+gcAction.retryActionUntilRan(“gc before optimization”, () -&gt; {</p>
+<blockquote>
+<div><p>LOG.info(“Run GC before optimization”);
+GCUtil.runGC();
+// Wait for indexing to catch up before gcAction rejoins the serverset. We only need to do
+// this if the host has already finished startup.
+if (EarlybirdStatus.hasStarted()) {</p>
+<blockquote>
+<div><p>indexCaughtUpMonitor.resetAndWaitUntilCaughtUp();</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>});</p>
+</div></blockquote>
+<dl>
+<dt>} finally {</dt><dd><dl class="simple">
+<dt>LOG.info(“Finished gc_before_optimization action. “</dt><dd><ul class="simple">
+<li><p>“Releasing coordination lock and beginning optimization.”);</p></li>
+</ul>
+</dd>
+</dl>
+<p>optimizationAndFlushingCoordinationLock.unlock();</p>
+</dd>
+</dl>
+<p>}</p>
+<p>transition(State.Indexing, State.Optimizing);</p>
+<p>SegmentInfo unoptimizedSegmentInfo = null;
+try {</p>
+<blockquote>
+<div><p>unoptimizedSegmentInfo = segmentWriterReference.get().getSegmentInfo();
+Preconditions.checkState(!unoptimizedSegmentInfo.isOptimized());</p>
+<p>Stopwatch stopwatch = Stopwatch.createStarted();
+LOG.info(“Started optimizing segment data {}.”, segmentName);
+EarlybirdSegment optimizedSegment =</p>
+<blockquote>
+<div><p>unoptimizedSegmentInfo.getIndexSegment().makeOptimizedSegment();</p>
+</div></blockquote>
+<p>LOG.info(“Finished optimizing segment data {} in {}.”, segmentName, stopwatch);</p>
+<dl class="simple">
+<dt>SegmentInfo newSegmentInfo = unoptimizedSegmentInfo</dt><dd><p>.copyWithEarlybirdSegment(optimizedSegment);</p>
+</dd>
+<dt>SegmentWriter optimizedWriter =</dt><dd><p>new SegmentWriter(newSegmentInfo, searchIndexingMetricSet.updateFreshness);</p>
+</dd>
+</dl>
+<p>Verify.verify(optimizedWriter.getSegmentInfo().isOptimized());</p>
+<p>// We want to apply all updates to the new segment twice, because this first call may apply
+// many thousands of updates and take a while to complete.
+applyAllPendingUpdates(optimizedWriter);</p>
+<p>// We try to do as little as possible while holding the lock, so the writer can continue
+// to make progress. First we apply all the updates that have been queued up before we
+// grabbed the lock, then we need to swap the new writer for the old one.
+synchronized (lock) {</p>
+<blockquote>
+<div><p>applyAllPendingUpdates(optimizedWriter);
+segmentWriterReference.getAndSet(optimizedWriter);
+transition(State.Optimizing, State.Optimized);</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>if (!unoptimizedSegmentInfo.isEnabled()) {</dt><dd><p>LOG.info(“Disabling segment: {}”, unoptimizedSegmentInfo.getSegmentName());
+newSegmentInfo.setIsEnabled(false);</p>
+</dd>
+</dl>
+<p>}</p>
+<p>optimizationPromise.setValue(newSegmentInfo);</p>
+</div></blockquote>
+<dl>
+<dt>} catch (Throwable e) {</dt><dd><dl class="simple">
+<dt>if (unoptimizedSegmentInfo != null) {</dt><dd><p>unoptimizedSegmentInfo.setFailedOptimize();</p>
+</dd>
+</dl>
+<p>}</p>
+<p>transition(State.Optimizing, State.FailedToOptimize);
+optimizationPromise.setException(e);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}, “optimizing-segment-writer”).start();</p>
+<p>return optimizationPromise;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private void applyAllPendingUpdates(SegmentWriter segmentWriter) throws IOException {</dt><dd><p>LOG.info(“Applying {} queued updates to segment {}.”, queuedEvents.size(), segmentName);
+// More events can be enqueued while this method is running, so we track the total applied too.
+long eventCount = 0;
+Stopwatch stopwatch = Stopwatch.createStarted();
+ThriftVersionedEvents update;
+while ((update = queuedEvents.poll()) != null) {</p>
+<blockquote>
+<div><p>segmentWriter.indexThriftVersionedEvents(update);
+eventCount++;</p>
+</div></blockquote>
+<p>}
+LOG.info(“Applied {} queued updates to segment {} in {}.”,</p>
+<blockquote>
+<div><p>eventCount, segmentName, stopwatch);</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;Override
+public Result indexThriftVersionedEvents(ThriftVersionedEvents tve) throws IOException {</p>
+<blockquote>
+<div><dl>
+<dt>synchronized (lock) {</dt><dd><dl class="simple">
+<dt>if (state.get() == State.Optimizing) {</dt><dd><p>queuedEvents.add(tve);</p>
+</dd>
+</dl>
+<p>}
+return segmentWriterReference.get().indexThriftVersionedEvents(tve);</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public SegmentInfo getSegmentInfo() {</p>
+<blockquote>
+<div><p>return segmentWriterReference.get().getSegmentInfo();</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>private void transition(State from, State to) {</dt><dd><p>Preconditions.checkState(state.compareAndSet(from, to));
+LOG.info(“Transitioned from {} to {} for segment {}.”, from, to, segmentName);</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;VisibleForTesting
+public Future&lt;SegmentInfo&gt; getOptimizationPromise() {</p>
+<blockquote>
+<div><p>return optimizationPromise;</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../_sources/src/java/com/twitter/search/earlybird/partition/OptimizingSegmentWriter.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

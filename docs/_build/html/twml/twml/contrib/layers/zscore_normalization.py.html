@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../" id="documentation_options" src="../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>“””
+Contains the twml.layers.ZscoreNormalization layer.
+“””
+from twml.layers.layer import Layer
+import tensorflow.compat.v1 as tf</p>
+<p>from tensorflow.python.training import moving_averages</p>
+<p># This is copied from tensorflow.contrib.framework.python.ops.add_model_variable in 1.15
+# Not available in 2.x
+# TODO: Figure out if this is really necessary.
+def _add_model_variable(var):</p>
+<blockquote>
+<div><p>“””Adds a variable to the <cite>GraphKeys.MODEL_VARIABLES</cite> collection.
+Args:</p>
+<blockquote>
+<div><p>var: a variable.</p>
+</div></blockquote>
+<p>“””
+if var not in tf.get_collection(tf.GraphKeys.MODEL_VARIABLES):</p>
+<blockquote>
+<div><p>tf.add_to_collection(tf.GraphKeys.MODEL_VARIABLES, var)</p>
+</div></blockquote>
+</div></blockquote>
+<dl>
+<dt>def update_moving_variable(batch_var, moving_var, decay, zero_debias=True, name=None):</dt><dd><dl class="simple">
+<dt>update_op = moving_averages.assign_moving_average(</dt><dd><p>moving_var, batch_var, decay, zero_debias=zero_debias, name=None)</p>
+</dd>
+</dl>
+<p>_add_model_variable(moving_var)
+with tf.control_dependencies([update_op]):</p>
+<blockquote>
+<div><p>return tf.identity(moving_var)</p>
+</div></blockquote>
+</dd>
+<dt>class ZscoreNormalization(Layer):</dt><dd><p>“””
+Perform z-score normalization using moving mean and std.
+Missing values are not included during mean/std calculation
+This layer should only be used right after input layer.</p>
+<dl>
+<dt>Args:</dt><dd><dl class="simple">
+<dt>decay:</dt><dd><p>using large decay to include longer moving means.</p>
+</dd>
+<dt>data_type:</dt><dd><p>use float64 to prevent overflow during variance calculation.</p>
+</dd>
+<dt>name:</dt><dd><p>Layer name</p>
+</dd>
+</dl>
+</dd>
+<dt>Returns:</dt><dd><blockquote>
+<div><p>A layer representing the output of the ZscoreNormalization transformation.</p>
+</div></blockquote>
+<p>“””</p>
+</dd>
+<dt>def __init__(</dt><dd><p>self,
+decay=0.9999,
+data_type=tf.float64,
+name=None,
+<a href="#id1"><span class="problematic" id="id2">**</span></a>kwargs):
+super(ZscoreNormalization, self).__init__(name=name, <a href="#id3"><span class="problematic" id="id4">**</span></a>kwargs)
+self.epsilon = tf.constant(1., data_type)
+self.decay = decay
+self.data_type = data_type</p>
+</dd>
+<dt>def build(self, input_shape):  # pylint: disable=unused-argument</dt><dd><p>“””Creates the moving_mean and moving_var tf.Variables of the layer.”””
+input_dim = input_shape[1]
+self.moving_mean = self.add_variable(</p>
+<blockquote>
+<div><p>‘{}_mean/EMA’.format(self.name),
+initializer=tf.constant_initializer(),
+shape=[input_dim],
+dtype=self.data_type,
+trainable=False</p>
+</div></blockquote>
+<p>)
+self.moving_var = self.add_variable(</p>
+<blockquote>
+<div><p>‘{}_variance/EMA’.format(self.name),
+initializer=tf.constant_initializer(),
+shape=[input_dim],
+dtype=self.data_type,
+trainable=False</p>
+</div></blockquote>
+<p>)
+self.built = True</p>
+</dd>
+<dt>def compute_output_shape(self, input_shape):</dt><dd><p>“””Computes the output shape of the layer given the input shape.</p>
+<dl class="simple">
+<dt>Args:</dt><dd><dl class="simple">
+<dt>input_shape: A (possibly nested tuple of) <cite>TensorShape</cite>.  It need not</dt><dd><p>be fully defined (e.g. the batch size may be unknown).</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>“””</p>
+<p>return input_shape</p>
+</dd>
+<dt>def _training_pass(self, input, dense_mask, input_dtype, handle_single, zero_debias):</dt><dd><p>epsilon = self.epsilon
+moving_mean, moving_var = self.moving_mean, self.moving_var
+# calculate the number of exisiting value for each feature
+tensor_batch_num = tf.reduce_sum(tf.cast(dense_mask, self.data_type), axis=0)
+mask_ones = tf.cast(tensor_batch_num, tf.bool)
+eps_vector = tf.fill(tf.shape(tensor_batch_num), epsilon)
+# the following filled 0 with epision
+tensor_batch_num_eps = tf.where(mask_ones,</p>
+<blockquote>
+<div><blockquote>
+<div><p>tensor_batch_num,
+eps_vector</p>
+</div></blockquote>
+<p>)</p>
+</div></blockquote>
+<p>tensor_batch_num_eps_broacast = tf.expand_dims(tensor_batch_num_eps, 0)
+tensor_batch_divided = input / tensor_batch_num_eps_broacast
+tensor_batch_mean = tf.reduce_sum(tensor_batch_divided, axis=0)</p>
+<p># update moving mean here, and use it to calculate the std.
+tensor_moving_mean = update_moving_variable(tensor_batch_mean, moving_mean, self.decay,</p>
+<blockquote>
+<div><p>zero_debias, name=”mean_ema_op”)</p>
+</div></blockquote>
+<p>tensor_batch_sub_mean = input - tf.expand_dims(tensor_moving_mean, 0)
+tensor_batch_sub_mean = tf.where(dense_mask,</p>
+<blockquote>
+<div><p>tensor_batch_sub_mean,
+tf.zeros_like(tensor_batch_sub_mean))</p>
+</div></blockquote>
+<p># divided by sqrt(n) before square, and then do summation for numeric stability.
+broad_sqrt_num_eps = tf.expand_dims(tf.sqrt(tensor_batch_num_eps), 0)
+tensor_batch_sub_mean_div = tensor_batch_sub_mean / broad_sqrt_num_eps
+tensor_batch_sub_mean_div_square = tf.square(tensor_batch_sub_mean_div)
+tensor_batch_var = tf.reduce_sum(tensor_batch_sub_mean_div_square, axis=0)</p>
+<p># update moving var here, dont replace 0 with eps before updating.
+tensor_moving_var = update_moving_variable(tensor_batch_var, moving_var, self.decay,</p>
+<blockquote>
+<div><p>zero_debias, name=”var_ema_op”)</p>
+</div></blockquote>
+<p># if std is 0, replace it with epsilon
+tensor_moving_std = tf.sqrt(tensor_moving_var)
+tensor_moving_std_eps = tf.where(tf.equal(tensor_moving_std, 0),</p>
+<blockquote>
+<div><p>eps_vector,
+tensor_moving_std)</p>
+</div></blockquote>
+<p>missing_input_norm = tensor_batch_sub_mean / tf.expand_dims(tensor_moving_std_eps, 0)</p>
+<dl>
+<dt>if handle_single:</dt><dd><p># if std==0 and value not missing, reset it to 1.
+moving_var_mask_zero = tf.math.equal(tensor_moving_var, 0)
+moving_var_mask_zero = tf.expand_dims(moving_var_mask_zero, 0)
+missing_input_norm = tf.where(</p>
+<blockquote>
+<div><p>tf.math.logical_and(dense_mask, moving_var_mask_zero),
+tf.ones_like(missing_input_norm),
+missing_input_norm</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+<dt>if input_dtype != self.data_type:</dt><dd><p>missing_input_norm = tf.cast(missing_input_norm, input_dtype)</p>
+</dd>
+</dl>
+<p>return missing_input_norm</p>
+</dd>
+<dt>def _infer_pass(self, input, dense_mask, input_dtype, handle_single):</dt><dd><p>epsilon = tf.cast(self.epsilon, input_dtype)
+testing_moving_mean = tf.cast(self.moving_mean, input_dtype)
+tensor_moving_std = tf.cast(tf.sqrt(self.moving_var), input_dtype)</p>
+<p>broad_mean = tf.expand_dims(testing_moving_mean, 0)
+tensor_batch_sub_mean = input - broad_mean</p>
+<dl>
+<dt>tensor_batch_sub_mean = tf.where(dense_mask,</dt><dd><blockquote>
+<div><p>tensor_batch_sub_mean,
+tf.zeros_like(tensor_batch_sub_mean)</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+<dt>tensor_moving_std_eps = tf.where(tf.equal(tensor_moving_std, 0),</dt><dd><p>tf.fill(tf.shape(tensor_moving_std), epsilon),
+tensor_moving_std)</p>
+</dd>
+</dl>
+<p>missing_input_norm = tensor_batch_sub_mean / tf.expand_dims(tensor_moving_std_eps, 0)
+if handle_single:</p>
+<blockquote>
+<div><p># if std==0 and value not missing, reset it to 1.
+moving_var_broad = tf.expand_dims(tensor_moving_std, 0)
+moving_var_mask_zero = tf.math.logical_not(tf.cast(moving_var_broad, tf.bool))</p>
+<dl class="simple">
+<dt>missing_input_norm = tf.where(tf.math.logical_and(dense_mask, moving_var_mask_zero),</dt><dd><p>tf.ones_like(missing_input_norm),
+missing_input_norm
+)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>return missing_input_norm</p>
+</dd>
+<dt>def call(</dt><dd><p>self,
+input,
+is_training,
+dense_mask=None,
+zero_debias=True,
+handle_single=False):
+“””
+Args:
+———–
+input:  B x D : float32/float64</p>
+<blockquote>
+<div><p>missing value must be set to 0.</p>
+</div></blockquote>
+<dl class="simple">
+<dt>is_training: bool</dt><dd><p>training phase or testing phase</p>
+</dd>
+<dt>dense_mask: B x D<span class="classifier">bool</span></dt><dd><p>missing value should be marked as 0, non-missing as 1. same shape as input</p>
+</dd>
+<dt>zero_debias: bool</dt><dd><p>bias correction of the moving average. (biased towards 0 in the beginning.
+see adam paper. <a class="reference external" href="https://arxiv.org/abs/1412.6980">https://arxiv.org/abs/1412.6980</a>)</p>
+</dd>
+<dt>handle_single: bool</dt><dd><p>if std==0, and feature is not missing value, set the value to 1, instead of 0.
+This is super rare if input only consists of continous feature.
+But if one-hot feature is included,
+they will all have same values 1, in that case, make sure to set handle_single to true.</p>
+</dd>
+</dl>
+<p>“””</p>
+<dl class="simple">
+<dt>if dense_mask is None:</dt><dd><p>dense_mask = tf.math.logical_not(tf.equal(input, 0))</p>
+</dd>
+</dl>
+<p>input_dtype = input.dtype</p>
+<dl>
+<dt>if is_training:</dt><dd><dl class="simple">
+<dt>if input_dtype != self.data_type:</dt><dd><p>input = tf.cast(input, self.data_type)</p>
+</dd>
+</dl>
+<p>return self._training_pass(input, dense_mask, input_dtype, handle_single, zero_debias)</p>
+</dd>
+<dt>else:</dt><dd><p>return self._infer_pass(input, dense_mask, input_dtype, handle_single)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+<dt>def zscore_normalization(</dt><dd><p>input,
+is_training,
+decay=0.9999,
+data_type=tf.float64,
+name=None,
+dense_mask=None,
+zero_debias=True,
+handle_single=False, <a href="#id5"><span class="problematic" id="id6">**</span></a>kwargs):
+“””
+Args:
+————
+input:  B x D : float32/float64</p>
+<blockquote>
+<div><p>missing value must be set to 0.</p>
+</div></blockquote>
+<dl class="simple">
+<dt>is_training: bool</dt><dd><p>training phase or testing phase</p>
+</dd>
+<dt>decay:</dt><dd><p>using large decay to include longer moving means.</p>
+</dd>
+<dt>data_type:</dt><dd><p>use float64 to zprevent overflow during variance calculation.</p>
+</dd>
+<dt>name:</dt><dd><p>Layer name</p>
+</dd>
+<dt>dense_mask: B x D<span class="classifier">bool</span></dt><dd><p>missing value should be marked as 0, non-missing as 1. same shape as input</p>
+</dd>
+<dt>zero_debias: bool</dt><dd><p>bias correction of the moving average. (biased towards 0 in the beginning.
+see adam paper. <a class="reference external" href="https://arxiv.org/abs/1412.6980">https://arxiv.org/abs/1412.6980</a>)</p>
+</dd>
+<dt>handle_single: bool</dt><dd><p>if std==0, and feature is not missing value, set the value to 1, instead of 0.
+This is super rare if input only consists of continous feature.
+But if one-hot feature is included,
+they will all have same values 1, in that case, make sure to set handle_single to true.</p>
+</dd>
+</dl>
+<p>“””</p>
+<p>norm_layer = ZscoreNormalization(decay=decay, data_type=data_type, name=name, <a href="#id7"><span class="problematic" id="id8">**</span></a>kwargs)
+return norm_layer(input,</p>
+<blockquote>
+<div><p>is_training,
+dense_mask=dense_mask,
+zero_debias=zero_debias,
+handle_single=handle_single)</p>
+</div></blockquote>
+</dd>
+</dl>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../_sources/twml/twml/contrib/layers/zscore_normalization.py.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

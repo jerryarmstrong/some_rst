@@ -1,0 +1,2562 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../" id="documentation_options" src="../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.earlybird;</p>
+<p>import java.io.IOException;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
+import javax.annotation.Nonnull;
+import javax.annotation.Nullable;</p>
+<p>import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Joiner;
+import com.google.common.base.Preconditions;
+import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.Lists;</p>
+<p>import org.apache.commons.lang.StringUtils;
+import org.apache.lucene.index.Term;
+import org.apache.lucene.queryparser.classic.ParseException;
+import org.apache.lucene.queryparser.classic.QueryParser;
+import org.apache.lucene.search.BooleanClause.Occur;
+import org.apache.lucene.search.BooleanQuery;
+import org.apache.lucene.search.Query;
+import org.apache.thrift.TException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;</p>
+<p>import com.twitter.common.util.Clock;
+import com.twitter.decider.Decider;
+import com.twitter.search.common.database.DatabaseConfig;
+import com.twitter.search.common.decider.DeciderUtil;
+import com.twitter.search.common.features.thrift.ThriftSearchFeatureSchema;
+import com.twitter.search.common.metrics.SearchCounter;
+import com.twitter.search.common.metrics.SearchRateCounter;
+import com.twitter.search.common.metrics.SearchTimer;
+import com.twitter.search.common.partitioning.base.Segment;
+import com.twitter.search.common.query.MappableField;
+import com.twitter.search.common.query.QueryHitAttributeHelper;
+import com.twitter.search.common.query.thriftjava.CollectorParams;
+import com.twitter.search.common.query.thriftjava.CollectorTerminationParams;
+import com.twitter.search.common.query.thriftjava.EarlyTerminationInfo;
+import com.twitter.search.common.ranking.thriftjava.ThriftRankingParams;
+import com.twitter.search.common.ranking.thriftjava.ThriftScoringFunctionType;
+import com.twitter.search.common.results.thriftjava.FieldHitList;
+import com.twitter.search.common.schema.SchemaUtil;
+import com.twitter.search.common.schema.SearchWhitespaceAnalyzer;
+import com.twitter.search.common.schema.base.FieldWeightDefault;
+import com.twitter.search.common.schema.base.ImmutableSchemaInterface;
+import com.twitter.search.common.schema.base.Schema;
+import com.twitter.search.common.schema.earlybird.EarlybirdCluster;
+import com.twitter.search.common.schema.earlybird.EarlybirdFieldConstants.EarlybirdFieldConstant;
+import com.twitter.search.common.search.TerminationTracker;
+import com.twitter.search.common.search.TwitterEarlyTerminationCollector;
+import com.twitter.search.common.search.termination.QueryTimeoutFactory;
+import com.twitter.search.common.util.earlybird.EarlybirdResponseUtil;
+import com.twitter.search.common.util.ml.tensorflow_engine.TensorflowModelsManager;
+import com.twitter.search.common.util.thrift.ThriftUtils;
+import com.twitter.search.core.earlybird.facets.FacetCountState;
+import com.twitter.search.earlybird.common.ClientIdUtil;
+import com.twitter.search.earlybird.common.config.EarlybirdConfig;
+import com.twitter.search.earlybird.exception.ClientException;
+import com.twitter.search.earlybird.exception.TransientException;
+import com.twitter.search.earlybird.index.facets.FacetSkipList;
+import com.twitter.search.earlybird.ml.ScoringModelsManager;
+import com.twitter.search.earlybird.partition.AudioSpaceTable;
+import com.twitter.search.earlybird.partition.MultiSegmentTermDictionaryManager;
+import com.twitter.search.earlybird.partition.PartitionConfig;
+import com.twitter.search.earlybird.partition.SegmentInfo;
+import com.twitter.search.earlybird.partition.SegmentManager;
+import com.twitter.search.earlybird.querycache.QueryCacheConversionRules;
+import com.twitter.search.earlybird.querycache.QueryCacheManager;
+import com.twitter.search.earlybird.queryparser.DetectFieldAnnotationVisitor;
+import com.twitter.search.earlybird.queryparser.EarlybirdLuceneQueryVisitor;
+import com.twitter.search.earlybird.queryparser.HighFrequencyTermPairRewriteVisitor;
+import com.twitter.search.earlybird.queryparser.LuceneRelevanceQueryVisitor;
+import com.twitter.search.earlybird.queryparser.ProtectedOperatorQueryRewriter;
+import com.twitter.search.earlybird.search.AbstractResultsCollector;
+import com.twitter.search.earlybird.search.AntiGamingFilter;
+import com.twitter.search.earlybird.search.queries.BadUserRepFilter;
+import com.twitter.search.earlybird.search.EarlybirdLuceneSearcher;
+import com.twitter.search.earlybird.search.EarlybirdMultiSegmentSearcher;
+import com.twitter.search.earlybird.search.queries.MatchAllDocsQuery;
+import com.twitter.search.earlybird.search.queries.RequiredStatusIDsFilter;
+import com.twitter.search.earlybird.search.SearchRequestInfo;
+import com.twitter.search.earlybird.search.SearchResultsCollector;
+import com.twitter.search.earlybird.search.SearchResultsInfo;
+import com.twitter.search.earlybird.search.SimpleSearchResults;
+import com.twitter.search.earlybird.search.SocialFilter;
+import com.twitter.search.earlybird.search.SocialSearchResultsCollector;
+import com.twitter.search.earlybird.search.queries.UserFlagsExcludeFilter;
+import com.twitter.search.earlybird.search.queries.UserIdMultiSegmentQuery;
+import com.twitter.search.earlybird.search.facets.EntityAnnotationCollector;
+import com.twitter.search.earlybird.search.facets.ExpandedUrlCollector;
+import com.twitter.search.earlybird.search.facets.ExplainFacetResultsCollector;
+import com.twitter.search.earlybird.search.facets.FacetRankingModule;
+import com.twitter.search.earlybird.search.facets.FacetResultsCollector;
+import com.twitter.search.earlybird.search.facets.FacetSearchRequestInfo;
+import com.twitter.search.earlybird.search.facets.NamedEntityCollector;
+import com.twitter.search.earlybird.search.facets.SpaceFacetCollector;
+import com.twitter.search.earlybird.search.facets.TermStatisticsCollector;
+import com.twitter.search.earlybird.search.facets.TermStatisticsRequestInfo;
+import com.twitter.search.earlybird.search.relevance.RelevanceSearchRequestInfo;
+import com.twitter.search.earlybird.search.relevance.RelevanceSearchResults;
+import com.twitter.search.earlybird.search.relevance.collectors.AbstractRelevanceCollector;
+import com.twitter.search.earlybird.search.relevance.collectors.BatchRelevanceTopCollector;
+import com.twitter.search.earlybird.search.relevance.collectors.RelevanceAllCollector;
+import com.twitter.search.earlybird.search.relevance.collectors.RelevanceTopCollector;
+import com.twitter.search.earlybird.search.relevance.scoring.RelevanceQuery;
+import com.twitter.search.earlybird.search.relevance.scoring.ScoringFunction;
+import com.twitter.search.earlybird.search.relevance.scoring.ScoringFunctionProvider;
+import com.twitter.search.earlybird.search.relevance.scoring.TensorflowBasedScoringFunction;
+import com.twitter.search.earlybird.stats.EarlybirdRPCStats;
+import com.twitter.search.earlybird.stats.EarlybirdSearcherStats;
+import com.twitter.search.earlybird.thrift.EarlybirdDebugInfo;
+import com.twitter.search.earlybird.thrift.EarlybirdRequest;
+import com.twitter.search.earlybird.thrift.EarlybirdResponse;
+import com.twitter.search.earlybird.thrift.EarlybirdResponseCode;
+import com.twitter.search.earlybird.thrift.ThriftFacetCount;
+import com.twitter.search.earlybird.thrift.ThriftFacetCountMetadata;
+import com.twitter.search.earlybird.thrift.ThriftFacetFieldRequest;
+import com.twitter.search.earlybird.thrift.ThriftFacetFieldResults;
+import com.twitter.search.earlybird.thrift.ThriftFacetRequest;
+import com.twitter.search.earlybird.thrift.ThriftFacetResults;
+import com.twitter.search.earlybird.thrift.ThriftSearchQuery;
+import com.twitter.search.earlybird.thrift.ThriftSearchRankingMode;
+import com.twitter.search.earlybird.thrift.ThriftSearchRelevanceOptions;
+import com.twitter.search.earlybird.thrift.ThriftSearchResult;
+import com.twitter.search.earlybird.thrift.ThriftSearchResultExtraMetadata;
+import com.twitter.search.earlybird.thrift.ThriftSearchResultMetadataOptions;
+import com.twitter.search.earlybird.thrift.ThriftSearchResults;
+import com.twitter.search.earlybird.thrift.ThriftTermRequest;
+import com.twitter.search.earlybird.thrift.ThriftTermStatisticsRequest;
+import com.twitter.search.earlybird.thrift.ThriftTermStatisticsResults;
+import com.twitter.search.earlybird.util.EarlybirdSearchResultUtil;
+import com.twitter.search.queryparser.parser.SerializedQueryParser;
+import com.twitter.search.queryparser.query.Conjunction;
+import com.twitter.search.queryparser.query.Disjunction;
+import com.twitter.search.queryparser.query.QueryNodeUtils;
+import com.twitter.search.queryparser.query.QueryParserException;
+import com.twitter.search.queryparser.query.annotation.Annotation;
+import com.twitter.search.queryparser.query.search.SearchOperator;
+import com.twitter.search.queryparser.query.search.SearchOperatorConstants;
+import com.twitter.search.queryparser.util.IdTimeRanges;
+import com.twitter.search.queryparser.visitors.ConversionVisitor;
+import com.twitter.search.queryparser.visitors.DetectPositiveOperatorVisitor;
+import com.twitter.search.queryparser.visitors.NamedDisjunctionVisitor;
+import com.twitter.search.queryparser.visitors.ProximityGroupRewriteVisitor;
+import com.twitter.search.queryparser.visitors.StripAnnotationsVisitor;</p>
+<p>import static com.twitter.search.queryparser.query.search.SearchOperator.Type.UNTIL_TIME;</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>This class provides the basic search() method:</p></li>
+<li><ul>
+<li><p>converts the thrift request object into what lucene expects.</p></li>
+</ul>
+</li>
+<li><ul>
+<li><p>gets the segment.</p></li>
+</ul>
+</li>
+<li><ul>
+<li><p>handles all errors, and prepares the response in case of error.</p></li>
+</ul>
+</li>
+<li></li>
+<li><p>We have one instance of this class per search received.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>public class EarlybirdSearcher {</dt><dd><dl>
+<dt>public enum QueryMode {</dt><dd><p>// Please think before adding more query modes: can this be implemented in a general way?
+RECENCY(new EarlybirdRPCStats(“search_recency”)),
+FACETS(new EarlybirdRPCStats(“search_facets”)),
+TERM_STATS(new EarlybirdRPCStats(“search_termstats”)),
+RELEVANCE(new EarlybirdRPCStats(“search_relevance”)),
+TOP_TWEETS(new EarlybirdRPCStats(“search_toptweets”));</p>
+<p>private final EarlybirdRPCStats requestStats;</p>
+<dl class="simple">
+<dt>QueryMode(EarlybirdRPCStats requestStats) {</dt><dd><p>this.requestStats = requestStats;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public EarlybirdRPCStats getRequestStats() {</dt><dd><p>return requestStats;</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>private static final Logger LOG = LoggerFactory.getLogger(EarlybirdSearcher.class);
+private static final String MATCH_ALL_SERIALIZED_QUERY = “(* )”;
+/**</p>
+<blockquote>
+<div><ul class="simple">
+<li><p>generic field annotations can be mapped to a concrete field in the index using this mapping</p></li>
+<li><p>via <a class="reference external" href="mailto:{&#37;&#52;&#48;link">{<span>&#64;</span>link</a> com.twitter.search.queryparser.query.annotation.Annotation.Type#MAPPABLE_FIELD}</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</div></blockquote>
+<dl class="simple">
+<dt>private static final Map&lt;MappableField, String&gt; MAPPABLE_FIELD_MAP =</dt><dd><dl class="simple">
+<dt>ImmutableMap.of(</dt><dd><p>MappableField.URL,
+EarlybirdFieldConstant.RESOLVED_LINKS_TEXT_FIELD.getFieldName());</p>
+</dd>
+</dl>
+</dd>
+<dt>private static final String ALLOW_QUERY_SPECIFIC_SIGNAL_DECIDER_KEY</dt><dd><p>= “allow_query_specific_score_adjustments”;</p>
+</dd>
+</dl>
+<p>&#64;VisibleForTesting
+public static final String ALLOW_AUTHOR_SPECIFIC_SIGNAL_DECIDER_KEY</p>
+<blockquote>
+<div><p>= “allow_author_specific_score_adjustments”;</p>
+</div></blockquote>
+<dl class="simple">
+<dt>private static final String USE_MULTI_TERM_DISJUNCTION_FOR_LIKED_BY_USER_IDS_DECIDER_KEY</dt><dd><p>= “use_multi_term_disjunction_for_liked_by_user_ids”;</p>
+</dd>
+<dt>private static final String ALLOW_CAMELCASE_USERNAME_FIELD_WEIGHT_OVERRIDE_DECIDER_KEY_PREFIX</dt><dd><p>= “<a href="#id35"><span class="problematic" id="id36">allow_camelcase_username_field_weight_override_in_</span></a>”;</p>
+</dd>
+<dt>private static final String ALLOW_TOKENIZED_DISPLAY_NAME_FIELD_WEIGHT_OVERRIDE_DECIDER_KEY_PREFIX</dt><dd><p>= “<a href="#id37"><span class="problematic" id="id38">allow_tokenized_display_name_field_weight_override_in_</span></a>”;</p>
+</dd>
+<dt>private static final boolean ALLOW_QUERY_SPECIFIC_SIGNAL_CONFIG</dt><dd><p>= EarlybirdConfig.getBool(“allow_query_specific_score_adjustments”, false);</p>
+</dd>
+<dt>private static final boolean ALLOW_AUTHOR_SPECIFIC_SIGNAL_CONFIG</dt><dd><p>= EarlybirdConfig.getBool(“allow_author_specific_score_adjustments”, false);</p>
+</dd>
+</dl>
+<p>public static final int DEFAULT_NUM_FACET_RESULTS = 100;</p>
+<p>private final ImmutableSchemaInterface schemaSnapshot;
+private final EarlybirdCluster cluster;</p>
+<p>private final Clock clock;
+private final Decider decider;</p>
+<p>// The actual request thrift.
+private final EarlybirdRequest request;</p>
+<p>// searchQuery from inside the request.
+private final ThriftSearchQuery searchQuery;</p>
+<p>// CollectorParams from inside the searchQuery;
+private final CollectorParams collectorParams;</p>
+<p>// Parsed query (parsed from serialized query string in request).
+private com.twitter.search.queryparser.query.Query parsedQuery;
+private boolean parsedQueryAllowNullcast;
+private IdTimeRanges idTimeRanges;</p>
+<p>// Lucene version of the above.  This is what we will actually be executing.
+private org.apache.lucene.search.Query luceneQuery;</p>
+<p>// Used for queries where we want to collect per-field hit attribution
+&#64;Nullable
+private QueryHitAttributeHelper hitAttributeHelper;</p>
+<p>// Debugging info can be appended to this buffer.
+private final StringBuilder messageBuffer = new StringBuilder(1024);
+private final EarlybirdDebugInfo debugInfo = new EarlybirdDebugInfo();</p>
+<p>// The segment we are searching, or null for the multi-searcher.
+private Segment segment = null;</p>
+<p>// True iff we are searching all segments (multi-searcher).
+private final boolean searchAllSegments;</p>
+<p>// Tracking termination criteria for this query
+private final TerminationTracker terminationTracker;</p>
+<p>private EarlybirdLuceneSearcher searcher = null;</p>
+<p>private final SegmentManager segmentManager;
+private final QueryCacheManager queryCacheManager;
+private final ScoringModelsManager scoringModelsManager;
+private final TensorflowModelsManager tensorflowModelsManager;</p>
+<p>private AntiGamingFilter antiGamingFilter = null;</p>
+<dl class="simple">
+<dt>private final boolean searchHighFrequencyTermPairs =</dt><dd><p>EarlybirdConfig.getBool(“search_high_frequency_term_pairs”, false);</p>
+</dd>
+</dl>
+<p>// How long to allow post-termination when enforcing query timeout
+private final int enforceQueryTimeoutBufferMillis =</p>
+<blockquote>
+<div><p>EarlybirdConfig.getInt(“enforce_query_timeout_buffer_millis”, 50);</p>
+</div></blockquote>
+<p>private EarlybirdRPCStats requestStats;</p>
+<p>private QueryTimeoutFactory queryTimeoutFactory;</p>
+<p>// Exported stats
+private final EarlybirdSearcherStats searcherStats;</p>
+<p>&#64;VisibleForTesting
+public static final SearchCounter FIELD_WEIGHT_OVERRIDE_MAP_NON_NULL_COUNT =</p>
+<blockquote>
+<div><p>SearchCounter.export(“field_weight_override_map_non_null_count”);</p>
+</div></blockquote>
+<p>&#64;VisibleForTesting
+public static final SearchCounter DROPPED_CAMELCASE_USERNAME_FIELD_WEIGHT_OVERRIDE =</p>
+<blockquote>
+<div><p>SearchCounter.export(“dropped_camelcase_username_field_weight_override”);</p>
+</div></blockquote>
+<p>&#64;VisibleForTesting
+public static final SearchCounter DROPPED_TOKENIZED_DISPLAY_NAME_FIELD_WEIGHT_OVERRIDE =</p>
+<blockquote>
+<div><p>SearchCounter.export(“dropped_tokenized_display_name_field_weight_override”);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>private static final SearchCounter RESPONSE_HAS_NO_THRIFT_SEARCH_RESULTS =</dt><dd><p>SearchCounter.export(“tweets_earlybird_searcher_response_has_no_thrift_search_results”);</p>
+</dd>
+<dt>private static final SearchCounter CLIENT_HAS_FEATURE_SCHEMA_COUNTER =</dt><dd><p>SearchCounter.export(“tweets_earlybird_searcher_client_has_feature_schema”);</p>
+</dd>
+<dt>private static final SearchCounter CLIENT_DOESNT_HAVE_FEATURE_SCHEMA_COUNTER =</dt><dd><p>SearchCounter.export(“tweet_earlybird_searcher_client_doesnt_have_feature_schema”);</p>
+</dd>
+<dt>private static final SearchCounter COLLECTOR_PARAMS_MAX_HITS_TO_PROCESS_NOT_SET_COUNTER =</dt><dd><p>SearchCounter.export(“collector_params_max_hits_to_process_not_set”);</p>
+</dd>
+<dt>private static final SearchCounter POSITIVE_PROTECTED_OPERATOR_DETECTED_COUNTER =</dt><dd><p>SearchCounter.export(“positive_protected_operator_detected_counter”);</p>
+</dd>
+</dl>
+<p>// Query mode we are executing.
+private final QueryMode queryMode;</p>
+<p>// facetRequest from inside the request (or null).
+private final ThriftFacetRequest facetRequest;</p>
+<p>// termStatisticsRequest from inside the request (or null).
+private final ThriftTermStatisticsRequest termStatisticsRequest;</p>
+<p>// Results fields filled in during searchInternal().
+private ThriftSearchResults searchResults = null;
+private ThriftFacetResults facetResults = null;
+private ThriftTermStatisticsResults termStatisticsResults = null;
+private EarlyTerminationInfo earlyTerminationInfo = null;</p>
+<p>// Partition config used to fill in debugging info.
+// If null, no debug info is written into results.
+&#64;Nullable
+private final PartitionConfig partitionConfig;</p>
+<p>private final MultiSegmentTermDictionaryManager multiSegmentTermDictionaryManager;</p>
+<p>private final QualityFactor qualityFactor;</p>
+<p>private Set&lt;String&gt; queriedFields;
+private final AudioSpaceTable audioSpaceTable;</p>
+<dl>
+<dt>public EarlybirdSearcher(</dt><dd><blockquote>
+<div><p>EarlybirdRequest request,
+SegmentManager segmentManager,
+AudioSpaceTable audioSpaceTable,
+QueryCacheManager queryCacheManager,
+ImmutableSchemaInterface schema,
+EarlybirdCluster cluster,
+&#64;Nullable PartitionConfig partitionConfig,
+Decider decider,
+EarlybirdSearcherStats searcherStats,
+ScoringModelsManager scoringModelsManager,
+TensorflowModelsManager tensorflowModelsManager,
+Clock clock,
+MultiSegmentTermDictionaryManager multiSegmentTermDictionaryManager,
+QueryTimeoutFactory queryTimeoutFactory,
+QualityFactor qualityFactor) {</p>
+</div></blockquote>
+<p>this.queryMode = getQueryMode(request);
+this.schemaSnapshot = schema.getSchemaSnapshot();
+// set the request stats as early as possible, so that we can track errors that happen
+// early on in query processing.
+this.requestStats = queryMode.getRequestStats();
+this.facetRequest = request.isSetFacetRequest() ? request.getFacetRequest() : null;
+this.termStatisticsRequest = request.isSetTermStatisticsRequest()</p>
+<blockquote>
+<div><p>? request.getTermStatisticsRequest() : null;</p>
+</div></blockquote>
+<p>this.partitionConfig = partitionConfig;
+this.searcherStats = searcherStats;
+this.multiSegmentTermDictionaryManager = multiSegmentTermDictionaryManager;
+this.clock = clock;
+this.decider = decider;
+this.request = request;
+this.segmentManager = segmentManager;
+this.queryCacheManager = queryCacheManager;
+this.cluster = cluster;
+this.scoringModelsManager = scoringModelsManager;
+this.tensorflowModelsManager = tensorflowModelsManager;
+this.audioSpaceTable = audioSpaceTable;
+// Note: we’re deferring the validation/nullchecks until validateRequest()
+// for more contained exception handling
+this.searchQuery = request.getSearchQuery();
+this.collectorParams = this.searchQuery == null ? null : this.searchQuery.getCollectorParams();
+// Search all segments if searchSegmentId is unset.
+this.searchAllSegments = !request.isSetSearchSegmentId();
+if (this.collectorParams == null</p>
+<blockquote>
+<div><blockquote>
+<div><p>|| !this.collectorParams.isSetTerminationParams()) {</p>
+</div></blockquote>
+<p>this.terminationTracker = new TerminationTracker(clock);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else if (request.isSetClientRequestTimeMs()) {</dt><dd><dl class="simple">
+<dt>this.terminationTracker = new TerminationTracker(collectorParams.getTerminationParams(),</dt><dd><p>request.getClientRequestTimeMs(), clock,
+getPostTerminationOverheadMillis(collectorParams.getTerminationParams()));</p>
+</dd>
+</dl>
+</dd>
+<dt>} else {</dt><dd><dl class="simple">
+<dt>this.terminationTracker = new TerminationTracker(</dt><dd><p>collectorParams.getTerminationParams(), clock,
+getPostTerminationOverheadMillis(collectorParams.getTerminationParams()));</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+this.queryTimeoutFactory = queryTimeoutFactory;
+this.qualityFactor = qualityFactor;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private int getPostTerminationOverheadMillis(CollectorTerminationParams terminationParams) {</dt><dd><p>// If enforcing timeouts, set the post-termination buffer to the smaller of the timeout or the
+// configured buffer. This ensures that timeout &gt;= buffer, and a request with a smaller timeout
+// should just time out immediately (because timeout == buffer).
+return (terminationParams.isEnforceQueryTimeout() &amp;&amp; terminationParams.getTimeoutMs() &gt; 0)</p>
+<blockquote>
+<div><p>? Math.min(enforceQueryTimeoutBufferMillis, terminationParams.getTimeoutMs()) : 0;</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<p>// Appends a debug string to the buffer.
+private void appendMessage(String message) {</p>
+<blockquote>
+<div><p>messageBuffer.append(message).append(”n”);</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Processes an Earlybird search request.</p></li>
+<li><p>&#64;return the earlybird response for this search request.</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>public EarlybirdResponse search() {</dt><dd><dl>
+<dt>try {</dt><dd><p>debugInfo.setHost(DatabaseConfig.getLocalHostname());</p>
+<p>// Throws transient exception for invalid requests.
+validateRequest();</p>
+<p>// Throws client exception for bad queries,
+parseEarlybirdRequest();</p>
+<p>// Modify the Lucene query if necessary.
+luceneQuery = postLuceneQueryProcess(luceneQuery);</p>
+<p>// Might return PARTITION_NOT_FOUND or PARTITION_DISABLED.
+EarlybirdResponseCode code = initSearcher();
+if (code != EarlybirdResponseCode.SUCCESS) {</p>
+<blockquote>
+<div><p>return respondError(code);</p>
+</div></blockquote>
+<p>}</p>
+<p>return searchInternal();</p>
+</dd>
+<dt>} catch (TransientException e) {</dt><dd><dl class="simple">
+<dt>LOG.error(String.format(“Transient exception in search() for EarlybirdRequest:n%s”, request),</dt><dd><p>e);</p>
+</dd>
+</dl>
+<p>appendMessage(e.getMessage());
+return respondError(EarlybirdResponseCode.TRANSIENT_ERROR);</p>
+</dd>
+<dt>} catch (ClientException e) {</dt><dd><dl class="simple">
+<dt>LOG.warn(String.format(“Client exception in search() %s for EarlybirdRequest:n %s”,</dt><dd><p>e, request));</p>
+</dd>
+</dl>
+<p>appendMessage(e.getMessage());
+return respondError(EarlybirdResponseCode.CLIENT_ERROR);</p>
+</dd>
+<dt>} catch (Exception e) {</dt><dd><dl class="simple">
+<dt>LOG.warn(String.format(“Uncaught exception in search() for EarlybirdRequest:n%s”, request),</dt><dd><p>e);</p>
+</dd>
+</dl>
+<p>appendMessage(e.getMessage());
+return respondError(EarlybirdResponseCode.TRANSIENT_ERROR);</p>
+</dd>
+<dt>} catch (AssertionError e) {</dt><dd><p>LOG.warn(String.format(“Assertion error in search() for EarlybirdRequest:n%s”, request), e);
+appendMessage(e.getMessage());
+return respondError(EarlybirdResponseCode.TRANSIENT_ERROR);</p>
+</dd>
+<dt>} catch (Error e) {</dt><dd><p>// SEARCH-33166: If we got here, it means what was thrown was not an Exception, or anything
+// we know how to handle. Log the Error for diagnostic purposes and propagate it.
+LOG.error(“Re-throwing uncaught error”, e);
+throw e;</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public EarlybirdRPCStats getRequestStats() {</dt><dd><p>return requestStats;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Wraps the given query with the provided filter queries.</p></li>
+<li></li>
+<li><p>&#64;param query the query to wrap with filters.</p></li>
+<li><p>&#64;param filters the filters to wrap the query with.</p></li>
+<li><p>&#64;return a BooleanQuery wrapped with filters</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+<dt>public static Query wrapFilters(Query query, Query… filters) {</dt><dd><p>boolean filtersEmpty = filters == null || filters.length == 0;</p>
+<dl>
+<dt>if (!filtersEmpty) {</dt><dd><p>filtersEmpty = true;
+for (Query f : filters) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (f != null) {</dt><dd><p>filtersEmpty = false;
+break;</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>if (filtersEmpty) {</dt><dd><dl class="simple">
+<dt>if (query == null) {</dt><dd><p>return new MatchAllDocsQuery();</p>
+</dd>
+<dt>} else {</dt><dd><p>return query;</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>BooleanQuery.Builder bqBuilder = new BooleanQuery.Builder();
+if (query != null) {</p>
+<blockquote>
+<div><p>bqBuilder.add(query, Occur.MUST);</p>
+</div></blockquote>
+<p>}
+for (Query f : filters) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (f != null) {</dt><dd><p>bqBuilder.add(f, Occur.FILTER);</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}
+return bqBuilder.build();</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// Examine all fields in the request for sanity.
+private void validateRequest() throws TransientException, ClientException {</p>
+<blockquote>
+<div><p>// First try thrift’s internal validate.  Should always succeed.
+try {</p>
+<blockquote>
+<div><p>request.validate();</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} catch (TException e) {</dt><dd><p>throw new TransientException(e.getMessage(), e);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>if (searchQuery == null) {</dt><dd><p>throw new TransientException(“No ThriftSearchQuery specified”);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>if (collectorParams == null) {</dt><dd><p>throw new TransientException(“No CollectorParams specified”);</p>
+</dd>
+</dl>
+<p>}</p>
+<p>validateTermStatsRequest();</p>
+<dl>
+<dt>if (!searchAllSegments) {</dt><dd><dl class="simple">
+<dt>if (request.getSearchSegmentId() &lt;= 0) {</dt><dd><p>String msg = “Bad time slice ID: “ + request.getSearchSegmentId();
+throw new TransientException(msg);</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// Initialize the segment.
+SegmentInfo segmentInfo = this.segmentManager.getSegmentInfo(request.getSearchSegmentId());
+segment = segmentInfo != null ? segmentInfo.getSegment() : null;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>if (collectorParams.getNumResultsToReturn() &lt; 0) {</dt><dd><p>String msg = “Invalid numResults: “ + collectorParams.getNumResultsToReturn();
+throw new TransientException(msg);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>if (searchQuery.getNamedDisjunctionMapSize() &gt; 0 &amp;&amp; searchQuery.isSetLuceneQuery()) {</dt><dd><p>throw new ClientException(“namedMultiTermDisjunctionMap does not support with luceneQuery”);</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>private void validateTermStatsRequest() throws ClientException {</dt><dd><p>// Validate the field names and values for all ThriftTermRequests.
+if (request.isSetTermStatisticsRequest()</p>
+<blockquote>
+<div><blockquote>
+<div><p>&amp;&amp; request.getTermStatisticsRequest().isSetTermRequests()) {</p>
+</div></blockquote>
+<dl>
+<dt>for (ThriftTermRequest termRequest<span class="classifier">request.getTermStatisticsRequest().getTermRequests()) {</span></dt><dd><p>// If termRequest.fieldName is not set, it defaults to ‘text’, which is a string field,
+// so we don’t need to check the term.
+if (termRequest.isSetFieldName()) {</p>
+<blockquote>
+<div><p>String fieldName = termRequest.getFieldName();
+Schema.FieldInfo facetFieldInfo = schemaSnapshot.getFacetFieldByFacetName(fieldName);
+if (facetFieldInfo != null) {</p>
+<blockquote>
+<div><p>// Facet fields are string fields, so we don’t need to check the term.
+continue;</p>
+</div></blockquote>
+<p>}</p>
+<p>Schema.FieldInfo fieldInfo = schemaSnapshot.getFieldInfo(fieldName);
+if (fieldInfo == null) {</p>
+<blockquote>
+<div><p>throw new ClientException(“Field “ + fieldName + “ is not present in the schema.”);</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>try {</dt><dd><p>SchemaUtil.toBytesRef(fieldInfo, termRequest.getTerm());</p>
+</dd>
+<dt>} catch (UnsupportedOperationException e) {</dt><dd><dl class="simple">
+<dt>throw new ClientException(“Term “ + termRequest.getTerm() + “ is not compatible with “</dt><dd><ul class="simple">
+<li><p>“the type of field “ + fieldName);</p></li>
+</ul>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private void setQueriesInDebugInfo(</dt><dd><blockquote>
+<div><p>com.twitter.search.queryparser.query.Query parsedQ,
+org.apache.lucene.search.Query luceneQ) {</p>
+</div></blockquote>
+<p>debugInfo.setParsedQuery(parsedQ == null ? null : parsedQ.serialize());
+debugInfo.setLuceneQuery(luceneQ == null ? null : luceneQ.toString());</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Takes the EarlybirdRequest that came into the service and after various parsing and processing</p></li>
+<li><p>steps ultimately produces a Lucene query.</p></li>
+</ul>
+<p><a href="#id9"><span class="problematic" id="id10">*</span></a>/</p>
+</dd>
+<dt>private void parseEarlybirdRequest() throws ClientException {</dt><dd><p>SerializedQueryParser parser = new SerializedQueryParser(EarlybirdConfig.getPenguinVersion());</p>
+<dl>
+<dt>try {</dt><dd><p>// if the deprecated iterativeQueries field is set, return an error to the client
+// indicating that support for it has been removed.
+if (searchQuery.isSetDeprecated_iterativeQueries()) {</p>
+<blockquote>
+<div><p>throw new ClientException(“Invalid request: iterativeQueries feature has been removed”);</p>
+</div></blockquote>
+<p>}</p>
+<p>// we parse the actual query from the user, if any
+luceneQuery = null;
+parsedQuery = null;  // this will be set by parseQueryHelper()</p>
+<dl>
+<dt>if (searchQuery.getLikedByUserIDFilter64Size() &gt; 0</dt><dd><blockquote>
+<div><p>&amp;&amp; searchQuery.isSetLuceneQuery()) {</p>
+</div></blockquote>
+<p>throw new ClientException(“likedByUserIDFilter64 does not support with luceneQuery”);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>if (!StringUtils.isBlank(request.getSearchQuery().getSerializedQuery())) {</dt><dd><p>searcherStats.thriftQueryWithSerializedQuery.increment();
+luceneQuery = parseSerializedQuery(searchQuery.getSerializedQuery(), parser, true);</p>
+</dd>
+<dt>} else if (!StringUtils.isBlank(request.getSearchQuery().getLuceneQuery())) {</dt><dd><p>searcherStats.thriftQueryWithLuceneQuery.increment();
+luceneQuery = parseLuceneQuery(searchQuery.getLuceneQuery());
+LOG.info(“lucene query: {}”, searchQuery.getLuceneQuery());
+if (luceneQuery != null) {</p>
+<blockquote>
+<div><p>LOG.info(“Using lucene query directly from the request: “ + luceneQuery.toString());</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+<dt>} else {</dt><dd><p>searcherStats.thriftQueryWithoutTextQuery.increment();
+luceneQuery = parseSerializedQuery(</p>
+<blockquote>
+<div><p>MATCH_ALL_SERIALIZED_QUERY,
+parser,
+queryMode != QueryMode.TERM_STATS);</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>} catch (QueryParserException | BooleanQuery.TooManyClauses e) {</dt><dd><p>LOG.info(“Exception parsing query during search”, e);
+appendMessage(e.getMessage());
+throw new ClientException(e);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Parses a serialized query and creates a Lucene query out of it.</p></li>
+<li></li>
+<li><p>To see how serialized queries look like, go to go/searchsyntax.</p></li>
+</ul>
+<p><a href="#id11"><span class="problematic" id="id12">*</span></a>/</p>
+</dd>
+<dt>private Query parseSerializedQuery(</dt><dd><blockquote>
+<div><p>String serializedQuery,
+SerializedQueryParser parser,
+boolean shouldAdjustQueryBasedOnRequestParameters) throws QueryParserException {</p>
+</div></blockquote>
+<p>// Parse the serialized query.
+parsedQuery = parser.parse(serializedQuery);
+if (parsedQuery == null) {</p>
+<blockquote>
+<div><p>return null;</p>
+</div></blockquote>
+<p>}</p>
+<p>// rewrite query if positive ‘protected’ operator is detected
+if (parsedQuery.accept(new DetectPositiveOperatorVisitor(SearchOperatorConstants.PROTECTED))) {</p>
+<blockquote>
+<div><p>POSITIVE_PROTECTED_OPERATOR_DETECTED_COUNTER.increment();
+ProtectedOperatorQueryRewriter rewriter = new ProtectedOperatorQueryRewriter();
+parsedQuery = rewriter.rewrite(</p>
+<blockquote>
+<div><p>parsedQuery,
+request.followedUserIds,
+segmentManager.getUserTable());</p>
+</div></blockquote>
+</div></blockquote>
+<p>}</p>
+<p>ThriftSearchRelevanceOptions options = searchQuery.getRelevanceOptions();
+if (shouldAdjustQueryBasedOnRequestParameters) {</p>
+<blockquote>
+<div><p>// If likedByUserIDFilter64 is set, combine it with query
+// Note: we deal with likedByUserIDFilter64 here instead of in postLuceneQueryProcess as we
+// want annotate query with ranks.
+if (searchQuery.isSetLikedByUserIDFilter64()</p>
+<blockquote>
+<div><blockquote>
+<div><p>&amp;&amp; searchQuery.getLikedByUserIDFilter64Size() &gt; 0) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>parsedQuery = combineWithLikedByUserIdFilter64(</dt><dd><p>parsedQuery, searchQuery.getLikedByUserIDFilter64());</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<p>// If namedListMap field is set, replace the named lists in the serialized query.
+if (searchQuery.getNamedDisjunctionMapSize() &gt; 0) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>parsedQuery = parsedQuery.accept(</dt><dd><p>new NamedDisjunctionVisitor(searchQuery.getNamedDisjunctionMap()));</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>if (searchQuery.isSetRelevanceOptions()</dt><dd><blockquote>
+<div><p>&amp;&amp; searchQuery.getRelevanceOptions().isCollectFieldHitAttributions()) {</p>
+</div></blockquote>
+<p>// NOTE: Before we do any modifications to the serialized query tree, annotate the query
+// nodes with their node rank in the original query.
+this.hitAttributeHelper =</p>
+<blockquote>
+<div><p>QueryHitAttributeHelper.from(parsedQuery, schemaSnapshot);</p>
+</div></blockquote>
+<p>parsedQuery = hitAttributeHelper.getAnnotatedQuery();</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// Currently antisocial/nullcast tweets are dropped when we build index, but some tweets may
+// become antisocial with realtime updates. For consistency, we should always filter out
+// antisocial/nullcast tweets if the user is not explicitly including it.
+final boolean allowAntisocial =</p>
+<blockquote>
+<div><p>parsedQuery.accept(new DetectPositiveOperatorVisitor(SearchOperatorConstants.ANTISOCIAL));</p>
+</div></blockquote>
+<dl class="simple">
+<dt>if (!allowAntisocial) {</dt><dd><dl class="simple">
+<dt>parsedQuery = QueryNodeUtils.appendAsConjunction(</dt><dd><p>parsedQuery,
+QueryCacheConversionRules.CACHED_EXCLUDE_ANTISOCIAL);</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+parsedQueryAllowNullcast =</p>
+<blockquote>
+<div><p>parsedQuery.accept(new DetectPositiveOperatorVisitor(SearchOperatorConstants.NULLCAST));</p>
+</div></blockquote>
+<dl class="simple">
+<dt>if (!parsedQueryAllowNullcast) {</dt><dd><dl class="simple">
+<dt>parsedQuery = QueryNodeUtils.appendAsConjunction(</dt><dd><p>parsedQuery, new SearchOperator(“filter”, SearchOperatorConstants.NULLCAST).negate());</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>// Strip all annotations from the filters that will be converted to query cache filters.
+// See SEARCH-15552.
+parsedQuery = parsedQuery.accept(</p>
+<blockquote>
+<div><p>new StripAnnotationsVisitor(QueryCacheConversionRules.STRIP_ANNOTATIONS_QUERIES));</p>
+</div></blockquote>
+<p>// Convert certain filters into cached filters, also consolidate them.
+parsedQuery = parsedQuery.accept(</p>
+<blockquote>
+<div><p>new ConversionVisitor(QueryCacheConversionRules.DEFAULT_RULES));</p>
+</div></blockquote>
+<p>// add proximity if needed
+if (options != null</p>
+<blockquote>
+<div><blockquote>
+<div><p>&amp;&amp; options.isProximityScoring()
+&amp;&amp; searchQuery.getRankingMode() != ThriftSearchRankingMode.RECENCY) {</p>
+</div></blockquote>
+<p>parsedQuery = parsedQuery.accept(new ProximityGroupRewriteVisitor()).simplify();</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>if (request.isSkipVeryRecentTweets()) {</dt><dd><p>parsedQuery = restrictQueryToFullyIndexedTweets(parsedQuery);</p>
+</dd>
+</dl>
+<p>}</p>
+<p>parsedQuery = parsedQuery.simplify();
+debugInfo.setParsedQuery(parsedQuery.serialize());</p>
+<p>// Extract top-level since-id for pagination optimizations.
+idTimeRanges = IdTimeRanges.fromQuery(parsedQuery);</p>
+<p>// Does any final processing specific to EarlybirdSearch class.
+parsedQuery = preLuceneQueryProcess(parsedQuery);</p>
+<p>// Convert to a lucene query.
+EarlybirdLuceneQueryVisitor luceneVisitor = getLuceneVisitor(</p>
+<blockquote>
+<div><p>options == null ? null : options.getFieldWeightMapOverride());</p>
+</div></blockquote>
+<dl class="simple">
+<dt>if (options != null) {</dt><dd><dl class="simple">
+<dt>luceneVisitor</dt><dd><p>.setProximityPhraseWeight((float) options.getProximityPhraseWeight())
+.setProximityPhraseSlop(options.getProximityPhraseSlop());</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>// Propagate hit attribute helper to the lucene visitor if it has been setup.
+luceneVisitor.setFieldHitAttributeHelper(this.hitAttributeHelper);</p>
+<p>org.apache.lucene.search.Query query = parsedQuery.accept(luceneVisitor);
+if (query != null) {</p>
+<blockquote>
+<div><p>debugInfo.setLuceneQuery(query.toString());</p>
+</div></blockquote>
+<p>}</p>
+<p>queriedFields = luceneVisitor.getQueriedFields();</p>
+<p>return query;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private Query parseLuceneQuery(String query) {</dt><dd><dl class="simple">
+<dt>QueryParser parser = new QueryParser(</dt><dd><p>EarlybirdFieldConstant.TEXT_FIELD.getFieldName(),
+new SearchWhitespaceAnalyzer());</p>
+</dd>
+</dl>
+<p>parser.setSplitOnWhitespace(true);
+try {</p>
+<blockquote>
+<div><p>return parser.parse(query);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} catch (ParseException e) {</dt><dd><p>LOG.error(“Cannot parse raw lucene query: “ + query, e);</p>
+</dd>
+<dt>} catch (NullPointerException e) {</dt><dd><dl class="simple">
+<dt>LOG.error(“NullPointerException while parsing raw lucene query: “ + query</dt><dd><ul class="simple">
+<li><p>“, probably your grammar is wrong.n”, e);</p></li>
+</ul>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+return null;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private com.twitter.search.queryparser.query.Query combineWithLikedByUserIdFilter64(</dt><dd><blockquote>
+<div><p>com.twitter.search.queryparser.query.Query query,
+List&lt;Long&gt; ids) throws QueryParserException {</p>
+</div></blockquote>
+<p>return QueryNodeUtils.appendAsConjunction(query, getLikedByUserIdQuery(ids));</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>initSearcher initializes the segmentSearcher, and returns SUCCESS if OK</p></li>
+<li><p>or some other response code it not OK.</p></li>
+</ul>
+<p><a href="#id13"><span class="problematic" id="id14">*</span></a>/</p>
+</dd>
+<dt>private EarlybirdResponseCode initSearcher() throws IOException {</dt><dd><p>searcher = null;
+if (searchAllSegments) {</p>
+<blockquote>
+<div><p>return initMultiSegmentSearcher();</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>return initSingleSegmentSearcher();</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private EarlybirdResponseCode initSingleSegmentSearcher() throws IOException {</dt><dd><dl class="simple">
+<dt>if (segment == null) {</dt><dd><p>String message = “Segment not found for time slice: “ + request.getSearchSegmentId();
+LOG.warn(message);
+appendMessage(message);
+return EarlybirdResponseCode.PARTITION_NOT_FOUND;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>EarlybirdResponseCode code = this.segmentManager.checkSegment(segment);
+if (code != EarlybirdResponseCode.SUCCESS) {</p>
+<blockquote>
+<div><p>String message = “Segment “ + segment + “ either disabled or dropped”;
+LOG.warn(message);
+appendMessage(message);
+return code;</p>
+</div></blockquote>
+<p>}</p>
+<p>searcher = segmentManager.getSearcher(segment, schemaSnapshot);
+if (searcher == null) {</p>
+<blockquote>
+<div><p>String message = “Could not construct searcher for segment “ + segment;
+LOG.error(message);
+appendMessage(message);
+return EarlybirdResponseCode.PERSISTENT_ERROR;</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>appendMessage(“Searching segment: “ + segment);
+return EarlybirdResponseCode.SUCCESS;</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private EarlybirdResponseCode initMultiSegmentSearcher() throws IOException {</dt><dd><dl class="simple">
+<dt>EarlybirdMultiSegmentSearcher multiSearcher =</dt><dd><p>segmentManager.getMultiSearcher(schemaSnapshot);</p>
+</dd>
+</dl>
+<p>searcher = multiSearcher;
+Preconditions.checkNotNull(searcher);</p>
+<p>// Set a top level since id to skip entire segments when possible.
+multiSearcher.setIdTimeRanges(idTimeRanges);
+return EarlybirdResponseCode.SUCCESS;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>private com.twitter.search.queryparser.query.Query
+restrictQueryToFullyIndexedTweets(com.twitter.search.queryparser.query.Query query) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>long untilTimeSeconds =</dt><dd><p>RecentTweetRestriction.recentTweetsUntilTime(decider, (int) (clock.nowMillis() / 1000));</p>
+</dd>
+<dt>if (untilTimeSeconds == 0) {</dt><dd><p>return query;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>SearchOperator timeLimit = new SearchOperator(UNTIL_TIME, untilTimeSeconds);
+return new Conjunction(query, timeLimit);</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>private EarlybirdResponse newResponse(EarlybirdResponseCode code, boolean setDebugInfo) {</dt><dd><p>EarlybirdResponse response = new EarlybirdResponse();
+response.setResponseCode(code);
+if (setDebugInfo) {</p>
+<blockquote>
+<div><p>response.setDebugInfo(debugInfo);
+if (messageBuffer.length() &gt; 0) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>response.setDebugString(DatabaseConfig.getLocalHostname()</dt><dd><ul class="simple">
+<li><p>“:n” + messageBuffer.toString());</p></li>
+</ul>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}
+return response;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private EarlybirdResponse respondError(EarlybirdResponseCode code) {</dt><dd><p>appendMessage(“Responding with error code “ + code);
+// Always respond with an error message, even when request.debug is false
+return newResponse(code, true);</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;VisibleForTesting
+public TerminationTracker getTerminationTracker() {</p>
+<blockquote>
+<div><p>return terminationTracker;</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>public void maybeSetCollectorDebugInfo(TwitterEarlyTerminationCollector collector) {</dt><dd><dl class="simple">
+<dt>if (request.isSetDebugOptions() &amp;&amp; request.getDebugOptions().isIncludeCollectorDebugInfo()) {</dt><dd><p>debugInfo.setCollectorDebugInfo(collector.getDebugInfo());</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public void setTermStatisticsDebugInfo(List&lt;String&gt; termStatisticsDebugInfo) {</dt><dd><p>debugInfo.setTermStatisticsDebugInfo(termStatisticsDebugInfo);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private EarlybirdResponse searchInternal() throws TransientException, ClientException {</dt><dd><p>searchResults = new ThriftSearchResults();</p>
+<p>SearchResultsInfo searchResultsInfo;
+try {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>switch (queryMode) {</dt><dd><dl class="simple">
+<dt>case RECENCY:</dt><dd><p>searchResultsInfo = processRealtimeQuery();
+break;</p>
+</dd>
+<dt>case RELEVANCE:</dt><dd><p>// Relevance search and Model-based search differ only on the scoring function used.
+SearchTimer timer = searcherStats.createTimer();
+timer.start();
+searchResultsInfo = processRelevanceQuery();
+timer.stop();
+searcherStats.recordRelevanceStats(timer, request);
+break;</p>
+</dd>
+<dt>case FACETS:</dt><dd><p>searchResultsInfo = processFacetsQuery();
+break;</p>
+</dd>
+<dt>case TERM_STATS:</dt><dd><p>searchResultsInfo = processTermStatsQuery();
+break;</p>
+</dd>
+<dt>case TOP_TWEETS:</dt><dd><p>searchResultsInfo = processTopTweetsQuery();
+break;</p>
+</dd>
+<dt>default:</dt><dd><p>throw new TransientException(“Unknown query mode “ + queryMode);</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>return respondSuccess(searchResults, facetResults, termStatisticsResults,</dt><dd><p>earlyTerminationInfo, searchResultsInfo);</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl class="simple">
+<dt>} catch (IOException e) {</dt><dd><p>throw new TransientException(e.getMessage(), e);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Helper method to process facets query.</p></li>
+</ul>
+<p><a href="#id15"><span class="problematic" id="id16">*</span></a>/</p>
+</dd>
+<dt>private SearchResultsInfo processFacetsQuery() throws ClientException, IOException {</dt><dd><p>// figure out which fields we need to count
+FacetCountState facetCountState = newFacetCountState();</p>
+<p>// Additionally wrap our query into a skip list boolean query for faster counting.
+if (!facetRequest.isUsingQueryCache()) {</p>
+<blockquote>
+<div><p>// Only if all fields to be counted use skip lists, then we can add a required clause
+// that filters out all results that do not contain those fields
+boolean cannotAddRequiredClause = facetCountState.hasFieldToCountWithoutSkipList();
+final Query facetSkipListFilter =</p>
+<blockquote>
+<div><p>cannotAddRequiredClause ? null : FacetSkipList.getSkipListQuery(facetCountState);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>final Query antisocialFilter = UserFlagsExcludeFilter.getUserFlagsExcludeFilter(</dt><dd><p>segmentManager.getUserTable(), true, true, false);</p>
+</dd>
+<dt>luceneQuery = wrapFilters(luceneQuery,</dt><dd><p>facetSkipListFilter,
+antisocialFilter);</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<p>facetResults = new ThriftFacetResults(new HashMap&lt;&gt;());</p>
+<dl class="simple">
+<dt>FacetSearchRequestInfo searchRequestInfo =</dt><dd><dl class="simple">
+<dt>new FacetSearchRequestInfo(searchQuery, facetRequest.getFacetRankingOptions(),</dt><dd><p>luceneQuery, facetCountState, terminationTracker);</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>searchRequestInfo.setIdTimeRanges(idTimeRanges);
+if (searchQuery.getMaxHitsPerUser() &gt; 0) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>antiGamingFilter = new AntiGamingFilter(</dt><dd><p>searchQuery.getMaxHitsPerUser(),
+searchQuery.getMaxTweepcredForAntiGaming(),
+luceneQuery);</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>AbstractResultsCollector&lt;</dt><dd><p>FacetSearchRequestInfo, EarlybirdLuceneSearcher.FacetSearchResults&gt; collector;</p>
+</dd>
+<dt>if (request.getDebugMode() &gt; 2) {</dt><dd><dl class="simple">
+<dt>collector = new ExplainFacetResultsCollector(schemaSnapshot,</dt><dd><p>searchRequestInfo, antiGamingFilter, searcherStats, clock, request.debugMode);</p>
+</dd>
+</dl>
+</dd>
+<dt>} else {</dt><dd><dl class="simple">
+<dt>collector = new FacetResultsCollector(schemaSnapshot,</dt><dd><p>searchRequestInfo, antiGamingFilter, searcherStats, clock, request.debugMode);</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>setQueriesInDebugInfo(parsedQuery, searchRequestInfo.getLuceneQuery());
+searcher.search(searchRequestInfo.getLuceneQuery(), collector);
+EarlybirdLuceneSearcher.FacetSearchResults hits = collector.getResults();</p>
+<p>EarlybirdSearchResultUtil.setResultStatistics(searchResults, hits);
+earlyTerminationInfo = EarlybirdSearchResultUtil.prepareEarlyTerminationInfo(hits);
+Set&lt;Long&gt; userIDWhitelist =</p>
+<blockquote>
+<div><p>antiGamingFilter != null ? antiGamingFilter.getUserIDWhitelist() : null;</p>
+</div></blockquote>
+<dl class="simple">
+<dt>prepareFacetResults(facetResults, hits, facetCountState, userIDWhitelist,</dt><dd><p>request.getDebugMode());</p>
+</dd>
+</dl>
+<p>facetResults.setUserIDWhitelist(userIDWhitelist);</p>
+<p>maybeSetCollectorDebugInfo(collector);</p>
+<dl class="simple">
+<dt>if (collector instanceof ExplainFacetResultsCollector) {</dt><dd><p>((ExplainFacetResultsCollector) collector).setExplanations(facetResults);</p>
+</dd>
+</dl>
+<p>}</p>
+<p>return hits;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Helper method to process term-stats query.</p></li>
+</ul>
+<p><a href="#id17"><span class="problematic" id="id18">*</span></a>/</p>
+</dd>
+<dt>private SearchResultsInfo processTermStatsQuery() throws IOException {</dt><dd><p>// first extract the terms that we need to count
+TermStatisticsRequestInfo searchRequestInfo =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>new TermStatisticsRequestInfo(searchQuery, luceneQuery, termStatisticsRequest,</dt><dd><p>terminationTracker);</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>searchRequestInfo.setIdTimeRanges(idTimeRanges);
+setQueriesInDebugInfo(parsedQuery, searchRequestInfo.getLuceneQuery());
+TermStatisticsCollector.TermStatisticsSearchResults hits =</p>
+<blockquote>
+<div><p>searcher.collectTermStatistics(searchRequestInfo, this, request.getDebugMode());</p>
+</div></blockquote>
+<p>EarlybirdSearchResultUtil.setResultStatistics(searchResults, hits);
+earlyTerminationInfo = EarlybirdSearchResultUtil.prepareEarlyTerminationInfo(hits);
+if (hits.results != null) {</p>
+<blockquote>
+<div><p>termStatisticsResults = new ThriftTermStatisticsResults();
+prepareTermStatisticsResults(termStatisticsResults, hits, request.getDebugMode());</p>
+</div></blockquote>
+<p>}</p>
+<p>return hits;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Helper method to process realtime query.</p></li>
+</ul>
+<p><a href="#id19"><span class="problematic" id="id20">*</span></a>/</p>
+</dd>
+<dt>private SearchResultsInfo processRealtimeQuery() throws IOException, ClientException {</dt><dd><p>// Disable maxHitsToProcess.
+if (!collectorParams.isSetTerminationParams()) {</p>
+<blockquote>
+<div><p>collectorParams.setTerminationParams(new CollectorTerminationParams());
+collectorParams.getTerminationParams().setMaxHitsToProcess(-1);
+COLLECTOR_PARAMS_MAX_HITS_TO_PROCESS_NOT_SET_COUNTER.increment();</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>SearchRequestInfo searchRequestInfo = new SearchRequestInfo(</dt><dd><p>searchQuery, luceneQuery, terminationTracker);</p>
+</dd>
+</dl>
+<p>searchRequestInfo.setIdTimeRanges(idTimeRanges);
+searchRequestInfo.setHitAttributeHelper(hitAttributeHelper);
+searchRequestInfo.setTimestamp(getQueryTimestamp(searchQuery));</p>
+<p>AbstractResultsCollector&lt;SearchRequestInfo, SimpleSearchResults&gt; collector;
+if (searchQuery.isSetSocialFilterType()) {</p>
+<blockquote>
+<div><dl>
+<dt>if (!searchRequestInfo.getSearchQuery().isSetDirectFollowFilter()</dt><dd><blockquote>
+<div><p>|| !searchRequestInfo.getSearchQuery().isSetTrustedFilter()) {</p>
+</div></blockquote>
+<p>searcherStats.unsetFiltersForSocialFilterTypeQuery.increment();
+throw new ClientException(</p>
+<blockquote>
+<div><p>“SocialFilterType specified without a TrustedFilter or DirectFollowFilter”);</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}
+SocialFilter socialFilter = new SocialFilter(</p>
+<blockquote>
+<div><p>searchQuery.getSocialFilterType(),
+searchRequestInfo.getSearchQuery().getSearcherId(),
+searchRequestInfo.getSearchQuery().getTrustedFilter(),
+searchRequestInfo.getSearchQuery().getDirectFollowFilter());</p>
+</div></blockquote>
+<dl class="simple">
+<dt>collector = new SocialSearchResultsCollector(</dt><dd><p>schemaSnapshot,
+searchRequestInfo,
+socialFilter,
+searcherStats,
+cluster,
+segmentManager.getUserTable(),
+request.getDebugMode());</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><dl class="simple">
+<dt>collector = new SearchResultsCollector(</dt><dd><p>schemaSnapshot,
+searchRequestInfo,
+clock,
+searcherStats,
+cluster,
+segmentManager.getUserTable(),
+request.getDebugMode());</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>setQueriesInDebugInfo(parsedQuery, luceneQuery);
+searcher.search(luceneQuery, collector);</p>
+<p>SimpleSearchResults hits = collector.getResults();</p>
+<p>EarlybirdSearchResultUtil.setResultStatistics(searchResults, hits);
+earlyTerminationInfo = EarlybirdSearchResultUtil.prepareEarlyTerminationInfo(hits);
+EarlybirdSearchResultUtil.prepareResultsArray(</p>
+<blockquote>
+<div><p>searchResults.getResults(), hits, request.debugMode &gt; 0 ? partitionConfig : null);</p>
+</div></blockquote>
+<p>searchResults.setHitCounts(collector.getHitCountMap());</p>
+<p>maybeSetCollectorDebugInfo(collector);</p>
+<p>addResultPayloads();</p>
+<p>return hits;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Helper method to process relevance query.</p></li>
+</ul>
+<p><a href="#id21"><span class="problematic" id="id22">*</span></a>/</p>
+</dd>
+<dt>private SearchResultsInfo processRelevanceQuery() throws IOException, ClientException {</dt><dd><dl class="simple">
+<dt>if (!searchQuery.isSetRelevanceOptions()) {</dt><dd><p>LOG.warn(“Relevance query with no relevance options!”);
+searchQuery.setRelevanceOptions(new ThriftSearchRelevanceOptions());</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// Note: today the assumption is that if you specify hasSpecifiedTweets,
+// you really do want all tweets scored and returned.
+final boolean hasSpecifiedTweets = searchQuery.getSearchStatusIdsSize() &gt; 0;
+if (hasSpecifiedTweets) {</p>
+<blockquote>
+<div><p>collectorParams.setNumResultsToReturn(searchQuery.getSearchStatusIdsSize());</p>
+</div></blockquote>
+<p>}
+// If we have explicit user ids, we will want to look at all results from those users, and will
+// not need to use the AntiGamingFilter.
+final boolean hasSpecifiedFromUserIds = searchQuery.getFromUserIDFilter64Size() &gt; 0;</p>
+<p>createRelevanceAntiGamingFilter(hasSpecifiedTweets, hasSpecifiedFromUserIds);</p>
+<dl>
+<dt>if (searchQuery.getRelevanceOptions().isSetRankingParams()) {</dt><dd><p>ThriftRankingParams rankingParams = searchQuery.getRelevanceOptions().getRankingParams();</p>
+<p>// The score adjustment signals that are passed in the request are disabled for the archive
+// cluster or when the features are decidered off. If the request provides those fields,
+// we unset them since checking the hashmap when scoring can cause a slight bump in
+// latency.
+//
+// Verify that the signal query specific scores for tweets signal is enabled
+if (rankingParams.isSetQuerySpecificScoreAdjustments()) {</p>
+<blockquote>
+<div><dl>
+<dt>if (ALLOW_QUERY_SPECIFIC_SIGNAL_CONFIG</dt><dd><blockquote>
+<div><p>&amp;&amp; DeciderUtil.isAvailableForRandomRecipient(
+decider, ALLOW_QUERY_SPECIFIC_SIGNAL_DECIDER_KEY)) {</p>
+</div></blockquote>
+<p>searcherStats.querySpecificSignalQueriesUsed.increment();
+searcherStats.querySpecificSignalMapTotalSize.add(</p>
+<blockquote>
+<div><p>rankingParams.getQuerySpecificScoreAdjustmentsSize());</p>
+</div></blockquote>
+</dd>
+<dt>} else {</dt><dd><p>searchQuery.getRelevanceOptions().getRankingParams().unsetQuerySpecificScoreAdjustments();
+searcherStats.querySpecificSignalQueriesErased.increment();</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>// Verify that the signal author specific scores signal is enabled
+if (rankingParams.isSetAuthorSpecificScoreAdjustments()) {</p>
+<blockquote>
+<div><dl>
+<dt>if (ALLOW_AUTHOR_SPECIFIC_SIGNAL_CONFIG</dt><dd><blockquote>
+<div><p>&amp;&amp; DeciderUtil.isAvailableForRandomRecipient(
+decider, ALLOW_AUTHOR_SPECIFIC_SIGNAL_DECIDER_KEY)) {</p>
+</div></blockquote>
+<p>searcherStats.authorSpecificSignalQueriesUsed.increment();
+searcherStats.authorSpecificSignalMapTotalSize.add(</p>
+<blockquote>
+<div><p>rankingParams.getAuthorSpecificScoreAdjustmentsSize());</p>
+</div></blockquote>
+</dd>
+<dt>} else {</dt><dd><dl class="simple">
+<dt>searchQuery.getRelevanceOptions().getRankingParams()</dt><dd><p>.unsetAuthorSpecificScoreAdjustments();</p>
+</dd>
+</dl>
+<p>searcherStats.authorSpecificSignalQueriesErased.increment();</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>ScoringFunction scoringFunction =</dt><dd><dl class="simple">
+<dt>new ScoringFunctionProvider.DefaultScoringFunctionProvider(</dt><dd><p>request, schemaSnapshot, searchQuery, antiGamingFilter,
+segmentManager.getUserTable(), hitAttributeHelper,
+parsedQuery, scoringModelsManager, tensorflowModelsManager)
+.getScoringFunction();</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>scoringFunction.setDebugMode(request.getDebugMode());</p>
+<p>RelevanceQuery relevanceQuery = new RelevanceQuery(luceneQuery, scoringFunction);
+RelevanceSearchRequestInfo searchRequestInfo =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>new RelevanceSearchRequestInfo(</dt><dd><p>searchQuery, relevanceQuery, terminationTracker, qualityFactor);</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>searchRequestInfo.setIdTimeRanges(idTimeRanges);
+searchRequestInfo.setHitAttributeHelper(hitAttributeHelper);
+searchRequestInfo.setTimestamp(getQueryTimestamp(searchQuery));</p>
+<dl>
+<dt>if (shouldUseTensorFlowCollector()</dt><dd><blockquote>
+<div><p>&amp;&amp; searchQuery.getRelevanceOptions().isUseRelevanceAllCollector()) {</p>
+</div></blockquote>
+<p>throw new ClientException(“Tensorflow scoring does not work with the RelevanceAllCollector”);</p>
+</dd>
+</dl>
+<p>}</p>
+<p>final AbstractRelevanceCollector collector;
+// First check if the Tensorflow results collector should be used, because the
+// TensorflowBasedScoringFunction only works with the BatchRelevanceTopCollector
+if (shouldUseTensorFlowCollector()) {</p>
+<blockquote>
+<div><p>// Collect top numResults.
+collector = new BatchRelevanceTopCollector(</p>
+<blockquote>
+<div><p>schemaSnapshot,
+searchRequestInfo,
+scoringFunction,
+searcherStats,
+cluster,
+segmentManager.getUserTable(),
+clock,
+request.getDebugMode());</p>
+</div></blockquote>
+</div></blockquote>
+<dl>
+<dt>} else if (hasSpecifiedTweets</dt><dd><blockquote>
+<div><p>|| searchQuery.getRelevanceOptions().isUseRelevanceAllCollector()) {</p>
+</div></blockquote>
+<p>// Collect all.
+collector = new RelevanceAllCollector(</p>
+<blockquote>
+<div><p>schemaSnapshot,
+searchRequestInfo,
+scoringFunction,
+searcherStats,
+cluster,
+segmentManager.getUserTable(),
+clock,
+request.getDebugMode());</p>
+</div></blockquote>
+</dd>
+<dt>} else {</dt><dd><p>// Collect top numResults.
+collector = new RelevanceTopCollector(</p>
+<blockquote>
+<div><p>schemaSnapshot,
+searchRequestInfo,
+scoringFunction,
+searcherStats,
+cluster,
+segmentManager.getUserTable(),
+clock,
+request.getDebugMode());</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<p>// Make sure that the Tensorflow scoring function and the Tensorflow results collector are
+// always used together. If this fails it will result in a TRANSIENT_ERROR response.
+Preconditions.checkState((collector instanceof BatchRelevanceTopCollector)</p>
+<blockquote>
+<div><p>== (scoringFunction instanceof TensorflowBasedScoringFunction));</p>
+</div></blockquote>
+<p>setQueriesInDebugInfo(parsedQuery, searchRequestInfo.getLuceneQuery());
+searcher.search(searchRequestInfo.getLuceneQuery(), collector);</p>
+<p>RelevanceSearchResults hits = collector.getResults();
+EarlybirdSearchResultUtil.setResultStatistics(searchResults, hits);
+searchResults.setScoringTimeNanos(hits.getScoringTimeNanos());</p>
+<p>earlyTerminationInfo = EarlybirdSearchResultUtil.prepareEarlyTerminationInfo(hits);
+EarlybirdSearchResultUtil.setLanguageHistogram(searchResults, collector.getLanguageHistogram());
+EarlybirdSearchResultUtil.prepareRelevanceResultsArray(</p>
+<blockquote>
+<div><p>searchResults.getResults(),
+hits,
+antiGamingFilter != null ? antiGamingFilter.getUserIDWhitelist() : null,
+request.getDebugMode() &gt; 0 ? partitionConfig : null);</p>
+</div></blockquote>
+<p>searchResults.setHitCounts(collector.getHitCountMap());
+searchResults.setRelevanceStats(hits.getRelevanceStats());</p>
+<p>maybeSetCollectorDebugInfo(collector);</p>
+<dl class="simple">
+<dt>if (explanationsEnabled(request.getDebugMode())) {</dt><dd><p>searcher.explainSearchResults(searchRequestInfo, hits, searchResults);</p>
+</dd>
+</dl>
+<p>}</p>
+<p>addResultPayloads();</p>
+<p>return hits;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public static boolean explanationsEnabled(int debugLevel) {</dt><dd><p>return debugLevel &gt; 1;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private boolean shouldUseTensorFlowCollector() {</dt><dd><dl class="simple">
+<dt>return tensorflowModelsManager.isEnabled()</dt><dd><p>&amp;&amp; searchQuery.getRelevanceOptions().isSetRankingParams()
+&amp;&amp; searchQuery.getRelevanceOptions().getRankingParams().isSetType()
+&amp;&amp; searchQuery.getRelevanceOptions().getRankingParams().getType()
+== ThriftScoringFunctionType.TENSORFLOW_BASED;</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+/**</p>
+<blockquote>
+<div><ul class="simple">
+<li><p>Optionally, if requested and needed, will create a new AntiGamingFilter. Otherwize, no</p></li>
+<li><p>AntiGamingFilter will be used for this query.</p></li>
+<li><p>&#64;param hasSpecifiedTweets whether the request has searchStatusIds specified.</p></li>
+<li><p>&#64;param hasSpecifiedFromUserIds whether the request has fromUserIDFilter64 specified.</p></li>
+</ul>
+<p><a href="#id23"><span class="problematic" id="id24">*</span></a>/</p>
+</div></blockquote>
+<dl>
+<dt>private void createRelevanceAntiGamingFilter(</dt><dd><blockquote>
+<div><p>boolean hasSpecifiedTweets, boolean hasSpecifiedFromUserIds) {</p>
+</div></blockquote>
+<p>// Anti-gaming filter (turned off for specified tweets mode, or when you’re explicitly asking
+// for specific users’ tweets).
+if (searchQuery.getMaxHitsPerUser() &gt; 0 &amp;&amp; !hasSpecifiedTweets &amp;&amp; !hasSpecifiedFromUserIds) {</p>
+<blockquote>
+<div><p>searcherStats.relevanceAntiGamingFilterUsed.increment();
+antiGamingFilter = new AntiGamingFilter(</p>
+<blockquote>
+<div><p>searchQuery.getMaxHitsPerUser(),
+searchQuery.getMaxTweepcredForAntiGaming(),
+luceneQuery);</p>
+</div></blockquote>
+</div></blockquote>
+<dl class="simple">
+<dt>} else if (searchQuery.getMaxHitsPerUser() &lt;= 0) {</dt><dd><p>searcherStats.relevanceAntiGamingFilterNotRequested.increment();</p>
+</dd>
+<dt>} else if (hasSpecifiedTweets &amp;&amp; hasSpecifiedFromUserIds) {</dt><dd><p>searcherStats.relevanceAntiGamingFilterSpecifiedTweetsAndFromUserIds.increment();</p>
+</dd>
+<dt>} else if (hasSpecifiedTweets) {</dt><dd><p>searcherStats.relevanceAntiGamingFilterSpecifiedTweets.increment();</p>
+</dd>
+<dt>} else if (hasSpecifiedFromUserIds) {</dt><dd><p>searcherStats.relevanceAntiGamingFilterSpecifiedFromUserIds.increment();</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Check to make sure that there are no nullcast documents in results.  If there exists nullcasts</p></li>
+<li><p>in results, we should log error and increment counters correspondingly.</p></li>
+</ul>
+<p><a href="#id25"><span class="problematic" id="id26">*</span></a>/</p>
+</dd>
+</dl>
+<p>&#64;VisibleForTesting
+public void logAndIncrementStatsIfNullcastInResults(ThriftSearchResults thriftSearchResults) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (!thriftSearchResults.isSetResults()) {</dt><dd><p>return;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>Set&lt;Long&gt; unexpectedNullcastStatusIds =</dt><dd><p>EarlybirdResponseUtil.findUnexpectedNullcastStatusIds(thriftSearchResults, request);</p>
+</dd>
+<dt>if (!unexpectedNullcastStatusIds.isEmpty()) {</dt><dd><p>searcherStats.nullcastUnexpectedQueries.increment();
+searcherStats.nullcastUnexpectedResults.add(unexpectedNullcastStatusIds.size());</p>
+<p>String base64Request;
+try {</p>
+<blockquote>
+<div><p>base64Request = ThriftUtils.toBase64EncodedString(request);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} catch (TException e) {</dt><dd><p>base64Request = “Failed to parse base 64 request”;</p>
+</dd>
+</dl>
+<p>}
+LOG.error(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>“Found unexpected nullcast tweets: {} | parsedQuery: {} | request: {} | response: {} | “</dt><dd><ul class="simple">
+<li><p>“request base 64: {}”,</p></li>
+</ul>
+</dd>
+</dl>
+<p>Joiner.on(“,”).join(unexpectedNullcastStatusIds),
+parsedQuery.serialize(),
+request,
+thriftSearchResults,
+base64Request);</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>private void addResultPayloads() throws IOException {</dt><dd><dl>
+<dt>if (searchQuery.getResultMetadataOptions() != null) {</dt><dd><dl class="simple">
+<dt>if (searchQuery.getResultMetadataOptions().isGetTweetUrls()) {</dt><dd><p>searcher.fillFacetResults(new ExpandedUrlCollector(), searchResults);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>if (searchQuery.getResultMetadataOptions().isGetNamedEntities()) {</dt><dd><p>searcher.fillFacetResults(new NamedEntityCollector(), searchResults);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>if (searchQuery.getResultMetadataOptions().isGetEntityAnnotations()) {</dt><dd><p>searcher.fillFacetResults(new EntityAnnotationCollector(), searchResults);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>if (searchQuery.getResultMetadataOptions().isGetSpaces()) {</dt><dd><p>searcher.fillFacetResults(new SpaceFacetCollector(audioSpaceTable), searchResults);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Helper method to process top tweets query.</p></li>
+</ul>
+<p><a href="#id27"><span class="problematic" id="id28">*</span></a>/</p>
+</dd>
+<dt>private SearchResultsInfo processTopTweetsQuery() throws IOException, ClientException {</dt><dd><p>// set dummy relevance options if it’s not available, but this shouldn’t happen in prod
+if (!searchQuery.isSetRelevanceOptions()) {</p>
+<blockquote>
+<div><p>searchQuery.setRelevanceOptions(new ThriftSearchRelevanceOptions());</p>
+</div></blockquote>
+<p>}
+if (!searchQuery.getRelevanceOptions().isSetRankingParams()) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>searchQuery.getRelevanceOptions().setRankingParams(</dt><dd><p>// this is important, or it’s gonna pick DefaultScoringFunction which pretty much
+// does nothing.
+new ThriftRankingParams().setType(ThriftScoringFunctionType.TOPTWEETS));</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+ScoringFunction scoringFunction = new ScoringFunctionProvider.DefaultScoringFunctionProvider(</p>
+<blockquote>
+<div><p>request, schemaSnapshot, searchQuery, null,
+segmentManager.getUserTable(), hitAttributeHelper, parsedQuery,
+scoringModelsManager, tensorflowModelsManager)
+.getScoringFunction();</p>
+</div></blockquote>
+<p>scoringFunction.setDebugMode(request.getDebugMode());</p>
+<p>RelevanceQuery relevanceQuery = new RelevanceQuery(luceneQuery, scoringFunction);
+RelevanceSearchRequestInfo searchRequestInfo =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>new RelevanceSearchRequestInfo(</dt><dd><p>searchQuery, relevanceQuery, terminationTracker, qualityFactor);</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>searchRequestInfo.setIdTimeRanges(idTimeRanges);
+searchRequestInfo.setTimestamp(getQueryTimestamp(searchQuery));</p>
+<dl class="simple">
+<dt>final AbstractRelevanceCollector collector =</dt><dd><dl class="simple">
+<dt>new RelevanceTopCollector(</dt><dd><p>schemaSnapshot,
+searchRequestInfo,
+scoringFunction,
+searcherStats,
+cluster,
+segmentManager.getUserTable(),
+clock,
+request.getDebugMode());</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>setQueriesInDebugInfo(parsedQuery, searchRequestInfo.getLuceneQuery());
+searcher.search(searchRequestInfo.getLuceneQuery(), collector);</p>
+<p>RelevanceSearchResults hits = collector.getResults();
+EarlybirdSearchResultUtil.setResultStatistics(searchResults, hits);
+searchResults.setScoringTimeNanos(hits.getScoringTimeNanos());
+earlyTerminationInfo = EarlybirdSearchResultUtil.prepareEarlyTerminationInfo(hits);
+EarlybirdSearchResultUtil.setLanguageHistogram(</p>
+<blockquote>
+<div><p>searchResults,
+collector.getLanguageHistogram());</p>
+</div></blockquote>
+<dl class="simple">
+<dt>EarlybirdSearchResultUtil.prepareRelevanceResultsArray(</dt><dd><p>searchResults.getResults(),
+hits,
+null,
+request.getDebugMode() &gt; 0 ? partitionConfig : null);</p>
+</dd>
+</dl>
+<p>searchResults.setHitCounts(collector.getHitCountMap());
+searchResults.setRelevanceStats(hits.getRelevanceStats());</p>
+<p>maybeSetCollectorDebugInfo(collector);</p>
+<dl>
+<dt>if (explanationsEnabled(request.getDebugMode())</dt><dd><blockquote>
+<div><p>&amp;&amp; searchQuery.isSetRelevanceOptions()
+&amp;&amp; searchQuery.getRelevanceOptions().isSetRankingParams()) {</p>
+</div></blockquote>
+<p>searcher.explainSearchResults(searchRequestInfo, hits, searchResults);</p>
+</dd>
+</dl>
+<p>}</p>
+<p>addResultPayloads();</p>
+<p>return hits;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private FacetCountState newFacetCountState() throws ClientException {</dt><dd><p>int minNumFacetResults = DEFAULT_NUM_FACET_RESULTS;
+if (facetRequest.isSetFacetRankingOptions()</p>
+<blockquote>
+<div><blockquote>
+<div><p>&amp;&amp; facetRequest.getFacetRankingOptions().isSetNumCandidatesFromEarlybird()) {</p>
+</div></blockquote>
+<p>minNumFacetResults = facetRequest.getFacetRankingOptions().getNumCandidatesFromEarlybird();</p>
+</div></blockquote>
+<p>}</p>
+<p>// figure out which fields we need to count
+FacetCountState facetCountState = new FacetCountState(schemaSnapshot, minNumFacetResults);</p>
+<p>// all categories if none!
+if (facetRequest.getFacetFields() == null || facetRequest.getFacetFields().isEmpty()) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>for (Schema.FieldInfo facetField<span class="classifier">schemaSnapshot.getFacetFields()) {</span></dt><dd><dl class="simple">
+<dt>facetCountState.addFacet(</dt><dd><p>facetField.getFieldType().getFacetName(), DEFAULT_NUM_FACET_RESULTS);</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<dl>
+<dt>} else {</dt><dd><p>Iterator&lt;ThriftFacetFieldRequest&gt; it = facetRequest.getFacetFieldsIterator();
+while (it.hasNext()) {</p>
+<blockquote>
+<div><p>ThriftFacetFieldRequest facetFieldRequest = it.next();
+Schema.FieldInfo facet = schemaSnapshot.getFacetFieldByFacetName(</p>
+<blockquote>
+<div><p>facetFieldRequest.getFieldName());</p>
+</div></blockquote>
+<dl class="simple">
+<dt>if (facet != null) {</dt><dd><dl class="simple">
+<dt>facetCountState.addFacet(</dt><dd><p>facet.getFieldType().getFacetName(), facetFieldRequest.getNumResults());</p>
+</dd>
+</dl>
+</dd>
+<dt>} else {</dt><dd><p>throw new ClientException(“Unknown facet field: “ + facetFieldRequest.getFieldName());</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}
+return facetCountState;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private com.twitter.search.queryparser.query.Query preLuceneQueryProcess(</dt><dd><blockquote>
+<div><p>com.twitter.search.queryparser.query.Query twitterQuery) throws QueryParserException {</p>
+</div></blockquote>
+<p>com.twitter.search.queryparser.query.Query query = twitterQuery;
+if (searchHighFrequencyTermPairs &amp;&amp; !includesCardField(searchQuery, query)) {</p>
+<blockquote>
+<div><p>// Process high frequency term pairs. Works best when query is as flat as possible.
+query = HighFrequencyTermPairRewriteVisitor.safeRewrite(</p>
+<blockquote>
+<div><p>query,
+DeciderUtil.isAvailableForRandomRecipient(</p>
+<blockquote>
+<div><p>decider, “enable_hf_term_pair_negative_disjunction_rewrite”));</p>
+</div></blockquote>
+</div></blockquote>
+</div></blockquote>
+<p>}
+return query.simplify();</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private Query postLuceneQueryProcess(final Query query) throws ClientException {</dt><dd><dl>
+<dt>if (StringUtils.isBlank(request.getSearchQuery().getSerializedQuery())</dt><dd><blockquote>
+<div><p>&amp;&amp; StringUtils.isBlank(request.getSearchQuery().getLuceneQuery())) {</p>
+</div></blockquote>
+<p>searcherStats.numRequestsWithBlankQuery.get(queryMode).increment();
+if (searchQuery.getSearchStatusIdsSize() == 0</p>
+<blockquote>
+<div><blockquote>
+<div><p>&amp;&amp; searchQuery.getFromUserIDFilter64Size() == 0
+&amp;&amp; searchQuery.getLikedByUserIDFilter64Size() == 0) {</p>
+</div></blockquote>
+<p>// No query or ids to search.  This is only allowed in some modes.
+if (queryMode == QueryMode.RECENCY</p>
+<blockquote>
+<div><blockquote>
+<div><p>|| queryMode == QueryMode.RELEVANCE
+|| queryMode == QueryMode.TOP_TWEETS) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>throw new ClientException(</dt><dd><p>“No query or status ids for “ + queryMode.toString().toLowerCase() + “ query”);</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// Wrap the query as needed with additional query filters.
+List&lt;Query&gt; filters = Lists.newArrayList();</p>
+<p>// Min tweep cred filter.
+if (searchQuery.isSetMinTweepCredFilter()) {</p>
+<blockquote>
+<div><p>searcherStats.addedFilterBadUserRep.increment();
+filters.add(BadUserRepFilter.getBadUserRepFilter(searchQuery.getMinTweepCredFilter()));</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>if (searchQuery.getFromUserIDFilter64Size() &gt; 0) {</dt><dd><p>this.queriedFields.add(EarlybirdFieldConstant.FROM_USER_ID_FIELD.getFieldName());
+this.searcherStats.addedFilterFromUserIds.increment();
+try {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>filters.add(UserIdMultiSegmentQuery.createIdDisjunctionQuery(</dt><dd><p>“from_user_id_filter”,
+searchQuery.getFromUserIDFilter64(),
+EarlybirdFieldConstant.FROM_USER_ID_FIELD.getFieldName(),
+schemaSnapshot,
+multiSegmentTermDictionaryManager,
+decider,
+cluster,
+Lists.newArrayList(),
+null,
+queryTimeoutFactory.createQueryTimeout(request, terminationTracker, clock)));</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl class="simple">
+<dt>} catch (QueryParserException e) {</dt><dd><p>throw new ClientException(e);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// Wrap the lucene query with these filters.
+Query wrappedQuery = wrapFilters(query, filters.toArray(new Query[filters.size()]));</p>
+<p>// If searchStatusIds is set, additionally modify the query to search exactly these
+// ids, using the luceneQuery only for scoring.
+if (searchQuery.getSearchStatusIdsSize() &gt; 0) {</p>
+<blockquote>
+<div><p>this.searcherStats.addedFilterTweetIds.increment();</p>
+<p>final Query queryForScoring = wrappedQuery;
+final Query queryForRetrieval =</p>
+<blockquote>
+<div><p>RequiredStatusIDsFilter.getRequiredStatusIDsQuery(searchQuery.getSearchStatusIds());</p>
+</div></blockquote>
+<dl class="simple">
+<dt>return new BooleanQuery.Builder()</dt><dd><p>.add(queryForRetrieval, Occur.MUST)
+.add(queryForScoring, Occur.SHOULD)
+.build();</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<p>return wrappedQuery;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private com.twitter.search.queryparser.query.Query getLikedByUserIdQuery(</dt><dd><blockquote>
+<div><p>List&lt;Long&gt; ids) throws QueryParserException {</p>
+</div></blockquote>
+<dl>
+<dt>if (DeciderUtil.isAvailableForRandomRecipient(</dt><dd><blockquote>
+<div><p>decider, USE_MULTI_TERM_DISJUNCTION_FOR_LIKED_BY_USER_IDS_DECIDER_KEY)) {</p>
+</div></blockquote>
+<p>// rewrite LikedByUserIdFilter64 to a multi_term_disjuntion query
+return createMultiTermDisjunctionQueryForLikedByUserIds(ids);</p>
+</dd>
+<dt>} else {</dt><dd><p>// rewrite LikedByUserIdFilter64 to a disjunction of multiple liked_by_user_ids query
+return createDisjunctionQueryForLikedByUserIds(ids);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Returns the Lucene query visitor that should be applied to the original request.</p></li>
+<li></li>
+<li><p>&#64;param fieldWeightMapOverride The per-field weight overrides.</p></li>
+</ul>
+<p><a href="#id29"><span class="problematic" id="id30">*</span></a>/</p>
+</dd>
+</dl>
+<p>&#64;VisibleForTesting
+public EarlybirdLuceneQueryVisitor getLuceneVisitor(</p>
+<blockquote>
+<div><blockquote>
+<div><p>Map&lt;String, Double&gt; fieldWeightMapOverride) {</p>
+</div></blockquote>
+<p>String clusterName = cluster.getNameForStats();
+// Iff in relevance mode _and_ intepreteSinceId is false, we turn off since_id
+// operator by using LuceneRelevanceQueryVisitor.</p>
+<dl>
+<dt>if (searchQuery.getRankingMode() == ThriftSearchRankingMode.RELEVANCE</dt><dd><blockquote>
+<div><p>&amp;&amp; searchQuery.getRelevanceOptions() != null
+&amp;&amp; !searchQuery.getRelevanceOptions().isInterpretSinceId()) {</p>
+</div></blockquote>
+<p>// hack!  reset top level since id, which is the same thing LuceneRelevanceVisitor
+// is doing.
+idTimeRanges = null;
+return new LuceneRelevanceQueryVisitor(</p>
+<blockquote>
+<div><p>schemaSnapshot,
+queryCacheManager,
+segmentManager.getUserTable(),
+segmentManager.getUserScrubGeoMap(),
+terminationTracker,
+FieldWeightDefault.overrideFieldWeightMap(</p>
+<blockquote>
+<div><p>schemaSnapshot.getFieldWeightMap(),
+dropBadFieldWeightOverrides(fieldWeightMapOverride, decider, clusterName)),</p>
+</div></blockquote>
+<p>MAPPABLE_FIELD_MAP,
+multiSegmentTermDictionaryManager,
+decider,
+cluster,
+queryTimeoutFactory.createQueryTimeout(</p>
+<blockquote>
+<div><p>request, terminationTracker, clock));</p>
+</div></blockquote>
+</div></blockquote>
+</dd>
+<dt>} else {</dt><dd><dl>
+<dt>return new EarlybirdLuceneQueryVisitor(</dt><dd><p>schemaSnapshot,
+queryCacheManager,
+segmentManager.getUserTable(),
+segmentManager.getUserScrubGeoMap(),
+terminationTracker,
+FieldWeightDefault.overrideFieldWeightMap(</p>
+<blockquote>
+<div><p>schemaSnapshot.getFieldWeightMap(),
+dropBadFieldWeightOverrides(fieldWeightMapOverride, decider, clusterName)),</p>
+</div></blockquote>
+<p>MAPPABLE_FIELD_MAP,
+multiSegmentTermDictionaryManager,
+decider,
+cluster,
+queryTimeoutFactory.createQueryTimeout(</p>
+<blockquote>
+<div><p>request, terminationTracker, clock));</p>
+</div></blockquote>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>private void prepareFacetResults(ThriftFacetResults thriftFacetResults,</dt><dd><blockquote>
+<div><p>EarlybirdLuceneSearcher.FacetSearchResults hits,
+FacetCountState&lt;ThriftFacetFieldResults&gt; facetCountState,
+Set&lt;Long&gt; userIDWhitelist,
+byte debugMode) throws IOException {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>for (FacetRankingModule rankingModule<span class="classifier">FacetRankingModule.REGISTERED_RANKING_MODULES) {</span></dt><dd><p>rankingModule.prepareResults(hits, facetCountState);</p>
+</dd>
+</dl>
+<p>}</p>
+<p>Map&lt;Term, ThriftFacetCount&gt; allFacetResults = new HashMap&lt;&gt;();</p>
+<dl class="simple">
+<dt>Iterator&lt;FacetCountState.FacetFieldResults&lt;ThriftFacetFieldResults&gt;&gt; fieldResultsIterator =</dt><dd><p>facetCountState.getFacetFieldResultsIterator();</p>
+</dd>
+</dl>
+<p>while (fieldResultsIterator.hasNext()) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>FacetCountState.FacetFieldResults&lt;ThriftFacetFieldResults&gt; facetFieldResults =</dt><dd><p>fieldResultsIterator.next();</p>
+</dd>
+<dt>if (facetFieldResults.results == null) {</dt><dd><p>// return empty resultset for this facet
+List&lt;ThriftFacetCount&gt; emptyList = new ArrayList&lt;&gt;();
+facetFieldResults.results = new ThriftFacetFieldResults(emptyList, 0);</p>
+</dd>
+</dl>
+<p>}
+thriftFacetResults.putToFacetFields(facetFieldResults.facetName,</p>
+<blockquote>
+<div><p>facetFieldResults.results);</p>
+</div></blockquote>
+<dl>
+<dt>Schema.FieldInfo field = schemaSnapshot.getFacetFieldByFacetName(</dt><dd><p>facetFieldResults.facetName);</p>
+</dd>
+<dt>for (ThriftFacetCount result<span class="classifier">facetFieldResults.results.topFacets) {</span></dt><dd><dl class="simple">
+<dt>if (result.facetLabel != null) {</dt><dd><p>allFacetResults.put(new Term(field.getName(), result.facetLabel), result);</p>
+</dd>
+<dt>} else {</dt><dd><p>LOG.warn(“Null facetLabel, field: {}, result: {}”, field.getName(), result);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>searcher.fillFacetResultMetadata(allFacetResults, schemaSnapshot, debugMode);</p>
+<dl>
+<dt>if (userIDWhitelist != null) {</dt><dd><dl>
+<dt>for (ThriftFacetCount facetCount<span class="classifier">allFacetResults.values()) {</span></dt><dd><p>ThriftFacetCountMetadata metadata = facetCount.getMetadata();
+if (metadata != null) {</p>
+<blockquote>
+<div><p>metadata.setDontFilterUser(userIDWhitelist.contains(metadata.getTwitterUserId()));</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private void prepareTermStatisticsResults(</dt><dd><blockquote>
+<div><p>ThriftTermStatisticsResults termStatistics,
+TermStatisticsCollector.TermStatisticsSearchResults hits,
+byte debugMode) throws IOException {</p>
+</div></blockquote>
+<p>termStatistics.setBinIds(hits.binIds);
+termStatistics.setHistogramSettings(termStatisticsRequest.getHistogramSettings());
+termStatistics.setTermResults(hits.results);
+setTermStatisticsDebugInfo(hits.getTermStatisticsDebugInfo());</p>
+<dl class="simple">
+<dt>if (hits.lastCompleteBinId != -1) {</dt><dd><p>termStatistics.setMinCompleteBinId(hits.lastCompleteBinId);</p>
+</dd>
+<dt>} else {</dt><dd><dl class="simple">
+<dt>SearchRateCounter.export(String.format(</dt><dd><p>“term_stats_%s_unset_min_complete_bin_id”, request.getClientId())).increment();</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>if (idTimeRanges != null</dt><dd><blockquote>
+<div><p>&amp;&amp; idTimeRanges.getUntilTimeExclusive().isPresent()
+&amp;&amp; hits.getMinSearchedTime() &gt; idTimeRanges.getUntilTimeExclusive().get()) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>SearchRateCounter.export(String.format(</dt><dd><p>“term_stats_%s_min_searched_time_after_until_time”, request.getClientId())).increment();</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>searcher.fillTermStatsMetadata(termStatistics, schemaSnapshot, debugMode);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private EarlybirdResponse respondSuccess(</dt><dd><blockquote>
+<div><p>ThriftSearchResults thriftSearchResults,
+ThriftFacetResults thriftFacetResults,
+ThriftTermStatisticsResults termStatisticResults,
+&#64;Nonnull EarlyTerminationInfo earlyTerminationState,
+&#64;Nonnull SearchResultsInfo searchResultsInfo) {</p>
+</div></blockquote>
+<p>Preconditions.checkNotNull(earlyTerminationState);
+Preconditions.checkNotNull(searchResultsInfo);</p>
+<p>exportEarlyTerminationStats(earlyTerminationState);</p>
+<dl class="simple">
+<dt>EarlybirdResponse response =</dt><dd><p>newResponse(EarlybirdResponseCode.SUCCESS, request.getDebugMode() &gt; 0);</p>
+</dd>
+</dl>
+<p>response.setEarlyTerminationInfo(earlyTerminationState);
+response.setNumSearchedSegments(searchResultsInfo.getNumSearchedSegments());</p>
+<dl>
+<dt>if (thriftSearchResults != null) {</dt><dd><p>// Nullcast check is only used when parsed query is available: if there is no parsed query,
+// we would not add possible exclude nullcast filter.
+if (parsedQuery != null &amp;&amp; !parsedQueryAllowNullcast) {</p>
+<blockquote>
+<div><p>logAndIncrementStatsIfNullcastInResults(thriftSearchResults);</p>
+</div></blockquote>
+<p>}
+response.setSearchResults(thriftSearchResults);</p>
+</dd>
+<dt>} else {</dt><dd><p>RESPONSE_HAS_NO_THRIFT_SEARCH_RESULTS.increment();</p>
+</dd>
+</dl>
+<p>}
+if (thriftFacetResults != null) {</p>
+<blockquote>
+<div><p>response.setFacetResults(thriftFacetResults);</p>
+</div></blockquote>
+<p>}
+if (termStatisticResults != null) {</p>
+<blockquote>
+<div><p>response.setTermStatisticsResults(termStatisticResults);</p>
+</div></blockquote>
+<p>}</p>
+<p>appendFeatureSchemaIfNeeded(response);</p>
+<p>appendLikedByUserIdsIfNeeded(response);</p>
+<p>return response;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private void exportEarlyTerminationStats(&#64;Nonnull EarlyTerminationInfo earlyTerminationState) {</dt><dd><dl>
+<dt>if (earlyTerminationState.isSetEarlyTerminationReason()) {</dt><dd><dl>
+<dt>SearchRateCounter.export(String.format(“early_termination_%s_%s”,</dt><dd><p>ClientIdUtil.formatClientId(request.getClientId()),
+earlyTerminationState.getEarlyTerminationReason())).increment();</p>
+</dd>
+<dt>SearchRateCounter.export(String.format(“early_termination_%s_%s”,</dt><dd><dl class="simple">
+<dt>ClientIdUtil.formatClientIdAndRequestType(</dt><dd><p>request.getClientId(), queryMode.name().toLowerCase()),</p>
+</dd>
+</dl>
+<p>earlyTerminationState.getEarlyTerminationReason())).increment();</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Builds a rank -&gt; userId map for liked_by_user_id queries that request hit attribution, and</p></li>
+<li><p>appends the resulting map to the response.</p></li>
+</ul>
+<p><a href="#id31"><span class="problematic" id="id32">*</span></a>/</p>
+</dd>
+<dt>private void appendLikedByUserIdsIfNeeded(EarlybirdResponse response) {</dt><dd><p>// Check if user asked for likedByUserIds list in response
+ThriftSearchRelevanceOptions resultRelevanceOptions =</p>
+<blockquote>
+<div><p>request.getSearchQuery().getRelevanceOptions();</p>
+</div></blockquote>
+<dl>
+<dt>if ((resultRelevanceOptions == null)</dt><dd><blockquote>
+<div><p>|| !resultRelevanceOptions.isCollectFieldHitAttributions()) {</p>
+</div></blockquote>
+<p>return;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// Make sure we have results in response and hit attribution helper is set up correctly
+if (!response.isSetSearchResults() || hitAttributeHelper == null) {</p>
+<blockquote>
+<div><p>return;</p>
+</div></blockquote>
+<p>}</p>
+<p>// Get rank to node map
+Map&lt;com.twitter.search.queryparser.query.Query, Integer&gt; nodeToRankMap =</p>
+<blockquote>
+<div><p>Preconditions.checkNotNull(hitAttributeHelper.getNodeToRankMap());</p>
+</div></blockquote>
+<dl class="simple">
+<dt>Map&lt;com.twitter.search.queryparser.query.Query, List&lt;Integer&gt;&gt; expandedNodeToRankMap =</dt><dd><p>Preconditions.checkNotNull(hitAttributeHelper.getExpandedNodeToRankMap());</p>
+</dd>
+</dl>
+<p>// Build a rank to id map
+ImmutableMap.Builder&lt;Integer, Long&gt; builder = ImmutableMap.builder();
+for (com.twitter.search.queryparser.query.Query query : nodeToRankMap.keySet()) {</p>
+<blockquote>
+<div><dl>
+<dt>if (query instanceof SearchOperator) {</dt><dd><p>SearchOperator op = (SearchOperator) query;
+if (expandedNodeToRankMap.containsKey(query)) {</p>
+<blockquote>
+<div><p>// for multi_term_disjunction case
+List&lt;Integer&gt; ranks = expandedNodeToRankMap.get(op);
+Preconditions.checkArgument(op.getNumOperands() == ranks.size() + 1);
+for (int i = 0; i &lt; ranks.size(); ++i) {</p>
+<blockquote>
+<div><p>builder.put(ranks.get(i), Long.valueOf(op.getOperands().get(i + 1)));</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<dl>
+<dt>} else if (op.getOperatorType() == SearchOperator.Type.LIKED_BY_USER_ID) {</dt><dd><p>// for liked_by_user_id case
+Preconditions.checkArgument(op.getAnnotationOf(Annotation.Type.NODE_RANK).isPresent());
+builder.put(</p>
+<blockquote>
+<div><p>(Integer) op.getAnnotationOf(Annotation.Type.NODE_RANK).get().getValue(),
+Long.valueOf(op.getOperands().get(0)));</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}
+Map&lt;Integer, Long&gt; rankToIdMap = builder.build();</p>
+<p>// Append liked_by_user_id filed into result
+for (ThriftSearchResult result : response.getSearchResults().getResults()) {</p>
+<blockquote>
+<div><dl>
+<dt>if (result.isSetMetadata()</dt><dd><blockquote>
+<div><p>&amp;&amp; result.getMetadata().isSetFieldHitAttribution()
+&amp;&amp; result.getMetadata().getFieldHitAttribution().isSetHitMap()) {</p>
+</div></blockquote>
+<p>List&lt;Long&gt; likedByUserIdList = Lists.newArrayList();</p>
+<dl class="simple">
+<dt>Map&lt;Integer, FieldHitList&gt; hitMap =</dt><dd><p>result.getMetadata().getFieldHitAttribution().getHitMap();</p>
+</dd>
+</dl>
+<p>// iterate hit attributions
+for (int rank : hitMap.keySet()) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (rankToIdMap.containsKey(rank)) {</dt><dd><p>likedByUserIdList.add(rankToIdMap.get(rank));</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}
+if (!result.getMetadata().isSetExtraMetadata()) {</p>
+<blockquote>
+<div><p>result.getMetadata().setExtraMetadata(new ThriftSearchResultExtraMetadata());</p>
+</div></blockquote>
+<p>}
+result.getMetadata().getExtraMetadata().setLikedByUserIds(likedByUserIdList);</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private void appendFeatureSchemaIfNeeded(EarlybirdResponse response) {</dt><dd><p>// Do not append the schema if the client didn’t request it.
+ThriftSearchResultMetadataOptions resultMetadataOptions =</p>
+<blockquote>
+<div><p>request.getSearchQuery().getResultMetadataOptions();</p>
+</div></blockquote>
+<dl class="simple">
+<dt>if ((resultMetadataOptions == null) || !resultMetadataOptions.isReturnSearchResultFeatures()) {</dt><dd><p>return;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>if (!response.isSetSearchResults()) {</dt><dd><p>return;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>ThriftSearchFeatureSchema featureSchema = schemaSnapshot.getSearchFeatureSchema();
+Preconditions.checkState(</p>
+<blockquote>
+<div><p>featureSchema.isSetSchemaSpecifier(),
+“The feature schema doesn’t have a schema specifier set: {}”, featureSchema);</p>
+</div></blockquote>
+<p>// If the client has this schema, we only need to return the schema version.
+// If the client doesn’t have this schema, we need to return the schema entries too.
+if (resultMetadataOptions.isSetFeatureSchemasAvailableInClient()</p>
+<blockquote>
+<div><blockquote>
+<div><p>&amp;&amp; resultMetadataOptions.getFeatureSchemasAvailableInClient().contains(
+featureSchema.getSchemaSpecifier())) {</p>
+</div></blockquote>
+<p>CLIENT_HAS_FEATURE_SCHEMA_COUNTER.increment();
+ThriftSearchFeatureSchema responseFeatureSchema = new ThriftSearchFeatureSchema();
+responseFeatureSchema.setSchemaSpecifier(featureSchema.getSchemaSpecifier());
+response.getSearchResults().setFeatureSchema(responseFeatureSchema);</p>
+</div></blockquote>
+<dl>
+<dt>} else {</dt><dd><p>CLIENT_DOESNT_HAVE_FEATURE_SCHEMA_COUNTER.increment();
+Preconditions.checkState(featureSchema.isSetEntries(),</p>
+<blockquote>
+<div><p>“Entries are not set in the feature schema: “ + featureSchema);</p>
+</div></blockquote>
+<p>response.getSearchResults().setFeatureSchema(featureSchema);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private static long getQueryTimestamp(ThriftSearchQuery query) {</dt><dd><p>return query != null &amp;&amp; query.isSetTimestampMsecs() ? query.getTimestampMsecs() : 0;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private static boolean includesCardField(ThriftSearchQuery searchQuery,</dt><dd><blockquote>
+<div><blockquote>
+<div><p>com.twitter.search.queryparser.query.Query query)</p>
+</div></blockquote>
+<p>throws QueryParserException {</p>
+</div></blockquote>
+<dl>
+<dt>if (searchQuery.isSetRelevanceOptions()) {</dt><dd><p>ThriftSearchRelevanceOptions options = searchQuery.getRelevanceOptions();
+if (options.isSetFieldWeightMapOverride()</p>
+<blockquote>
+<div><blockquote>
+<div><dl class="simple">
+<dt>&amp;&amp; (options.getFieldWeightMapOverride().containsKey(</dt><dd><p>EarlybirdFieldConstant.CARD_TITLE_FIELD.getFieldName())</p>
+</dd>
+</dl>
+<p>|| options.getFieldWeightMapOverride()
+.containsKey(EarlybirdFieldConstant.CARD_DESCRIPTION_FIELD.getFieldName()))) {</p>
+</div></blockquote>
+<p>return true;</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>return query.accept(new DetectFieldAnnotationVisitor(ImmutableSet.of(</dt><dd><p>EarlybirdFieldConstant.CARD_TITLE_FIELD.getFieldName(),
+EarlybirdFieldConstant.CARD_DESCRIPTION_FIELD.getFieldName())));</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private static QueryMode getQueryMode(EarlybirdRequest request) {</dt><dd><dl class="simple">
+<dt>if (request.isSetFacetRequest()) {</dt><dd><p>return QueryMode.FACETS;</p>
+</dd>
+<dt>} else if (request.isSetTermStatisticsRequest()) {</dt><dd><p>return QueryMode.TERM_STATS;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// Recency mode until we determine otherwise.
+QueryMode queryMode = QueryMode.RECENCY;
+ThriftSearchQuery searchQuery = request.getSearchQuery();
+if (searchQuery != null) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>switch (searchQuery.getRankingMode()) {</dt><dd><dl class="simple">
+<dt>case RECENCY:</dt><dd><p>queryMode = QueryMode.RECENCY;
+break;</p>
+</dd>
+<dt>case RELEVANCE:</dt><dd><p>queryMode = QueryMode.RELEVANCE;
+break;</p>
+</dd>
+<dt>case TOPTWEETS:</dt><dd><p>queryMode = QueryMode.TOP_TWEETS;
+break;</p>
+</dd>
+<dt>default:</dt><dd><p>break;</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>if (searchQuery == null</dt><dd><blockquote>
+<div><p>|| !searchQuery.isSetSerializedQuery()
+|| searchQuery.getSerializedQuery().isEmpty()) {</p>
+</div></blockquote>
+<p>LOG.debug(“Search query was empty, query mode was “ + queryMode);</p>
+</dd>
+</dl>
+<p>}</p>
+<p>return queryMode;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private static &lt;V&gt; ImmutableMap&lt;String, V&gt; dropBadFieldWeightOverrides(</dt><dd><blockquote>
+<div><p>Map&lt;String, V&gt; map, Decider decider, String clusterName) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>if (map == null) {</dt><dd><p>return null;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>FIELD_WEIGHT_OVERRIDE_MAP_NON_NULL_COUNT.increment();
+ImmutableMap.Builder&lt;String, V&gt; builder = ImmutableMap.builder();</p>
+<dl>
+<dt>for (Map.Entry&lt;String, V&gt; entry<span class="classifier">map.entrySet()) {</span></dt><dd><dl>
+<dt>if (EarlybirdFieldConstant.CAMELCASE_USER_HANDLE_FIELD.getFieldName().equals(entry.getKey())</dt><dd><blockquote>
+<div><p>&amp;&amp; !isAllowedCamelcaseUsernameFieldWeightOverride(decider, clusterName)) {</p>
+</div></blockquote>
+<p>DROPPED_CAMELCASE_USERNAME_FIELD_WEIGHT_OVERRIDE.increment();</p>
+</dd>
+<dt>} else if (EarlybirdFieldConstant.TOKENIZED_USER_NAME_FIELD.getFieldName().equals(</dt><dd><blockquote>
+<div><blockquote>
+<div><p>entry.getKey())</p>
+</div></blockquote>
+<p>&amp;&amp; !isAllowedTokenizedScreenNameFieldWeightOverride(decider, clusterName)) {</p>
+</div></blockquote>
+<p>DROPPED_TOKENIZED_DISPLAY_NAME_FIELD_WEIGHT_OVERRIDE.increment();</p>
+</dd>
+<dt>} else {</dt><dd><p>builder.put(entry.getKey(), entry.getValue());</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>return builder.build();</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private static boolean isAllowedCamelcaseUsernameFieldWeightOverride(</dt><dd><blockquote>
+<div><p>Decider decider, String clusterName) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>return DeciderUtil.isAvailableForRandomRecipient(decider,</dt><dd><p>ALLOW_CAMELCASE_USERNAME_FIELD_WEIGHT_OVERRIDE_DECIDER_KEY_PREFIX + clusterName);</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private static boolean isAllowedTokenizedScreenNameFieldWeightOverride(</dt><dd><blockquote>
+<div><p>Decider decider, String clusterName) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>return DeciderUtil.isAvailableForRandomRecipient(decider,</dt><dd><p>ALLOW_TOKENIZED_DISPLAY_NAME_FIELD_WEIGHT_OVERRIDE_DECIDER_KEY_PREFIX + clusterName);</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>private static com.twitter.search.queryparser.query.Query
+createMultiTermDisjunctionQueryForLikedByUserIds(List&lt;Long&gt; ids) throws QueryParserException {</p>
+<blockquote>
+<div><p>List&lt;String&gt; operands = new ArrayList&lt;&gt;(ids.size() + 1);
+operands.add(EarlybirdFieldConstant.LIKED_BY_USER_ID_FIELD.getFieldName());
+for (long id : ids) {</p>
+<blockquote>
+<div><p>operands.add(String.valueOf(id));</p>
+</div></blockquote>
+<p>}
+return new SearchOperator(SearchOperator.Type.MULTI_TERM_DISJUNCTION, operands)</p>
+<blockquote>
+<div><p>.simplify();</p>
+</div></blockquote>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>private static com.twitter.search.queryparser.query.Query createDisjunctionQueryForLikedByUserIds(</dt><dd><blockquote>
+<div><p>List&lt;Long&gt; ids) throws QueryParserException {</p>
+</div></blockquote>
+<dl>
+<dt>return new Disjunction(</dt><dd><dl class="simple">
+<dt>ids.stream()</dt><dd><p>.map(id -&gt; new SearchOperator(SearchOperator.Type.LIKED_BY_USER_ID, id))
+.collect(Collectors.toList()))</p>
+</dd>
+</dl>
+<p>.simplify();</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public com.twitter.search.queryparser.query.Query getParsedQuery() {</dt><dd><p>return parsedQuery;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Get the index fields that were queried after this searcher completed its job.</p></li>
+<li><p>&#64;return</p></li>
+</ul>
+<p><a href="#id33"><span class="problematic" id="id34">*</span></a>/</p>
+</dd>
+<dt>public Set&lt;String&gt; getQueriedFields() {</dt><dd><p>return queriedFields;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public Query getLuceneQuery() {</dt><dd><p>return luceneQuery;</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../_sources/src/java/com/twitter/search/earlybird/EarlybirdSearcher.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

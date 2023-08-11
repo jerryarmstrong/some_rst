@@ -1,0 +1,696 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.ann.scalding.offline</p>
+<p>import com.twitter.ann.common._
+import com.twitter.ann.hnsw.{HnswParams, TypedHnswIndex}
+import com.twitter.bijection.Injection
+import com.twitter.cortex.ml.embeddings.common.{EntityKind, Helpers, UserKind}
+import com.twitter.entityembeddings.neighbors.thriftscala.{EntityKey, NearestNeighbors, Neighbor}
+import com.twitter.ml.api.embedding.Embedding
+import com.twitter.ml.api.embedding.EmbeddingMath.{Float =&gt; math}
+import com.twitter.ml.featurestore.lib.embedding.EmbeddingWithEntity
+import com.twitter.ml.featurestore.lib.{EntityId, UserId}
+import com.twitter.scalding.typed.{TypedPipe, UnsortedGrouped}
+import com.twitter.scalding.{Args, DateRange, Stat, TextLine, UniqueID}
+import com.twitter.search.common.file.AbstractFile
+import com.twitter.util.{Await, FuturePool}
+import scala.util.Random</p>
+<dl>
+<dt>case class Index[T, D &lt;: Distance[D]](</dt><dd><p>injection: Injection[T, Array[Byte]],
+metric: Metric[D],
+dimension: Int,
+directory: AbstractFile) {
+lazy val annIndex = TypedHnswIndex.loadIndex[T, D](</p>
+<blockquote>
+<div><p>dimension,
+metric,
+injection,
+ReadWriteFuturePool(FuturePool.immediatePool),
+directory</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>object KnnHelper {</dt><dd><dl>
+<dt>def getFilteredUserEmbeddings(</dt><dd><p>args: Args,
+filterPath: Option[String],
+reducers: Int,
+useHashJoin: Boolean</p>
+</dd>
+<dt>)(</dt><dd><p>implicit dateRange: DateRange</p>
+</dd>
+<dt>): TypedPipe[EmbeddingWithEntity[UserId]] = {</dt><dd><dl>
+<dt>val userEmbeddings: TypedPipe[EmbeddingWithEntity[UserId]] =</dt><dd><p>UserKind.parser.getEmbeddingFormat(args, “consumer”).getEmbeddings</p>
+</dd>
+<dt>filterPath match {</dt><dd><dl>
+<dt>case Some(fileName: String) =&gt;</dt><dd><dl>
+<dt>val filterUserIds: TypedPipe[UserId] = TypedPipe</dt><dd><p>.from(TextLine(fileName))
+.flatMap { idLine =&gt;</p>
+<blockquote>
+<div><p>Helpers.optionalToLong(idLine)</p>
+</div></blockquote>
+<p>}
+.map { id =&gt;</p>
+<blockquote>
+<div><p>UserId(id)</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+<dt>Helpers</dt><dd><dl class="simple">
+<dt>.adjustableJoin(</dt><dd><p>left = userEmbeddings.groupBy(_.entityId),
+right = filterUserIds.asKeys,
+useHashJoin = useHashJoin,
+reducers = Some(reducers)</p>
+</dd>
+<dt>).map {</dt><dd><p>case (_, (embedding, _)) =&gt; embedding</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>case None =&gt; userEmbeddings</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def getNeighborsPipe[T &lt;: EntityId, D &lt;: Distance[D]](</dt><dd><p>args: Args,
+uncastEntityKind: EntityKind[_],
+uncastMetric: Metric[_],
+ef: Int,
+consumerEmbeddings: TypedPipe[EmbeddingWithEntity[UserId]],
+abstractFile: Option[AbstractFile],
+reducers: Int,
+numNeighbors: Int,
+dimension: Int</p>
+</dd>
+<dt>)(</dt><dd><p>implicit dateRange: DateRange</p>
+</dd>
+<dt>): TypedPipe[(EntityKey, NearestNeighbors)] = {</dt><dd><p>val entityKind = uncastEntityKind.asInstanceOf[EntityKind[T]]
+val injection = entityKind.byteInjection
+val metric = uncastMetric.asInstanceOf[Metric[D]]
+abstractFile match {</p>
+<blockquote>
+<div><dl>
+<dt>case Some(directory: AbstractFile) =&gt;</dt><dd><p>val index = Index(injection, metric, dimension, directory)
+consumerEmbeddings</p>
+<blockquote>
+<div><dl>
+<dt>.map { embedding =&gt;</dt><dd><dl>
+<dt>val knn = Await.result(</dt><dd><dl class="simple">
+<dt>index.annIndex.queryWithDistance(</dt><dd><p>Embedding(embedding.embedding.toArray),
+numNeighbors,
+HnswParams(ef)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>)
+val neighborList = knn</p>
+<blockquote>
+<div><p>.filter(_.neighbor.toString != embedding.entityId.userId.toString)
+.map(nn =&gt;</p>
+<blockquote>
+<div><dl class="simple">
+<dt>Neighbor(</dt><dd><p>neighbor = EntityKey(nn.neighbor.toString),
+similarity = Some(1 - nn.distance.distance)))</p>
+</dd>
+</dl>
+</div></blockquote>
+</div></blockquote>
+<p>EntityKey(embedding.entityId.toString) -&gt; NearestNeighbors(neighborList)</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+</dd>
+<dt>case None =&gt;</dt><dd><dl class="simple">
+<dt>val producerEmbeddings: TypedPipe[EmbeddingWithEntity[UserId]] =</dt><dd><p>UserKind.parser.getEmbeddingFormat(args, “producer”).getEmbeddings</p>
+</dd>
+<dt>bruteForceNearestNeighbors(</dt><dd><p>consumerEmbeddings,
+producerEmbeddings,
+numNeighbors,
+reducers</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def bruteForceNearestNeighbors(</dt><dd><p>consumerEmbeddings: TypedPipe[EmbeddingWithEntity[UserId]],
+producerEmbeddings: TypedPipe[EmbeddingWithEntity[UserId]],
+numNeighbors: Int,
+reducers: Int</p>
+</dd>
+<dt>): TypedPipe[(EntityKey, NearestNeighbors)] = {</dt><dd><dl>
+<dt>consumerEmbeddings</dt><dd><p>.cross(producerEmbeddings)
+.map {</p>
+<blockquote>
+<div><dl>
+<dt>case (cEmbed: EmbeddingWithEntity[UserId], pEmbed: EmbeddingWithEntity[UserId]) =&gt;</dt><dd><p>// Cosine similarity
+val cEmbedNorm = math.l2Norm(cEmbed.embedding).toFloat
+val pEmbedNorm = math.l2Norm(pEmbed.embedding).toFloat
+val distance: Float = -math.dotProduct(</p>
+<blockquote>
+<div><p>(math.scalarProduct(cEmbed.embedding, 1 / cEmbedNorm)),
+math.scalarProduct(pEmbed.embedding, 1 / pEmbedNorm))</p>
+</div></blockquote>
+<dl class="simple">
+<dt>(</dt><dd><p>UserKind.stringInjection(cEmbed.entityId),
+(distance, UserKind.stringInjection(pEmbed.entityId)))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+.groupBy(_._1).withReducers(reducers)
+.sortWithTake(numNeighbors) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case ((_: String, (sim1: Float, _: String)), (_: String, (sim2: Float, _: String))) =&gt;</dt><dd><p>sim1 &lt; sim2</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+.map {</p>
+<blockquote>
+<div><dl>
+<dt>case (consumerId: String, (prodSims: Seq[(String, (Float, String))])) =&gt;</dt><dd><dl>
+<dt>EntityKey(consumerId) -&gt; NearestNeighbors(</dt><dd><dl class="simple">
+<dt>prodSims.map {</dt><dd><dl class="simple">
+<dt>case (consumerId: String, (sim: Float, prodId: String)) =&gt;</dt><dd><p>Neighbor(neighbor = EntityKey(prodId), similarity = Some(-sim.toDouble))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Calculate the nearest neighbors exhaustively between two entity embeddings using one as query and other as the search space.</p></li>
+<li><p>&#64;param queryEmbeddings entity embeddings for queries</p></li>
+<li><p>&#64;param searchSpaceEmbeddings entity embeddings for search space</p></li>
+<li><p>&#64;param metric distance metric</p></li>
+<li><p>&#64;param numNeighbors number of neighbors</p></li>
+<li><p>&#64;param queryIdsFilter optional query ids to filter to query entity embeddings</p></li>
+<li><p>&#64;param reducers number of reducers for grouping</p></li>
+<li><p>&#64;param isSearchSpaceLarger Used for optimization: Is the search space larger than the query space? Ignored if numOfSearchGroups &gt; 1.</p></li>
+<li><p>&#64;param numOfSearchGroups we divide the search space into these groups (randomly). Useful when the search space is too large. Overrides isSearchSpaceLarger.</p></li>
+<li><p>&#64;param numReplicas Each search group will be responsible for 1/numReplicas queryEmebeddings.</p></li>
+<li><p>This might speed up the search when the size of the index embeddings is</p></li>
+<li><p>large.</p></li>
+<li><p>&#64;tparam A type of query entity</p></li>
+<li><p>&#64;tparam B type of search space entity</p></li>
+<li><p>&#64;tparam D type of distance</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>def findNearestNeighbours[A &lt;: EntityId, B &lt;: EntityId, D &lt;: Distance[D]](</dt><dd><p>queryEmbeddings: TypedPipe[EmbeddingWithEntity[A]],
+searchSpaceEmbeddings: TypedPipe[EmbeddingWithEntity[B]],
+metric: Metric[D],
+numNeighbors: Int = 10,
+queryIdsFilter: Option[TypedPipe[A]] = Option.empty,
+reducers: Int = 100,
+mappers: Int = 100,
+isSearchSpaceLarger: Boolean = true,
+numOfSearchGroups: Int = 1,
+numReplicas: Int = 1,
+useCounters: Boolean = true</p>
+</dd>
+<dt>)(</dt><dd><p>implicit ordering: Ordering[A],
+uid: UniqueID</p>
+</dd>
+<dt>): TypedPipe[(A, Seq[(B, D)])] = {</dt><dd><dl>
+<dt>val filteredQueryEmbeddings = queryIdsFilter match {</dt><dd><dl>
+<dt>case Some(filter) =&gt; {</dt><dd><dl class="simple">
+<dt>queryEmbeddings.groupBy(_.entityId).hashJoin(filter.asKeys).map {</dt><dd><p>case (x, (embedding, _)) =&gt; embedding</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}
+case None =&gt; queryEmbeddings</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>if (numOfSearchGroups &gt; 1) {</dt><dd><p>val indexingStrategy = BruteForceIndexingStrategy(metric)
+findNearestNeighboursWithIndexingStrategy(</p>
+<blockquote>
+<div><p>queryEmbeddings,
+searchSpaceEmbeddings,
+numNeighbors,
+numOfSearchGroups,
+indexingStrategy,
+numReplicas,
+Some(reducers),
+useCounters = useCounters</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+<dt>} else {</dt><dd><dl class="simple">
+<dt>findNearestNeighboursViaCross(</dt><dd><p>filteredQueryEmbeddings,
+searchSpaceEmbeddings,
+metric,
+numNeighbors,
+reducers,
+mappers,
+isSearchSpaceLarger)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Calculate the nearest neighbors using the specified indexing strategy between two entity</p></li>
+<li><p>embeddings using one as query and other as the search space.</p></li>
+<li><p>&#64;param queryEmbeddings entity embeddings for queries</p></li>
+<li><p>&#64;param searchSpaceEmbeddings entity embeddings for search space. You should be able to fit</p></li>
+<li><p>searchSpaceEmbeddings.size / numOfSearchGroups into memory.</p></li>
+<li><p>&#64;param numNeighbors number of neighbors</p></li>
+<li><p>&#64;param reducersOption number of reducers for the final sortedTake.</p></li>
+<li><p>&#64;param numOfSearchGroups we divide the search space into these groups (randomly). Useful when</p></li>
+<li><p>the search space is too large. Search groups are shards. Choose this</p></li>
+<li><p>number by ensuring searchSpaceEmbeddings.size / numOfSearchGroups</p></li>
+<li><p>embeddings will fit into memory.</p></li>
+<li><p>&#64;param numReplicas Each search group will be responsible for 1/numReplicas queryEmebeddings.</p></li>
+<li><p>By increasing this number, we can parallelize the work and reduce end to end</p></li>
+<li><p>running times.</p></li>
+<li><p>&#64;param indexingStrategy How we will search for nearest neighbors within a search group</p></li>
+<li><p>&#64;param queryShards one step we have is to fan out the query embeddings. We create one entry</p></li>
+<li><p>per search group. If numOfSearchGroups is large, then this fan out can take</p></li>
+<li><p>a long time. You can shard the query shard first to parallelize this</p></li>
+<li><p>process. One way to estimate what value to use:</p></li>
+<li><p>queryEmbeddings.size * numOfSearchGroups / queryShards should be around 1GB.</p></li>
+<li><p>&#64;param searchSpaceShards this param is similar to queryShards. Except it shards the search</p></li>
+<li><p>space when numReplicas is too large. One way to estimate what value</p></li>
+<li><p>to use: searchSpaceEmbeddings.size * numReplicas / searchSpaceShards</p></li>
+<li><p>should be around 1GB.</p></li>
+<li><p>&#64;tparam A type of query entity</p></li>
+<li><p>&#64;tparam B type of search space entity</p></li>
+<li><p>&#64;tparam D type of distance</p></li>
+<li><p>&#64;return a pipe keyed by the index embedding. The values are the list of numNeighbors nearest</p></li>
+<li><p>neighbors along with their distances.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>def findNearestNeighboursWithIndexingStrategy[A &lt;: EntityId, B &lt;: EntityId, D &lt;: Distance[D]](</dt><dd><p>queryEmbeddings: TypedPipe[EmbeddingWithEntity[A]],
+searchSpaceEmbeddings: TypedPipe[EmbeddingWithEntity[B]],
+numNeighbors: Int,
+numOfSearchGroups: Int,
+indexingStrategy: IndexingStrategy[D],
+numReplicas: Int = 1,
+reducersOption: Option[Int] = None,
+queryShards: Option[Int] = None,
+searchSpaceShards: Option[Int] = None,
+useCounters: Boolean = true</p>
+</dd>
+<dt>)(</dt><dd><p>implicit ordering: Ordering[A],
+uid: UniqueID</p>
+</dd>
+</dl>
+<p>): UnsortedGrouped[A, Seq[(B, D)]] = {</p>
+<blockquote>
+<div><p>implicit val ord: Ordering[NNKey] = Ordering.by(NNKey.unapply)</p>
+<dl>
+<dt>val entityEmbeddings = searchSpaceEmbeddings.map { embedding: EmbeddingWithEntity[B] =&gt;</dt><dd><dl class="simple">
+<dt>val entityEmbedding =</dt><dd><p>EntityEmbedding(embedding.entityId, Embedding(embedding.embedding.toArray))</p>
+</dd>
+</dl>
+<p>entityEmbedding</p>
+</dd>
+</dl>
+<p>}</p>
+<p>val shardedSearchSpace = shard(entityEmbeddings, searchSpaceShards)</p>
+<dl>
+<dt>val groupedSearchSpaceEmbeddings = shardedSearchSpace</dt><dd><dl>
+<dt>.flatMap { entityEmbedding =&gt;</dt><dd><p>val searchGroup = Random.nextInt(numOfSearchGroups)
+(0 until numReplicas).map { replica =&gt;</p>
+<blockquote>
+<div><p>(NNKey(searchGroup, replica, Some(numReplicas)), entityEmbedding)</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>val shardedQueries = shard(queryEmbeddings, queryShards)</p>
+<dl>
+<dt>val groupedQueryEmbeddings = shardedQueries</dt><dd><dl>
+<dt>.flatMap { entity =&gt;</dt><dd><p>val replica = Random.nextInt(numReplicas)
+(0 until numOfSearchGroups).map { searchGroup =&gt;</p>
+<blockquote>
+<div><p>(NNKey(searchGroup, replica, Some(numReplicas)), entity)</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}.group
+.withReducers(reducersOption.getOrElse(numOfSearchGroups * numReplicas))</p>
+</dd>
+</dl>
+<p>val numberAnnIndexQueries = Stat(“NumberAnnIndexQueries”)
+val annIndexQueryTotalMs = Stat(“AnnIndexQueryTotalMs”)
+val numberIndexBuilds = Stat(“NumberIndexBuilds”)
+val annIndexBuildTotalMs = Stat(“AnnIndexBuildTotalMs”)
+val groupedKnn = groupedQueryEmbeddings</p>
+<blockquote>
+<div><dl>
+<dt>.cogroup(groupedSearchSpaceEmbeddings) {</dt><dd><dl>
+<dt>case (_, queryIter, searchSpaceIter) =&gt;</dt><dd><p>// This index build happens numReplicas times. Ideally we could serialize the queryable.
+// And only build the index once per search group.
+// The issues with that now are:
+// - The HNSW queryable is not serializable in scalding
+// - The way that map reduce works requires that there is a job that write out the search
+//   space embeddings numReplicas times. In the current setup, we can do that by sharding
+//   the embeddings first and then fanning out. But if we had a single queryable, we would
+//   not be able to shard it easily and writing this out would take a long time.
+val indexBuildStartTime = System.currentTimeMillis()
+val queryable = indexingStrategy.buildIndex(searchSpaceIter)
+if (useCounters) {</p>
+<blockquote>
+<div><p>numberIndexBuilds.inc()
+annIndexBuildTotalMs.incBy(System.currentTimeMillis() - indexBuildStartTime)</p>
+</div></blockquote>
+<p>}
+queryIter.flatMap { query =&gt;</p>
+<blockquote>
+<div><p>val queryStartTime = System.currentTimeMillis()
+val embedding = Embedding(query.embedding.toArray)
+val result = Await.result(</p>
+<blockquote>
+<div><p>queryable.queryWithDistance(embedding, numNeighbors)</p>
+</div></blockquote>
+<p>)
+val queryToTopNeighbors = result</p>
+<blockquote>
+<div><dl class="simple">
+<dt>.map { neighbor =&gt;</dt><dd><p>(query.entityId, (neighbor.neighbor, neighbor.distance))</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<dl class="simple">
+<dt>if (useCounters) {</dt><dd><p>numberAnnIndexQueries.inc()
+annIndexQueryTotalMs.incBy(System.currentTimeMillis() - queryStartTime)</p>
+</dd>
+</dl>
+<p>}
+queryToTopNeighbors</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+.values
+.group</p>
+</div></blockquote>
+<dl>
+<dt>val groupedKnnWithReducers = reducersOption</dt><dd><dl class="simple">
+<dt>.map { reducers =&gt;</dt><dd><dl class="simple">
+<dt>groupedKnn</dt><dd><p>.withReducers(reducers)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}.getOrElse(groupedKnn)</p>
+</dd>
+<dt>groupedKnnWithReducers</dt><dd><dl>
+<dt>.sortedTake(numNeighbors) {</dt><dd><dl>
+<dt>Ordering</dt><dd><dl class="simple">
+<dt>.by[(B, D), D] {</dt><dd><p>case (_, distance) =&gt; distance</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>private[this] def shard[T](</dt><dd><p>pipe: TypedPipe[T],
+numberOfShards: Option[Int]</p>
+</dd>
+<dt>): TypedPipe[T] = {</dt><dd><dl>
+<dt>numberOfShards</dt><dd><dl class="simple">
+<dt>.map { shards =&gt;</dt><dd><p>pipe.shard(shards)</p>
+</dd>
+</dl>
+<p>}.getOrElse(pipe)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private[this] def findNearestNeighboursViaCross[A &lt;: EntityId, B &lt;: EntityId, D &lt;: Distance[D]](</dt><dd><p>queryEmbeddings: TypedPipe[EmbeddingWithEntity[A]],
+searchSpaceEmbeddings: TypedPipe[EmbeddingWithEntity[B]],
+metric: Metric[D],
+numNeighbors: Int,
+reducers: Int,
+mappers: Int,
+isSearchSpaceLarger: Boolean</p>
+</dd>
+<dt>)(</dt><dd><p>implicit ordering: Ordering[A]</p>
+</dd>
+</dl>
+<p>): TypedPipe[(A, Seq[(B, D)])] = {</p>
+<blockquote>
+<div><dl>
+<dt>val crossed: TypedPipe[(A, (B, D))] = if (isSearchSpaceLarger) {</dt><dd><dl>
+<dt>searchSpaceEmbeddings</dt><dd><p>.shard(mappers)
+.cross(queryEmbeddings).map {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case (searchSpaceEmbedding, queryEmbedding) =&gt;</dt><dd><p>val distance = metric.distance(searchSpaceEmbedding.embedding, queryEmbedding.embedding)
+(queryEmbedding.entityId, (searchSpaceEmbedding.entityId, distance))</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+<dt>} else {</dt><dd><dl>
+<dt>queryEmbeddings</dt><dd><p>.shard(mappers)
+.cross(searchSpaceEmbeddings).map {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case (queryEmbedding, searchSpaceEmbedding) =&gt;</dt><dd><p>val distance = metric.distance(searchSpaceEmbedding.embedding, queryEmbedding.embedding)
+(queryEmbedding.entityId, (searchSpaceEmbedding.entityId, distance))</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>crossed</dt><dd><p>.groupBy(_._1)
+.withReducers(reducers)
+.sortedTake(numNeighbors) {</p>
+<blockquote>
+<div><dl>
+<dt>Ordering</dt><dd><dl class="simple">
+<dt>.by[(A, (B, D)), D] {</dt><dd><p>case (_, (_, distance)) =&gt; distance</p>
+</dd>
+</dl>
+<p>} // Sort by distance metric in ascending order</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl class="simple">
+<dt>}.map {</dt><dd><dl class="simple">
+<dt>case (queryId, neighbors) =&gt;</dt><dd><p>(queryId, neighbors.map(_._2))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Convert nearest neighbors to string format.</p></li>
+<li><p>By default format would be (queryId  neighbourId:distance  neighbourId:distance …..) in ascending order of distance.</p></li>
+<li><p>&#64;param nearestNeighbors nearest neighbors tuple in form of (queryId, Seq[(neighborId, distance)]</p></li>
+<li><p>&#64;param queryEntityKind entity kind of query</p></li>
+<li><p>&#64;param neighborEntityKind entity kind of search space/neighbors</p></li>
+<li><p>&#64;param idDistanceSeparator String separator to separate a single neighborId and distance. Default to colon (:)</p></li>
+<li><p>&#64;param neighborSeparator String operator to separate neighbors. Default to tab</p></li>
+<li><p>&#64;tparam A type of query entity</p></li>
+<li><p>&#64;tparam B type of search space entity</p></li>
+<li><p>&#64;tparam D type of distance</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>def nearestNeighborsToString[A &lt;: EntityId, B &lt;: EntityId, D &lt;: Distance[D]](</dt><dd><p>nearestNeighbors: (A, Seq[(B, D)]),
+queryEntityKind: EntityKind[A],
+neighborEntityKind: EntityKind[B],
+idDistanceSeparator: String = “:”,
+neighborSeparator: String = “t”</p>
+</dd>
+<dt>): String = {</dt><dd><p>val (queryId, neighbors) = nearestNeighbors
+val formattedNeighbors = neighbors.map {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case (neighbourId, distance) =&gt;</dt><dd><p>s”${neighborEntityKind.stringInjection.apply(neighbourId)}$idDistanceSeparator${distance.distance}”</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+(queryEntityKind.stringInjection.apply(queryId) +: formattedNeighbors)</p>
+<blockquote>
+<div><p>.mkString(neighborSeparator)</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private[this] case class NNKey(</dt><dd><p>searchGroup: Int,
+replica: Int,
+maxReplica: Option[Int] = None) {
+override def hashCode(): Int =</p>
+<blockquote>
+<div><p>maxReplica.map(_ * searchGroup + replica).getOrElse(super.hashCode())</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/ann/src/main/scala/com/twitter/ann/scalding/offline/KnnHelper.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

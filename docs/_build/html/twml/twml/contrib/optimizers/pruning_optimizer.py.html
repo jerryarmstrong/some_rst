@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../" id="documentation_options" src="../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>“””
+Provides a general optimizer for pruning features of a neural network.</p>
+<p>The optimizer estimates the computational cost of features, combines this information with pruning
+signals indicating their usefulness, and disables features via binary masks at regular intervals.</p>
+<p>To make a layer prunable, use <cite>twml.contrib.pruning.apply_mask</cite>:</p>
+<blockquote>
+<div><p>dense1 = tf.layers.dense(inputs=inputs, units=50, activation=tf.nn.relu)
+dense1 = apply_mask(dense1)</p>
+</div></blockquote>
+<p>To prune the network, apply PruningOptimizer to any cross-entropy loss:</p>
+<blockquote>
+<div><p>loss = tf.losses.sparse_softmax_cross_entropy(labels=labels, logits=logits)</p>
+<p>optimizer = PruningOptimizer(learning_rate=0.001, momentum=0.5)
+minimize = optimizer.minimize(</p>
+<blockquote>
+<div><p>loss=loss,
+prune_every=10,
+burn_in=100,
+global_step=tf.train.get_global_step())</p>
+</div></blockquote>
+</div></blockquote>
+<p>“””</p>
+<p>import tensorflow.compat.v1 as tf</p>
+<p>from twml.contrib.pruning import computational_cost, prune, update_pruning_signals
+from twml.contrib.pruning import MASK_COLLECTION</p>
+<dl>
+<dt>class PruningOptimizer(tf.train.MomentumOptimizer):</dt><dd><p>“””
+Updates parameters with SGD and pruning masks using Fisher pruning.</p>
+<dl class="simple">
+<dt>Arguments:</dt><dd><dl class="simple">
+<dt>learning_rate: float</dt><dd><p>Learning rate of SGD</p>
+</dd>
+<dt>momentum: float</dt><dd><p>Momentum used by SGD</p>
+</dd>
+<dt>use_locking: bool</dt><dd><p>If <cite>True</cite>, use locks for update operations</p>
+</dd>
+<dt>name: str</dt><dd><p>Optional name prefix for the operations created when applying gradients</p>
+</dd>
+<dt>use_nesterov: bool</dt><dd><p>If <cite>True</cite>, use Nesterov momentum</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>“””</p>
+<dl>
+<dt>def __init__(</dt><dd><blockquote>
+<div><p>self,
+learning_rate,
+momentum=0.9,
+use_locking=False,
+name=”PruningOptimizer”,
+use_nesterov=False):</p>
+</div></blockquote>
+<dl class="simple">
+<dt>super(PruningOptimizer, self).__init__(</dt><dd><p>learning_rate=learning_rate,
+momentum=momentum,
+use_locking=use_locking,
+name=name,
+use_nesterov=use_nesterov)</p>
+</dd>
+</dl>
+</dd>
+<dt>def minimize(</dt><dd><p>self,
+loss,
+prune_every=100,
+burn_in=0,
+decay=.96,
+flops_weight=’AUTO’,
+flops_target=0,
+update_params=None,
+method=’Fisher’,
+<a href="#id1"><span class="problematic" id="id2">*</span></a>args,
+<a href="#id3"><span class="problematic" id="id4">**</span></a>kwargs):
+“””
+Create operations to minimize loss and to prune features.</p>
+<p>A pruning signal measures the importance of feature maps. This is weighed against the
+computational cost of computing a feature map. Features are then iteratively pruned
+based on a weighted average of feature importance S and computational cost C (in FLOPs):</p>
+<p>$$S + w * C$$</p>
+<p>Setting <cite>flops_weight</cite> to ‘AUTO’ is the most convenient and recommended option, but not
+necessarily optimal.</p>
+<dl class="simple">
+<dt>Arguments:</dt><dd><dl class="simple">
+<dt>loss: tf.Tensor</dt><dd><p>The value to minimize</p>
+</dd>
+<dt>prune_every: int</dt><dd><p>One entry of a mask is set to zero only every few update steps</p>
+</dd>
+<dt>burn_in: int</dt><dd><p>Pruning starts only after this many parameter updates</p>
+</dd>
+<dt>decay: float</dt><dd><p>Controls exponential moving average of pruning signals</p>
+</dd>
+<dt>flops_weight: float or str</dt><dd><p>Controls the targeted trade-off between computational complexity and performance</p>
+</dd>
+<dt>flops_target: float</dt><dd><p>Stop pruning when computational complexity is less or this many floating point ops</p>
+</dd>
+<dt>update_params: tf.Operation</dt><dd><p>Optional training operation used instead of MomentumOptimizer to update parameters</p>
+</dd>
+<dt>method: str</dt><dd><p>Method used to compute pruning signal (currently only supports ‘Fisher’)</p>
+</dd>
+</dl>
+</dd>
+<dt>Returns:</dt><dd><p>A <cite>tf.Operation</cite> updating parameters and pruning masks</p>
+</dd>
+</dl>
+<p>References:
+* Theis et al., Faster gaze prediction with dense networks and Fisher pruning, 2018
+“””</p>
+<p># gradient-based updates of parameters
+if update_params is None:</p>
+<blockquote>
+<div><p>update_params = super(PruningOptimizer, self).minimize(loss, <a href="#id5"><span class="problematic" id="id6">*</span></a>args, <a href="#id7"><span class="problematic" id="id8">**</span></a>kwargs)</p>
+</div></blockquote>
+<p>masks = tf.get_collection(MASK_COLLECTION)</p>
+<dl>
+<dt>with tf.variable_scope(‘pruning_opt’, reuse=True):</dt><dd><p># estimate computational cost per data point
+batch_size = tf.cast(tf.shape(masks[0].tensor), loss.dtype)[0]
+cost = tf.divide(computational_cost(loss), batch_size, name=’computational_cost’)</p>
+<p>tf.summary.scalar(‘computational_cost’, cost)</p>
+<dl>
+<dt>if masks:</dt><dd><p>signals = update_pruning_signals(loss, masks=masks, decay=decay, method=method)</p>
+<p># estimate computational cost per feature map
+costs = tf.gradients(cost, masks)</p>
+<p># trade off computational complexity and performance
+if flops_weight.upper() == ‘AUTO’:</p>
+<blockquote>
+<div><p>signals = [s / (c + 1e-6) for s, c in zip(signals, costs)]</p>
+</div></blockquote>
+<dl class="simple">
+<dt>elif not isinstance(flops_weight, float) or flops_weight != 0.:</dt><dd><p>signals = [s - flops_weight * c for s, c in zip(signals, costs)]</p>
+</dd>
+</dl>
+<p>counter = tf.Variable(0, name=’pruning_counter’)
+counter = tf.assign_add(counter, 1, use_locking=True)</p>
+<p># only prune every so often after a burn-in phase
+pruning_cond = tf.logical_and(counter &gt; burn_in, tf.equal(counter % prune_every, 0))</p>
+<p># stop pruning after reaching threshold
+if flops_target &gt; 0:</p>
+<blockquote>
+<div><p>pruning_cond = tf.logical_and(pruning_cond, tf.greater(cost, flops_target))</p>
+</div></blockquote>
+<dl class="simple">
+<dt>update_masks = tf.cond(</dt><dd><p>pruning_cond,
+lambda: prune(signals, masks=masks),
+lambda: tf.group(masks))</p>
+</dd>
+</dl>
+<p>return tf.group([update_params, update_masks])</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p># no masks found
+return update_params</p>
+</dd>
+</dl>
+</dd>
+</dl>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../_sources/twml/twml/contrib/optimizers/pruning_optimizer.py.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

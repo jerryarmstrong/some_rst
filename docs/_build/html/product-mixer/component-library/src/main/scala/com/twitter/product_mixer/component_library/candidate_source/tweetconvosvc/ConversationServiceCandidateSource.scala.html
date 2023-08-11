@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../../../" id="documentation_options" src="../../../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.product_mixer.component_library.candidate_source.tweetconvosvc</p>
+<p>import com.twitter.product_mixer.core.feature.featuremap.FeatureMap
+import com.twitter.product_mixer.core.functional_component.candidate_source.CandidateSourceWithExtractedFeatures
+import com.twitter.product_mixer.core.functional_component.candidate_source.CandidatesWithSourceFeatures
+import com.twitter.product_mixer.core.model.common.identifier.CandidateSourceIdentifier
+import com.twitter.stitch.Stitch
+import com.twitter.tweetconvosvc.tweet_ancestor.{thriftscala =&gt; ta}
+import com.twitter.tweetconvosvc.{thriftscala =&gt; tcs}
+import com.twitter.util.Return
+import com.twitter.util.Throw
+import javax.inject.Inject
+import javax.inject.Singleton</p>
+<dl>
+<dt>case class ConversationServiceCandidateSourceRequest(</dt><dd><p>tweetsWithConversationMetadata: Seq[TweetWithConversationMetadata])</p>
+</dd>
+<dt>case class TweetWithConversationMetadata(</dt><dd><p>tweetId: Long,
+userId: Option[Long],
+sourceTweetId: Option[Long],
+sourceUserId: Option[Long],
+inReplyToTweetId: Option[Long],
+conversationId: Option[Long],
+ancestors: Seq[ta.TweetAncestor])</p>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Candidate source that fetches ancestors of input candidates from Tweetconvosvc and</p></li>
+<li><p>returns a flattened list of input and ancestor candidates.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+</dl>
+<p>&#64;Singleton
+class ConversationServiceCandidateSource &#64;Inject() (</p>
+<blockquote>
+<div><dl>
+<dt>conversationServiceClient: tcs.ConversationService.MethodPerEndpoint)</dt><dd><dl class="simple">
+<dt>extends CandidateSourceWithExtractedFeatures[</dt><dd><p>ConversationServiceCandidateSourceRequest,
+TweetWithConversationMetadata</p>
+</dd>
+</dl>
+<p>] {</p>
+</dd>
+<dt>override val identifier: CandidateSourceIdentifier =</dt><dd><p>CandidateSourceIdentifier(“ConversationService”)</p>
+</dd>
+</dl>
+<p>private val maxModuleSize = 3
+private val maxAncestorsInConversation = 2
+private val numberOfRootTweets = 1
+private val maxTweetsInConversationWithSameId = 1</p>
+<dl>
+<dt>override def apply(</dt><dd><p>request: ConversationServiceCandidateSourceRequest</p>
+</dd>
+<dt>): Stitch[CandidatesWithSourceFeatures[TweetWithConversationMetadata]] = {</dt><dd><dl class="simple">
+<dt>val inputTweetsWithConversationMetadata: Seq[TweetWithConversationMetadata] =</dt><dd><p>request.tweetsWithConversationMetadata</p>
+</dd>
+<dt>val ancestorsRequest =</dt><dd><p>tcs.GetAncestorsRequest(inputTweetsWithConversationMetadata.map(_.tweetId))</p>
+</dd>
+</dl>
+<p>// build the tweets with conversation metadata by calling the conversation service with reduced
+// ancestors to limit to maxModuleSize
+val tweetsWithConversationMetadataFromAncestors: Stitch[Seq[TweetWithConversationMetadata]] =</p>
+<blockquote>
+<div><dl>
+<dt>Stitch</dt><dd><p>.callFuture(conversationServiceClient.getAncestors(ancestorsRequest))
+.map { getAncestorsResponse: tcs.GetAncestorsResponse =&gt;</p>
+<blockquote>
+<div><dl>
+<dt>inputTweetsWithConversationMetadata</dt><dd><dl>
+<dt>.zip(getAncestorsResponse.ancestors).collect {</dt><dd><dl>
+<dt>case (focalTweet, tcs.TweetAncestorsResult.TweetAncestors(ancestorsResult))</dt><dd><blockquote>
+<div><p>if ancestorsResult.nonEmpty =&gt;</p>
+</div></blockquote>
+<p>getTweetsInThread(focalTweet, ancestorsResult.head)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}.flatten</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>// dedupe the tweets in the list and transform the calling error to
+// return the requested tweets with conversation metadata
+val transformedTweetsWithConversationMetadata: Stitch[Seq[TweetWithConversationMetadata]] =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>tweetsWithConversationMetadataFromAncestors.transform {</dt><dd><dl class="simple">
+<dt>case Return(ancestors) =&gt;</dt><dd><p>Stitch.value(dedupeCandidates(inputTweetsWithConversationMetadata, ancestors))</p>
+</dd>
+<dt>case Throw(_) =&gt;</dt><dd><p>Stitch.value(inputTweetsWithConversationMetadata)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>// return the candidates with empty source features from transformed tweetsWithConversationMetadata
+transformedTweetsWithConversationMetadata.map {</p>
+<blockquote>
+<div><dl>
+<dt>responseTweetsWithConversationMetadata: Seq[TweetWithConversationMetadata] =&gt;</dt><dd><dl class="simple">
+<dt>CandidatesWithSourceFeatures(</dt><dd><p>responseTweetsWithConversationMetadata,
+FeatureMap.empty</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def getTweetsInThread(</dt><dd><p>focalTweet: TweetWithConversationMetadata,
+ancestors: ta.TweetAncestors</p>
+</dd>
+<dt>): Seq[TweetWithConversationMetadata] = {</dt><dd><p>// Re-add the focal tweet so we can easily build modules and dedupe later.
+// Note, TweetConvoSVC returns the bottom of the thread first, so we
+// reverse them for easy rendering.
+val focalTweetWithConversationMetadata = TweetWithConversationMetadata(</p>
+<blockquote>
+<div><p>tweetId = focalTweet.tweetId,
+userId = focalTweet.userId,
+sourceTweetId = focalTweet.sourceTweetId,
+sourceUserId = focalTweet.sourceUserId,
+inReplyToTweetId = focalTweet.inReplyToTweetId,
+conversationId = Some(focalTweet.tweetId),
+ancestors = ancestors.ancestors</p>
+</div></blockquote>
+<p>)</p>
+<dl>
+<dt>val parentTweets = ancestors.ancestors.map { ancestor =&gt;</dt><dd><dl class="simple">
+<dt>TweetWithConversationMetadata(</dt><dd><p>tweetId = ancestor.tweetId,
+userId = Some(ancestor.userId),
+sourceTweetId = None,
+sourceUserId = None,
+inReplyToTweetId = None,
+conversationId = Some(focalTweet.tweetId),
+ancestors = Seq.empty</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>} ++ getTruncatedRootTweet(ancestors, focalTweet.tweetId)</p>
+<p>val (intermediates, root) = parentTweets.splitAt(parentTweets.size - numberOfRootTweets)
+val truncatedIntermediates =</p>
+<blockquote>
+<div><p>intermediates.take(maxModuleSize - maxAncestorsInConversation).reverse</p>
+</div></blockquote>
+<p>root ++ truncatedIntermediates :+ focalTweetWithConversationMetadata</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Ancestor store truncates at 256 ancestors. For very large reply threads, we try best effort</p></li>
+<li><p>to append the root tweet to the ancestor list based on the conversationId and</p></li>
+<li><p>conversationRootAuthorId. When rendering conversation modules, we can display the root tweet</p></li>
+<li><p>instead of the 256th highest ancestor.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>private def getTruncatedRootTweet(</dt><dd><p>ancestors: ta.TweetAncestors,
+focalTweetId: Long</p>
+</dd>
+<dt>): Option[TweetWithConversationMetadata] = {</dt><dd><dl>
+<dt>ancestors.conversationRootAuthorId.collect {</dt><dd><dl>
+<dt>case rootAuthorId</dt><dd><blockquote>
+<div><dl class="simple">
+<dt>if ancestors.state == ta.ReplyState.Partial &amp;&amp;</dt><dd><p>ancestors.ancestors.last.tweetId != ancestors.conversationId =&gt;</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl class="simple">
+<dt>TweetWithConversationMetadata(</dt><dd><p>tweetId = ancestors.conversationId,
+userId = Some(rootAuthorId),
+sourceTweetId = None,
+sourceUserId = None,
+inReplyToTweetId = None,
+conversationId = Some(focalTweetId),
+ancestors = Seq.empty</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def dedupeCandidates(</dt><dd><p>inputTweetsWithConversationMetadata: Seq[TweetWithConversationMetadata],
+ancestors: Seq[TweetWithConversationMetadata]</p>
+</dd>
+<dt>): Seq[TweetWithConversationMetadata] = {</dt><dd><dl>
+<dt>val dedupedAncestors: Iterable[TweetWithConversationMetadata] = ancestors</dt><dd><dl>
+<dt>.groupBy(_.tweetId).map {</dt><dd><dl>
+<dt>case (_, duplicateAncestors)</dt><dd><blockquote>
+<div><p>if duplicateAncestors.size &gt; maxTweetsInConversationWithSameId =&gt;</p>
+</div></blockquote>
+<p>duplicateAncestors.maxBy(_.conversationId.getOrElse(0L))</p>
+</dd>
+</dl>
+<p>case (_, nonDuplicateAncestors) =&gt; nonDuplicateAncestors.head</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>// Sort by tweet id to prevent issues with future assumptions of the root being the first
+// tweet and the focal being the last tweet in a module. The tweets as a whole do not need
+// to be sorted overall, only the relative order within modules must be kept.
+val sortedDedupedAncestors: Seq[TweetWithConversationMetadata] =</p>
+<blockquote>
+<div><p>dedupedAncestors.toSeq.sortBy(_.tweetId)</p>
+</div></blockquote>
+<p>val ancestorIds = sortedDedupedAncestors.map(_.tweetId).toSet
+val updatedCandidates = inputTweetsWithConversationMetadata.filterNot { candidate =&gt;</p>
+<blockquote>
+<div><p>ancestorIds.contains(candidate.tweetId)</p>
+</div></blockquote>
+<p>}
+sortedDedupedAncestors ++ updatedCandidates</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../../../_sources/product-mixer/component-library/src/main/scala/com/twitter/product_mixer/component_library/candidate_source/tweetconvosvc/ConversationServiceCandidateSource.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

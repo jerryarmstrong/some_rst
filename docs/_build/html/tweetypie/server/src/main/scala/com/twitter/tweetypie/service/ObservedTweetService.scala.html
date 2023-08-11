@@ -1,0 +1,586 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.tweetypie
+package service</p>
+<p>import com.twitter.servo.exception.thriftscala.ClientError
+import com.twitter.servo.util.SynchronizedHashMap
+import com.twitter.tweetypie.client_id.ClientIdHelper
+import com.twitter.tweetypie.service.observer._
+import com.twitter.tweetypie.thriftscala._
+import com.twitter.finagle.tracing.Trace</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Wraps an underlying TweetService, observing requests and results.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>class ObservedTweetService(</dt><dd><p>protected val underlying: ThriftTweetService,
+stats: StatsReceiver,
+clientIdHelper: ClientIdHelper)</p>
+<blockquote>
+<div><p>extends TweetServiceProxy {</p>
+</div></blockquote>
+<p>private[this] val asyncEventOrRetryScope = stats.scope(“async_event_or_retry”)
+private[this] val deleteFieldsScope = stats.scope(“delete_additional_fields”)
+private[this] val deleteTweetsScope = stats.scope(“delete_tweets”)
+private[this] val getDeletedTweetsScope = stats.scope(“get_deleted_tweets”)
+private[this] val getTweetCountsScope = stats.scope(“get_tweet_counts”)
+private[this] val getTweetsScope = stats.scope(“get_tweets”)
+private[this] val getTweetFieldsScope = stats.scope(“get_tweet_fields”)
+private[this] val postTweetScope = stats.scope(“post_tweet”)
+private[this] val replicatedInsertTweet2Scope = stats.scope(“replicated_insert_tweet2”)
+private[this] val retweetScope = stats.scope(“post_retweet”)
+private[this] val scrubGeoScope = stats.scope(“scrub_geo”)
+private[this] val setFieldsScope = stats.scope(“set_additional_fields”)
+private[this] val setRetweetVisibilityScope = stats.scope(“set_retweet_visibility”)
+private[this] val getStoredTweetsScope = stats.scope(“get_stored_tweets”)
+private[this] val getStoredTweetsByUserScope = stats.scope(“get_stored_tweets_by_user”)</p>
+<p>private[this] val defaultGetTweetsRequestOptions = GetTweetOptions()</p>
+<p>/** Increments the appropriate write success/failure counter <a href="#id3"><span class="problematic" id="id4">*</span></a>/
+private[this] val observeWriteResult: Effect[Try[_]] = {</p>
+<blockquote>
+<div><dl>
+<dt>withAndWithoutClientId(stats) { (stats, _) =&gt;</dt><dd><p>val successCounter = stats.counter(“write_successes”)
+val failureCounter = stats.counter(“write_failures”)
+val clientErrorCounter = stats.counter(“write_client_errors”)
+Effect[Try[_]] {</p>
+<blockquote>
+<div><p>case Return(_) =&gt; successCounter.incr()
+case Throw(ClientError(_, _)) | Throw(AccessDenied(_, _)) =&gt; clientErrorCounter.incr()
+case Throw(_) =&gt; failureCounter.incr()</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>/** Increments the tweet_creates counter on future success. <a href="#id5"><span class="problematic" id="id6">*</span></a>/
+private[this] val observeTweetWriteSuccess: Effect[Any] = {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>withAndWithoutClientId(stats) { (stats, _) =&gt;</dt><dd><p>val counter = stats.counter(“tweet_writes”)
+Effect[Any] { _ =&gt; counter.incr() }</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>private[this] val observeGetTweetsRequest =</dt><dd><dl class="simple">
+<dt>withAndWithoutClientId(getTweetsScope) {</dt><dd><p>GetTweetsObserver.observeRequest</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>private[this] val observeGetTweetFieldsRequest =</dt><dd><dl class="simple">
+<dt>withAndWithoutClientId(getTweetFieldsScope) {</dt><dd><p>GetTweetFieldsObserver.observeRequest</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>private[this] val observeGetTweetCountsRequest =</dt><dd><dl class="simple">
+<dt>withAndWithoutClientId(getTweetCountsScope) { (s, _) =&gt;</dt><dd><p>GetTweetCountsObserver.observeRequest(s)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>private[this] val observeRetweetRequest: Effect[RetweetRequest] =</dt><dd><p>withAndWithoutClientId(retweetScope) { (s, _) =&gt; Observer.observeRetweetRequest(s) }</p>
+</dd>
+<dt>private[this] val observeDeleteTweetsRequest =</dt><dd><p>withAndWithoutClientId(deleteTweetsScope) { (s, _) =&gt; Observer.observeDeleteTweetsRequest(s) }</p>
+</dd>
+<dt>private[this] val observeSetFieldsRequest: Effect[SetAdditionalFieldsRequest] =</dt><dd><p>withAndWithoutClientId(setFieldsScope) { (s, _) =&gt; Observer.observeSetFieldsRequest(s) }</p>
+</dd>
+<dt>private[this] val observeSetRetweetVisibilityRequest: Effect[SetRetweetVisibilityRequest] =</dt><dd><dl class="simple">
+<dt>withAndWithoutClientId(setRetweetVisibilityScope) { (s, _) =&gt;</dt><dd><p>Observer.observeSetRetweetVisibilityRequest(s)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>private[this] val observeDeleteFieldsRequest: Effect[DeleteAdditionalFieldsRequest] =</dt><dd><p>withAndWithoutClientId(deleteFieldsScope) { (s, _) =&gt; Observer.observeDeleteFieldsRequest(s) }</p>
+</dd>
+<dt>private[this] val observePostTweetAdditionals: Effect[Tweet] =</dt><dd><p>withAndWithoutClientId(postTweetScope) { (s, _) =&gt; Observer.observeAdditionalFields(s) }</p>
+</dd>
+<dt>private[this] val observePostTweetRequest: Effect[PostTweetRequest] =</dt><dd><p>withAndWithoutClientId(postTweetScope) { (s, _) =&gt; PostTweetObserver.observerRequest(s) }</p>
+</dd>
+<dt>private[this] val observeGetTweetResults =</dt><dd><dl class="simple">
+<dt>withAndWithoutClientId(getTweetsScope) {</dt><dd><p>GetTweetsObserver.observeResults</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>private[this] val observeGetTweetFieldsResults: Effect[Seq[GetTweetFieldsResult]] =</dt><dd><p>GetTweetFieldsObserver.observeResults(getTweetFieldsScope)</p>
+</dd>
+<dt>private[this] val observeTweetCountsResults =</dt><dd><p>GetTweetCountsObserver.observeResults(getTweetCountsScope)</p>
+</dd>
+<dt>private[this] val observeScrubGeoRequest =</dt><dd><p>Observer.observeScrubGeo(scrubGeoScope)</p>
+</dd>
+<dt>private[this] val observeRetweetResponse =</dt><dd><p>PostTweetObserver.observeResults(retweetScope, byClient = false)</p>
+</dd>
+<dt>private[this] val observePostTweetResponse =</dt><dd><p>PostTweetObserver.observeResults(postTweetScope, byClient = false)</p>
+</dd>
+<dt>private[this] val observeAsyncInsertRequest =</dt><dd><p>Observer.observeAsyncInsertRequest(asyncEventOrRetryScope)</p>
+</dd>
+<dt>private[this] val observeAsyncSetAdditionalFieldsRequest =</dt><dd><p>Observer.observeAsyncSetAdditionalFieldsRequest(asyncEventOrRetryScope)</p>
+</dd>
+<dt>private[this] val observeAsyncSetRetweetVisibilityRequest =</dt><dd><p>Observer.observeAsyncSetRetweetVisibilityRequest(asyncEventOrRetryScope)</p>
+</dd>
+<dt>private[this] val observeAsyncUndeleteTweetRequest =</dt><dd><p>Observer.observeAsyncUndeleteTweetRequest(asyncEventOrRetryScope)</p>
+</dd>
+<dt>private[this] val observeAsyncDeleteTweetRequest =</dt><dd><p>Observer.observeAsyncDeleteTweetRequest(asyncEventOrRetryScope)</p>
+</dd>
+<dt>private[this] val observeAsyncDeleteAdditionalFieldsRequest =</dt><dd><p>Observer.observeAsyncDeleteAdditionalFieldsRequest(asyncEventOrRetryScope)</p>
+</dd>
+<dt>private[this] val observeAsyncTakedownRequest =</dt><dd><p>Observer.observeAsyncTakedownRequest(asyncEventOrRetryScope)</p>
+</dd>
+<dt>private[this] val observeAsyncUpdatePossiblySensitiveTweetRequest =</dt><dd><p>Observer.observeAsyncUpdatePossiblySensitiveTweetRequest(asyncEventOrRetryScope)</p>
+</dd>
+<dt>private[this] val observedReplicatedInsertTweet2Request =</dt><dd><p>Observer.observeReplicatedInsertTweetRequest(replicatedInsertTweet2Scope)</p>
+</dd>
+<dt>private[this] val observeGetTweetFieldsResultState: Effect[GetTweetFieldsObserver.Type] =</dt><dd><dl class="simple">
+<dt>withAndWithoutClientId(getTweetFieldsScope) { (statsReceiver, _) =&gt;</dt><dd><p>GetTweetFieldsObserver.observeExchange(statsReceiver)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>private[this] val observeGetTweetsResultState: Effect[GetTweetsObserver.Type] =</dt><dd><dl class="simple">
+<dt>withAndWithoutClientId(getTweetsScope) { (statsReceiver, _) =&gt;</dt><dd><p>GetTweetsObserver.observeExchange(statsReceiver)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>private[this] val observeGetTweetCountsResultState: Effect[GetTweetCountsObserver.Type] =</dt><dd><dl class="simple">
+<dt>withAndWithoutClientId(getTweetCountsScope) { (statsReceiver, _) =&gt;</dt><dd><p>GetTweetCountsObserver.observeExchange(statsReceiver)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>private[this] val observeGetDeletedTweetsResultState: Effect[GetDeletedTweetsObserver.Type] =</dt><dd><dl class="simple">
+<dt>withAndWithoutClientId(getDeletedTweetsScope) { (statsReceiver, _) =&gt;</dt><dd><p>GetDeletedTweetsObserver.observeExchange(statsReceiver)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>private[this] val observeGetStoredTweetsRequest: Effect[GetStoredTweetsRequest] =</dt><dd><p>GetStoredTweetsObserver.observeRequest(getStoredTweetsScope)</p>
+</dd>
+<dt>private[this] val observeGetStoredTweetsResult: Effect[Seq[GetStoredTweetsResult]] =</dt><dd><p>GetStoredTweetsObserver.observeResult(getStoredTweetsScope)</p>
+</dd>
+<dt>private[this] val observeGetStoredTweetsResultState: Effect[GetStoredTweetsObserver.Type] =</dt><dd><p>GetStoredTweetsObserver.observeExchange(getStoredTweetsScope)</p>
+</dd>
+<dt>private[this] val observeGetStoredTweetsByUserRequest: Effect[GetStoredTweetsByUserRequest] =</dt><dd><p>GetStoredTweetsByUserObserver.observeRequest(getStoredTweetsByUserScope)</p>
+</dd>
+<dt>private[this] val observeGetStoredTweetsByUserResult: Effect[GetStoredTweetsByUserResult] =</dt><dd><p>GetStoredTweetsByUserObserver.observeResult(getStoredTweetsByUserScope)</p>
+</dd>
+<dt>private[this] val observeGetStoredTweetsByUserResultState: Effect[</dt><dd><p>GetStoredTweetsByUserObserver.Type</p>
+</dd>
+<dt>] =</dt><dd><p>GetStoredTweetsByUserObserver.observeExchange(getStoredTweetsByUserScope)</p>
+</dd>
+<dt>override def getTweets(request: GetTweetsRequest): Future[Seq[GetTweetResult]] = {</dt><dd><dl class="simple">
+<dt>val actualRequest =</dt><dd><p>if (request.options.nonEmpty) request
+else request.copy(options = Some(defaultGetTweetsRequestOptions))</p>
+</dd>
+</dl>
+<p>observeGetTweetsRequest(actualRequest)
+Trace.recordBinary(“query_width”, request.tweetIds.length)
+super</p>
+<blockquote>
+<div><p>.getTweets(request)
+.onSuccess(observeGetTweetResults)
+.respond(response =&gt; observeGetTweetsResultState((request, response)))</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>override def getTweetFields(request: GetTweetFieldsRequest): Future[Seq[GetTweetFieldsResult]] = {</dt><dd><p>observeGetTweetFieldsRequest(request)
+Trace.recordBinary(“query_width”, request.tweetIds.length)
+super</p>
+<blockquote>
+<div><p>.getTweetFields(request)
+.onSuccess(observeGetTweetFieldsResults)
+.respond(response =&gt; observeGetTweetFieldsResultState((request, response)))</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>override def getTweetCounts(request: GetTweetCountsRequest): Future[Seq[GetTweetCountsResult]] = {</dt><dd><p>observeGetTweetCountsRequest(request)
+Trace.recordBinary(“query_width”, request.tweetIds.length)
+super</p>
+<blockquote>
+<div><p>.getTweetCounts(request)
+.onSuccess(observeTweetCountsResults)
+.respond(response =&gt; observeGetTweetCountsResultState((request, response)))</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>override def getDeletedTweets(</dt><dd><p>request: GetDeletedTweetsRequest</p>
+</dd>
+<dt>): Future[Seq[GetDeletedTweetResult]] = {</dt><dd><p>Trace.recordBinary(“query_width”, request.tweetIds.length)
+super</p>
+<blockquote>
+<div><p>.getDeletedTweets(request)
+.respond(response =&gt; observeGetDeletedTweetsResultState((request, response)))</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>override def postTweet(request: PostTweetRequest): Future[PostTweetResult] = {</dt><dd><p>observePostTweetRequest(request)
+request.additionalFields.foreach(observePostTweetAdditionals)
+super</p>
+<blockquote>
+<div><p>.postTweet(request)
+.onSuccess(observePostTweetResponse)
+.onSuccess(observeTweetWriteSuccess)
+.respond(observeWriteResult)</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>override def postRetweet(request: RetweetRequest): Future[PostTweetResult] = {</dt><dd><p>observeRetweetRequest(request)
+super</p>
+<blockquote>
+<div><p>.postRetweet(request)
+.onSuccess(observeRetweetResponse)
+.onSuccess(observeTweetWriteSuccess)
+.respond(observeWriteResult)</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>override def setAdditionalFields(request: SetAdditionalFieldsRequest): Future[Unit] = {</dt><dd><p>observeSetFieldsRequest(request)
+super</p>
+<blockquote>
+<div><p>.setAdditionalFields(request)
+.respond(observeWriteResult)</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>override def setRetweetVisibility(request: SetRetweetVisibilityRequest): Future[Unit] = {</dt><dd><p>observeSetRetweetVisibilityRequest(request)
+super</p>
+<blockquote>
+<div><p>.setRetweetVisibility(request)
+.respond(observeWriteResult)</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>override def deleteAdditionalFields(request: DeleteAdditionalFieldsRequest): Future[Unit] = {</dt><dd><p>observeDeleteFieldsRequest(request)
+super</p>
+<blockquote>
+<div><p>.deleteAdditionalFields(request)
+.respond(observeWriteResult)</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>override def updatePossiblySensitiveTweet(</dt><dd><p>request: UpdatePossiblySensitiveTweetRequest</p>
+</dd>
+<dt>): Future[Unit] =</dt><dd><dl class="simple">
+<dt>super</dt><dd><p>.updatePossiblySensitiveTweet(request)
+.respond(observeWriteResult)</p>
+</dd>
+</dl>
+</dd>
+<dt>override def deleteLocationData(request: DeleteLocationDataRequest): Future[Unit] =</dt><dd><dl class="simple">
+<dt>super</dt><dd><p>.deleteLocationData(request)
+.respond(observeWriteResult)</p>
+</dd>
+</dl>
+</dd>
+<dt>override def scrubGeo(geoScrub: GeoScrub): Future[Unit] = {</dt><dd><p>observeScrubGeoRequest(geoScrub)
+super</p>
+<blockquote>
+<div><p>.scrubGeo(geoScrub)
+.respond(observeWriteResult)</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>override def scrubGeoUpdateUserTimestamp(request: DeleteLocationData): Future[Unit] =</dt><dd><p>super.scrubGeoUpdateUserTimestamp(request).respond(observeWriteResult)</p>
+</dd>
+<dt>override def takedown(request: TakedownRequest): Future[Unit] =</dt><dd><dl class="simple">
+<dt>super</dt><dd><p>.takedown(request)
+.respond(observeWriteResult)</p>
+</dd>
+</dl>
+</dd>
+<dt>override def setTweetUserTakedown(request: SetTweetUserTakedownRequest): Future[Unit] =</dt><dd><dl class="simple">
+<dt>super</dt><dd><p>.setTweetUserTakedown(request)
+.respond(observeWriteResult)</p>
+</dd>
+</dl>
+</dd>
+<dt>override def incrTweetFavCount(request: IncrTweetFavCountRequest): Future[Unit] =</dt><dd><dl class="simple">
+<dt>super</dt><dd><p>.incrTweetFavCount(request)
+.respond(observeWriteResult)</p>
+</dd>
+</dl>
+</dd>
+<dt>override def incrTweetBookmarkCount(request: IncrTweetBookmarkCountRequest): Future[Unit] =</dt><dd><dl class="simple">
+<dt>super</dt><dd><p>.incrTweetBookmarkCount(request)
+.respond(observeWriteResult)</p>
+</dd>
+</dl>
+</dd>
+<dt>override def deleteTweets(request: DeleteTweetsRequest): Future[Seq[DeleteTweetResult]] = {</dt><dd><p>observeDeleteTweetsRequest(request)
+super</p>
+<blockquote>
+<div><p>.deleteTweets(request)
+.respond(observeWriteResult)</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>override def cascadedDeleteTweet(request: CascadedDeleteTweetRequest): Future[Unit] =</dt><dd><dl class="simple">
+<dt>super</dt><dd><p>.cascadedDeleteTweet(request)
+.respond(observeWriteResult)</p>
+</dd>
+</dl>
+</dd>
+<dt>override def asyncInsert(request: AsyncInsertRequest): Future[Unit] = {</dt><dd><p>observeAsyncInsertRequest(request)
+super</p>
+<blockquote>
+<div><p>.asyncInsert(request)
+.respond(observeWriteResult)</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>override def asyncSetAdditionalFields(request: AsyncSetAdditionalFieldsRequest): Future[Unit] = {</dt><dd><p>observeAsyncSetAdditionalFieldsRequest(request)
+super</p>
+<blockquote>
+<div><p>.asyncSetAdditionalFields(request)
+.respond(observeWriteResult)</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>override def asyncSetRetweetVisibility(</dt><dd><p>request: AsyncSetRetweetVisibilityRequest</p>
+</dd>
+<dt>): Future[Unit] = {</dt><dd><p>observeAsyncSetRetweetVisibilityRequest(request)
+super</p>
+<blockquote>
+<div><p>.asyncSetRetweetVisibility(request)
+.respond(observeWriteResult)</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>override def asyncUndeleteTweet(request: AsyncUndeleteTweetRequest): Future[Unit] = {</dt><dd><p>observeAsyncUndeleteTweetRequest(request)
+super</p>
+<blockquote>
+<div><p>.asyncUndeleteTweet(request)
+.respond(observeWriteResult)</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>override def asyncDelete(request: AsyncDeleteRequest): Future[Unit] = {</dt><dd><p>observeAsyncDeleteTweetRequest(request)
+super</p>
+<blockquote>
+<div><p>.asyncDelete(request)
+.respond(observeWriteResult)</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>override def asyncDeleteAdditionalFields(</dt><dd><p>request: AsyncDeleteAdditionalFieldsRequest</p>
+</dd>
+<dt>): Future[Unit] = {</dt><dd><p>observeAsyncDeleteAdditionalFieldsRequest(request)
+super</p>
+<blockquote>
+<div><p>.asyncDeleteAdditionalFields(request)
+.respond(observeWriteResult)</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>override def asyncTakedown(request: AsyncTakedownRequest): Future[Unit] = {</dt><dd><p>observeAsyncTakedownRequest(request)
+super</p>
+<blockquote>
+<div><p>.asyncTakedown(request)
+.respond(observeWriteResult)</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>override def asyncUpdatePossiblySensitiveTweet(</dt><dd><p>request: AsyncUpdatePossiblySensitiveTweetRequest</p>
+</dd>
+<dt>): Future[Unit] = {</dt><dd><p>observeAsyncUpdatePossiblySensitiveTweetRequest(request)
+super</p>
+<blockquote>
+<div><p>.asyncUpdatePossiblySensitiveTweet(request)
+.respond(observeWriteResult)</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>override def replicatedInsertTweet2(request: ReplicatedInsertTweet2Request): Future[Unit] = {</dt><dd><p>observedReplicatedInsertTweet2Request(request.cachedTweet.tweet)
+super.replicatedInsertTweet2(request)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>override def getStoredTweets(</dt><dd><p>request: GetStoredTweetsRequest</p>
+</dd>
+<dt>): Future[Seq[GetStoredTweetsResult]] = {</dt><dd><p>observeGetStoredTweetsRequest(request)
+super</p>
+<blockquote>
+<div><p>.getStoredTweets(request)
+.onSuccess(observeGetStoredTweetsResult)
+.respond(response =&gt; observeGetStoredTweetsResultState((request, response)))</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>override def getStoredTweetsByUser(</dt><dd><p>request: GetStoredTweetsByUserRequest</p>
+</dd>
+<dt>): Future[GetStoredTweetsByUserResult] = {</dt><dd><p>observeGetStoredTweetsByUserRequest(request)
+super</p>
+<blockquote>
+<div><p>.getStoredTweetsByUser(request)
+.onSuccess(observeGetStoredTweetsByUserResult)
+.respond(response =&gt; observeGetStoredTweetsByUserResultState((request, response)))</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def withAndWithoutClientId[A](</dt><dd><p>stats: StatsReceiver</p>
+</dd>
+<dt>)(</dt><dd><p>f: (StatsReceiver, Boolean) =&gt; Effect[A]</p>
+</dd>
+<dt>) =</dt><dd><p>f(stats, false).also(withClientId(stats)(f))</p>
+</dd>
+<dt>private def withClientId[A](stats: StatsReceiver)(f: (StatsReceiver, Boolean) =&gt; Effect[A]) = {</dt><dd><p>val map = new SynchronizedHashMap[String, Effect[A]]</p>
+<dl>
+<dt>Effect[A] { value =&gt;</dt><dd><dl class="simple">
+<dt>clientIdHelper.effectiveClientIdRoot.foreach { clientId =&gt;</dt><dd><p>val clientObserver = map.getOrElseUpdate(clientId, f(stats.scope(clientId), true))
+clientObserver(value)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/tweetypie/server/src/main/scala/com/twitter/tweetypie/service/ObservedTweetService.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

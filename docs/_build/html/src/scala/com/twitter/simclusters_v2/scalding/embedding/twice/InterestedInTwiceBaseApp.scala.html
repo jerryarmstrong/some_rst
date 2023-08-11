@@ -1,0 +1,754 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../" id="documentation_options" src="../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.simclusters_v2.scalding.embedding.twice</p>
+<p>import com.twitter.bijection.Injection
+import com.twitter.dal.client.dataset.KeyValDALDataset
+import com.twitter.scalding.DateRange
+import com.twitter.scalding.Days
+import com.twitter.scalding.Execution
+import com.twitter.scalding.Stat
+import com.twitter.scalding.TypedTsv
+import com.twitter.scalding.UniqueID
+import com.twitter.scalding.typed.TypedPipe
+import com.twitter.scalding_internal.dalv2.DAL
+import com.twitter.scalding_internal.dalv2.DALWrite._
+import com.twitter.scalding_internal.dalv2.remote_access.AllowCrossDC
+import com.twitter.scalding_internal.multiformat.format.keyval.KeyVal
+import com.twitter.simclusters_v2.common.SimClustersEmbedding
+import com.twitter.simclusters_v2.common.UserId
+import com.twitter.simclusters_v2.common.clustering.ClusteringMethod
+import com.twitter.simclusters_v2.common.clustering.ClusteringStatistics._
+import com.twitter.simclusters_v2.common.clustering.ClusterRepresentativeSelectionMethod
+import com.twitter.simclusters_v2.common.clustering.ClusterRepresentativeSelectionStatistics._
+import com.twitter.simclusters_v2.hdfs_sources.ProducerEmbeddingSources
+import com.twitter.simclusters_v2.hdfs_sources.UserUserGraphScalaDataset
+import com.twitter.simclusters_v2.scalding.common.Util
+import com.twitter.simclusters_v2.scalding.embedding.common.EmbeddingUtil
+import com.twitter.simclusters_v2.thriftscala.EmbeddingType
+import com.twitter.simclusters_v2.thriftscala.InternalId
+import com.twitter.simclusters_v2.thriftscala.ModelVersion
+import com.twitter.simclusters_v2.thriftscala.MultiEmbeddingType
+import com.twitter.simclusters_v2.thriftscala.NeighborWithWeights
+import com.twitter.simclusters_v2.thriftscala.OrderedClustersAndMembers
+import com.twitter.simclusters_v2.thriftscala.ClusterMembers
+import com.twitter.simclusters_v2.thriftscala.SimClustersEmbeddingIdWithScore
+import com.twitter.simclusters_v2.thriftscala.SimClustersMultiEmbedding
+import com.twitter.simclusters_v2.thriftscala.SimClustersMultiEmbedding.Ids
+import com.twitter.simclusters_v2.thriftscala.SimClustersMultiEmbeddingByIds
+import com.twitter.simclusters_v2.thriftscala.SimClustersMultiEmbeddingId
+import com.twitter.simclusters_v2.thriftscala.UserAndNeighbors
+import com.twitter.simclusters_v2.thriftscala.{</p>
+<blockquote>
+<div><p>SimClustersEmbeddingId =&gt; SimClustersEmbeddingIdThrift</p>
+</div></blockquote>
+<p>}
+import com.twitter.util.Stopwatch
+import java.util.TimeZone
+import scala.util.Random.shuffle</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Base app for computing User InterestedIn multi-embedding representation.</p></li>
+<li><p>TWICE: Capturing users’ long-term interests using multiple SimClusters embeddings.</p></li>
+<li><p>This job will</p></li>
+<li><ul>
+<li><p>Randomly select K follow/fav actions for each user,</p></li>
+</ul>
+</li>
+<li><ul>
+<li><p>cluster the follow/fav actions for each user,</p></li>
+</ul>
+</li>
+<li><ul>
+<li><p>for each cluster, construct a representation (e.g. average or medoid).</p></li>
+</ul>
+</li>
+<li></li>
+<li><p>&#64;tparam T type of producer embedding. e.g. SimClustersEmbedding</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+</dl>
+<p>trait InterestedInTwiceBaseApp[T] {</p>
+<blockquote>
+<div><p>import InterestedInTwiceBaseApp._</p>
+<p>def modelVersion: ModelVersion = ModelVersion.Model20m145k2020</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>function to output similarity (&gt;=0, the larger, more similar), given two producer embeddings.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+</dl>
+<p>def producerProducerSimilarityFnForClustering: (T, T) =&gt; Double
+def producerProducerSimilarityFnForClusterRepresentative: (T, T) =&gt; Double</p>
+<p>// Sort clusters by decreasing size, fall back to entity ID to break tie
+val clusterOrdering: Ordering[Set[Long]] = math.Ordering.by(c =&gt; (-c.size, c.min))</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Read user-user graph.</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>def getUserUserGraph(</dt><dd><p>implicit dateRange: DateRange,
+timeZone: TimeZone</p>
+</dd>
+<dt>): TypedPipe[UserAndNeighbors] = {</dt><dd><dl>
+<dt>DAL</dt><dd><dl class="simple">
+<dt>.readMostRecentSnapshot(</dt><dd><p>UserUserGraphScalaDataset</p>
+</dd>
+</dl>
+<p>)
+.withRemoteReadPolicy(AllowCrossDC)
+.toTypedPipe</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Randomly select up to maxNeighborsByUser neighbors for each user.</p></li>
+<li><p>Attempts to equally sample both follow and fav edges (e.g. maxNeighborsByUser/2 for each).</p></li>
+<li><p>However, if one type of edge is insufficient, backfill with other type up to maxNeighborsByUser neighbours.</p></li>
+<li><p>&#64;param userUserGraph User-User follow/fav graph.</p></li>
+<li><p>&#64;param maxNeighborsByUser How many neighbors to keep for each user.</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+<dt>def selectMaxProducersPerUser(</dt><dd><p>userUserGraph: TypedPipe[UserAndNeighbors],
+maxNeighborsByUser: Int = MaxNeighborsByUser</p>
+</dd>
+<dt>)(</dt><dd><p>implicit uniqueID: UniqueID</p>
+</dd>
+</dl>
+<p>): TypedPipe[UserAndNeighbors] = {</p>
+<blockquote>
+<div><p>val numOfFollowEdgesStat = Stat(StatNumOfFollowEdges)
+val numOfFavEdgesStat = Stat(StatNumOfFavEdges)
+val numOfEdgesCumulativeFrequencyBeforeFilter = Util.CumulativeStat(</p>
+<blockquote>
+<div><p>StatCFNumProducersPerConsumerBeforeFilter,
+StatCFNumProducersPerConsumerBeforeFilterBuckets)</p>
+</div></blockquote>
+<dl>
+<dt>userUserGraph.map { userAndNeighbors: UserAndNeighbors =&gt;</dt><dd><p>numOfEdgesCumulativeFrequencyBeforeFilter.incForValue(userAndNeighbors.neighbors.size)</p>
+<dl class="simple">
+<dt>val (followEdges, favEdges) =</dt><dd><p>userAndNeighbors.neighbors.partition(_.isFollowed.contains(true))</p>
+</dd>
+</dl>
+<p>val randomFollowEdges = shuffle(followEdges)
+val randomFavEdges = shuffle(favEdges)</p>
+<p>// interleave follow and fav edges, and select top k
+val interleavedTopKEdges: Seq[NeighborWithWeights] = randomFollowEdges</p>
+<blockquote>
+<div><p>.map(Some(_))
+.zipAll(</p>
+<blockquote>
+<div><p>randomFavEdges.map(Some(_)),
+None,
+None</p>
+</div></blockquote>
+<p>) // default None value when one edge Seq is shorter than another
+.flatMap {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case (followEdgeOpt, favEdgeOpt) =&gt;</dt><dd><p>Seq(followEdgeOpt, favEdgeOpt)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}.flatten
+.take(maxNeighborsByUser)</p>
+</div></blockquote>
+<p>// edge stats
+interleavedTopKEdges</p>
+<blockquote>
+<div><dl class="simple">
+<dt>.foreach { edge =&gt;</dt><dd><p>if (edge.isFollowed.contains(true)) numOfFollowEdgesStat.inc()
+else numOfFavEdgesStat.inc()</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>userAndNeighbors.copy(neighbors = interleavedTopKEdges)</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Get multi embedding for each user:</p></li>
+<li><ul>
+<li><p>For each user, join their follow / fav - based neighbors to producer embeddings,</p></li>
+</ul>
+</li>
+<li><ul>
+<li><p>Group these neighbors into clusters using the specified clusteringMethod,</p></li>
+</ul>
+</li>
+<li><ul>
+<li><p>For each cluster, select the medoid as the representation.</p></li>
+</ul>
+</li>
+<li></li>
+<li><p>&#64;param userUserGraph User-User follow/fav graph.</p></li>
+<li><p>&#64;param producerEmbedding producer embedding dataset. e.g. simclusters embeddings, simhash, etc.</p></li>
+<li><p>&#64;param clusteringMethod A method to group embeddings together.</p></li>
+<li><p>&#64;param maxClustersPerUser How many clusters to keep per user.</p></li>
+<li><p>&#64;param clusterRepresentativeSelectionMethod A method to select a cluster representative.</p></li>
+<li><p>&#64;param numReducers How many reducers to use for sketch operation.</p></li>
+</ul>
+<p><a href="#id9"><span class="problematic" id="id10">*</span></a>/</p>
+</dd>
+<dt>def getMultiEmbeddingPerUser(</dt><dd><p>userUserGraph: TypedPipe[UserAndNeighbors],
+producerEmbedding: TypedPipe[(UserId, T)],
+clusteringMethod: ClusteringMethod,
+maxClustersPerUser: Int = MaxClustersPerUser,
+clusterRepresentativeSelectionMethod: ClusterRepresentativeSelectionMethod[T],
+numReducers: Int</p>
+</dd>
+<dt>)(</dt><dd><p>implicit uniqueID: UniqueID</p>
+</dd>
+</dl>
+<p>): TypedPipe[(UserId, Seq[Set[UserId]], SimClustersMultiEmbedding)] = {</p>
+<blockquote>
+<div><dl>
+<dt>val truncatedUserUserGraph: TypedPipe[UserAndNeighbors] = selectMaxProducersPerUser(</dt><dd><p>userUserGraph)</p>
+</dd>
+<dt>val validEdges: TypedPipe[(UserId, NeighborWithWeights)] =</dt><dd><dl>
+<dt>truncatedUserUserGraph.flatMap {</dt><dd><dl>
+<dt>case UserAndNeighbors(srcId, neighborsWithWeights) =&gt;</dt><dd><dl class="simple">
+<dt>neighborsWithWeights.map { neighborWithWeights =&gt;</dt><dd><dl class="simple">
+<dt>(</dt><dd><p>neighborWithWeights.neighborId, // producerId
+neighborWithWeights.copy(neighborId = srcId))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>implicit val l2b: UserId =&gt; Array[Byte] = Injection.long2BigEndian</p>
+<p>val totalEdgesNonEmptyProducerEmbeddingsStat = Stat(StatTotalEdgesNonEmptyProducerEmbeddings)
+val userClusterPairsBeforeTruncation = Stat(StatNumUserClusterPairsBeforeTruncation)
+val userClusterPairsAfterTruncation = Stat(StatNumUserClusterPairsAfterTruncation)
+val numUsers = Stat(StatNumUsers)
+val numOfClustersCumulativeFrequencyBeforeFilter =</p>
+<blockquote>
+<div><p>Util.CumulativeStat(StatCFNumOfClustersBeforeFilter, StatCFNumOfClustersBeforeFilterBuckets)</p>
+</div></blockquote>
+<p>// map each clustering statistic to a scalding.Stat
+val clusteringStatsMap: Map[String, Stat] = Map(</p>
+<blockquote>
+<div><p>StatSimilarityGraphTotalBuildTime -&gt; Stat(StatSimilarityGraphTotalBuildTime),
+StatClusteringAlgorithmRunTime -&gt; Stat(StatClusteringAlgorithmRunTime),
+StatMedoidSelectionTime -&gt; Stat(StatMedoidSelectionTime)</p>
+</div></blockquote>
+<p>)
+val cosineSimilarityCumulativeFrequencyBeforeFilter = Util.CumulativeStat(</p>
+<blockquote>
+<div><p>StatCFCosineSimilarityBeforeFilter,
+StatCFCosineSimilarityBeforeFilterBuckets)</p>
+</div></blockquote>
+<p>val clusterRepresentativeSelectionTime = Stat(StatClusterRepresentativeSelectionTime)</p>
+<dl>
+<dt>validEdges</dt><dd><p>.sketch(numReducers)
+.join(producerEmbedding)
+.map {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case (producerId: UserId, (srcWithWeights: NeighborWithWeights, embedding)) =&gt;</dt><dd><p>totalEdgesNonEmptyProducerEmbeddingsStat.inc()
+(srcWithWeights.neighborId, (srcWithWeights.copy(neighborId = producerId), embedding))</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+.group
+.toList
+.map {</p>
+<blockquote>
+<div><dl>
+<dt>case (userId: UserId, embeddings: Seq[(NeighborWithWeights, T)]) =&gt;</dt><dd><p>numUsers.inc()
+val embeddingsMap: Map[Long, T] = embeddings.map {</p>
+<blockquote>
+<div><p>case (n: NeighborWithWeights, e) =&gt; (n.neighborId, e)</p>
+</div></blockquote>
+<p>}.toMap
+val weightsMap: Map[Long, NeighborWithWeights] = embeddings.map {</p>
+<blockquote>
+<div><p>case (n: NeighborWithWeights, _) =&gt; (n.neighborId, n)</p>
+</div></blockquote>
+<p>}.toMap
+// 1. Cluster embeddings
+val clusters: Set[Set[UserId]] =</p>
+<blockquote>
+<div><dl>
+<dt>clusteringMethod</dt><dd><dl>
+<dt>.cluster[T](</dt><dd><p>embeddingsMap,
+producerProducerSimilarityFnForClustering,
+// Map.get() returns an Option, so will not throw.
+// Use .foreach() to filter out potential Nones.
+(name, incr) =&gt; {</p>
+<blockquote>
+<div><p>clusteringStatsMap.get(name).foreach(ctr =&gt; ctr.incBy(incr))
+if (name == StatComputedSimilarityBeforeFilter)</p>
+<blockquote>
+<div><p>cosineSimilarityCumulativeFrequencyBeforeFilter.incForValue(incr)</p>
+</div></blockquote>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>// 2. Sort clusters
+val sortedClusters: Seq[Set[UserId]] = clusters.toSeq.sorted(clusterOrdering)</p>
+<p>// 3. Keep only a max number of clusters (avoid OOM)
+userClusterPairsBeforeTruncation.incBy(sortedClusters.size)
+numOfClustersCumulativeFrequencyBeforeFilter.incForValue(sortedClusters.size)
+val truncatedClusters = sortedClusters.take(maxClustersPerUser)
+userClusterPairsAfterTruncation.incBy(truncatedClusters.size)</p>
+<p>// 4. Get list of cluster representatives
+val truncatedIdWithScoreList: Seq[SimClustersEmbeddingIdWithScore] =</p>
+<blockquote>
+<div><dl>
+<dt>truncatedClusters.map { members: Set[UserId] =&gt;</dt><dd><p>val clusterRepresentationSelectionElapsed = Stopwatch.start()
+val medoid: UserId = clusterRepresentativeSelectionMethod.selectClusterRepresentative(</p>
+<blockquote>
+<div><p>members.map(id =&gt; weightsMap(id)),
+embeddingsMap)</p>
+</div></blockquote>
+<dl>
+<dt>clusterRepresentativeSelectionTime.incBy(</dt><dd><p>clusterRepresentationSelectionElapsed().inMilliseconds)</p>
+</dd>
+<dt>SimClustersEmbeddingIdWithScore(</dt><dd><dl class="simple">
+<dt>id = SimClustersEmbeddingIdThrift(</dt><dd><p>EmbeddingType.TwiceUserInterestedIn,
+modelVersion,
+InternalId.UserId(medoid)),</p>
+</dd>
+</dl>
+<p>score = members.size)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<dl>
+<dt>(</dt><dd><p>userId,
+sortedClusters,
+SimClustersMultiEmbedding.Ids(</p>
+<blockquote>
+<div><p>SimClustersMultiEmbeddingByIds(ids = truncatedIdWithScoreList)))</p>
+</div></blockquote>
+</dd>
+</dl>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Write the output to disk as a TypedTsv.</p></li>
+</ul>
+<p><a href="#id11"><span class="problematic" id="id12">*</span></a>/</p>
+</dd>
+<dt>def writeOutputToTypedTSV(</dt><dd><p>output: TypedPipe[(UserId, Seq[Set[UserId]], SimClustersMultiEmbedding)],
+userToClusterRepresentativesIndexOutputPath: String,
+userToClusterMembersIndexOutputPath: String</p>
+</dd>
+</dl>
+<p>): Execution[(Unit, Unit)] = {</p>
+<blockquote>
+<div><p>// write the user -&gt; cluster representatives index
+val writeClusterRepresentatives = output</p>
+<blockquote>
+<div><dl class="simple">
+<dt>.collect {</dt><dd><p>case (userId: Long, _, Ids(ids)) =&gt; (userId, ids.ids)</p>
+</dd>
+</dl>
+<p>}
+//.shard(partitions = 1)
+.writeExecution(TypedTsv[(UserId, Seq[SimClustersEmbeddingIdWithScore])](</p>
+<blockquote>
+<div><p>userToClusterRepresentativesIndexOutputPath))</p>
+</div></blockquote>
+</div></blockquote>
+<p>// write the user -&gt; cluster members index
+val writeClusterMembers = output</p>
+<blockquote>
+<div><dl class="simple">
+<dt>.collect {</dt><dd><p>case (userId: Long, clusters: Seq[Set[UserId]], _) =&gt; (userId, clusters)</p>
+</dd>
+</dl>
+<p>}
+//.shard(partitions = 1)
+.writeExecution(TypedTsv[(UserId, Seq[Set[UserId]])](userToClusterMembersIndexOutputPath))</p>
+</div></blockquote>
+<p>Execution.zip(writeClusterRepresentatives, writeClusterMembers)</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Write the output to disk as a KeyValDataset.</p></li>
+</ul>
+<p><a href="#id13"><span class="problematic" id="id14">*</span></a>/</p>
+</dd>
+<dt>def writeOutputToKeyValDataset(</dt><dd><p>output: TypedPipe[(UserId, Seq[Set[UserId]], SimClustersMultiEmbedding)],
+embeddingType: MultiEmbeddingType,
+userToClusterRepresentativesIndexDataset: KeyValDALDataset[</p>
+<blockquote>
+<div><p>KeyVal[SimClustersMultiEmbeddingId, SimClustersMultiEmbedding]</p>
+</div></blockquote>
+<p>],
+userToClusterMembersIndexDataset: KeyValDALDataset[KeyVal[UserId, OrderedClustersAndMembers]],
+userToClusterRepresentativesIndexOutputPath: String,
+userToClusterMembersIndexOutputPath: String</p>
+</dd>
+<dt>)(</dt><dd><p>implicit dateRange: DateRange</p>
+</dd>
+<dt>): Execution[(Unit, Unit)] = {</dt><dd><p>// write the user -&gt; cluster representatives index
+val writeClusterRepresentatives = output</p>
+<blockquote>
+<div><dl>
+<dt>.map {</dt><dd><dl>
+<dt>case (userId: UserId, _, embeddings: SimClustersMultiEmbedding) =&gt;</dt><dd><dl>
+<dt>KeyVal(</dt><dd><dl class="simple">
+<dt>key = SimClustersMultiEmbeddingId(</dt><dd><p>embeddingType = embeddingType,
+modelVersion = modelVersion,
+internalId = InternalId.UserId(userId)</p>
+</dd>
+</dl>
+<p>),
+value = embeddings</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+.writeDALVersionedKeyValExecution(</p>
+<blockquote>
+<div><p>userToClusterRepresentativesIndexDataset,
+D.Suffix(userToClusterRepresentativesIndexOutputPath),
+ExplicitEndTime(dateRange.end)</p>
+</div></blockquote>
+<p>)</p>
+</div></blockquote>
+<p>// write the user -&gt; cluster members index
+val writeClusterMembers = output</p>
+<blockquote>
+<div><dl class="simple">
+<dt>.map {</dt><dd><dl class="simple">
+<dt>case (userId: UserId, clusters: Seq[Set[UserId]], _) =&gt;</dt><dd><dl class="simple">
+<dt>KeyVal(</dt><dd><p>key = userId,
+value = OrderedClustersAndMembers(clusters, Some(clusters.map(ClusterMembers(_)))))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+.writeDALVersionedKeyValExecution(</p>
+<blockquote>
+<div><p>userToClusterMembersIndexDataset,
+D.Suffix(userToClusterMembersIndexOutputPath),
+ExplicitEndTime(dateRange.end)</p>
+</div></blockquote>
+<p>)</p>
+</div></blockquote>
+<p>Execution.zip(writeClusterRepresentatives, writeClusterMembers)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Main method for scheduled jobs.</p></li>
+</ul>
+<p><a href="#id15"><span class="problematic" id="id16">*</span></a>/</p>
+</dd>
+<dt>def runScheduledApp(</dt><dd><p>clusteringMethod: ClusteringMethod,
+clusterRepresentativeSelectionMethod: ClusterRepresentativeSelectionMethod[T],
+producerEmbedding: TypedPipe[(UserId, T)],
+userToClusterRepresentativesIndexPathSuffix: String,
+userToClusterMembersIndexPathSuffix: String,
+userToClusterRepresentativesIndexDataset: KeyValDALDataset[</p>
+<blockquote>
+<div><p>KeyVal[SimClustersMultiEmbeddingId, SimClustersMultiEmbedding]</p>
+</div></blockquote>
+<p>],
+userToClusterMembersIndexDataset: KeyValDALDataset[KeyVal[UserId, OrderedClustersAndMembers]],
+numReducers: Int</p>
+</dd>
+<dt>)(</dt><dd><p>implicit dateRange: DateRange,
+timeZone: TimeZone,
+uniqueId: UniqueID</p>
+</dd>
+</dl>
+<p>): Execution[Unit] = {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>val userToClusterRepresentativesIndexOutputPath: String = EmbeddingUtil.getHdfsPath(</dt><dd><p>isAdhoc = false,
+isManhattanKeyVal = true,
+modelVersion = modelVersion,
+pathSuffix = userToClusterRepresentativesIndexPathSuffix</p>
+</dd>
+</dl>
+<p>)</p>
+<dl class="simple">
+<dt>val userToClusterMembersIndexOutputPath: String = EmbeddingUtil.getHdfsPath(</dt><dd><p>isAdhoc = false,
+isManhattanKeyVal = true,
+modelVersion = modelVersion,
+pathSuffix = userToClusterMembersIndexPathSuffix</p>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>val execution = Execution.withId { implicit uniqueId =&gt;</dt><dd><dl>
+<dt>val output: TypedPipe[(UserId, Seq[Set[UserId]], SimClustersMultiEmbedding)] =</dt><dd><dl class="simple">
+<dt>getMultiEmbeddingPerUser(</dt><dd><p>userUserGraph = getUserUserGraph(dateRange.prepend(Days(30)), implicitly),
+producerEmbedding = producerEmbedding,
+clusteringMethod = clusteringMethod,
+clusterRepresentativeSelectionMethod = clusterRepresentativeSelectionMethod,
+numReducers = numReducers</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>writeOutputToKeyValDataset(</dt><dd><p>output = output,
+embeddingType = MultiEmbeddingType.TwiceUserInterestedIn,
+userToClusterRepresentativesIndexDataset = userToClusterRepresentativesIndexDataset,
+userToClusterMembersIndexDataset = userToClusterMembersIndexDataset,
+userToClusterRepresentativesIndexOutputPath = userToClusterRepresentativesIndexOutputPath,
+userToClusterMembersIndexOutputPath = userToClusterMembersIndexOutputPath</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<p>execution.unit</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Main method for adhoc jobs.</p></li>
+</ul>
+<p><a href="#id17"><span class="problematic" id="id18">*</span></a>/</p>
+</dd>
+<dt>def runAdhocApp(</dt><dd><p>clusteringMethod: ClusteringMethod,
+clusterRepresentativeSelectionMethod: ClusterRepresentativeSelectionMethod[T],
+producerEmbedding: TypedPipe[(UserId, T)],
+userToClusterRepresentativesIndexPathSuffix: String,
+userToClusterMembersIndexPathSuffix: String,
+numReducers: Int</p>
+</dd>
+<dt>)(</dt><dd><p>implicit dateRange: DateRange,
+timeZone: TimeZone,
+uniqueId: UniqueID</p>
+</dd>
+</dl>
+<p>): Execution[Unit] = {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>val userToClusterRepresentativesIndexOutputPath: String = EmbeddingUtil.getHdfsPath(</dt><dd><p>isAdhoc = true,
+isManhattanKeyVal = false,
+modelVersion = modelVersion,
+pathSuffix = userToClusterRepresentativesIndexPathSuffix</p>
+</dd>
+</dl>
+<p>)</p>
+<dl class="simple">
+<dt>val userToClusterMembersIndexOutputPath: String = EmbeddingUtil.getHdfsPath(</dt><dd><p>isAdhoc = true,
+isManhattanKeyVal = false,
+modelVersion = modelVersion,
+pathSuffix = userToClusterMembersIndexPathSuffix</p>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>val execution = Execution.withId { implicit uniqueId =&gt;</dt><dd><dl>
+<dt>val output: TypedPipe[(UserId, Seq[Set[UserId]], SimClustersMultiEmbedding)] =</dt><dd><dl class="simple">
+<dt>getMultiEmbeddingPerUser(</dt><dd><p>userUserGraph = getUserUserGraph(dateRange.prepend(Days(30)), implicitly),
+producerEmbedding = producerEmbedding,
+clusteringMethod = clusteringMethod,
+clusterRepresentativeSelectionMethod = clusterRepresentativeSelectionMethod,
+numReducers = numReducers</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>writeOutputToTypedTSV(</dt><dd><p>output,
+userToClusterRepresentativesIndexOutputPath,
+userToClusterMembersIndexOutputPath)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>execution.unit</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>object InterestedInTwiceBaseApp {</p>
+<blockquote>
+<div><p>// Statistics
+val StatNumOfFollowEdges = “num_of_follow_edges”
+val StatNumOfFavEdges = “num_of_fav_edges”
+val StatTotalEdgesNonEmptyProducerEmbeddings = “total_edges_with_non_empty_producer_embeddings”
+val StatNumUserClusterPairsBeforeTruncation = “num_user_cluster_pairs_before_truncation”
+val StatNumUserClusterPairsAfterTruncation = “num_user_cluster_pairs_after_truncation”
+val StatNumUsers = “num_users”
+// Cumulative Frequency
+val StatCFNumProducersPerConsumerBeforeFilter = “num_producers_per_consumer_cf_before_filter”
+val StatCFNumProducersPerConsumerBeforeFilterBuckets: Seq[Double] =</p>
+<blockquote>
+<div><p>Seq(0, 10, 20, 50, 100, 500, 1000)</p>
+</div></blockquote>
+<p>val StatCFCosineSimilarityBeforeFilter = “cosine_similarity_cf_before_filter”
+val StatCFCosineSimilarityBeforeFilterBuckets: Seq[Double] =</p>
+<blockquote>
+<div><p>Seq(0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100)</p>
+</div></blockquote>
+<p>val StatCFNumOfClustersBeforeFilter = “num_of_clusters_cf_before_filter”
+val StatCFNumOfClustersBeforeFilterBuckets: Seq[Double] =</p>
+<blockquote>
+<div><p>Seq(1, 3, 5, 10, 15, 20, 50, 100, 200, 300, 500)</p>
+</div></blockquote>
+<p>val MaxClustersPerUser: Int = 10
+val MaxNeighborsByUser: Int = 500</p>
+<p>object ProducerEmbeddingSource {</p>
+<blockquote>
+<div><dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Read log-fav based Aggregatable Producer embeddings dataset.</p></li>
+</ul>
+<p><a href="#id19"><span class="problematic" id="id20">*</span></a>/</p>
+</dd>
+<dt>def getAggregatableProducerEmbeddings(</dt><dd><p>implicit dateRange: DateRange,
+timeZone: TimeZone</p>
+</dd>
+<dt>): TypedPipe[(UserId, SimClustersEmbedding)] =</dt><dd><dl>
+<dt>ProducerEmbeddingSources</dt><dd><dl class="simple">
+<dt>.producerEmbeddingSource(</dt><dd><p>EmbeddingType.AggregatableLogFavBasedProducer,
+ModelVersion.Model20m145k2020)(dateRange.prepend(Days(30)))</p>
+</dd>
+</dl>
+<p>.mapValues(s =&gt; SimClustersEmbedding(s))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../_sources/src/scala/com/twitter/simclusters_v2/scalding/embedding/twice/InterestedInTwiceBaseApp.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../" id="documentation_options" src="../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.earlybird.archive.segmentbuilder;</p>
+<p>import java.util.concurrent.atomic.AtomicBoolean;</p>
+<p>import com.google.common.base.Stopwatch;</p>
+<p>import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;</p>
+<p>import com.twitter.common.util.Clock;
+import com.twitter.search.common.util.GCUtil;
+import com.twitter.search.common.util.zktrylock.TryLock;
+import com.twitter.search.earlybird.archive.ArchiveSegmentUpdater;
+import com.twitter.search.earlybird.index.EarlybirdSegmentFactory;
+import com.twitter.search.earlybird.partition.SegmentInfo;
+import com.twitter.search.earlybird.partition.SegmentSyncConfig;</p>
+<dl>
+<dt>public class NotYetBuiltSegment extends SegmentBuilderSegment {</dt><dd><p>private static final Logger LOG = LoggerFactory.getLogger(NotYetBuiltSegment.class);</p>
+<dl>
+<dt>public NotYetBuiltSegment(</dt><dd><blockquote>
+<div><p>SegmentInfo segmentInfo,
+SegmentConfig segmentConfig,
+EarlybirdSegmentFactory earlybirdSegmentFactory,
+int alreadyRetriedCount,
+SegmentSyncConfig sync) {</p>
+</div></blockquote>
+<p>super(segmentInfo, segmentConfig, earlybirdSegmentFactory, alreadyRetriedCount, sync);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><ol class="arabic simple">
+<li><p>Grab the ZK lock for this segment.</p></li>
+</ol>
+</li>
+<li><p>2a. if lock fails, another host is updating; return the SOMEONE_ELSE_IS_BUILDING state.</p></li>
+<li><p>2b. if lock succeeds, check again if the updated segment exists on HDFS.</p></li>
+<li><p>3a. if so, just move on.</p></li>
+<li><p>3b. if not, update the segment.</p></li>
+<li><p>In both cases, we need to check if the segment can now be marked as BUILT_AND_FINALIZED.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+</dl>
+<p>&#64;Override
+public SegmentBuilderSegment handle()</p>
+<blockquote>
+<div><blockquote>
+<div><p>throws SegmentUpdaterException, SegmentInfoConstructionException {</p>
+</div></blockquote>
+<p>LOG.info(“Handling a not yet built segment: {}”, this.getSegmentName());
+Stopwatch stopwatch = Stopwatch.createStarted();
+TryLock lock = getZooKeeperTryLock();</p>
+<p>// The tryWithLock can only access variables from parent class that are final. However, we
+// would like to pass the process() return value to the parent class. So here we use
+// AtomicBoolean reference instead of Boolean.
+final AtomicBoolean successRef = new AtomicBoolean(false);
+boolean gotLock = lock.tryWithLock(() -&gt; {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>ArchiveSegmentUpdater updater = new ArchiveSegmentUpdater(</dt><dd><p>segmentConfig.getTryLockFactory(),
+sync,
+segmentConfig.getEarlybirdIndexConfig(),
+Clock.SYSTEM_CLOCK);</p>
+</dd>
+</dl>
+<p>boolean success = updater.updateSegment(segmentInfo);
+successRef.set(success);</p>
+</div></blockquote>
+<p>});</p>
+<dl>
+<dt>if (!gotLock) {</dt><dd><p>LOG.info(“cannot acquire zookeeper lock for: “ + segmentInfo);
+return new SomeoneElseIsBuildingSegment(</p>
+<blockquote>
+<div><p>segmentInfo,
+segmentConfig,
+earlybirdSegmentFactory,
+alreadyRetriedCount,
+sync);</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<p>// 1. we want to make sure the heap is clean right after building a segment so that it’s ready
+//   for us to start allocations for a new segment
+// — I think we’ve had cases where we were seeing OOM’s while building
+// 2. the thing that I think it helps with is compaction (vs just organically running CMS)
+// — which would clean up the heap, but may leave it in a fragmented state
+// — and running a Full GC is supposed to compact the remaining tenured space.
+GCUtil.runGC();</p>
+<dl>
+<dt>if (successRef.get()) {</dt><dd><p>LOG.info(“Indexing segment {} took {}”, segmentInfo, stopwatch);
+LOG.info(“Finished building {}”, segmentInfo.getSegment().getSegmentName());
+return new BuiltAndFinalizedSegment(</p>
+<blockquote>
+<div><p>segmentInfo, segmentConfig, earlybirdSegmentFactory, 0, sync);</p>
+</div></blockquote>
+</dd>
+<dt>} else {</dt><dd><p>int alreadyTried = alreadyRetriedCount + 1;
+String errMsg = “failed updating segment for: “ + segmentInfo</p>
+<blockquote>
+<div><ul class="simple">
+<li><p>“ for “ + alreadyTried + “ times”;</p></li>
+</ul>
+</div></blockquote>
+<p>LOG.error(errMsg);
+if (alreadyTried &lt; segmentConfig.getMaxRetriesOnFailure()) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>return new NotYetBuiltSegment(</dt><dd><p>createNewSegmentInfo(segmentInfo),
+segmentConfig,
+earlybirdSegmentFactory,
+alreadyTried,
+sync);</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>throw new SegmentUpdaterException(errMsg);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../_sources/src/java/com/twitter/search/earlybird/archive/segmentbuilder/NotYetBuiltSegment.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

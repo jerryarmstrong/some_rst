@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../../" id="documentation_options" src="../../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.product_mixer.core.quality_factor</p>
+<p>import com.twitter.product_mixer.core.pipeline.pipeline_failure.ClientFailure
+import com.twitter.product_mixer.core.pipeline.pipeline_failure.PipelineFailure
+import com.twitter.product_mixer.core.quality_factor.QualityFactorConfig.defaultIgnorableFailures
+import com.twitter.servo.util.CancelledExceptionExtractor
+import com.twitter.util.Duration
+import com.twitter.conversions.DurationOps.RichDuration</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Quality factor is an abstract number that enables a feedback loop to control operation costs and ultimately</p></li>
+<li><p>maintain the operation success rate. Abstractly, if operations/calls are too expensive (such as high</p></li>
+<li><p>latencies), the quality factor should go down, which helps future calls to ease their demand/load (such as</p></li>
+<li><p>reducing request width); if ops/calls are fast, the quality factor should go up, so we can incur more load.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+</dl>
+<p>sealed trait QualityFactorConfig {</p>
+<blockquote>
+<div><dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>specifies the quality factor min and max bounds and default value.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+</dl>
+<p>def qualityFactorBounds: BoundsWithDefault[Double]</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>initialDelay Specifies how much delay we should have before the quality factor calculation start to kick in. This is</p></li>
+<li><p>mostly to ease the load during the initial warmup/startup.</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+</dl>
+<p>def initialDelay: Duration</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>[[Throwable]]s that should be ignored when calculating</p></li>
+<li><p>the [[QualityFactor]] if this is [[PartialFunction.isDefinedAt]]</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+</dl>
+<p>def ignorableFailures: PartialFunction[Throwable, Unit] = defaultIgnorableFailures</p>
+</div></blockquote>
+<p>}</p>
+<p>object QualityFactorConfig {</p>
+<blockquote>
+<div><dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Default value for [[QualityFactorConfig.ignorableFailures]] that ignores any</p></li>
+<li><p>Cancelled requests and [[ClientFailure]]</p></li>
+</ul>
+<p><a href="#id9"><span class="problematic" id="id10">*</span></a>/</p>
+</dd>
+<dt>val defaultIgnorableFailures: PartialFunction[Throwable, Unit] = {</dt><dd><p>case PipelineFailure(_: ClientFailure, _, _, _) =&gt; ()
+case CancelledExceptionExtractor(_) =&gt; ()</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>This is a linear quality factor implementation, aimed to achieve and maintain a percentile latency target.</p></li>
+<li></li>
+<li><p>If we call quality factor q, target latency t and target percentile p,</p></li>
+<li><p>then the q (quality factor) formula should be:</p></li>
+<li><p>q += delta                      for each request with latency &lt;= t</p></li>
+<li><p>q -= delta * p / (100 - p)      for each request with latency &gt; t ms or a timeout.</p></li>
+<li></li>
+<li><p>When percentile p latency stays at target latency t, then based on the formula above, q will</p></li>
+<li><p>stay constant (fluctuates around a constant value).</p></li>
+<li></li>
+<li><p>For example, assume t = 100ms, p = p99, and q = 0.5</p></li>
+<li><p>let’s say, p99 latency stays at 100ms when q = 0.5. p99 means that out of every 100 latencies,</p></li>
+<li><p>99 times the latency is below 100ms and 1 time it is above 100ms. So based on the formula above,</p></li>
+<li><p>q will increase by “delta” 99 times and it will decrease by delta * p / (100 - p) = delta * 99 once,</p></li>
+<li><p>which results in the same q = 0.5.</p></li>
+<li></li>
+<li><p>&#64;param targetLatency This is the latency target, calls with latencies above which will cause quality</p></li>
+<li><p>factor to go down, and vice versa. e.g. 500ms.</p></li>
+<li><p>&#64;param targetLatencyPercentile This the percentile where the target latency is aimed at. e.g. 95.0.</p></li>
+<li><p>&#64;param delta the step for adjusting quality factor. It should be a positive double. If delta is</p></li>
+<li><p>too large, then quality factor will fluctuate more, and if it is too small, the</p></li>
+<li><p>responsiveness will be reduced.</p></li>
+</ul>
+<p><a href="#id11"><span class="problematic" id="id12">*</span></a>/</p>
+</dd>
+<dt>case class LinearLatencyQualityFactorConfig(</dt><dd><p>override val qualityFactorBounds: BoundsWithDefault[Double],
+override val initialDelay: Duration,
+targetLatency: Duration,
+targetLatencyPercentile: Double,
+delta: Double,
+override val ignorableFailures: PartialFunction[Throwable, Unit] =</p>
+<blockquote>
+<div><p>QualityFactorConfig.defaultIgnorableFailures)
+extends QualityFactorConfig {</p>
+</div></blockquote>
+<dl>
+<dt>require(</dt><dd><p>targetLatencyPercentile &gt;= 50.0 &amp;&amp; targetLatencyPercentile &lt; 100.0,
+s”Invalid targetLatencyPercentile value: ${targetLatencyPercentile}.n” +</p>
+<blockquote>
+<div><p>s”Correct sample values: 95.0, 99.9. Incorrect sample values: 0.95, 0.999.”</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>A quality factor provides component capacity state based on sampling component</p></li>
+<li><p>Queries Per Second (qps) at local host level.</p></li>
+<li></li>
+<li><p>If we call quality factor q, max qps R:</p></li>
+<li><p>then the q (quality factor) formula should be:</p></li>
+<li><p>q = Math.min([[qualityFactorBounds.bounds.maxInclusive]], q + delta)      for each request that observed qps &lt;= R on local host</p></li>
+<li><p>q -= delta                                      for each request that observed qps &gt; R on local host</p></li>
+<li></li>
+<li><p>When qps r stays below R, q will stay as constant (value at [[qualityFactorBounds.bounds.maxInclusive]]).</p></li>
+<li><p>When qps r starts to increase above R, q will decrease by delta per request,</p></li>
+<li><p>with delta being an additive factor that controls how sensitive q is when max qps R is exceeded.</p></li>
+<li></li>
+<li><p>&#64;param initialDelay Specifies an initial delay time to allow query rate counter warm up to start reflecting actual traffic load.</p></li>
+<li><p>Qf value would only start to update after this initial delay.</p></li>
+<li><p>&#64;param maxQueriesPerSecond The max qps the underlying component can take. Requests go above this qps threshold will cause quality factor to go down.</p></li>
+<li><p>&#64;param queriesPerSecondSampleWindow The window of underlying query rate counter counting with and calculate an average qps over the window,</p></li>
+<li><p>default to count with 10 seconds time window (i.e. qps = total requests over last 10 secs / 10).</p></li>
+<li><p>Note: underlying query rate counter has a sliding window with 10 fixed slices. Therefore a larger</p></li>
+<li><p>window would lead to a coarser qps calculation. (e.g. with 60 secs time window, it sliding over 6 seconds slice (60 / 10 = 6 secs)).</p></li>
+<li><p>A larger time window also lead to a slower reaction to sudden qps burst, but more robust to flaky qps pattern.</p></li>
+<li><p>&#64;param delta The step for adjusting quality factor. It should be a positive double. If the delta is large, the quality factor</p></li>
+<li><p>will fluctuate more and be more responsive to exceeding max qps, and if it is small, the quality factor will be less responsive.</p></li>
+</ul>
+<p><a href="#id13"><span class="problematic" id="id14">*</span></a>/</p>
+</dd>
+<dt>case class QueriesPerSecondBasedQualityFactorConfig(</dt><dd><p>override val qualityFactorBounds: BoundsWithDefault[Double],
+override val initialDelay: Duration,
+maxQueriesPerSecond: Int,
+queriesPerSecondSampleWindow: Duration = 10.seconds,
+delta: Double = 0.001,
+override val ignorableFailures: PartialFunction[Throwable, Unit] =</p>
+<blockquote>
+<div><p>QualityFactorConfig.defaultIgnorableFailures)
+extends QualityFactorConfig</p>
+</div></blockquote>
+</dd>
+</dl>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../../_sources/product-mixer/core/src/main/scala/com/twitter/product_mixer/core/quality_factor/QualityFactorConfig.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

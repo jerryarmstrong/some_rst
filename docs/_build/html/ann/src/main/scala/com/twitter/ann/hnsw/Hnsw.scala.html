@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../" id="documentation_options" src="../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.ann.hnsw</p>
+<p>import com.google.common.annotations.VisibleForTesting
+import com.twitter.ann.common.EmbeddingType._
+import com.twitter.ann.common.Metric.toThrift
+import com.twitter.ann.common._
+import com.twitter.ann.common.thriftscala.DistanceMetric
+import com.twitter.ann.hnsw.HnswIndex.RandomProvider
+import com.twitter.util.Future
+import java.util.Random
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ThreadLocalRandom
+import java.util.concurrent.locks.Lock
+import java.util.concurrent.locks.ReentrantLock
+import scala.collection.JavaConverters._</p>
+<dl>
+<dt>private[hnsw] object Hnsw {</dt><dd><dl>
+<dt>private[hnsw] def apply[T, D &lt;: Distance[D]](</dt><dd><p>dimension: Int,
+metric: Metric[D],
+efConstruction: Int,
+maxM: Int,
+expectedElements: Int,
+futurePool: ReadWriteFuturePool,
+idEmbeddingMap: IdEmbeddingMap[T]</p>
+</dd>
+<dt>): Hnsw[T, D] = {</dt><dd><dl class="simple">
+<dt>val randomProvider = new RandomProvider {</dt><dd><p>override def get(): Random = ThreadLocalRandom.current()</p>
+</dd>
+</dl>
+<p>}
+val distFn =</p>
+<blockquote>
+<div><p>DistanceFunctionGenerator(metric, (key: T) =&gt; idEmbeddingMap.get(key))</p>
+</div></blockquote>
+<dl class="simple">
+<dt>val internalIndex = new HnswIndex[T, EmbeddingVector](</dt><dd><p>distFn.index,
+distFn.query,
+efConstruction,
+maxM,
+expectedElements,
+randomProvider</p>
+</dd>
+</dl>
+<p>)
+new Hnsw[T, D](</p>
+<blockquote>
+<div><p>dimension,
+metric,
+internalIndex,
+futurePool,
+idEmbeddingMap,
+distFn.shouldNormalize,
+LockedAccess.apply(expectedElements)</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private[hnsw] object LockedAccess {</dt><dd><dl class="simple">
+<dt>protected[hnsw] def apply[T](expectedElements: Int): LockedAccess[T] =</dt><dd><p>DefaultLockedAccess(new ConcurrentHashMap[T, Lock](expectedElements))</p>
+</dd>
+<dt>protected[hnsw] def apply[T](): LockedAccess[T] =</dt><dd><p>DefaultLockedAccess(new ConcurrentHashMap[T, Lock]())</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private[hnsw] case class DefaultLockedAccess[T](locks: ConcurrentHashMap[T, Lock])</dt><dd><blockquote>
+<div><p>extends LockedAccess[T] {</p>
+</div></blockquote>
+<p>override def lockProvider(item: T) = locks.computeIfAbsent(item, (_: T) =&gt; new ReentrantLock())</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private[hnsw] trait LockedAccess[T] {</dt><dd><p>protected def lockProvider(item: T): Lock
+def lock[K](item: T)(fn: =&gt; K): K = {</p>
+<blockquote>
+<div><p>val lock = lockProvider(item)
+lock.lock()
+try {</p>
+<blockquote>
+<div><p>fn</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} finally {</dt><dd><p>lock.unlock()</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;VisibleForTesting
+private[hnsw] class Hnsw[T, D &lt;: Distance[D]](</p>
+<blockquote>
+<div><p>dimension: Int,
+metric: Metric[D],
+hnswIndex: HnswIndex[T, EmbeddingVector],
+readWriteFuturePool: ReadWriteFuturePool,
+idEmbeddingMap: IdEmbeddingMap[T],
+shouldNormalize: Boolean,
+lockedAccess: LockedAccess[T] = LockedAccess.apply[T]())</p>
+<blockquote>
+<div><p>extends Appendable[T, HnswParams, D]
+with Queryable[T, HnswParams, D]
+with Updatable[T] {</p>
+</div></blockquote>
+<dl>
+<dt>override def append(entity: EntityEmbedding[T]): Future[Unit] = {</dt><dd><dl>
+<dt>readWriteFuturePool.write {</dt><dd><p>val indexDimension = entity.embedding.length
+assert(</p>
+<blockquote>
+<div><p>toThrift(metric) == DistanceMetric.EditDistance || indexDimension == dimension,
+s”Dimension mismatch for index(${indexDimension}) and embedding($dimension)”</p>
+</div></blockquote>
+<p>)</p>
+<dl>
+<dt>lockedAccess.lock(entity.id) {</dt><dd><p>// To make this thread-safe, we are using ConcurrentHashMap#putIfAbsent underneath,
+// so if there is a pre-existing item, put() will return something that is not null
+val embedding = idEmbeddingMap.putIfAbsent(entity.id, updatedEmbedding(entity.embedding))</p>
+<dl class="simple">
+<dt>if (embedding == null) { // New element - insert into the index</dt><dd><p>hnswIndex.insert(entity.id)</p>
+</dd>
+<dt>} else { // Existing element - update the embedding and graph structure</dt><dd><dl class="simple">
+<dt>throw new IllegalDuplicateInsertException(</dt><dd><p>“Append method does not permit duplicates (try using update method): “ + entity.id)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>} onFailure { e =&gt;</dt><dd><p>Future.exception(e)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>override def toQueryable: Queryable[T, HnswParams, D] = this</p>
+<dl class="simple">
+<dt>override def query(</dt><dd><p>embedding: EmbeddingVector,
+numOfNeighbours: Int,
+runtimeParams: HnswParams</p>
+</dd>
+<dt>): Future[List[T]] = {</dt><dd><dl class="simple">
+<dt>queryWithDistance(embedding, numOfNeighbours, runtimeParams)</dt><dd><p>.map(_.map(_.neighbor))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>override def queryWithDistance(</dt><dd><p>embedding: EmbeddingVector,
+numOfNeighbours: Int,
+runtimeParams: HnswParams</p>
+</dd>
+<dt>): Future[List[NeighborWithDistance[T, D]]] = {</dt><dd><p>val indexDimension = embedding.length
+assert(</p>
+<blockquote>
+<div><p>toThrift(metric) == DistanceMetric.EditDistance || indexDimension == dimension,
+s”Dimension mismatch for index(${indexDimension}) and embedding($dimension)”</p>
+</div></blockquote>
+<p>)
+readWriteFuturePool.read {</p>
+<blockquote>
+<div><dl>
+<dt>hnswIndex</dt><dd><p>.searchKnn(updatedEmbedding(embedding), numOfNeighbours, runtimeParams.ef)
+.asScala
+.map { nn =&gt;</p>
+<blockquote>
+<div><dl class="simple">
+<dt>NeighborWithDistance(</dt><dd><p>nn.getItem,
+metric.fromAbsoluteDistance(nn.getDistance)</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<p>}
+.toList</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private[this] def updatedEmbedding(embedding: EmbeddingVector): EmbeddingVector = {</dt><dd><dl class="simple">
+<dt>if (shouldNormalize) {</dt><dd><p>MetricUtil.norm(embedding)</p>
+</dd>
+<dt>} else {</dt><dd><p>embedding</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>def getIndex: HnswIndex[T, EmbeddingVector] = hnswIndex
+def getDimen: Int = dimension
+def getMetric: Metric[D] = metric
+def getIdEmbeddingMap: IdEmbeddingMap[T] = idEmbeddingMap
+override def update(</p>
+<blockquote>
+<div><p>entity: EntityEmbedding[T]</p>
+</div></blockquote>
+<dl>
+<dt>): Future[Unit] = {</dt><dd><dl>
+<dt>readWriteFuturePool.write {</dt><dd><p>val indexDimension = entity.embedding.length
+assert(</p>
+<blockquote>
+<div><p>toThrift(metric) == DistanceMetric.EditDistance || indexDimension == dimension,
+s”Dimension mismatch for index(${indexDimension}) and embedding($dimension)”</p>
+</div></blockquote>
+<p>)</p>
+<dl>
+<dt>lockedAccess.lock(entity.id) {</dt><dd><p>val embedding = idEmbeddingMap.put(entity.id, updatedEmbedding(entity.embedding))
+if (embedding == null) { // New element - insert into the index</p>
+<blockquote>
+<div><p>hnswIndex.insert(entity.id)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else { // Existing element - update the embedding and graph structure</dt><dd><p>hnswIndex.reInsert(entity.id);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>} onFailure { e =&gt;</dt><dd><p>Future.exception(e)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../_sources/ann/src/main/scala/com/twitter/ann/hnsw/Hnsw.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

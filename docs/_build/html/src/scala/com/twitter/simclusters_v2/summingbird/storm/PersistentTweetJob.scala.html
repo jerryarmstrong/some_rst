@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../" id="documentation_options" src="../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.simclusters_v2.summingbird.storm</p>
+<p>import com.twitter.simclusters_v2.common.TweetId
+import com.twitter.simclusters_v2.summingbird.common.Implicits
+import com.twitter.simclusters_v2.summingbird.common.Monoids.PersistentSimClustersEmbeddingLongestL2NormMonoid
+import com.twitter.simclusters_v2.summingbird.common.StatsUtil
+import com.twitter.simclusters_v2.summingbird.stores.PersistentTweetEmbeddingStore.{</p>
+<blockquote>
+<div><p>LatestEmbeddingVersion,
+LongestL2EmbeddingVersion,
+PersistentTweetEmbeddingId</p>
+</div></blockquote>
+<p>}
+import com.twitter.simclusters_v2.thriftscala.{</p>
+<blockquote>
+<div><p>PersistentSimClustersEmbedding,
+SimClustersEmbedding,
+SimClustersEmbeddingMetadata</p>
+</div></blockquote>
+<p>}
+import com.twitter.summingbird.option.JobId
+import com.twitter.summingbird.{Platform, Producer, TailProducer}
+import com.twitter.timelineservice.thriftscala.Event
+import com.twitter.tweetypie.thriftscala.StatusCounts</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>The job to save the qualified tweet SimClustersEmbedding into Strato Store(Back by Manhattan).</p></li>
+<li></li>
+<li><p>The steps</p></li>
+<li><ol class="arabic simple">
+<li><p>Read from Favorite Stream.</p></li>
+</ol>
+</li>
+<li><ol class="arabic simple" start="2">
+<li><p>Join with Tweet Status Count Service.</p></li>
+</ol>
+</li>
+<li><ol class="arabic simple" start="3">
+<li><p>Filter out the tweets whose favorite count &lt; 8.</p></li>
+</ol>
+</li>
+<li><p>We consider these tweets’ SimClusters embedding is too noisy and untrustable.</p></li>
+<li><ol class="arabic simple" start="4">
+<li><p>Update the SimClusters Tweet embedding with timestamp 0L.</p></li>
+</ol>
+</li>
+<li><p>0L is reserved for the latest tweet embedding. It’s also used to maintain the tweet count.</p></li>
+<li><ol class="arabic simple" start="5">
+<li><p>If the SimClusters Tweet embedding’s update count is 2 power N &amp; N &gt;= 3.</p></li>
+</ol>
+</li>
+<li><p>Persistent the embeddings with the timestamp as part of the LK.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">**</span></a>/</p>
+</dd>
+<dt>private[storm] object PersistentTweetJob {</dt><dd><p>import StatsUtil._</p>
+<p>private val MinFavoriteCount = 8
+type Timestamp = Long</p>
+<p>val longestL2NormMonoid = new PersistentSimClustersEmbeddingLongestL2NormMonoid()</p>
+<dl>
+<dt>def generate[P &lt;: Platform[P]](</dt><dd><p>timelineEventSource: Producer[P, Event],
+tweetStatusCountService: P#Service[TweetId, StatusCounts],
+tweetEmbeddingService: P#Service[TweetId, SimClustersEmbedding],
+persistentTweetEmbeddingStoreWithLatestAggregation: P#Store[</p>
+<blockquote>
+<div><p>PersistentTweetEmbeddingId,
+PersistentSimClustersEmbedding</p>
+</div></blockquote>
+<p>],
+persistentTweetEmbeddingStoreWithLongestL2NormAggregation: P#Store[</p>
+<blockquote>
+<div><p>PersistentTweetEmbeddingId,
+PersistentSimClustersEmbedding</p>
+</div></blockquote>
+<p>]</p>
+</dd>
+<dt>)(</dt><dd><p>implicit jobId: JobId</p>
+</dd>
+</dl>
+<p>): TailProducer[P, Any] = {</p>
+<blockquote>
+<div><dl>
+<dt>val timelineEvents: Producer[P, (TweetId, Timestamp)] = timelineEventSource</dt><dd><dl class="simple">
+<dt>.collect {</dt><dd><dl class="simple">
+<dt>case Event.Favorite(favoriteEvent) =&gt;</dt><dd><p>(favoriteEvent.tweetId, favoriteEvent.eventTimeMs)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>val filteredEvents = timelineEvents</dt><dd><p>.leftJoin[StatusCounts](tweetStatusCountService)
+.filter {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case (_, (_, Some(statusCounts))) =&gt;</dt><dd><p>// Only consider tweets which has more than 8 favorite
+statusCounts.favoriteCount.exists(_ &gt;= MinFavoriteCount)</p>
+</dd>
+<dt>case _ =&gt;</dt><dd><p>false</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+.leftJoin[SimClustersEmbedding](tweetEmbeddingService)</p>
+</dd>
+<dt>val latestAndPersistentEmbeddingProducer = filteredEvents</dt><dd><dl>
+<dt>.collect {</dt><dd><dl>
+<dt>case (tweetId, ((eventTimeMs, _), Some(tweetEmbedding))) =&gt;</dt><dd><dl>
+<dt>(</dt><dd><p>// This special timestamp is a reserved space for the latest tweet embedding.
+PersistentTweetEmbeddingId(tweetId, timestampInMs = LatestEmbeddingVersion),
+PersistentSimClustersEmbedding(</p>
+<blockquote>
+<div><p>tweetEmbedding,
+SimClustersEmbeddingMetadata(updatedAtMs = Some(eventTimeMs), updatedCount = Some(1))</p>
+</div></blockquote>
+<p>))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+.observe(“num_of_embedding_updates”)
+.sumByKey(persistentTweetEmbeddingStoreWithLatestAggregation)(</p>
+<blockquote>
+<div><p>Implicits.persistentSimClustersEmbeddingMonoid)</p>
+</div></blockquote>
+<p>.name(“latest_embedding_producer”)
+.flatMap {</p>
+<blockquote>
+<div><dl>
+<dt>case (persistentTweetEmbeddingId, (maybeEmbedding, deltaEmbedding)) =&gt;</dt><dd><dl>
+<dt>lastQualifiedUpdatedCount(</dt><dd><p>maybeEmbedding.flatMap(_.metadata.updatedCount),
+deltaEmbedding.metadata.updatedCount</p>
+</dd>
+<dt>).map { newUpdateCount =&gt;</dt><dd><dl class="simple">
+<dt>(</dt><dd><dl class="simple">
+<dt>persistentTweetEmbeddingId.copy(timestampInMs =</dt><dd><p>deltaEmbedding.metadata.updatedAtMs.getOrElse(0L)),</p>
+</dd>
+<dt>deltaEmbedding.copy(metadata =</dt><dd><p>deltaEmbedding.metadata.copy(updatedCount = Some(newUpdateCount)))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+.observe(“num_of_extra_embedding”)
+.sumByKey(persistentTweetEmbeddingStoreWithLatestAggregation)(</p>
+<blockquote>
+<div><p>Implicits.persistentSimClustersEmbeddingMonoid)</p>
+</div></blockquote>
+<p>.name(“persistent_embeddings_producer”)</p>
+</dd>
+<dt>val longestL2NormEmbeddingProducer = filteredEvents</dt><dd><dl>
+<dt>.collect {</dt><dd><dl>
+<dt>case (tweetId, ((eventTimeMs, Some(statusCounts)), Some(tweetEmbedding))) =&gt;</dt><dd><dl>
+<dt>(</dt><dd><p>// This special timestamp is a reserved space for the latest tweet embedding.
+PersistentTweetEmbeddingId(tweetId, timestampInMs = LongestL2EmbeddingVersion),
+PersistentSimClustersEmbedding(</p>
+<blockquote>
+<div><p>tweetEmbedding,
+SimClustersEmbeddingMetadata(</p>
+<blockquote>
+<div><p>updatedAtMs = Some(eventTimeMs),
+// We’re not aggregating the existing embedding, we’re replacing it. The count
+// therefore needs to be the absolute fav count for this tweet, not the delta.
+updatedCount = statusCounts.favoriteCount.map(_ + 1)</p>
+</div></blockquote>
+<p>)</p>
+</div></blockquote>
+<p>))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+.observe(“num_longest_l2_norm_updates”)
+.sumByKey(persistentTweetEmbeddingStoreWithLongestL2NormAggregation)(longestL2NormMonoid)
+.name(“longest_l2_norm_embedding_producer”)</p>
+</dd>
+</dl>
+<p>latestAndPersistentEmbeddingProducer.also(longestL2NormEmbeddingProducer)</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/*</dt><dd><blockquote>
+<div><p>If this change in counts crosses one or more powers of 2 (8,16,32…), return the last boundary
+that was crossed. In the case where a count delta is large, it may skip a power of 2, and
+thus we may not store embeddings for all 2^(i+3) where 0 &lt;= i &lt;= tweetFavCount.</p>
+</div></blockquote>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>private def lastQualifiedUpdatedCount(</dt><dd><p>existingUpdateCount: Option[Long],
+deltaUpdateCount: Option[Long]</p>
+</dd>
+<dt>): Option[Int] = {</dt><dd><p>val existing = existingUpdateCount.getOrElse(0L)
+val sum = existing + deltaUpdateCount.getOrElse(0L)
+qualifiedSet.filter { i =&gt; (existing &lt; i) &amp;&amp; (i &lt;= sum) }.lastOption</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// Only 2 Power n while n &gt;= 3 is qualified for Persistent. The max = 16,777,216
+private lazy val qualifiedSet = 3</p>
+<blockquote>
+<div><p>.until(25).map { i =&gt; Math.pow(2, i).toInt }.toSet</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../_sources/src/scala/com/twitter/simclusters_v2/summingbird/storm/PersistentTweetJob.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

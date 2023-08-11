@@ -1,0 +1,800 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../" id="documentation_options" src="../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.simclusters_v2.scalding.tweet_similarity</p>
+<p>import com.twitter.ads.entities.db.thriftscala.PromotedTweet
+import com.twitter.dataproducts.estimation.ReservoirSampler
+import com.twitter.scalding.typed.TypedPipe
+import com.twitter.scalding.{DateRange, Execution, TypedTsv}
+import com.twitter.scalding_internal.dalv2.DAL
+import com.twitter.scalding_internal.dalv2.remote_access.{ExplicitLocation, Proc3Atla, ProcAtla}
+import com.twitter.simclusters_v2.common.{SimClustersEmbedding, Timestamp, TweetId, UserId}
+import com.twitter.simclusters_v2.scalding.common.Util
+import com.twitter.simclusters_v2.scalding.embedding.common.ExternalDataSources
+import com.twitter.simclusters_v2.thriftscala.{</p>
+<blockquote>
+<div><p>TweetTopKTweetsWithScore,
+TweetWithScore,
+TweetsWithScore</p>
+</div></blockquote>
+<p>}
+import com.twitter.timelineservice.thriftscala.{ContextualizedFavoriteEvent, FavoriteEventUnion}
+import com.twitter.wtf.scalding.client_event_processing.thriftscala.{</p>
+<blockquote>
+<div><p>InteractionDetails,
+InteractionType,
+TweetImpressionDetails</p>
+</div></blockquote>
+<p>}
+import com.twitter.wtf.scalding.jobs.client_event_processing.UserInteractionScalaDataset
+import java.util.Random
+import scala.collection.mutable.ArrayBuffer
+import scala.util.control.Breaks._
+import twadoop_config.configuration.log_categories.group.timeline.TimelineServiceFavoritesScalaDataset</p>
+<p>object TweetPairLabelCollectionUtil {</p>
+<blockquote>
+<div><dl>
+<dt>case class FeaturedTweet(</dt><dd><p>tweet: TweetId,
+timestamp: Timestamp, //engagement or impression time
+author: Option[UserId],
+embedding: Option[SimClustersEmbedding])</p>
+<blockquote>
+<div><p>extends Ordered[FeaturedTweet] {</p>
+</div></blockquote>
+<p>import scala.math.Ordered.orderingToOrdered</p>
+<dl class="simple">
+<dt>def compare(that: FeaturedTweet): Int =</dt><dd><p>(this.tweet, this.timestamp, this.author) compare (that.tweet, that.timestamp, that.author)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>val MaxFavPerUser: Int = 100</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Get all fav events within the given dateRange and where all users’ out-degree &lt;= maxOutDegree</p></li>
+<li><p>from TimelineServiceFavoritesScalaDataset</p></li>
+<li></li>
+<li><p>&#64;param dateRange         date of interest</p></li>
+<li><p>&#64;param maxOutgoingDegree max #degrees for the users of interests</p></li>
+<li></li>
+<li><p>&#64;return Filtered fav events, TypedPipe of (userid, tweetid, timestamp) tuples</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>def getFavEvents(</dt><dd><p>dateRange: DateRange,
+maxOutgoingDegree: Int</p>
+</dd>
+<dt>): TypedPipe[(UserId, TweetId, Timestamp)] = {</dt><dd><dl>
+<dt>val fullTimelineFavData: TypedPipe[ContextualizedFavoriteEvent] =</dt><dd><dl class="simple">
+<dt>DAL</dt><dd><p>.read(TimelineServiceFavoritesScalaDataset, dateRange)
+.withRemoteReadPolicy(ExplicitLocation(ProcAtla))
+.toTypedPipe</p>
+</dd>
+</dl>
+</dd>
+<dt>val userTweetTuples = fullTimelineFavData</dt><dd><dl>
+<dt>.flatMap { cfe: ContextualizedFavoriteEvent =&gt;</dt><dd><dl class="simple">
+<dt>cfe.event match {</dt><dd><dl class="simple">
+<dt>case FavoriteEventUnion.Favorite(fav) =&gt;</dt><dd><p>Some((fav.userId, (fav.tweetId, fav.eventTimeMs)))</p>
+</dd>
+<dt>case _ =&gt;</dt><dd><p>None</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>//Get users with the out-degree &lt;= maxOutDegree first
+val usersWithValidOutDegree = userTweetTuples</p>
+<blockquote>
+<div><p>.groupBy(_._1)
+.withReducers(1000)
+.size
+.filter(_._2 &lt;= maxOutgoingDegree)</p>
+</div></blockquote>
+<p>// Keep only usersWithValidOutDegree in the graph
+userTweetTuples</p>
+<blockquote>
+<div><dl class="simple">
+<dt>.join(usersWithValidOutDegree).map {</dt><dd><p>case (userId, ((tweetId, eventTime), _)) =&gt; (userId, tweetId, eventTime)</p>
+</dd>
+</dl>
+<p>}.forceToDisk</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Get impression events where users stay at the tweets for more than one minute</p></li>
+<li></li>
+<li><p>&#64;param dateRange time range of interest</p></li>
+<li></li>
+<li><p>&#64;return</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>def getImpressionEvents(dateRange: DateRange): TypedPipe[(UserId, TweetId, Timestamp)] = {</dt><dd><dl>
+<dt>DAL</dt><dd><p>.read(UserInteractionScalaDataset, dateRange)
+.withRemoteReadPolicy(ExplicitLocation(Proc3Atla))
+.toTypedPipe
+.flatMap {</p>
+<blockquote>
+<div><dl>
+<dt>case userInteraction</dt><dd><blockquote>
+<div><p>if userInteraction.interactionType == InteractionType.TweetImpressions =&gt;</p>
+</div></blockquote>
+<dl>
+<dt>userInteraction.interactionDetails match {</dt><dd><dl>
+<dt>case InteractionDetails.TweetImpressionDetails(</dt><dd><blockquote>
+<div><blockquote>
+<div><p>TweetImpressionDetails(tweetId, _, dwellTimeInSecOpt))</p>
+</div></blockquote>
+<p>if dwellTimeInSecOpt.exists(_ &gt;= 1) =&gt;</p>
+</div></blockquote>
+<p>Some(userInteraction.userId, tweetId, userInteraction.timeStamp)</p>
+</dd>
+<dt>case _ =&gt;</dt><dd><p>None</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>case _ =&gt; None</p>
+</div></blockquote>
+<p>}
+.forceToDisk</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Given an events dataset, return a filtered events limited to a given set of tweets</p></li>
+<li></li>
+<li><p>&#64;param events user fav events, a TypedPipe of (userid, tweetid, timestamp) tuples</p></li>
+<li><p>&#64;param tweets tweets of interest</p></li>
+<li></li>
+<li><p>&#64;return Filtered fav events on the given tweets of interest only, TypedPipe of (userid, tweetid, timestamp) tuples</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>def getFilteredEvents(</dt><dd><p>events: TypedPipe[(UserId, TweetId, Timestamp)],
+tweets: TypedPipe[TweetId]</p>
+</dd>
+<dt>): TypedPipe[(UserId, TweetId, Timestamp)] = {</dt><dd><dl>
+<dt>events</dt><dd><dl class="simple">
+<dt>.map {</dt><dd><p>case (userId, tweetId, eventTime) =&gt; (tweetId, (userId, eventTime))</p>
+</dd>
+</dl>
+<p>}
+.join(tweets.asKeys)
+.withReducers(1000)
+.map {</p>
+<blockquote>
+<div><p>case (tweetId, ((userId, eventTime), _)) =&gt; (userId, tweetId, eventTime)</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/** Get (tweetId, author userId) of a given dateRange</dt><dd><ul class="simple">
+<li></li>
+<li><p>&#64;param dateRange time range of interest</p></li>
+<li></li>
+<li><p>&#64;return TypedPipe of (tweetId, userId)</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+<dt>def getTweetAuthorPairs(dateRange: DateRange): TypedPipe[(TweetId, UserId)] = {</dt><dd><dl>
+<dt>ExternalDataSources</dt><dd><p>.flatTweetsSource(dateRange)
+.collect {</p>
+<blockquote>
+<div><p>// Exclude retweets and quoted tweets
+case record if record.shareSourceTweetId.isEmpty &amp;&amp; record.quotedTweetTweetId.isEmpty =&gt;</p>
+<blockquote>
+<div><p>(record.tweetId, record.userId)</p>
+</div></blockquote>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/** Given a set of tweets, get all non-promoted tweets from the given set</dt><dd><ul class="simple">
+<li></li>
+<li><p>&#64;param promotedTweets TypedPipe of promoted tweets</p></li>
+<li><p>&#64;param tweets         tweets of interest</p></li>
+<li></li>
+<li><p>&#64;return TypedPipe of tweetId</p></li>
+</ul>
+<p><a href="#id9"><span class="problematic" id="id10">*</span></a>/</p>
+</dd>
+<dt>def getNonPromotedTweets(</dt><dd><p>promotedTweets: TypedPipe[PromotedTweet],
+tweets: TypedPipe[TweetId]</p>
+</dd>
+<dt>): TypedPipe[TweetId] = {</dt><dd><dl>
+<dt>promotedTweets</dt><dd><dl class="simple">
+<dt>.collect {</dt><dd><p>case promotedTweet if promotedTweet.tweetId.isDefined =&gt; promotedTweet.tweetId.get</p>
+</dd>
+</dl>
+<p>}
+.asKeys
+.rightJoin(tweets.asKeys)
+.withReducers(1000)
+.filterNot(joined =&gt; joined._2._1.isDefined) //filter out those in promotedTweets
+.keys</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Given a fav events dataset, return all distinct ordered tweet pairs, labelled by whether they are co-engaged or not</p></li>
+<li><p>Note we distinguish between (t1, t2) and (t2, t1) because o.w we introduce bias to training samples</p></li>
+<li></li>
+<li><p>&#64;param events      user fav events, a TypedPipe of (userid, featuredTweet) tuples</p></li>
+<li><p>&#64;param timeframe   two tweets will be considered co-engaged if they are fav-ed within coengagementTimeframe</p></li>
+<li><p>&#64;param isCoengaged if pairs are co-engaged</p></li>
+<li></li>
+<li><p>&#64;return labelled tweet pairs, TypedPipe of (userid, featuredTweet1, featuredTweet2, isCoengaged) tuples</p></li>
+</ul>
+<p><a href="#id11"><span class="problematic" id="id12">*</span></a>/</p>
+</dd>
+<dt>def getTweetPairs(</dt><dd><p>events: TypedPipe[(UserId, FeaturedTweet)],
+timeframe: Long,
+isCoengaged: Boolean</p>
+</dd>
+<dt>): TypedPipe[(UserId, FeaturedTweet, FeaturedTweet, Boolean)] = {</dt><dd><dl>
+<dt>events</dt><dd><dl class="simple">
+<dt>.map {</dt><dd><p>case (userId, featuredTweet) =&gt; (userId, Seq(featuredTweet))</p>
+</dd>
+</dl>
+<p>}
+.sumByKey
+.flatMap {</p>
+<blockquote>
+<div><dl>
+<dt>case (userId, featuredTweets) if featuredTweets.size &gt; 1 =&gt;</dt><dd><p>val sortedFeaturedTweet = featuredTweets.sortBy(_.timestamp)
+// Get all distinct ordered pairs that happen within coengagementTimeframe
+val distinctPairs = ArrayBuffer[(UserId, FeaturedTweet, FeaturedTweet, Boolean)]()
+breakable {</p>
+<blockquote>
+<div><dl>
+<dt>for (i &lt;- sortedFeaturedTweet.indices) {</dt><dd><dl>
+<dt>for (j &lt;- i + 1 until sortedFeaturedTweet.size) {</dt><dd><p>val featuredTweet1 = sortedFeaturedTweet(i)
+val featuredTweet2 = sortedFeaturedTweet(j)
+if (math.abs(featuredTweet1.timestamp - featuredTweet2.timestamp) &lt;= timeframe)</p>
+<blockquote>
+<div><dl class="simple">
+<dt>distinctPairs ++= Seq(</dt><dd><p>(userId, featuredTweet1, featuredTweet2, isCoengaged),
+(userId, featuredTweet2, featuredTweet1, isCoengaged))</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl class="simple">
+<dt>else</dt><dd><p>break</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}
+distinctPairs</p>
+</dd>
+</dl>
+<p>case _ =&gt; Nil</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Get co-engaged tweet pairs</p></li>
+<li></li>
+<li><p>&#64;param favEvents             user fav events, TypedPipe of (userid, tweetid, timestamp)</p></li>
+<li><p>&#64;param tweets                tweets to be considered</p></li>
+<li><p>&#64;param coengagementTimeframe time window for two tweets to be considered as co-engaged</p></li>
+<li></li>
+<li><p>&#64;return TypedPipe of co-engaged tweet pairs</p></li>
+</ul>
+<p><a href="#id13"><span class="problematic" id="id14">*</span></a>/</p>
+</dd>
+<dt>def getCoengagedPairs(</dt><dd><p>favEvents: TypedPipe[(UserId, TweetId, Timestamp)],
+tweets: TypedPipe[TweetId],
+coengagementTimeframe: Long</p>
+</dd>
+<dt>): TypedPipe[(UserId, FeaturedTweet, FeaturedTweet, Boolean)] = {</dt><dd><dl>
+<dt>val userFeaturedTweetPairs =</dt><dd><dl>
+<dt>getFilteredEvents(favEvents, tweets)</dt><dd><dl class="simple">
+<dt>.map {</dt><dd><p>case (user, tweet, timestamp) =&gt; (user, FeaturedTweet(tweet, timestamp, None, None))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>getTweetPairs(userFeaturedTweetPairs, coengagementTimeframe, isCoengaged = true)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Get co-impressed tweet pairs</p></li>
+<li></li>
+<li><p>&#64;param impressionEvents tweet impression events, TypedPipe of (userid, tweetid, timestamp)</p></li>
+<li><p>&#64;param tweets           set of tweets considered to be part of co-impressed tweet pairs</p></li>
+<li><p>&#64;param timeframe        time window for two tweets to be considered as co-impressed</p></li>
+<li></li>
+<li><p>&#64;return TypedPipe of co-impressed tweet pairs</p></li>
+</ul>
+<p><a href="#id15"><span class="problematic" id="id16">*</span></a>/</p>
+</dd>
+<dt>def getCoimpressedPairs(</dt><dd><p>impressionEvents: TypedPipe[(UserId, TweetId, Timestamp)],
+tweets: TypedPipe[TweetId],
+timeframe: Long</p>
+</dd>
+<dt>): TypedPipe[(UserId, FeaturedTweet, FeaturedTweet, Boolean)] = {</dt><dd><dl>
+<dt>val userFeaturedTweetPairs = getFilteredEvents(impressionEvents, tweets)</dt><dd><dl class="simple">
+<dt>.map {</dt><dd><p>case (user, tweet, timestamp) =&gt; (user, FeaturedTweet(tweet, timestamp, None, None))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>getTweetPairs(userFeaturedTweetPairs, timeframe, isCoengaged = false)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Consolidate co-engaged pairs and co-impressed pairs, and compute all the labelled tweet pairs</p></li>
+<li><p>Given a pair:</p></li>
+<li><p>label = 1 if co-engaged (whether or not it’s co-impressed)</p></li>
+<li><p>label = 0 if co-impressed and not co-engaged</p></li>
+<li></li>
+<li><p>&#64;param coengagedPairs   co-engaged tweet pairs, TypedPipe of (user, queryFeaturedTweet, candidateFeaturedTweet, label)</p></li>
+<li><p>&#64;param coimpressedPairs co-impressed tweet pairs, TypedPipe of (user, queryFeaturedTweet, candidateFeaturedTweet, label)</p></li>
+<li></li>
+<li><p>&#64;return labelled tweet pairs, TypedPipe of (queryFeaturedTweet, candidateFeaturedTweet, label) tuples</p></li>
+</ul>
+<p><a href="#id17"><span class="problematic" id="id18">*</span></a>/</p>
+</dd>
+<dt>def computeLabelledTweetPairs(</dt><dd><p>coengagedPairs: TypedPipe[(UserId, FeaturedTweet, FeaturedTweet, Boolean)],
+coimpressedPairs: TypedPipe[(UserId, FeaturedTweet, FeaturedTweet, Boolean)]</p>
+</dd>
+<dt>): TypedPipe[(FeaturedTweet, FeaturedTweet, Boolean)] = {</dt><dd><dl>
+<dt>(coengagedPairs ++ coimpressedPairs)</dt><dd><dl class="simple">
+<dt>.groupBy {</dt><dd><dl class="simple">
+<dt>case (userId, queryFeaturedTweet, candidateFeaturedTweet, _) =&gt;</dt><dd><p>(userId, queryFeaturedTweet.tweet, candidateFeaturedTweet.tweet)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+// consolidate all the labelled pairs into one with the max label
+// (label order: co-engagement = true &gt; co-impression = false)
+.maxBy {</p>
+<blockquote>
+<div><p>case (_, _, _, label) =&gt; label</p>
+</div></blockquote>
+<p>}
+.values
+.map { case (_, queryTweet, candidateTweet, label) =&gt; (queryTweet, candidateTweet, label) }</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Get a balanced-class sampling of tweet pairs.</p></li>
+<li><p>For each query tweet, we make sure the numbers of positives and negatives are equal.</p></li>
+<li></li>
+<li><p>&#64;param labelledPairs      labelled tweet pairs, TypedPipe of (queryFeaturedTweet, candidateFeaturedTweet, label) tuples</p></li>
+<li><p>&#64;param maxSamplesPerClass max number of samples per class</p></li>
+<li></li>
+<li><p>&#64;return sampled labelled pairs after balanced-class sampling</p></li>
+</ul>
+<p><a href="#id19"><span class="problematic" id="id20">*</span></a>/</p>
+</dd>
+<dt>def getQueryTweetBalancedClassPairs(</dt><dd><p>labelledPairs: TypedPipe[(FeaturedTweet, FeaturedTweet, Boolean)],
+maxSamplesPerClass: Int</p>
+</dd>
+<dt>): TypedPipe[(FeaturedTweet, FeaturedTweet, Boolean)] = {</dt><dd><dl>
+<dt>val queryTweetToSampleCount = labelledPairs</dt><dd><dl class="simple">
+<dt>.map {</dt><dd><dl class="simple">
+<dt>case (queryTweet, _, label) =&gt;</dt><dd><p>if (label) (queryTweet.tweet, (1, 0)) else (queryTweet.tweet, (0, 1))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+.sumByKey
+.map {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case (queryTweet, (posCount, negCount)) =&gt;</dt><dd><p>(queryTweet, Math.min(Math.min(posCount, negCount), maxSamplesPerClass))</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+<dt>labelledPairs</dt><dd><p>.groupBy { case (queryTweet, _, _) =&gt; queryTweet.tweet }
+.join(queryTweetToSampleCount)
+.values
+.map {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case ((queryTweet, candidateTweet, label), samplePerClass) =&gt;</dt><dd><p>((queryTweet.tweet, label, samplePerClass), (queryTweet, candidateTweet, label))</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+.group
+.mapGroup {</p>
+<blockquote>
+<div><dl>
+<dt>case ((_, _, samplePerClass), iter) =&gt;</dt><dd><p>val random = new Random(123L)
+val sampler =</p>
+<blockquote>
+<div><p>new ReservoirSampler[(FeaturedTweet, FeaturedTweet, Boolean)](samplePerClass, random)</p>
+</div></blockquote>
+<p>iter.foreach { pair =&gt; sampler.sampleItem(pair) }
+sampler.sample.toIterator</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+.values</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Given a user fav dataset, computes the similarity scores (based on engagers) between every tweet pairs</p></li>
+<li></li>
+<li><p>&#64;param events                user fav events, a TypedPipe of (userid, tweetid, timestamp) tuples</p></li>
+<li><p>&#64;param minInDegree           min number of engagement count for the tweets</p></li>
+<li><p>&#64;param coengagementTimeframe two tweets will be considered co-engaged if they are fav-ed within coengagementTimeframe</p></li>
+<li></li>
+<li><p>&#64;return tweet similarity based on engagers, a TypedPipe of (tweet1, tweet2, similarity_score) tuples</p></li>
+</ul>
+<p><a href="#id21"><span class="problematic" id="id22">**</span></a>/</p>
+</dd>
+<dt>def getScoredCoengagedTweetPairs(</dt><dd><p>events: TypedPipe[(UserId, TweetId, Timestamp)],
+minInDegree: Int,
+coengagementTimeframe: Long</p>
+</dd>
+</dl>
+<p>)(
+): TypedPipe[(TweetId, TweetWithScore)] = {</p>
+<blockquote>
+<div><p>// compute tweet norms (based on engagers)
+// only keep tweets whose indegree &gt;= minInDegree
+val tweetNorms = events</p>
+<blockquote>
+<div><p>.map { case (_, tweetId, _) =&gt; (tweetId, 1.0) }
+.sumByKey //the number of engagers per tweetId
+.filter(_._2 &gt;= minInDegree)
+.mapValues(math.sqrt)</p>
+</div></blockquote>
+<dl>
+<dt>val edgesWithWeight = events</dt><dd><dl class="simple">
+<dt>.map {</dt><dd><p>case (userId, tweetId, eventTime) =&gt; (tweetId, (userId, eventTime))</p>
+</dd>
+</dl>
+<p>}
+.join(tweetNorms)
+.map {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case (tweetId, ((userId, eventTime), norm)) =&gt;</dt><dd><p>(userId, Seq((tweetId, eventTime, 1 / norm)))</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>// get cosine similarity
+val tweetPairsWithWeight = edgesWithWeight.sumByKey</p>
+<blockquote>
+<div><dl>
+<dt>.flatMap {</dt><dd><dl>
+<dt>case (_, tweets) if tweets.size &gt; 1 =&gt;</dt><dd><dl>
+<dt>allUniquePairs(tweets).flatMap {</dt><dd><dl>
+<dt>case ((tweetId1, eventTime1, weight1), (tweetId2, eventTime2, weight2)) =&gt;</dt><dd><p>// consider only co-engagement happened within the given timeframe
+if ((eventTime1 - eventTime2).abs &lt;= coengagementTimeframe) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (tweetId1 &gt; tweetId2) // each worker generate allUniquePairs in different orders, hence should standardize the pairs</dt><dd><p>Some(((tweetId2, tweetId1), weight1 * weight2))</p>
+</dd>
+<dt>else</dt><dd><p>Some(((tweetId1, tweetId2), weight1 * weight2))</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>None</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>case _ =&gt;</dt><dd><p>None</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>case _ =&gt; Nil</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<dl>
+<dt>tweetPairsWithWeight.sumByKey</dt><dd><dl>
+<dt>.flatMap {</dt><dd><dl>
+<dt>case ((tweetId1, tweetId2), weight) =&gt;</dt><dd><dl class="simple">
+<dt>Seq(</dt><dd><p>(tweetId1, TweetWithScore(tweetId2, weight)),
+(tweetId2, TweetWithScore(tweetId1, weight))</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>case _ =&gt; Nil</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Get the write exec for per-query stats</p></li>
+<li></li>
+<li><p>&#64;param tweetPairs input dataset</p></li>
+<li><p>&#64;param outputPath output path for the per-query stats</p></li>
+<li><p>&#64;param identifier identifier for the tweetPairs dataset</p></li>
+<li></li>
+<li><p>&#64;return execution of the the writing exec</p></li>
+</ul>
+<p><a href="#id23"><span class="problematic" id="id24">*</span></a>/</p>
+</dd>
+<dt>def getPerQueryStatsExec(</dt><dd><p>tweetPairs: TypedPipe[(FeaturedTweet, FeaturedTweet, Boolean)],
+outputPath: String,
+identifier: String</p>
+</dd>
+<dt>): Execution[Unit] = {</dt><dd><dl>
+<dt>val queryTweetsToCounts = tweetPairs</dt><dd><dl class="simple">
+<dt>.map {</dt><dd><dl class="simple">
+<dt>case (queryTweet, _, label) =&gt;</dt><dd><p>if (label) (queryTweet.tweet, (1, 0)) else (queryTweet.tweet, (0, 1))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+.sumByKey
+.map { case (queryTweet, (posCount, negCount)) =&gt; (queryTweet, posCount, negCount) }</p>
+</dd>
+<dt>Execution</dt><dd><dl>
+<dt>.zip(</dt><dd><dl>
+<dt>queryTweetsToCounts.writeExecution(</dt><dd><p>TypedTsv[(TweetId, Int, Int)](s”${outputPath}_$identifier”)),</p>
+</dd>
+<dt>Util.printSummaryOfNumericColumn(</dt><dd><dl class="simple">
+<dt>queryTweetsToCounts</dt><dd><p>.map { case (_, posCount, _) =&gt; posCount },</p>
+</dd>
+</dl>
+<p>Some(s”Per-query Positive Count ($identifier)”)),</p>
+</dd>
+<dt>Util.printSummaryOfNumericColumn(</dt><dd><dl class="simple">
+<dt>queryTweetsToCounts</dt><dd><p>.map { case (_, _, negCount) =&gt; negCount },</p>
+</dd>
+</dl>
+<p>Some(s”Per-query Negative Count ($identifier)”))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>).unit</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Get the top K similar tweets key-val dataset</p></li>
+<li></li>
+<li><p>&#64;param allTweetPairs all tweet pairs with their similarity scores</p></li>
+<li><p>&#64;param k             the maximum number of top results for each user</p></li>
+<li></li>
+<li><p>&#64;return key-val top K results for each tweet</p></li>
+</ul>
+<p><a href="#id25"><span class="problematic" id="id26">*</span></a>/</p>
+</dd>
+<dt>def getKeyValTopKSimilarTweets(</dt><dd><p>allTweetPairs: TypedPipe[(TweetId, TweetWithScore)],
+k: Int</p>
+</dd>
+</dl>
+<p>)(
+): TypedPipe[(TweetId, TweetsWithScore)] = {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>allTweetPairs.group</dt><dd><p>.sortedReverseTake(k)(Ordering.by(_.score))
+.map { case (tweetId, tweetWithScoreSeq) =&gt; (tweetId, TweetsWithScore(tweetWithScoreSeq)) }</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Get the top K similar tweets dataset.</p></li>
+<li></li>
+<li><p>&#64;param allTweetPairs all tweet pairs with their similarity scores</p></li>
+<li><p>&#64;param k             the maximum number of top results for each user</p></li>
+<li></li>
+<li><p>&#64;return top K results for each tweet</p></li>
+</ul>
+<p><a href="#id27"><span class="problematic" id="id28">*</span></a>/</p>
+</dd>
+<dt>def getTopKSimilarTweets(</dt><dd><p>allTweetPairs: TypedPipe[(TweetId, TweetWithScore)],
+k: Int</p>
+</dd>
+</dl>
+<p>)(
+): TypedPipe[TweetTopKTweetsWithScore] = {</p>
+<blockquote>
+<div><dl>
+<dt>allTweetPairs.group</dt><dd><p>.sortedReverseTake(k)(Ordering.by(_.score))
+.map {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case (tweetId, tweetWithScoreSeq) =&gt;</dt><dd><p>TweetTopKTweetsWithScore(tweetId, TweetsWithScore(tweetWithScoreSeq))</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Given a input sequence, output all unique pairs in this sequence.</p></li>
+</ul>
+<p><a href="#id29"><span class="problematic" id="id30">*</span></a>/</p>
+</dd>
+<dt>def allUniquePairs[T](input: Seq[T]): Stream[(T, T)] = {</dt><dd><dl>
+<dt>input match {</dt><dd><p>case Nil =&gt; Stream.empty
+case seq =&gt;</p>
+<blockquote>
+<div><p>seq.tail.toStream.map(a =&gt; (seq.head, a)) #::: allUniquePairs(seq.tail)</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../_sources/src/scala/com/twitter/simclusters_v2/scalding/tweet_similarity/TweetPairLabelCollectionUtil.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

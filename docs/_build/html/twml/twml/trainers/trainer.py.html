@@ -1,0 +1,2079 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>Learning rate decay functions &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../" id="documentation_options" src="../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p># pylint: disable=too-many-lines
+“””
+<code class="docutils literal notranslate"><span class="pre">twml.trainers.Trainer</span></code> is a wrapper around <a class="reference external" href="https://www.tensorflow.org/versions/master/api_docs/python/tf/estimator/Estimator">tf.estimator.Estimator</a>
+to expose an easier to use API by
+hiding rarely used config knobs and supplying default values.</p>
+<p>The <cite>Trainer</cite> facilitates multi-phase training commonly used at Twitter: e.g.
+MDL calibration -&gt; MLP training -&gt; Isotonic calibration.
+The <cite>Trainer</cite> also facilitates hyperparameters tuning,
+with its simple <cite>add_parser_arguments()</cite> method.</p>
+<section id="learning-rate-decay-functions">
+<h1>Learning rate decay functions<a class="headerlink" href="#learning-rate-decay-functions" title="Permalink to this heading">¶</a></h1>
+<p>Please note that we have four learning rate decay functions to choose from.
+Additionally, each trainer can only take one learning rate decay function and its parameters.
+If that is not the case, it will throw an error.
+Also, please note that the learning rate decay is a positional argument and should be placed as
+the last argument to the trainer, as you can see in the example above.
+The four learning decays options are:</p>
+<ol class="arabic simple">
+<li><p>inverse_learning_rate_decay:</p></li>
+</ol>
+<blockquote>
+<div><p>The function returns the decayed learning rate. It is computed as:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">decayed_learning_rate</span> <span class="o">=</span> <span class="n">learning_rate</span> <span class="o">/</span> <span class="p">(</span><span class="mi">1</span> <span class="o">+</span> <span class="n">decay_rate</span> <span class="o">*</span> <span class="n">global_step</span> <span class="o">/</span><span class="n">decay_step</span><span class="p">)</span>
+<span class="n">final_decayed_learning_rate</span> <span class="o">=</span> <span class="nb">max</span><span class="p">(</span><span class="n">decayed_learning_rate</span><span class="p">,</span> <span class="n">min_learning_rate</span><span class="p">)</span>
+</pre></div>
+</div>
+</div></blockquote>
+<ol class="arabic simple" start="2">
+<li><p>polynomial_learning_rate_decay:</p></li>
+</ol>
+<blockquote>
+<div><p>The function returns the decayed learning rate. It is computed as:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">global_step</span> <span class="o">=</span> <span class="nb">min</span><span class="p">(</span><span class="n">global_step</span><span class="p">,</span> <span class="n">decay_steps</span><span class="p">)</span>
+<span class="n">decayed_learning_rate</span> <span class="o">=</span> <span class="p">(</span><span class="n">learning_rate</span> <span class="o">-</span> <span class="n">end_learning_rate</span><span class="p">)</span> <span class="o">*</span>
+                        <span class="p">(</span><span class="mi">1</span> <span class="o">-</span> <span class="n">global_step</span> <span class="o">/</span> <span class="n">decay_steps</span><span class="p">)</span> <span class="o">^</span> <span class="p">(</span><span class="n">power</span><span class="p">)</span> <span class="o">+</span>
+                        <span class="n">end_learning_rate</span>
+</pre></div>
+</div>
+</div></blockquote>
+<ol class="arabic simple" start="3">
+<li><p>piecewise_constant_learning_rate_decay:</p></li>
+</ol>
+<blockquote>
+<div><p>Piecewise constant from boundaries and interval values.</p>
+<p>Example: use a learning rate that’s 1.0 for the first 100001 steps, 0.5 for
+the next 10000 steps, and 0.1 for any additional steps.</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">global_step</span> <span class="o">=</span> <span class="n">tf</span><span class="o">.</span><span class="n">Variable</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="n">trainable</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
+<span class="n">boundaries</span> <span class="o">=</span> <span class="p">[</span><span class="mi">100000</span><span class="p">,</span> <span class="mi">110000</span><span class="p">]</span>
+<span class="n">values</span> <span class="o">=</span> <span class="p">[</span><span class="mf">1.0</span><span class="p">,</span> <span class="mf">0.5</span><span class="p">,</span> <span class="mf">0.1</span><span class="p">]</span>
+<span class="n">learning_rate</span> <span class="o">=</span> <span class="n">tf</span><span class="o">.</span><span class="n">train</span><span class="o">.</span><span class="n">piecewise_constant</span><span class="p">(</span><span class="n">global_step</span><span class="p">,</span> <span class="n">boundaries</span><span class="p">,</span> <span class="n">values</span><span class="p">)</span>
+</pre></div>
+</div>
+</div></blockquote>
+<ol class="arabic simple" start="4">
+<li><p>exponential_learning_rate_decay:</p></li>
+</ol>
+<blockquote>
+<div><p>The function returns the decayed learning rate. It is computed as:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">decayed_learning_rate</span> <span class="o">=</span> <span class="n">learning_rate</span> <span class="o">*</span> <span class="n">decay_rate</span> <span class="o">^</span> <span class="p">(</span><span class="n">global_step</span> <span class="o">/</span> <span class="n">decay_steps</span><span class="p">)</span>
+</pre></div>
+</div>
+</div></blockquote>
+<p>“””</p>
+<p>import datetime
+import functools
+import math
+from operator import itemgetter
+import os
+import pprint as pp
+import random
+from string import Template
+import subprocess
+import sys
+import time
+from threading import Thread</p>
+<p>from twitter.common.metrics import AtomicGauge
+from twitter.deepbird.stats_server import utils as stats_server_utils
+from twitter.deepbird.stats_server.stats_exporter import StatsExporter
+from twitter.ml.common import metrics
+from twitter.ml.common.kubernetes import kubectl_delete_by_name, Resource
+from twitter.ml.twml.status import get_distributed_training_job_status, TrainingJobStatus</p>
+<p>from absl import logging
+from twml.optimizers import LazyAdamOptimizer, optimize_loss, OPTIMIZER_SUMMARIES
+from twml.contrib.optimizers import DeepGradientCompressionOptimizer
+from twml.tracking import ExperimentTracker
+from twml.util import (delete_file_or_dir,</p>
+<blockquote>
+<div><p>get_distributed_training_job_path,
+sanitize_hdfs_path)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>try:</dt><dd><p>from urllib import quote as encode_url</p>
+</dd>
+<dt>except ImportError:</dt><dd><p>from urllib.parse import quote as encode_url</p>
+</dd>
+</dl>
+<p>import tensorflow.compat.v1 as tf
+import tensorflow
+import tensorflow_hub as hub</p>
+<p>import twitter.ml.twml.kubernetes.status as k8s_status
+import twml
+import twml.export_output_fns
+import twml.learning_rate_decay
+import twml.metrics</p>
+<dl>
+<dt>_CLUSTER_TEMPLATE = Template(‘’’{</dt><dd><dl class="simple">
+<dt>“cluster”: {</dt><dd><p>“ps”: [$PS],
+“chief”: [$CHIEF],
+“worker”: [$WORKER]</p>
+</dd>
+</dl>
+<p>},
+“task”: {“type”: “$TYPE”, “index”: $INDEX}</p>
+</dd>
+</dl>
+<p>}
+‘’’)</p>
+<dl>
+<dt>def init_from_checkpoint(init_dir, init_map):</dt><dd><p>“””
+Wrapper around tf.train.init_from_checkpoint
+“””
+if init_dir:</p>
+<blockquote>
+<div><p>init_dir = sanitize_hdfs_path(init_dir)
+tf.train.init_from_checkpoint(init_dir, init_map)</p>
+</div></blockquote>
+</dd>
+<dt>class Trainer(object):</dt><dd><p>“””
+This class wraps <code class="docutils literal notranslate"><span class="pre">tf.estimator.Estimator</span></code> to make construction, saving, and loading easier.
+Supports multi-phase training (for example, use a Trainer for MDL calibration, then
+another for training the rest of the model, then another for isotonic calibration).
+The Trainer also implements a training and evaluation loop via the <code class="docutils literal notranslate"><span class="pre">learn()</span></code> method.
+Each Trainer is associated to a fixed set of hyper parameters (params), and a single model
+specified by <code class="docutils literal notranslate"><span class="pre">build_graph</span></code>. Given these constraints, a single Trainer can be called
+multiple times for training and evaluation over multiple epochs.</p>
+<p>However, if you intend to try different sets of hyper-parameters, we recommend you instantiate
+a different Trainer for each such experiment. That way, each experiment can be tracked
+in a different <code class="docutils literal notranslate"><span class="pre">save_dir</span></code>. Indeed, after calling <code class="docutils literal notranslate"><span class="pre">learn</span></code>, a Trainer’s save_dir will contain
+checkpoints of the model (its graph, and variables), and the history of metrics (for example,
+evaluation accuracy at each epoch), and other store observations like the average time per step.
+The latter metrics can be viewed by pointing
+TensorBoard to the save_dir and accessing TensorBoard via your browser.
+“””</p>
+<dl>
+<dt>def __init__(self, name, params, build_graph_fn,</dt><dd><blockquote>
+<div><p>metric_fn=None,
+optimize_loss_fn=None,
+run_config=None,
+save_dir=None,
+init_from_dir=None,
+init_map=None,
+warm_start_from=None,
+profiler_steps=None,
+<a href="#id1"><span class="problematic" id="id2">**</span></a>kwargs):</p>
+</div></blockquote>
+<p>“””</p>
+<dl>
+<dt>Args:</dt><dd><dl>
+<dt>name (String):</dt><dd><p>string name of this estimator; used as scope names for variables and tensors.</p>
+</dd>
+<dt>params (HParams, Namespace, or Dict):</dt><dd><p>hyper-parameters to be passed to Estimator constructor.
+Must include params.train_batch_size and params.eval_batch_size.
+Note that params is passed to twml.util.convert_to_hparams() to produce an HParams.</p>
+</dd>
+<dt>build_graph_fn:</dt><dd><p>A function for building tensorflow graphs.
+This matches TensorFlow Estimator’s model_fn signature.
+For example,</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="k">def</span> <span class="nf">build_graph</span><span class="p">(</span><span class="n">features</span><span class="p">,</span> <span class="n">label</span><span class="p">,</span> <span class="n">mode</span><span class="p">,</span> <span class="n">params</span><span class="p">,</span> <span class="n">config</span><span class="o">=</span><span class="kc">None</span><span class="p">):</span>
+  <span class="c1"># Implements a simple binary logistic regression model</span>
+  <span class="n">sparse_tf</span> <span class="o">=</span> <span class="n">twml</span><span class="o">.</span><span class="n">util</span><span class="o">.</span><span class="n">convert_to_sparse</span><span class="p">(</span><span class="n">features</span><span class="p">,</span> <span class="n">params</span><span class="o">.</span><span class="n">input_size_bits</span><span class="p">)</span>
+
+  <span class="n">logits</span> <span class="o">=</span> <span class="n">twml</span><span class="o">.</span><span class="n">layers</span><span class="o">.</span><span class="n">full_sparse</span><span class="p">(</span><span class="n">sparse_tf</span><span class="p">,</span> <span class="mi">1</span> <span class="o">&lt;&lt;</span> <span class="n">params</span><span class="o">.</span><span class="n">input_size_bits</span><span class="p">,</span> <span class="mi">1</span><span class="p">)</span>
+
+  <span class="k">if</span> <span class="n">mode</span> <span class="o">==</span> <span class="s1">&#39;infer&#39;</span><span class="p">:</span>
+    <span class="n">loss</span> <span class="o">=</span> <span class="kc">None</span>
+  <span class="k">else</span><span class="p">:</span>
+    <span class="n">loss</span> <span class="o">=</span> <span class="n">tf</span><span class="o">.</span><span class="n">nn</span><span class="o">.</span><span class="n">sigmoid_cross_entropy_with_logits</span><span class="p">(</span><span class="n">labels</span><span class="o">=</span><span class="n">label</span><span class="p">,</span> <span class="n">logits</span><span class="o">=</span><span class="n">logits</span><span class="p">)</span>
+    <span class="n">loss</span> <span class="o">=</span> <span class="n">twml</span><span class="o">.</span><span class="n">util</span><span class="o">.</span><span class="n">weighted_average</span><span class="p">(</span><span class="n">loss</span><span class="p">,</span> <span class="n">features</span><span class="p">[</span><span class="s1">&#39;weights&#39;</span><span class="p">])</span>
+
+  <span class="n">output</span> <span class="o">=</span> <span class="n">tf</span><span class="o">.</span><span class="n">nn</span><span class="o">.</span><span class="n">sigmoid</span><span class="p">(</span><span class="n">logits</span><span class="p">)</span>
+
+  <span class="k">return</span> <span class="p">{</span><span class="s1">&#39;output&#39;</span><span class="p">:</span> <span class="n">output</span><span class="p">,</span> <span class="s1">&#39;loss&#39;</span><span class="p">:</span> <span class="n">loss</span><span class="p">}</span>
+</pre></div>
+</div>
+<dl class="simple">
+<dt>Args:</dt><dd><dl class="simple">
+<dt>features (dict of Tensor keyed by a string name):</dt><dd><p>input tensors.</p>
+</dd>
+<dt>mode (tf.estimator.ModeKeys / String):</dt><dd><p>one of ‘train’, ‘eval’, ‘infer’.</p>
+</dd>
+<dt>label (Tensor):</dt><dd><p>if in <code class="docutils literal notranslate"><span class="pre">mode</span> <span class="pre">==</span> <span class="pre">'train'</span></code> mode, these contain the corresponding labels for input.</p>
+</dd>
+<dt>params (HParams):</dt><dd><p>hyper parameters that control how to build a graph.</p>
+</dd>
+<dt>config:</dt><dd><p>the RunConfig object passed to Estimator constructor.</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>This function is expected to return a dictionary containing the following keys:</p>
+<ul class="simple">
+<li><p>‘output’: a node representing model output; required.</p></li>
+<li><p>‘loss’: (required) a loss node used for optimization; required for training and
+evaluation.</p></li>
+<li><p>‘train_op’: (optional) an operation that minimizes the loss (as output by
+<cite>tf.train.Optimizer.minimize</cite>). If train_op is specified, train_op is used
+for optimization as opposed to loss. Loss is always logged to tensorboard.</p></li>
+</ul>
+<p>Notes:</p>
+<ul class="simple">
+<li><p>any tf.summary written inside build graph are logged to tensorboard during training.</p></li>
+<li><p>the <code class="docutils literal notranslate"><span class="pre">build_graph_fn</span></code> is called once or twice per epoch (once per training,
+once per evaluation). All data loading (and preprocessing) logic not required
+for serving should be in the <code class="docutils literal notranslate"><span class="pre">input_fn</span></code> passed to <code class="docutils literal notranslate"><span class="pre">learn</span></code>, <code class="docutils literal notranslate"><span class="pre">train</span></code>,
+<code class="docutils literal notranslate"><span class="pre">evalulate</span></code>, etc.</p></li>
+</ul>
+</dd>
+<dt>optimize_loss_fn:</dt><dd><p>Defaults to Trainer.get_train_op. A function that takes params and loss as arguments
+and returns a training op. The training op is used to update parameters (that is, to learn).</p>
+</dd>
+<dt>metric_fn:</dt><dd><p>A function that returns the eval_metric_ops dict given graph_output, labels and weights.
+Defaults to None.
+Use <code class="docutils literal notranslate"><span class="pre">twml.metrics.get_binary_class_metric_fn()</span></code> to return a <code class="docutils literal notranslate"><span class="pre">metric_fn</span></code>
+which implements many binary classification metrics.</p>
+</dd>
+<dt>run_config (RunConfig):</dt><dd><p>optional configuration to be passed to Estimator constructor. Defaults to None.</p>
+</dd>
+<dt>save_dir (String):</dt><dd><p>optional directory where to save model checkpoints,
+tensorboard event files and trained parameters.
+Overwrites and defaults to run_config.model_dir.</p>
+</dd>
+<dt>init_from_dir (String):</dt><dd><p>optional directory to load weights from.
+if set to None (the default), do not init from any directory.</p>
+</dd>
+<dt>init_map (map from String to String):</dt><dd><p>Must be specified if init_from_dir is specified.
+Defines which scopes and variables to load.
+Keys are the variables and scopes to load from the directory.
+Values are the destinations (in the current graph) to load into.
+See tf.init_from_checkpoint for more information.
+Note that the the trainer prepends name_scope of the form <cite>name</cite>/model/ to the name_scope
+of any variable defined inside <cite>build_graph_fn</cite> and this should be taken into account when
+defining the values.</p>
+</dd>
+<dt>warm_start_from:</dt><dd><p>Optional string filepath to a checkpoint to warm-start from,
+or a tf.estimator.WarmStartSettings object to fully configure warm-starting.
+If the string filepath is provided instead of a WarmStartSettings,
+then all variables are warm-started, and it is assumed that
+vocabularies and Tensor names are unchanged.</p>
+</dd>
+<dt>profiler_steps (Integer):</dt><dd><p>Defaults to None. If set defines the number of steps in the
+<a class="reference external" href="https://www.tensorflow.org/api_docs/python/tf/train/ProfilerHook">tf.train.ProfileHook</a>.
+Captures CPU/GPU profiling information every <code class="docutils literal notranslate"><span class="pre">profiler_steps</span></code> steps or seconds.
+When executing <code class="docutils literal notranslate"><span class="pre">learn</span></code>, <code class="docutils literal notranslate"><span class="pre">train</span></code> or <code class="docutils literal notranslate"><span class="pre">predict</span></code> methods,
+with <code class="docutils literal notranslate"><span class="pre">profiler_steps</span></code> set to a number,
+a <code class="docutils literal notranslate"><span class="pre">timeline_X.json</span></code> file is created in the save_dir. This file contains profiling data
+storedin Chrome trace format. To view stored data, use the Chrome browser to follow
+these steps:</p>
+<ol class="arabic simple">
+<li><p>Go to the page chrome://tracing.</p></li>
+<li><p>In the upper left corner, you will find Load button.</p></li>
+<li><p>Press it and load our JSON file, which can be found in the <code class="docutils literal notranslate"><span class="pre">save_dir</span></code></p></li>
+</ol>
+<p><em>Warning</em>: This could create too many these json files which can be a potential problem,
+e.g. for  HDFS there is normally quota forfile count, so use with caution.</p>
+<p>Note: this argument is ignored when a non-None <code class="docutils literal notranslate"><span class="pre">hooks</span></code> argument is pasesd to
+<code class="docutils literal notranslate"><span class="pre">train</span></code>, <code class="docutils literal notranslate"><span class="pre">learn</span></code>, or <code class="docutils literal notranslate"><span class="pre">predict</span></code> methods. The hook can be added manually by passing
+<code class="docutils literal notranslate"><span class="pre">trainer.train(...,</span> <span class="pre">hooks=myhooks.extend(trainer.get_train_hooks()))</span></code>, for example.</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>“””</p>
+<dl class="simple">
+<dt>if tensorflow.__version__ &gt;= “2.0”:</dt><dd><p>RuntimeError(“Trainer not yet supported for Tensorflow &gt;= 2.0”)</p>
+</dd>
+</dl>
+<p>self._name = name
+self._build_graph_fn = build_graph_fn
+self._metric_fn = metric_fn
+self._tensorboard_handle = None
+self._current_estimator_spec = None  # holds the current estimator spec
+self._profiler_steps = profiler_steps
+self._export_output_fn = None
+self._is_early_stopping = False</p>
+<p># NOTE: Sanitize all HDFS paths first.
+save_dir = sanitize_hdfs_path(save_dir)
+init_from_dir = sanitize_hdfs_path(init_from_dir)</p>
+<p># warm_start_from can be of type tf.estimator.WarmStartSettings.
+if isinstance(warm_start_from, str):</p>
+<blockquote>
+<div><p>warm_start_from = sanitize_hdfs_path(warm_start_from)</p>
+</div></blockquote>
+<p># convert to twitter.deepbird.hparam.hparam.HParams object
+params = twml.util.convert_to_hparams(params)</p>
+<p># keep a copy of the params because calling self._estimator.params creates a deepcopy
+self._params = params
+self.check_params()</p>
+<p>self._using_hogwild = True if os.environ.get(‘TWML_HOGWILD_PORTS’) else False
+# configure Hogwild (needs to be called before RunConfig is created)
+self._hogwild_setup()</p>
+<dl>
+<dt>if not run_config:</dt><dd><p>session_config = tf.ConfigProto()
+# By default each process tries to allocate (almost) all of the memory.
+# This option ensures the gpu memory grows dynamically instead.
+session_config.gpu_options.allow_growth = True  # pylint: disable=no-member</p>
+<dl>
+<dt>if ‘TWML_NUM_CPUS’ in os.environ:</dt><dd><p>num_available_cpus = int(os.environ.get(“TWML_MESOS_CPU”, “8”))
+if params.num_mkl_threads &gt; 1:</p>
+<blockquote>
+<div><p>os.environ[“OMP_NUM_THREADS”] = str(params.num_mkl_threads)
+os.environ[“MKL_NUM_THREADS”] = str(params.num_mkl_threads)
+session_config.inter_op_parallelism_threads = num_available_cpus // params.num_mkl_threads
+session_config.intra_op_parallelism_threads = params.num_mkl_threads</p>
+</div></blockquote>
+</dd>
+<dt>run_config = tf.estimator.RunConfig(</dt><dd><p>session_config=session_config,
+keep_checkpoint_max=self._params.get(‘keep_checkpoint_max’, 20),
+log_step_count_steps=10000,
+save_checkpoints_secs=self._params.get(‘save_checkpoints_secs’, 600),
+tf_random_seed=self._tf_random_seed())</p>
+</dd>
+</dl>
+</dd>
+<dt>elif not isinstance(run_config, tf.estimator.RunConfig):</dt><dd><dl class="simple">
+<dt>raise ValueError(“Expecting run_config argument of type None or tf.estimator.RunConfig”</dt><dd><p>“Got %s instead.” % type(run_config).__name__)</p>
+</dd>
+</dl>
+</dd>
+<dt>elif os.environ.get(‘TWML_HOGWILD_PORTS’):</dt><dd><p>raise ValueError(“Custom RunConfig not supported with Hogwild”)</p>
+</dd>
+<dt>if run_config.model_dir is None and save_dir is None:</dt><dd><dl class="simple">
+<dt>raise ValueError(</dt><dd><p>“Expecting either save_dir or run_config.model_dir to be specified. Got None for each.”)</p>
+</dd>
+</dl>
+</dd>
+<dt>elif run_config.model_dir is None:</dt><dd><p>run_config = run_config.replace(model_dir=save_dir)</p>
+</dd>
+<dt>elif save_dir is None:</dt><dd><p>save_dir = run_config.model_dir</p>
+</dd>
+</dl>
+<p>self._save_dir = save_dir
+self.experiment_tracker = ExperimentTracker(self._params, run_config, self._save_dir)</p>
+<p># Check if should delete the tsd running this training job. In certain use case when
+# there are other tf operations following trainer.train_and_evaluate (or trainer.learn),
+# additional state files need to be specified to ensure those steps are executed after job restart.
+kwargs[‘gke_state_files’] = kwargs.get(‘gke_state_files’, [‘_SUCCESS’])
+self._maybe_del_tsd_exit(kwargs[‘gke_state_files’])
+logging.info(“Checkpoint and event files will be saved at save_dir=%s”, save_dir)
+self._optimize_loss_fn = self.get_train_op if optimize_loss_fn is None else optimize_loss_fn</p>
+<p># overwrite the current save_dir
+if self._params.get(‘overwrite_save_dir’) and tf.io.gfile.exists(self._save_dir):</p>
+<blockquote>
+<div><dl class="simple">
+<dt>logging.info(“Trainer overwriting existing save directory: %s (params.overwrite_save_dir)”</dt><dd><p>% self._save_dir)</p>
+</dd>
+</dl>
+<p># if distributed or hogwild:
+if self._params.get(‘distributed’, False):</p>
+<blockquote>
+<div><p># sleep for 30 seconds to allow each worker to get to this point.
+time.sleep(30)
+if run_config.is_chief:</p>
+<blockquote>
+<div><p>logging.info(“Chief deleting the save_dir now”)
+delete_file_or_dir(self._save_dir)</p>
+</div></blockquote>
+<p># sleep for 30 seconds to allow each worker to get to this point.
+time.sleep(30)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>else:</dt><dd><p>delete_file_or_dir(self._save_dir)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p># Exposing stats to a /vars.json endpoint that will be collected
+# by the absorber
+if self._params.get(‘stats_port’):</p>
+<blockquote>
+<div><dl class="simple">
+<dt>try:</dt><dd><p>stats_server_utils.start_stats_server(self._params.get(‘stats_port’), self._save_dir)</p>
+</dd>
+<dt>except Exception as err:</dt><dd><p>logging.error(‘Failed to start the stats server. Error: %s’, str(err))</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>checkpoint = os.path.join(self._save_dir, ‘checkpoint’)
+if tf.io.gfile.exists(checkpoint):</p>
+<blockquote>
+<div><dl class="simple">
+<dt>logging.info(“The provided save_dir directory %s already exists.”</dt><dd><p>“ Training will be resumed.”
+% checkpoint)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>self._maybe_restore_checkpoint = lambda: init_from_checkpoint(init_from_dir, init_map)</p>
+<dl class="simple">
+<dt>if init_from_dir is not None and init_map is None:</dt><dd><p>raise ValueError(“Need to provide init_map when init_from_dir is provided.”)</p>
+</dd>
+<dt>if not tf.io.gfile.exists(self._save_dir):</dt><dd><p># so tensorboard can point to a directory that exists
+tf.io.gfile.mkdir(self._save_dir)</p>
+</dd>
+<dt>self._estimator = tf.estimator.Estimator(</dt><dd><p>model_fn=self._model_fn,
+params=self._params,  # HParams
+config=run_config,  # RunConfig
+warm_start_from=warm_start_from,
+model_dir=self._save_dir,  # By this point it is same as run_config.model_dir</p>
+</dd>
+</dl>
+<p>)</p>
+<p># Log parameters that are used to construct trainer. This allows people to see default values.
+logging.info(“Trainer constructed using the following parameters: “)
+pp_params = pp.pformat(self._params.values())
+logging.info(pp_params)</p>
+<p># Start TensorBoard
+if self._params.get(‘disable_tensorboard’, False):</p>
+<blockquote>
+<div><p>logging.info(“Skipping launching TensorBoard [–disable_tensorboard is set]”)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>elif “tensorboard_port” in self._params.values() and self._params.tensorboard_port is not None:</dt><dd><p>self.start_tensorboard(self._params.tensorboard_port)</p>
+</dd>
+</dl>
+<p># Export gauge that will track whether a model was exported
+self.stats_exporter = StatsExporter(“twml.trainer”)
+self.export_gauge = AtomicGauge(‘export_model’)
+self.stats_exporter.register_metrics(self.export_gauge)</p>
+</dd>
+<dt>def _hogwild_setup(self):</dt><dd><p>“””
+Setup the parameters required for hogwild.
+“””
+self._num_workers = self._params.get(‘num_workers’) or 1
+logging.info(“NUM_WORKERS: %d”, self._num_workers)
+if self._num_workers &lt;= 1:</p>
+<blockquote>
+<div><p>self._ports = None
+return</p>
+</div></blockquote>
+<p># a hogwild job is considered distributed
+if ‘distributed’ in self._params:</p>
+<blockquote>
+<div><p>self._params.set_hparam(‘distributed’, True)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>else:</dt><dd><p>self._params.add_hparam(‘distributed’, True)</p>
+</dd>
+</dl>
+<p>ports = os.environ.get(‘TWML_HOGWILD_PORTS’)
+if ports:</p>
+<blockquote>
+<div><p>self._ports = [int(port) for port in ports.strip().split(“,”)]
+if (self._num_workers + 1!= len(self._ports)):</p>
+<blockquote>
+<div><p>raise ValueError(“Number of (workers + PS) and ports need to match”)</p>
+</div></blockquote>
+</div></blockquote>
+<dl class="simple">
+<dt>else:</dt><dd><dl class="simple">
+<dt>if self._num_workers &gt; 1:</dt><dd><p>raise ValueError(“TWML_HOGWILD_PORTS needs to be set to use hogwild training”)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p># Split the number of data threads across multiple workers
+num_threads = self._params.get(‘num_threads’)
+num_threads_per_worker = int(math.ceil(float(num_threads) / self._num_workers))
+self._params.set_hparam(‘num_threads’, num_threads_per_worker)</p>
+<p>hogwild_task_type = os.environ.get(‘TWML_HOGWILD_TASK_TYPE’)
+hogwild_task_id = int(os.environ.get(‘TWML_HOGWILD_TASK_ID’))
+os.environ[‘TF_CONFIG’] = self._get_cluster_config(hogwild_task_type, hogwild_task_id)</p>
+</dd>
+<dt>def _tf_random_seed(self):</dt><dd><p>“”” Returns user set seed and deal with Hogwild multiple seeds “””
+tf_random_seed = self._params.get(‘tf_random_seed’, None)
+if tf_random_seed is None:</p>
+<blockquote>
+<div><p>return None</p>
+</div></blockquote>
+<dl class="simple">
+<dt>elif self.using_hogwild and os.environ.get(‘TWML_HOGWILD_TASK_TYPE’) == ‘worker’:</dt><dd><p># chief (tf_random_seed), worker_0 (tf_random_seed + 1), worker_1 (tf_random_seed + 2)…
+return tf_random_seed + 1 + int(os.environ.get(‘TWML_HOGWILD_TASK_ID’))</p>
+</dd>
+<dt>else:</dt><dd><p>return tf_random_seed</p>
+</dd>
+</dl>
+</dd>
+<dt>def check_params(self):</dt><dd><p>“”” Verify that params has the correct key,values “””
+param_values = self._params.values()</p>
+<dl>
+<dt>if ‘train_batch_size’ in param_values:</dt><dd><dl class="simple">
+<dt>if not isinstance(self._params.train_batch_size, int):</dt><dd><p>raise ValueError(“Expecting params.train_batch_size to be an integer.”)</p>
+</dd>
+<dt>if self._params.train_batch_size &lt;= 0:</dt><dd><p>raise ValueError(“train_batch_size needs to be positive”)</p>
+</dd>
+</dl>
+</dd>
+<dt>else:</dt><dd><p>raise ValueError(“train_batch_size needs to be present in params”)</p>
+</dd>
+<dt>if ‘eval_batch_size’ in param_values:</dt><dd><dl class="simple">
+<dt>if not isinstance(self._params.eval_batch_size, int):</dt><dd><p>raise ValueError(“Expecting params.eval_batch_size to be an integer.”)</p>
+</dd>
+<dt>if self._params.eval_batch_size &lt;= 0:</dt><dd><p>raise ValueError(“eval_batch_size needs to be positive.”)</p>
+</dd>
+</dl>
+</dd>
+<dt>else:</dt><dd><p>self._params.add_hparam(‘eval_batch_size’, self._params.train_batch_size)</p>
+</dd>
+<dt>if (self._params.get(‘distributed_training_cleanup’) and</dt><dd><p>not self._params.get(‘distributed’)):
+# we only need to support training discontinuation for distributed training
+# bc we are still using TSDs on GKE for distributed training
+raise ValueError(</p>
+<blockquote>
+<div><p>“Expecting params.distributed to be set if ”
+“params.distributed_training_cleanup is set.”</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+<dt>def _get_cluster_config(self, name, index):</dt><dd><p>“””Create a tensorflow cluster config from ports, name and index”””
+host = ‘“localhost:%d”’
+ps = host % self._ports[0]
+chief = host % self._ports[1]
+workers = “, “.join([host % port for port in self._ports[2:]])
+config = _CLUSTER_TEMPLATE.substitute(</p>
+<blockquote>
+<div><p>PS=ps,
+CHIEF=chief,
+WORKER=workers,
+TYPE=name,
+INDEX=index,</p>
+</div></blockquote>
+<p>)
+return config</p>
+</dd>
+</dl>
+<p>&#64;property
+def current_estimator_spec(self):</p>
+<blockquote>
+<div><p>“””
+returns the current estimator (warning: often reset)
+“””
+return self._current_estimator_spec</p>
+</div></blockquote>
+<p>&#64;property
+def estimator(self):</p>
+<blockquote>
+<div><p>“”” returns estimator encapsulated by Trainer “””
+return self._estimator</p>
+</div></blockquote>
+<p>&#64;property
+def num_workers(self):</p>
+<blockquote>
+<div><p>“”” returns number of workers “””
+return self._estimator.config.num_worker_replicas</p>
+</div></blockquote>
+<p>&#64;property
+def worker_index(self):</p>
+<blockquote>
+<div><p>“””
+returns index of worker in the cluster
+chief has index 0
+non-chief workers have indices 1 through (num_workers - 1)
+“””
+return self._estimator.config.global_id_in_cluster</p>
+</div></blockquote>
+<p>&#64;property
+def using_hogwild(self):</p>
+<blockquote>
+<div><p>“”” returns a bool indicating whether hogwild is being used “””
+return self._using_hogwild</p>
+</div></blockquote>
+<dl>
+<dt>def set_estimator(self, estimator):</dt><dd><p>“”” sets the estimator used internally by Trainer “””
+if not isinstance(estimator, tf.estimator.Estimator):</p>
+<blockquote>
+<div><p>raise ValueError(“Expecting tf.estimator.Estimator”)</p>
+</div></blockquote>
+<p>self._estimator = estimator
+self._params = self.estimator.params</p>
+</dd>
+</dl>
+<p>&#64;property
+def params(self):</p>
+<blockquote>
+<div><p>“””
+returns the hyper-parameters passed to the constructor.
+“””
+return self._params</p>
+</div></blockquote>
+<p>&#64;staticmethod
+def add_parser_arguments():</p>
+<blockquote>
+<div><p>“””
+Add common commandline args to parse for the Trainer class.
+Typically, the user calls this function and then parses cmd-line arguments
+into an argparse.Namespace object which is then passed to the Trainer constructor
+via the params argument.</p>
+<p>See the <a class="reference external" href="_modules/twml/argument_parser.html#get_trainer_parser">code</a>
+for a list and description of all cmd-line arguments.</p>
+<dl class="simple">
+<dt>Returns:</dt><dd><p>argparse.ArgumentParser instance with some useful args already added.</p>
+</dd>
+</dl>
+<p>“””
+return twml.argument_parser.get_trainer_parser()</p>
+</div></blockquote>
+<p>&#64;staticmethod
+def get_train_op(params, loss):</p>
+<blockquote>
+<div><p>“””
+Return a training Op, that is, a <a class="reference external" href="https://www.tensorflow.org/api_docs/python/tf/contrib/layers/optimize_loss">twml.optimizers.optimize_loss</a>
+instance given params and loss.
+This method can be overwritten by passing the optimize_loss_fn to the Trainer
+constructor.</p>
+<dl class="simple">
+<dt>Args:</dt><dd><dl class="simple">
+<dt>params:</dt><dd><p>tensorflow.contrib.training.HParams instance. Recognizes the optimizer, optimizer_summaries,
+gradient_noise_scale, clip_gradients and learning_rate_decay (including
+other learning rate decay arguments).</p>
+</dd>
+<dt>loss:</dt><dd><p>scalar Op returned by the build_graph that specifies the training loss to
+be minimized.</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>“””
+optimizer = params.get(‘optimizer’)</p>
+<dl>
+<dt>if not optimizer:</dt><dd><p>optimizer = ‘SGD’</p>
+</dd>
+<dt>if optimizer == ‘LazyAdam’:</dt><dd><p>optimizer = LazyAdamOptimizer</p>
+</dd>
+<dt>if optimizer == ‘DGC’:</dt><dd><dl class="simple">
+<dt>optimizer = DeepGradientCompressionOptimizer(</dt><dd><p>learning_rate=params.learning_rate,
+use_locking=False,
+name=”Sparse”,
+density=params.get(‘dgc_density’),
+density_decay=params.get(‘dgc_density_decay’),
+density_decay_steps=params.get(‘dgc_density_decay_steps’),
+density_decay_rate=params.get(‘dgc_density_decay_rate’),
+min_density=params.get(‘dgc_min_density’),
+accumulation=params.get(‘dgc_accumulation’)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>summaries = [‘loss’]
+if params.get(‘show_optimizer_summaries’):</p>
+<blockquote>
+<div><p>summaries = OPTIMIZER_SUMMARIES</p>
+</div></blockquote>
+<dl class="simple">
+<dt>train_op = optimize_loss(</dt><dd><p>loss=loss,
+global_step=tf.train.get_global_step(),
+optimizer=optimizer,
+learning_rate=params.learning_rate,
+summaries=summaries,
+colocate_gradients_with_ops=True,
+gradient_noise_scale=params.get(‘gradient_noise_scale’),
+clip_gradients=params.get(‘clip_gradients’),
+learning_rate_decay_fn=twml.learning_rate_decay.get_learning_rate_decay_fn(params)</p>
+</dd>
+</dl>
+<p>)
+return train_op</p>
+</div></blockquote>
+<p>def export_model_effects(self, export_path, feature_spec=None, log_features=True):</p>
+<blockquote>
+<div><p># DO NOT CHANGE THE ORDER.
+# This needs to be done before registering the model.
+if feature_spec:</p>
+<blockquote>
+<div><dl>
+<dt>if log_features:</dt><dd><p>features = feature_spec[‘features’]
+feature_names = [‘.’.join(features[fid][‘featureName’].split(‘.’)[1:]) for fid in features.keys()]
+features_to_log = ‘,’.join(feature_names)
+try:</p>
+<blockquote>
+<div><p>model_hash = self.experiment_tracker.compute_model_hash(export_path)
+metrics.log_usage(‘dbv2’, ‘export_model_effects’, ‘v1’, custom_attrs=[model_hash, “feature config present”, features_to_log])</p>
+</div></blockquote>
+<dl class="simple">
+<dt>except:  # noqa: T803</dt><dd><p>logging.info(“Failed to log Feature Config features”)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>twml.contrib.export.export_fn.export_feature_spec(export_path, feature_spec)
+export_start_time = time.time()
+self.experiment_tracker.export_feature_spec(feature_spec)
+logging.info(“Exported feature spec to ML Metastore in %s seconds.”, time.time() - export_start_time)</p>
+</div></blockquote>
+<p>self.experiment_tracker.register_model(str(export_path))
+self.export_gauge.increment()</p>
+</div></blockquote>
+<p>&#64;property
+def best_or_latest_checkpoint(self):</p>
+<blockquote>
+<div><dl>
+<dt>if self._is_early_stopping:</dt><dd><p>best_checkpoint_path = os.path.join(self._save_dir, “best_checkpoint”)
+checkpoint_path = tf.train.latest_checkpoint(best_checkpoint_path)
+# Return best checkpoint if necessary
+if checkpoint_path:</p>
+<blockquote>
+<div><p>return checkpoint_path</p>
+</div></blockquote>
+<dl class="simple">
+<dt>else:</dt><dd><p>raise ValueError(“Best checkpoint not found at %s.” % best_checkpoint_path)</p>
+</dd>
+</dl>
+</dd>
+<dt>else:  # Fallback to latest checkpoint from save directory</dt><dd><p>return self.latest_checkpoint</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>&#64;property
+def latest_checkpoint(self):</p>
+<blockquote>
+<div><p>return self.estimator.latest_checkpoint()</p>
+</div></blockquote>
+<dl>
+<dt>def export_model(self, serving_input_receiver_fn,</dt><dd><blockquote>
+<div><p>export_output_fn=None,
+export_dir=None, checkpoint_path=None,
+feature_spec=None,
+log_features=True):</p>
+</div></blockquote>
+<p>“””
+Export the model for prediction. Typically, the exported model
+will later be run in production servers. This method is called
+by the user to export the PREDICTgraph to disk.</p>
+<p>Internally, this method calls <a class="reference external" href="https://www.tensorflow.org/api_docs/python/tf/estimator/Estimator#export_savedmodel">tf.estimator.Estimator.export_savedmodel</a>.</p>
+<p>Note that a valid self._export_output_fn is required.
+If export_ouput_fn is provided, it is used to set the self._export_output_fn.</p>
+<dl class="simple">
+<dt>Args:</dt><dd><dl class="simple">
+<dt>serving_input_receiver_fn:</dt><dd><p>function preparing the model for inference requests.
+This funtion returns the <code class="docutils literal notranslate"><span class="pre">features</span></code> dict passed to <code class="docutils literal notranslate"><span class="pre">build_graph</span></code>.</p>
+</dd>
+<dt>export_dir:</dt><dd><p>directory to export a SavedModel for prediction servers.
+Defaults to <code class="docutils literal notranslate"><span class="pre">[save_dir]/exported_models</span></code>.</p>
+</dd>
+<dt>checkpoint_path:</dt><dd><p>the checkpoint path to export. If None (the default), the most recent checkpoint
+found within the model directory is chosen.</p>
+</dd>
+<dt>export_output_fn:</dt><dd><p>Function to export the graph_output (output of build_graph) for
+prediction. Takes a graph_output dict as sole argument and returns
+the export_output_fns dict.
+Defaults to <cite>twml.export_output_fns.default_output_fn</cite>.</p>
+</dd>
+</dl>
+</dd>
+<dt>Return:</dt><dd><p>returns a string path to exported directory.</p>
+</dd>
+</dl>
+<p># set the export output function
+“””
+if not self.is_chief():</p>
+<blockquote>
+<div><p>logging.info(“Trainer.export_model ignored due to the process not being chief.”)
+return</p>
+</div></blockquote>
+<p>self._export_output_fn = export_output_fn or twml.export_output_fns.default_output_fn</p>
+<dl class="simple">
+<dt>if not callable(self._export_output_fn):</dt><dd><dl class="simple">
+<dt>raise RuntimeError(</dt><dd><p>“Expecting export_output_fn function. Got %s.”
+% type(self._export_output_fn).__name__)</p>
+</dd>
+</dl>
+</dd>
+<dt>if export_dir:</dt><dd><p>export_dir = sanitize_hdfs_path(export_dir)</p>
+</dd>
+<dt>if checkpoint_path:</dt><dd><p>checkpoint_path = sanitize_hdfs_path(checkpoint_path)</p>
+</dd>
+<dt>else:</dt><dd><p>checkpoint_path = self.best_or_latest_checkpoint</p>
+</dd>
+</dl>
+<p># actually export the model using the Estimator API
+export_path = self._estimator.export_savedmodel(</p>
+<blockquote>
+<div><p>export_dir_base=export_dir or os.path.join(self._save_dir, ‘exported_models’),
+serving_input_receiver_fn=serving_input_receiver_fn,
+checkpoint_path=checkpoint_path)</p>
+</div></blockquote>
+<p># export_path is bytes, need to convert to string for python3 to work.
+logging.info(“The exported model path is: “ + str(export_path))</p>
+<p>self.export_model_effects(export_path, feature_spec, log_features)</p>
+<p>return export_path</p>
+</dd>
+<dt>def _model_fn(self, features, labels, mode, params, config=None):</dt><dd><p>“””
+returns tf.estimator.EstimatorSpec that can be used with tf.estimator.Estimators.
+You would probably never need to modify this method.
+Instead, you should override build_graph, which this method calls.</p>
+<dl class="simple">
+<dt>Args:</dt><dd><dl class="simple">
+<dt>features:</dt><dd><p>Dict of input tensors.</p>
+</dd>
+<dt>labels:</dt><dd><p>Tensor of target labels.</p>
+</dd>
+<dt>mode:</dt><dd><p>an instance of tf.estimator.ModeKeys.
+Typically used to toggle TRAINing or EVALuation.</p>
+</dd>
+<dt>params:</dt><dd><p>HParams object containing hyper-parameters.</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>“””
+# pylint: disable=too-many-branches
+if isinstance(features, dict):</p>
+<blockquote>
+<div><p>weights = features.get(‘weights’, None)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>else:</dt><dd><p>weights = None</p>
+</dd>
+<dt>with tf.variable_scope(self._name + ‘/model’):</dt><dd><p>graph_output = self._build_graph_fn(features, labels, mode, params, config)
+loss = graph_output[‘loss’] if ‘loss’ in graph_output else None</p>
+</dd>
+</dl>
+<p>self._maybe_restore_checkpoint()</p>
+<dl>
+<dt>with tf.variable_scope(self._name + ‘/optim’):</dt><dd><p>train_op = None
+if mode == tf.estimator.ModeKeys.TRAIN:</p>
+<blockquote>
+<div><dl>
+<dt>if ‘train_op’ in graph_output:</dt><dd><p>train_op = graph_output[‘train_op’]
+graph_output[‘train_op’] = None  # remove from preds to prevent error</p>
+</dd>
+<dt>elif loss is not None:</dt><dd><p>train_op = self._optimize_loss_fn(params, loss)</p>
+</dd>
+<dt>if params.get(‘train_log_metrics’) and self._metric_fn:</dt><dd><p>metric_ops = self._metric_fn(graph_output=graph_output, labels=labels, weights=weights)
+for metric_name in metric_ops:</p>
+<blockquote>
+<div><dl class="simple">
+<dt>tf.summary.scalar(</dt><dd><p>name=”<a href="#id11"><span class="problematic" id="id12">training_metric_</span></a>” + metric_name,
+tensor=metric_ops[metric_name][1])  # index 0 contains value_op, 1 contains update_op</p>
+</dd>
+</dl>
+</div></blockquote>
+</dd>
+</dl>
+</div></blockquote>
+</dd>
+<dt>if mode == tf.estimator.ModeKeys.PREDICT and self._export_output_fn is not None:</dt><dd><p># note that this is ignored by the predict method.
+# Estimator only uses export_output_fn for export_model.
+export_outputs = self._export_output_fn(graph_output)</p>
+</dd>
+<dt>else:</dt><dd><p>export_outputs = None</p>
+</dd>
+<dt>if mode == tf.estimator.ModeKeys.EVAL and self._metric_fn:</dt><dd><p>eval_metric_ops = self._metric_fn(graph_output=graph_output, labels=labels, weights=weights)</p>
+</dd>
+<dt>else:</dt><dd><p>eval_metric_ops = None</p>
+</dd>
+</dl>
+<p># None and loss (scalar, not sliceable by TFMA) should be removed from the graph_output
+preds = {key: graph_output[key] for key in graph_output if (graph_output[key] is not None) and (key is not ‘loss’)}</p>
+<p>init_feed_dict = twml.contrib.initializers.get_init_feed_dict()
+scaffold = tf.train.Scaffold(init_feed_dict=init_feed_dict)</p>
+<p># Clear the init feed collection to avoid serializing the initializers.
+twml.contrib.initializers.clear_init_feed_collection()</p>
+<p># save estimator for use by later methods and hooks (warning: often reset)
+self._current_estimator_spec = tf.estimator.EstimatorSpec(</p>
+<blockquote>
+<div><p>mode=mode,
+predictions=preds,
+export_outputs=export_outputs,
+loss=loss,
+train_op=train_op,
+eval_metric_ops=eval_metric_ops,
+scaffold=scaffold,</p>
+</div></blockquote>
+<p>)</p>
+<p>return self._current_estimator_spec</p>
+</dd>
+<dt>def get_train_hooks(self):</dt><dd><p>“””Return SessionRunHooks used during training.</p>
+<p>By default training uses one hooks <cite>tf.train.StepCounterHook</cite> for monitoring step speed.</p>
+<p>If self._profiler_steps is set then we also use the ProfilerHook <cite>tf.train.ProfilerHook</cite>
+for monitoring the profile.</p>
+<p>“””
+# Instead of having every_n_steps be a constant number,
+# change it dynamically based on batch size.
+# Ideally we should be using every_n_secs, but that seems buggy as of 1.7.
+# The every_n_steps = 20K / batch_size
+every_n_steps = ((2048 * 100) // self._params.train_batch_size)
+step_counter = tf.train.StepCounterHook(</p>
+<blockquote>
+<div><p>every_n_steps=every_n_steps, output_dir=self._save_dir</p>
+</div></blockquote>
+<p>)
+train_hooks = [step_counter]</p>
+<dl>
+<dt>if self._profiler_steps is not None:</dt><dd><dl>
+<dt>if not self._params.get(‘distributed’) or self._estimator.config.is_chief:</dt><dd><dl class="simple">
+<dt>profiler = tf.train.ProfilerHook(</dt><dd><p>save_steps=self._profiler_steps,
+output_dir=self._save_dir</p>
+</dd>
+</dl>
+<p>)
+train_hooks.append(profiler)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>return train_hooks</p>
+</dd>
+<dt>def is_task_type(self, name):</dt><dd><p>“””
+Helper function to specify if the current process is of the given worker type.
+Note: This an only be called <em>after</em> self._hogwild_setup() is called in __init__()
+“””
+if os.environ.get(‘TF_CONFIG’):</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if self._estimator.config.task_type == name:</dt><dd><p>return True</p>
+</dd>
+<dt>else:</dt><dd><p>return False</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>return True</p>
+</dd>
+<dt>def is_evaluator(self):</dt><dd><p>“””
+Helper function to let you know if the worker is evaluator.
+Note: This an only be called <em>after</em> self._hogwild_setup() is called in __init__()
+“””
+return self.is_task_type(“evaluator”)</p>
+</dd>
+<dt>def is_chief(self):</dt><dd><p>“””
+Helper function to let you know if the worker is chief.
+Note: This an only be called <em>after</em> self._hogwild_setup() is called in __init__()
+“””
+return self.is_task_type(“chief”) or self.is_task_type(“master”)</p>
+</dd>
+<dt>def is_ps(self):</dt><dd><p>“””
+Helper function to let you know if the task is parameter server.
+“””
+if os.environ.get(‘TF_CONFIG’) and self._estimator.config.task_type == ‘ps’:</p>
+<blockquote>
+<div><p>return True</p>
+</div></blockquote>
+<p>return False</p>
+</dd>
+<dt>def _exit_ps_after_training_complete(self):</dt><dd><p>“””
+Helper function to shutdown parameter server after training job complete (either succeed or failed).
+“””
+if not self.is_ps():</p>
+<blockquote>
+<div><p>return</p>
+</div></blockquote>
+<p># No need to exit ps if on the same machine
+if os.environ.get(‘TWML_HOGWILD_PORTS’):</p>
+<blockquote>
+<div><p>return</p>
+</div></blockquote>
+<dl class="simple">
+<dt>if self._params.get(‘disable_auto_ps_shutdown’, False):</dt><dd><p>logging.info(“Skip shutting down parameter server after training complete [–disable_auto_ps_shutdown is set]”)
+return</p>
+</dd>
+</dl>
+<p># checking job status is different on gke vs aurora
+if self._is_on_gke():</p>
+<blockquote>
+<div><dl class="simple">
+<dt>get_job_status = functools.partial(</dt><dd><p>k8s_status.get_training_job_status,
+cluster=None,
+namespace=os.environ[‘TWML_JOB_ROLE’],
+environment=os.environ[‘TWML_JOB_ENV’],
+job_name=os.environ[‘TWML_JOB_NAME’],
+using_tsd=True)</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl>
+<dt>else:</dt><dd><dl class="simple">
+<dt>get_job_status = functools.partial(</dt><dd><p>get_distributed_training_job_path,
+base_job_path=get_distributed_training_job_path()</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>def wait_complete_then_exit():</dt><dd><p>retry_max = 60
+retry = 0
+while True:</p>
+<blockquote>
+<div><dl>
+<dt>try:</dt><dd><p>training_status = get_job_status()
+if training_status == TrainingJobStatus.FINISHED:</p>
+<blockquote>
+<div><p>logging.info(“Distributed training job succeed, shutting down parameter server.”)
+os._exit(0)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>elif training_status == TrainingJobStatus.FAILED:</dt><dd><p>logging.info(“Distributed training job failed, shutting down parameter server.”)
+os._exit(0)</p>
+</dd>
+<dt>elif training_status == TrainingJobStatus.NOT_FOUND:</dt><dd><p>raise Exception(“Distributed training job status not found.”)</p>
+</dd>
+<dt>else:</dt><dd><p>poke_interval = random.randrange(60, 90)  # prevent spike QPS to aurora endpoint
+time.sleep(poke_interval)
+retry = 0</p>
+</dd>
+</dl>
+</dd>
+<dt>except Exception as e:</dt><dd><dl class="simple">
+<dt>if retry &gt;= retry_max:</dt><dd><p>raise e  # only exception in this thread, won’t fail parameter server thread</p>
+</dd>
+</dl>
+<p>retry += 1
+poke_interval = random.randrange(60, 90) + retry * 10
+logging.warn(“Error getting distributed training job status, will retry after %s seconds.” % poke_interval)
+time.sleep(poke_interval)</p>
+</dd>
+</dl>
+</div></blockquote>
+</dd>
+</dl>
+<p>Thread(target=wait_complete_then_exit).start()</p>
+</dd>
+<dt>def get_eval_hooks(self):  # pylint: disable=no-self-use</dt><dd><p>“”” Return SessionRunHooks used during evaluation.”””
+return None</p>
+</dd>
+<dt>def get_predict_hooks(self):</dt><dd><p>“”” Return hooks used during prediction.
+If profiler_steps is set in the constructor to the Trainer,
+we pass a tf.Train.ProfilerHook to the estimator’s predict function.
+“””
+hooks = []
+if self._profiler_steps is not None:</p>
+<blockquote>
+<div><dl class="simple">
+<dt>profiler = tf.train.ProfilerHook(</dt><dd><p>save_steps=self._profiler_steps,
+output_dir=self._save_dir</p>
+</dd>
+</dl>
+<p>)
+hooks.append(profiler)</p>
+</div></blockquote>
+<p>return hooks</p>
+</dd>
+<dt>def learn(self, train_input_fn=None, eval_input_fn=None,</dt><dd><blockquote>
+<div><p>train_max_steps=None,
+train_steps=None, eval_steps=None,
+train_hooks=None, eval_hooks=None,
+early_stop_metric=None, early_stop_patience=-1,
+early_stop_minimize=True, early_stop_tolerance=0, start_epoch=0,
+exporters=None, export_output_fn=None, max_duration=None):</p>
+</div></blockquote>
+<p>“””
+Train and evaluate the estimator for <code class="docutils literal notranslate"><span class="pre">train_max_steps</span></code> steps.
+Each epoch involves <code class="docutils literal notranslate"><span class="pre">train_steps</span></code> training steps followed
+by <code class="docutils literal notranslate"><span class="pre">eval_steps</span></code> evaluation steps. Note that each step
+is a <code class="docutils literal notranslate"><span class="pre">session.run()</span></code>, that is, each batch is a step.</p>
+<dl>
+<dt>Args:</dt><dd><dl>
+<dt>train_max_steps:</dt><dd><p>maximum number of global steps of training to run.
+Defaults to params.train_max_steps.
+None-values cause learn() to terminate after <em>one</em> call to train() and evaluate(),
+which is usually useful when using train_steps=-1
+Non-positive values trains indefinitely in a loop (use with caution),
+which is usually useful when used with early stopping.</p>
+</dd>
+<dt>train_steps:</dt><dd><p>number of training steps per epoch. For example, 100 means each
+training epoch will end after processing 100 batches.
+Defaults to params.train_steps.
+Non-positive values and None-values go through the entire training set each epoch.</p>
+</dd>
+<dt>eval_steps:</dt><dd><p>number of evaluation steps per epoch.
+Defaults to params.eval_steps.
+Non-positive values and None-values go through the entire evaluation set each epoch.</p>
+</dd>
+<dt>train_input_fn:</dt><dd><p>Function to iterate through training set. It is passed to estimator.train.</p>
+</dd>
+<dt>eval_input_fn:</dt><dd><p>Function to iterate through evaluation set. It is passed to estimator.evaluate.</p>
+</dd>
+<dt>train_hooks:</dt><dd><p>List of SessionRunHooks uses for training. Defaults to self.get_train_hooks().</p>
+</dd>
+<dt>eval_hooks:</dt><dd><p>List of SessionRunHooks uses for evaluation. Defaults to self.get_eval_hooks()</p>
+</dd>
+<dt>start_epoch:</dt><dd><p>The epoch from which to start learn. If you want to do training and evaluation
+for N epochs, you can call <code class="docutils literal notranslate"><span class="pre">learn()</span></code> in a loop as follows:</p>
+</dd>
+<dt>exporters:</dt><dd><p>List of exporters called at the end of each evaluation run.
+Defaults to none.</p>
+</dd>
+<dt>export_output_fn:</dt><dd><p>The output format to use for exported models.
+Only used if exporters is not None.</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="k">for</span> <span class="n">epoch</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span><span class="n">max_epoch</span><span class="p">):</span>
+  <span class="n">trainer</span><span class="o">.</span><span class="n">learn</span><span class="p">(</span><span class="n">start_epoch</span><span class="o">=</span><span class="n">epoch</span><span class="p">)</span>
+</pre></div>
+</div>
+</dd>
+</dl>
+</dd>
+<dt>Early-stopping arguments:</dt><dd><dl class="simple">
+<dt>early_stop_metric:</dt><dd><p>String specifying the metric to early-stop on. Required with positive
+<code class="docutils literal notranslate"><span class="pre">early_stop_patience</span></code>. For example, ‘accuracy’, ‘accuracy_0’, ‘loss’, etc.
+The string is used to extract the relevant tensor Op from the dict returned by
+the get_eval_metric_ops method. For <code class="docutils literal notranslate"><span class="pre">metrics</span></code> pass to the constructor,
+the string is one of those. For multi-class (that is, multi-metric)
+metrics, the string may be appended with a <code class="docutils literal notranslate"><span class="pre">_0</span></code>, <code class="docutils literal notranslate"><span class="pre">_1</span></code>, etc. or one
+of the <code class="docutils literal notranslate"><span class="pre">multi_metric_names</span></code> (one per class).</p>
+</dd>
+<dt>early_stop_patience:</dt><dd><p>Maximum number of epochs to wait for an improvement in the early_stop_metric
+before breaking off training. For example, a patience of 10 means that
+training will have 10 epochs to improve the metric before it is killed.
+Whenever the metric is improved before running out of patience,
+patience is reset to <code class="docutils literal notranslate"><span class="pre">early_stop_patience</span></code>.
+Defaults to -1 (that is, no early-stopping).</p>
+</dd>
+<dt>early_stop_minimize:</dt><dd><p>Set this to True (the default) for metrics that need to be minimized
+(like <code class="docutils literal notranslate"><span class="pre">loss</span></code>). Metrics like <code class="docutils literal notranslate"><span class="pre">accuracy</span></code> that need to be maximized
+should set this to False.</p>
+</dd>
+<dt>early_stop_tolerance:</dt><dd><p>A non-negative tolerance for comparing early_stop_metric.
+E.g. when maximizing the condition is current_metric &gt; best_metric + tolerance.
+Defaults to 0.</p>
+</dd>
+<dt>max_duration:</dt><dd><p>A float. When this argument is defined, the job will automatically terminate after
+<cite>max_duration</cite> seconds if it has not already compeleted.</p>
+</dd>
+</dl>
+</dd>
+<dt>Returns:</dt><dd><p>The directory where the checkpoints were saved.
+That is, save_dir.
+You can point TensorBoard to this directory to get metrics,
+or pass it to another Trainer via <code class="docutils literal notranslate"><span class="pre">init_from_dir</span></code> when doing
+multi-phase training.</p>
+</dd>
+</dl>
+<p>“””
+# pylint: disable=too-many-branches</p>
+<dl class="simple">
+<dt>if not callable(train_input_fn):</dt><dd><p>raise ValueError(“Expecting callable train_input_fn function”)</p>
+</dd>
+<dt>if not callable(eval_input_fn):</dt><dd><p>raise ValueError(“Expecting callable eval_input_fn function”)</p>
+</dd>
+<dt>if os.environ.get(‘TF_CONFIG’):</dt><dd><p>raise ValueError(“trainer.learn() can not be used with distributed / hogwild setups”)</p>
+</dd>
+<dt>if exporters and export_output_fn:</dt><dd><p>self._export_output_fn = export_output_fn</p>
+</dd>
+</dl>
+<p>train_hooks = self.get_train_hooks() if train_hooks is None else train_hooks
+eval_hooks = self.get_eval_hooks() if eval_hooks is None else eval_hooks
+eval_hooks = [] if eval_hooks is None else eval_hooks</p>
+<dl>
+<dt>if train_max_steps is None:</dt><dd><p>train_max_steps = self.params.get(‘train_max_steps’)</p>
+</dd>
+<dt>if train_steps is None:</dt><dd><p>train_steps = self.params.train_steps</p>
+</dd>
+<dt>if train_steps &lt;= 0:</dt><dd><p>train_steps = None</p>
+</dd>
+<dt>if eval_steps is None:</dt><dd><p>eval_steps = self.params.eval_steps</p>
+</dd>
+<dt>if eval_steps &lt;= 0:</dt><dd><p>eval_steps = None</p>
+</dd>
+<dt>if early_stop_patience &gt; 0:</dt><dd><p>assert train_max_steps is not None, “Early stopping and max_steps=None are not compatible.”
+# prepare early stopping hook (which also handles logic here)
+self._is_early_stopping = True
+early_stop_hook = twml.hooks.EarlyStopHook(</p>
+<blockquote>
+<div><p>metric=early_stop_metric,
+checkpoint_dir=self._save_dir,
+patience=early_stop_patience,
+minimize=early_stop_minimize,
+tolerance=early_stop_tolerance,
+get_estimator_spec_fn=lambda: self.current_estimator_spec,
+start_epoch=start_epoch)</p>
+</div></blockquote>
+<p># add early stop hook to eval hooks
+eval_hooks.append(early_stop_hook)</p>
+</dd>
+<dt>if max_duration is not None:</dt><dd><dl class="simple">
+<dt>train_early_stop_duration_hook = twml.hooks.EarlyStopDuration(</dt><dd><p>max_duration=max_duration,
+exit_on_end=False,
+save_dir=self._save_dir,
+overwrite=True,</p>
+</dd>
+</dl>
+<p>)
+train_hooks.append(train_early_stop_duration_hook)</p>
+<dl class="simple">
+<dt>eval_early_stop_duration_hook = twml.hooks.EarlyStopDuration(</dt><dd><p>max_duration=max_duration,
+exit_on_end=False,
+save_dir=self._save_dir,
+overwrite=True,</p>
+</dd>
+</dl>
+<p>)
+eval_hooks.append(eval_early_stop_duration_hook)</p>
+</dd>
+<dt>if not self._is_early_stopping:</dt><dd><dl class="simple">
+<dt>if (train_max_steps is not None) and (train_max_steps &lt;= 0):</dt><dd><dl class="simple">
+<dt>if ((max_duration is not None) and (max_duration &lt; 0)) or (max_duration is None):</dt><dd><dl class="simple">
+<dt>logging.warn(“train.max_steps is non-positive, and no early or duration stopping is configured. “</dt><dd><p>“Training job will loop forever.”)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+<dt>if train_max_steps is not None and train_max_steps &gt; 0:</dt><dd><p># we can’t pass max_steps AND steps to estimator.train.
+# so we pass steps to estimator.train and max_steps to this hook instead…
+stop_at_step_hook = twml.hooks.StopAtStepHook(last_step=train_max_steps)
+train_hooks.append(stop_at_step_hook)</p>
+</dd>
+<dt>with self.experiment_tracker.track_experiment(eval_hooks,</dt><dd><blockquote>
+<div><p>lambda: self.current_estimator_spec):</p>
+</div></blockquote>
+<p># alternate training and evaluation epochs
+epoch = start_epoch
+while True:</p>
+<blockquote>
+<div><p>logging.info(“Training epoch %d”, epoch)
+self._estimator.train(train_input_fn, steps=train_steps, hooks=train_hooks)</p>
+<p>logging.info(“Evaluating epoch %d”, epoch)
+eval_result = self._estimator.evaluate(</p>
+<blockquote>
+<div><p>eval_input_fn, steps=eval_steps, hooks=eval_hooks)</p>
+</div></blockquote>
+<dl>
+<dt>if exporters:</dt><dd><p>checkpoint_path = self.estimator.latest_checkpoint()
+for exporter in exporters:</p>
+<blockquote>
+<div><p>export_path = os.path.join(self._save_dir, “export”, exporter.name)
+exporter.export(</p>
+<blockquote>
+<div><p>estimator=self.estimator, export_path=export_path,
+checkpoint_path=checkpoint_path, eval_result=eval_result,
+is_the_final_export=False)</p>
+</div></blockquote>
+</div></blockquote>
+</dd>
+</dl>
+<p># If train_max_step is none. Terminate after one loop.
+if train_max_steps is None:</p>
+<blockquote>
+<div><p>break</p>
+</div></blockquote>
+<p># If stop_at_step_hook requested a stop, break
+if train_max_steps &gt; 0 and stop_at_step_hook.stop_requested:</p>
+<blockquote>
+<div><p>break</p>
+</div></blockquote>
+<p># early-stopping logic is handled internally by the hook
+if early_stop_patience &gt; 0 and early_stop_hook.should_stop:</p>
+<blockquote>
+<div><p># but we still need to break here
+break</p>
+</div></blockquote>
+<p>epoch += 1</p>
+</div></blockquote>
+<p>self.write_state_to_disk(save_dir=self._save_dir, filename=’_SUCCESS’)</p>
+</dd>
+</dl>
+<p>return self._save_dir</p>
+</dd>
+<dt>def get_train_spec(self, input_fn, max_steps=None, hooks=None):</dt><dd><p>“””Get the TrainSpec used by <code class="docutils literal notranslate"><span class="pre">tf.train.train_and_evaluate</span></code>.”””
+if not callable(input_fn):</p>
+<blockquote>
+<div><p>raise ValueError(“Expecting callable train_input_fn”)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>if max_steps is None:</dt><dd><p>max_steps = self.params.train_max_steps</p>
+</dd>
+<dt>if max_steps is not None and max_steps &lt;= 0:</dt><dd><p>max_steps = None</p>
+</dd>
+</dl>
+<p>hooks = self.get_train_hooks() if hooks is None else hooks</p>
+<dl class="simple">
+<dt>return tf.estimator.TrainSpec(input_fn=input_fn,</dt><dd><p>max_steps=max_steps,
+hooks=hooks)</p>
+</dd>
+</dl>
+</dd>
+<dt>def get_eval_spec(self, input_fn, steps=None, delay=None, period=None,</dt><dd><blockquote>
+<div><p>hooks=None, exporters=None):</p>
+</div></blockquote>
+<p>“””Get the EvalSpec used by <code class="docutils literal notranslate"><span class="pre">tf.train.train_and_evaluate</span></code>.”””
+if not callable(input_fn):</p>
+<blockquote>
+<div><p>raise ValueError(“Expecting callable eval_input_fn”)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>if steps is None:</dt><dd><p>steps = self.params.eval_steps</p>
+</dd>
+<dt>if steps &lt;= 0:</dt><dd><p>steps = None</p>
+</dd>
+<dt>if delay is None:</dt><dd><p>delay = self.params.eval_delay</p>
+</dd>
+<dt>if period is None:</dt><dd><p>period = self.params.eval_period</p>
+</dd>
+</dl>
+<p>hooks = self.get_eval_hooks() if hooks is None else hooks</p>
+<p>eval_name = self.params.get(“eval_name”, None)</p>
+<dl class="simple">
+<dt>return tf.estimator.EvalSpec(input_fn=input_fn,</dt><dd><p>steps=steps,
+name=eval_name,
+start_delay_secs=delay,
+throttle_secs=period,
+hooks=hooks,
+exporters=exporters)</p>
+</dd>
+</dl>
+</dd>
+<dt>def train_and_evaluate(self, train_input_fn=None, eval_input_fn=None,</dt><dd><blockquote>
+<div><p>train_max_steps=None, eval_steps=None,
+eval_delay=None, eval_period=None,
+train_hooks=None, eval_hooks=None,
+early_stop_metric=None, early_stop_patience=-1,
+early_stop_minimize=True, early_stop_tolerance=0, exporters=None,
+export_output_fn=None, max_duration=None):</p>
+</div></blockquote>
+<p>“””
+Train and evaluate the estimator for <code class="docutils literal notranslate"><span class="pre">train_max_steps</span></code>
+using <code class="docutils literal notranslate"><span class="pre">tf.estimator.train_and_evaluate</span></code>.
+With a cluster configuration provided in the <code class="docutils literal notranslate"><span class="pre">TF_CONFIG</span></code> environment variable, this method
+can be used for distributed training (multi-node or multi-process).
+Unlike the <code class="docutils literal notranslate"><span class="pre">learn</span></code> method, training is continuous with <code class="docutils literal notranslate"><span class="pre">train_max_steps</span></code>.
+For distributed use case, evaluation happens periodically.
+That is, after <code class="docutils literal notranslate"><span class="pre">eval_delay</span></code> seconds, an evaluation epoch of <code class="docutils literal notranslate"><span class="pre">eval_step</span></code> steps
+occurs every <code class="docutils literal notranslate"><span class="pre">eval_period</span></code> seconds. Evaluation happens on the most recent checkpoint.
+TF defaults to saving checkpoints every 10 mins.
+For local use case, training occurs for train_max_steps epochs followed by a
+single evaluation. For local use case we therefore recommend using learn() instead
+as it provides early-stopping and multiple evaluations.</p>
+<p><code class="docutils literal notranslate"><span class="pre">train_and_evaluate</span></code> will evaluate for <code class="docutils literal notranslate"><span class="pre">eval_steps</span></code> every <code class="docutils literal notranslate"><span class="pre">eval_period</span></code> seconds.
+It will stop after <code class="docutils literal notranslate"><span class="pre">train_steps</span></code> is reached.</p>
+<p>You must ensure that all workers/servers are assigned the same <cite>save_dir</cite>.</p>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>If the TF_CONFIG environment variable is set, this function assumes its running a distribute job.</p>
+</div>
+<dl class="simple">
+<dt>Args:</dt><dd><dl class="simple">
+<dt>train_input_fn:</dt><dd><p>Function to iterate through training set. It is passed to estimator.train_and_evalute</p>
+</dd>
+<dt>eval_input_fn:</dt><dd><p>Function to iterate through evaluation set. It is passed to estimator.train_and_evalute.</p>
+</dd>
+<dt>train_max_steps:</dt><dd><p>maximum number of global steps of training to run.
+Defaults to params.train_max_steps.
+Non-positive values and None-values train indefinitely (use with caution).</p>
+</dd>
+<dt>eval_steps:</dt><dd><p>number of steps per evaluation.
+Defaults to params.eval_steps.
+Non-positive values and None-values go through
+the entire evaluation set for each evaluation.
+Note that the number of eval_steps should be high enough to minimize noise.
+This is especially true for early-stopping.</p>
+</dd>
+<dt>eval_delay:</dt><dd><p>Start the first evaluation after eval_delay. Defaults to params.eval_delay or 2*60s.</p>
+</dd>
+<dt>eval_period:</dt><dd><p>Run an evaluation every eval_period seconds. Defaults to params.eval_period or 10*60s.</p>
+</dd>
+<dt>exporters:</dt><dd><p>List of exporters called at the end of each evaluation run.
+Defaults to none.</p>
+</dd>
+<dt>export_output_fn:</dt><dd><p>The output format to use for exported models.
+Only used if exporters is not None.</p>
+</dd>
+</dl>
+</dd>
+<dt>Early-stopping arguments:</dt><dd><dl class="simple">
+<dt>early_stop_metric:</dt><dd><p>String specifying the metric to early-stop on. Required with positive
+<code class="docutils literal notranslate"><span class="pre">early_stop_patience</span></code>. For example, ‘accuracy’, ‘accuracy_0’, ‘loss’, etc.
+The string is used to extract the relevant tensor Op from the dict returned by
+the get_eval_metric_ops method. For <code class="docutils literal notranslate"><span class="pre">metrics</span></code> pass to the constructor,
+the string is one of those. For multi-class (that is, multi-metric)
+metrics, the string may be appended with a <code class="docutils literal notranslate"><span class="pre">_0</span></code>, <code class="docutils literal notranslate"><span class="pre">_1</span></code>, etc. or one
+of the <code class="docutils literal notranslate"><span class="pre">multi_metric_names</span></code> (one per class).</p>
+</dd>
+<dt>early_stop_patience:</dt><dd><p>Maximum number of epochs to wait for an improvement in the early_stop_metric
+before breaking off training. For example, a patience of 10 means that
+training will have 10 epochs to improve the metric before it is killed.
+Whenever the metric is improved before running out of patience,
+patience is reset to <code class="docutils literal notranslate"><span class="pre">early_stop_patience</span></code>.
+Defaults to -1 (that is, no early-stopping).</p>
+</dd>
+<dt>early_stop_minimize:</dt><dd><p>Set this to True (the default) for metrics that need to be minimized
+(like <code class="docutils literal notranslate"><span class="pre">loss</span></code>). Metrics like <code class="docutils literal notranslate"><span class="pre">accuracy</span></code> that need to be maximized
+should set this to False.</p>
+</dd>
+<dt>early_stop_tolerance:</dt><dd><p>A non-negative tolerance for comparing early_stop_metric.
+E.g. when maximizing the condition is current_metric &gt; best_metric + tolerance.
+Defaults to 0.</p>
+</dd>
+<dt>max_duration:</dt><dd><p>A float. When this argument is defined, the job will automatically terminate after
+<cite>max_duration</cite> seconds if it has not already compeleted.</p>
+</dd>
+</dl>
+</dd>
+<dt>Returns:</dt><dd><p>The directory where the checkpoints were saved.</p>
+</dd>
+</dl>
+<p>“””</p>
+<p>logging.info(“WARNING: Trainer.train_and_evaluate is an EXPERIMENTAL API.”)
+logging.info(“Trainer.train_and_evaluate may change or be removed in future versions.”)</p>
+<dl class="simple">
+<dt>if not callable(train_input_fn):</dt><dd><p>raise ValueError(“Expecting callable train_input_fn function”)</p>
+</dd>
+<dt>if not callable(eval_input_fn):</dt><dd><p>raise ValueError(“Expecting callable eval_input_fn function”)</p>
+</dd>
+</dl>
+<p>self._exit_ps_after_training_complete()</p>
+<p># Maybe export in eval processes.
+if self.is_evaluator():</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if self.params.get(“eval_name”) is not None:</dt><dd><p># Do not export if running special eval.
+exporters = None
+export_output_fn = None</p>
+</dd>
+<dt>elif exporters and export_output_fn:</dt><dd><p>self._export_output_fn = export_output_fn</p>
+</dd>
+<dt>else:</dt><dd><p># Default option.
+self._export_output_fn = None</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>train_hooks = self.get_train_hooks() if train_hooks is None else train_hooks
+train_hooks = [] if train_hooks is None else train_hooks</p>
+<p>eval_hooks = self.get_eval_hooks() if eval_hooks is None else eval_hooks
+eval_hooks = [] if eval_hooks is None else eval_hooks</p>
+<dl>
+<dt>if train_max_steps is None:</dt><dd><p>train_max_steps = self.params.get(‘train_max_steps’)</p>
+</dd>
+<dt>if eval_steps is None:</dt><dd><p>eval_steps = self.params.eval_steps</p>
+</dd>
+<dt>if eval_steps &lt;= 0:</dt><dd><p>eval_steps = None</p>
+</dd>
+<dt>if eval_delay is None:</dt><dd><p>eval_delay = self.params.eval_delay</p>
+</dd>
+<dt>if eval_period is None:</dt><dd><p>eval_period = self.params.eval_period</p>
+</dd>
+<dt>if early_stop_patience &gt; 0:</dt><dd><p># when training hooks detect this file, they request a stop to training
+early_stop_path = os.path.join(self._save_dir, ‘earlystop_now.txt’)
+# prepare early stopping hook (which also handles logic here)</p>
+<p>self._is_early_stopping = True</p>
+<dl class="simple">
+<dt>eval_early_stop_hook = twml.hooks.EarlyStopHook(</dt><dd><p>metric=early_stop_metric,
+checkpoint_dir=self._save_dir,
+patience=early_stop_patience,
+minimize=early_stop_minimize,
+tolerance=early_stop_tolerance,
+get_estimator_spec_fn=lambda: self.current_estimator_spec,
+file_path=early_stop_path,
+exit_on_end=os.environ.get(‘TF_CONFIG’) is not None)  # only exit for distributed jobs</p>
+</dd>
+</dl>
+<p># add early stop hook to eval hooks
+eval_hooks.append(eval_early_stop_hook)</p>
+<p># prepare the commensurate training hook
+train_early_stop_hook = twml.hooks.StopIfExistsHook(early_stop_path)
+train_hooks.append(train_early_stop_hook)</p>
+</dd>
+<dt>if max_duration is not None:</dt><dd><dl class="simple">
+<dt>train_early_stop_duration_hook = twml.hooks.EarlyStopDuration(</dt><dd><p>max_duration=max_duration,
+exit_on_end=False,
+save_dir=self._save_dir,
+overwrite=self.is_chief()</p>
+</dd>
+</dl>
+<p>)
+eval_early_stop_duration_hook = twml.hooks.EarlyStopDuration(</p>
+<blockquote>
+<div><p>max_duration=max_duration,
+exit_on_end=os.environ.get(‘TF_CONFIG’) is not None,
+save_dir=self._save_dir,
+overwrite=False</p>
+</div></blockquote>
+<p>)  # only exit for distributed jobs</p>
+<p>train_hooks.append(train_early_stop_duration_hook)
+eval_hooks.append(eval_early_stop_duration_hook)</p>
+</dd>
+<dt>with self.experiment_tracker.track_experiment(eval_hooks, lambda: self.current_estimator_spec):</dt><dd><p>train_spec = self.get_train_spec(train_input_fn, train_max_steps, train_hooks)
+eval_spec = self.get_eval_spec(eval_input_fn, eval_steps,</p>
+<blockquote>
+<div><p>eval_delay, eval_period,
+eval_hooks, exporters)</p>
+</div></blockquote>
+<p>self._train_and_evaluate(train_spec, eval_spec)</p>
+</dd>
+<dt>if self.is_chief():</dt><dd><p>self.write_state_to_disk(save_dir=self._save_dir, filename=’_SUCCESS’)</p>
+</dd>
+</dl>
+<p>return self._save_dir</p>
+</dd>
+<dt>def _train_and_evaluate(self, train_spec, eval_spec):</dt><dd><p>“””
+Private method that calls
+<code class="docutils literal notranslate"><span class="pre">tf.estimator.train_and_evaluate(self._estimator,</span> <span class="pre">train_spec,</span> <span class="pre">eval_spec)</span></code>.
+“””
+try:</p>
+<blockquote>
+<div><p>tf.estimator.train_and_evaluate(self._estimator, train_spec, eval_spec)</p>
+</div></blockquote>
+<dl>
+<dt>except twml.errors.EarlyStopError:</dt><dd><p># Ignore the exception if on evaluator.
+if self.is_evaluator():</p>
+<blockquote>
+<div><p>pass</p>
+</div></blockquote>
+<dl class="simple">
+<dt>else:</dt><dd><p>raise</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+<dt>def train(self, input_fn=None, steps=None, hooks=None):</dt><dd><p>“””
+Train the estimator for <cite>steps</cite> training steps.</p>
+<dl class="simple">
+<dt>Args:</dt><dd><dl class="simple">
+<dt>steps:</dt><dd><p>number of steps for which to perform training. For example, 100 means each
+evaluation will end after processing 100 batches.
+Defaults to None. i.e. trains on the entire dataset a single time.
+Non-positive values and None-values go through the entire training set each epoch.</p>
+</dd>
+<dt>input_fn:</dt><dd><p>Function to iterate through training set. It is passed to estimator.train.</p>
+</dd>
+<dt>hooks:</dt><dd><p>List of SessionRunHooks uses for training. Defaults to self.get_train_hooks().</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>“””
+if os.environ.get(‘TF_CONFIG’) and “is_calibrating” not in self.params:</p>
+<blockquote>
+<div><p>raise ValueError(“trainer.train() can not be used with distributed / hogwild setups”)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>if not callable(input_fn):</dt><dd><p>raise ValueError(“Expecting callable input_fn function”)</p>
+</dd>
+<dt>if self._is_early_stopping:</dt><dd><p>raise ValueError(“Can not call train() after learn() when using early stopping.”)</p>
+</dd>
+</dl>
+<p>hooks = self.get_train_hooks() if hooks is None else hooks
+self._estimator.train(input_fn, steps=steps, hooks=hooks)
+return self</p>
+</dd>
+<dt>def evaluate(self, input_fn=None, steps=None, hooks=None, name=None):</dt><dd><p>“””
+Evaluate the estimator for <cite>steps</cite> evaluation steps.</p>
+<dl class="simple">
+<dt>Args:</dt><dd><dl class="simple">
+<dt>steps:</dt><dd><p>number of steps for which to perform evaluation. For example, 100 means each
+evaluation will end after processing 100 batches.
+Defaults to None. i.e. evaluates on the entire dataset a single time.
+Negative values and None-values go through the entire training set each epoch.</p>
+</dd>
+<dt>input_fn:</dt><dd><p>Function to iterate through evaluation set. It is passed to estimator.evaluate.</p>
+</dd>
+<dt>hooks:</dt><dd><p>List of SessionRunHooks used for evaluation. Defaults to None.
+Note that, unlike learn(), hooks defaults to None instead of self.get_eval_hooks()
+as the latter may implement early-stopping, which isn’t necessarilty the desired
+behavior when calling evaluate() on its own.</p>
+</dd>
+<dt>name:</dt><dd><p>Name of the evaluation if user needs to run multiple evaluations on different data sets.
+Metrics for different evaluations are saved in separate folders,
+and appear separately in tensorboard.</p>
+</dd>
+</dl>
+</dd>
+<dt>Returns:</dt><dd><p>If <cite>is_evaluator()</cite>, returns a dict containing the evaluation metrics specified
+in <cite>metric_fn</cite> keyed by name, as well as an entry <cite>global_step</cite> that contains
+the value of the global step for which this evaluation was performed.
+Otherwise (i.e. <cite>is_evaluator() == False</cite>), returns None.</p>
+</dd>
+</dl>
+<p>“””
+if not self.is_evaluator():</p>
+<blockquote>
+<div><p>return None</p>
+</div></blockquote>
+<dl class="simple">
+<dt>if not callable(input_fn):</dt><dd><p>raise ValueError(“Expecting callable input_fn function”)</p>
+</dd>
+</dl>
+<p>hooks = self.get_eval_hooks() if hooks is None else hooks
+hooks = [] if hooks is None else hooks</p>
+<p># for consistency with train/learn
+eval_steps = None if steps is not None and steps &lt; 0 else steps</p>
+<dl>
+<dt>with self.experiment_tracker.track_experiment(hooks, lambda: self.current_estimator_spec, name=name):</dt><dd><p>checkpoint = self.best_or_latest_checkpoint
+computed_metrics = self._estimator.evaluate(</p>
+<blockquote>
+<div><p>input_fn,
+steps=eval_steps,
+hooks=hooks,
+checkpoint_path=checkpoint,
+name=name</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>return computed_metrics</p>
+</dd>
+<dt>def start_tensorboard(self, port=None):</dt><dd><p>“””
+Start tensorboard process to visualize logs in save_dir.
+“””
+logging.info(“Starting tensorboard.”)
+if self._tensorboard_handle:</p>
+<blockquote>
+<div><p>logging.warn(“Tensorboard already running. Nothing done.”)
+return</p>
+</div></blockquote>
+<dl class="simple">
+<dt>if port is None:</dt><dd><dl class="simple">
+<dt>if ‘tensorboard_port’ not in self.params.values():</dt><dd><p>raise ValueError(‘You must specify a port for tensorboard to run on.’)</p>
+</dd>
+<dt>elif self.params.tensorboard_port is None:</dt><dd><p>return</p>
+</dd>
+<dt>else:</dt><dd><p>port = self.params.tensorboard_port</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>mldash_path = ‘experiments’
+if self.experiment_tracker.path:</p>
+<blockquote>
+<div><p>mldash_path += ‘/%s’ % encode_url(self.experiment_tracker.experiment_id)</p>
+</div></blockquote>
+<p>tensorboard_args = [’–logdir=%s’ % self._save_dir, ‘–port=%d’ % port]</p>
+<dl class="simple">
+<dt>try:</dt><dd><p>args = [‘email_and_launch_tensorboard’, mldash_path, ‘–’] + tensorboard_args
+self._tensorboard_handle = subprocess.Popen(args)</p>
+</dd>
+<dt>except OSError:</dt><dd><dl class="simple">
+<dt>try:</dt><dd><p>self._tensorboard_handle = subprocess.Popen([‘tensorboard’] + tensorboard_args)</p>
+</dd>
+<dt>except OSError:</dt><dd><dl class="simple">
+<dt>try:</dt><dd><p># this will work with Twitter internal pants build when run locally
+args = [‘./pants’, ‘run’, ‘twml:tensorboard’, ‘–’] + tensorboard_args
+self._tensorboard_handle = subprocess.Popen(args)</p>
+</dd>
+<dt>except OSError:</dt><dd><p>logging.error(“No tensorboard installed, won’t able to visualize training in tensorboard.”)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+<dt>def stop_tensorboard(self):</dt><dd><p>“””
+Shutdown this Trainer’s associated Tensorboard.
+“””
+if self._tensorboard_handle:</p>
+<blockquote>
+<div><p>logging.info(“Shutting down tensorboard.”)
+self._tensorboard_handle.kill()</p>
+</div></blockquote>
+<dl class="simple">
+<dt>else:</dt><dd><p>logging.warn(“No known tensorboard process. Nothing done.”)</p>
+</dd>
+</dl>
+</dd>
+<dt>def calibrate(self,</dt><dd><blockquote>
+<div><p>calibrator,
+steps=None,
+input_fn=None,
+save_calibrator=True,
+hooks=None):</p>
+</div></blockquote>
+<p>“””
+Calibrate the calibrator for <cite>steps</cite> calibration steps using the estimator.train method.
+The build_graph passed to the Trainer constructor should
+call calibrator.accumulate using something like tf.py_func.
+That way, when this method calls estimator.train the calibrator will
+accumulate one epoch of samples. After which, this method calls calibrator.calibrate().
+It is up to the user to then call calibrator.save() to save the calibrated Layer
+and other information to disk for multi-phase training.</p>
+<dl class="simple">
+<dt>Args:</dt><dd><dl class="simple">
+<dt>calibrator:</dt><dd><p>a twml.Calibrator instance or a dict of the form {name(str): twml.Calibrator}.</p>
+</dd>
+<dt>steps:</dt><dd><p>Maximum steps to accumulate examples for calibration. Optional.
+If not specified, examples will be accumulated until all downsampled parts are processed.</p>
+</dd>
+<dt>input_fn:</dt><dd><p>Function to iterate through training set. It is passed to estimator.train.</p>
+</dd>
+<dt>hooks:</dt><dd><p>List of SessionRunHooks uses for training. Defaults to self.get_train_hooks().</p>
+</dd>
+<dt>save_calibrator:</dt><dd><p>Boolean (default: True). If set to True it will save the calibrator layer.</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>“””</p>
+<dl class="simple">
+<dt>if not callable(input_fn):</dt><dd><p>raise ValueError(“Expecting callable input_fn function”)</p>
+</dd>
+</dl>
+<p># making everything a dict to avoid multiple ifs
+if isinstance(calibrator, twml.contrib.calibrators.Calibrator):</p>
+<blockquote>
+<div><p>calibrator = {“default”: calibrator}</p>
+</div></blockquote>
+<p># This is a dummy call to train, since we cannot predict without training
+# from the Estimator API
+self._estimator.train(input_fn, steps=1)
+max_steps = steps if steps is not None else -1
+for name, clbrt in sorted(calibrator.items(), key=itemgetter(0)):</p>
+<blockquote>
+<div><p>count = 0
+for out in self._estimator.predict(input_fn, hooks=hooks, yield_single_examples=False):</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if max_steps &gt; 0 and count &gt; max_steps:</dt><dd><p>break</p>
+</dd>
+</dl>
+<p>clbrt.accumulate_feature(out)
+count += 1</p>
+</div></blockquote>
+<p>clbrt.calibrate()</p>
+</div></blockquote>
+<p># this step is done to allow us to keep the current phases event file for
+# visualization on Tensorboard. It removes all files that
+# are not event files. This piece of code should be deprecated when
+# we deprecate the MDL calibrator (CX-12329)
+for fname in tf.io.gfile.listdir(self._save_dir):</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if not fname.startswith(“events”):</dt><dd><p>tf.io.gfile.remove(os.path.join(self._save_dir, fname))</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl>
+<dt>if save_calibrator:</dt><dd><p># If we only have one calibrator, the calibrator signature
+# will be set to default
+if len(calibrator) == 1:</p>
+<blockquote>
+<div><p>calibrator = calibrator[‘default’]
+calibrator.save(</p>
+<blockquote>
+<div><p>self.params.save_dir,
+name=calibrator.name,
+verbose=True</p>
+</div></blockquote>
+<p>)</p>
+</div></blockquote>
+<dl>
+<dt>else:</dt><dd><dl>
+<dt>for name, clbrt in calibrator.items():</dt><dd><dl class="simple">
+<dt>clbrt.save(</dt><dd><p>self.params.save_dir,
+name=clbrt.name + str(name),
+verbose=True</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+<dt>def predict(self, <a href="#id3"><span class="problematic" id="id4">*</span></a>args, <a href="#id5"><span class="problematic" id="id6">**</span></a>kwargs):</dt><dd><p>“””
+Wrapper over the tensorflow <a class="reference external" href="https://www.tensorflow.org/api_docs/python/tf/estimator/Estimator#predict">Estimator.predict</a>.
+method. See that documentation for description of arguments accepted.</p>
+<p>If hooks is passed as an argument, the specified hooks are used.
+Else when profiler_steps is specified in the constructor of the Trainer, a
+tf.train.ProfilerHook is passed to the predict interface.
+Otherwise, hooks is set to an empty list.
+“””
+if ‘hooks’ not in kwargs and len(args) &lt; 3:</p>
+<blockquote>
+<div><p># If hooks is not specified as a keyword argument, nor as a positional argument
+# add hooks as a keyword argument.
+kwargs[‘hooks’] = self.get_predict_hooks()</p>
+</div></blockquote>
+<p>return self.estimator.predict(<a href="#id7"><span class="problematic" id="id8">*</span></a>args, <a href="#id9"><span class="problematic" id="id10">**</span></a>kwargs)</p>
+</dd>
+<dt>def hub_export(self,</dt><dd><blockquote>
+<div><p>name,
+serving_input_receiver_fn,
+export_dir=None,
+checkpoint_path=None,
+export_task_type_overrider=None):</p>
+</div></blockquote>
+<p>“””
+Exports registered modules into a save directory.</p>
+<p>This method creates a directory under export_path with the save TF Hub.
+One sub-directory (named export_name) per module registered via register_module_for_export.</p>
+<dl class="simple">
+<dt>Arguments:</dt><dd><dl class="simple">
+<dt>name:</dt><dd><p>unique name of the module to export.</p>
+</dd>
+<dt>serving_input_receiver_fn:</dt><dd><p>A function with no arguments that returns a ServingInputReceiver.
+This is used with the estimator passed to export() to build the graph (in PREDICT mode)
+that registers the modules for export. The model in that graph is never run,
+so the actual data provided by this input fn does not matter.</p>
+</dd>
+<dt>export_dir:</dt><dd><p>A string containing a directory where to write the export directories.
+Defaults to the save_dir.</p>
+</dd>
+<dt>checkpoint_path:</dt><dd><p>The checkpoint path to export. Defaults to the latest.</p>
+</dd>
+<dt>export_task_type_overrider:</dt><dd><p>Specifies the task type that will override the default task type used for export
+(hogwild training defaults to evaluator, otherwise, defaults to chief)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>“””
+if export_task_type_overrider:</p>
+<blockquote>
+<div><dl>
+<dt>if not self.is_task_type(export_task_type_overrider):</dt><dd><dl class="simple">
+<dt>logging.info(</dt><dd><p>f”Trainer.hub_export ignored due to process not being {export_task_type_overrider}”)</p>
+</dd>
+</dl>
+<p>return</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl class="simple">
+<dt>else:</dt><dd><dl class="simple">
+<dt>if self._using_hogwild:</dt><dd><dl class="simple">
+<dt>if not self.is_evaluator():</dt><dd><p>logging.info(“Trainer.hub_export ignored due to the process not being evaluator.”)
+return</p>
+</dd>
+</dl>
+</dd>
+<dt>else:</dt><dd><dl class="simple">
+<dt>if not self.is_chief():</dt><dd><p>logging.info(“Trainer.hub_export ignored due to the process not being chief.”)
+return</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+<dt>if export_dir:</dt><dd><p>export_dir = sanitize_hdfs_path(export_dir)</p>
+</dd>
+<dt>if checkpoint_path:</dt><dd><p>checkpoint_path = sanitize_hdfs_path(checkpoint_path)</p>
+</dd>
+<dt>else:</dt><dd><p>checkpoint_path = self.best_or_latest_checkpoint</p>
+</dd>
+</dl>
+<p>export_dir = export_dir if export_dir is not None else self._save_dir
+exporter = hub.LatestModuleExporter(name, serving_input_receiver_fn)
+# The path_exporter by default contains a timestamp directory in its path.
+path_exporter = exporter.export(estimator=self.estimator,</p>
+<blockquote>
+<div><p>export_path=export_dir,
+checkpoint_path=checkpoint_path)</p>
+</div></blockquote>
+<p># LatestModuleExporter.export() returns a binary string on Cloud ML Engine
+# but tf.io.gfile.listdir() does not; this is an issue when joining paths
+if isinstance(path_exporter, bytes):</p>
+<blockquote>
+<div><p>path_exporter = path_exporter.decode()</p>
+</div></blockquote>
+<p># Copying the saved hub module to export_dir so we don’t need to specify
+# the timestamp when loading the module.
+# This is a workaround due to the current implementation of hub.LatestModuleExporter.
+# This works for multiple hub modules.
+hub_exported_modules = tf.io.gfile.listdir(path_exporter)</p>
+<dl>
+<dt>backup_dir = os.path.join(export_dir, “backups”,</dt><dd><p>datetime.datetime.now().strftime(‘%Y-%m-%d_%H-%M-%S’))</p>
+</dd>
+<dt>for folder in hub_exported_modules:</dt><dd><p>hub_module_oldpath = os.path.join(path_exporter, folder)
+hub_module_newpath = os.path.join(export_dir, folder)</p>
+<p># If the destination already exists, move to backup
+if tf.io.gfile.exists(hub_module_newpath):</p>
+<blockquote>
+<div><p># Ensure backup_dir exists
+tf.io.gfile.makedirs(backup_dir)
+hub_module_backup = os.path.join(backup_dir, folder)
+tf.io.gfile.rename(hub_module_newpath, hub_module_backup)</p>
+</div></blockquote>
+<p>tf.io.gfile.rename(hub_module_oldpath, hub_module_newpath)</p>
+</dd>
+</dl>
+<p># Since the timestamped folder exists but is empty, we can delete it.
+tf.io.gfile.rmtree(path_exporter)</p>
+</dd>
+<dt>def _is_on_gke(self) -&gt; bool:</dt><dd><p>“””Returns True if running on gke.”””
+cluster = os.environ.get(‘TWML_JOB_CLUSTER’)
+if not cluster or cluster in {‘smf1’, ‘atla’}:</p>
+<blockquote>
+<div><p>return False</p>
+</div></blockquote>
+<p>return True</p>
+</dd>
+<dt>def _maybe_del_tsd_exit(self, state_files) -&gt; None:</dt><dd><p>“””Handle potential early exit and TwitterSetDeployment deletion.</p>
+<blockquote>
+<div><dl class="simple">
+<dt>If:</dt><dd><ul class="simple">
+<li><p>distributed training</p></li>
+<li><p>running GKE</p></li>
+<li><p>training is finished (all state_files exists)</p></li>
+</ul>
+</dd>
+</dl>
+<p>we will exit early and not restart work</p>
+<p>If –distributed_training_cleanup = True then we will also handle
+cleaning up the TwitterSetDeployments.</p>
+<dl class="simple">
+<dt>Args:</dt><dd><p>state_files: A python list indicate state files to determine the finish
+state of the job.</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>“””
+# job type that is responsible for experiment tracking will remain alive
+# until it marks the experiment as finished.
+if self.experiment_tracker._env_eligible_for_recording_experiment:</p>
+<blockquote>
+<div><p>exp_status = self.experiment_tracker.get_run_status()
+if exp_status and exp_status not in {‘Success’, ‘Failed’}:</p>
+<blockquote>
+<div><dl class="simple">
+<dt>logging.info(</dt><dd><p>f”Not exiting early because experiment is still {exp_status}.”</p>
+</dd>
+</dl>
+<p>)
+return</p>
+</div></blockquote>
+</div></blockquote>
+<p># do not bother if we are on prem
+if not self._is_on_gke():</p>
+<blockquote>
+<div><p>logging.info(“No need to exit early because running on prem.”)
+return</p>
+</div></blockquote>
+<dl class="simple">
+<dt>states = [</dt><dd><p>twml.util.file_exist_in_dir(self._save_dir, state_file) for state_file in state_files]</p>
+</dd>
+</dl>
+<p>do_not_restart = (self._params.get(‘distributed’) and all(states))
+if not do_not_restart:</p>
+<blockquote>
+<div><p>return</p>
+</div></blockquote>
+<dl>
+<dt>logging.info(</dt><dd><p>f”Exiting early because a _SUCCESS file already exists in {self._save_dir}”)</p>
+</dd>
+<dt>if self._params.get(‘distributed_training_cleanup’):</dt><dd><dl class="simple">
+<dt>resource_name = ‘-‘.join([</dt><dd><p>os.environ[‘TWML_JOB_NAME’],
+os.environ[‘TWML_DISTRIBUTED_JOB_TYPE’],
+os.environ[‘TWML_JOB_ENV’],</p>
+</dd>
+</dl>
+<p>])
+logging.info(f”Deleting TwitterSetDeployment {resource_name}”)
+# each job type will manage its own deletion so that deletion happens
+# in the trainer init call for every job type
+# otherwise we may kill another job type during an important
+# process like experiment tracking management (handled by the evaluator
+kubectl_delete_by_name(</p>
+<blockquote>
+<div><p>zone=None,
+namespace=os.environ[‘TWML_JOB_ROLE’],
+resource_type=Resource.TWITTERSETDEPLOYMENTS.value,
+resource_name=resource_name,
+wait=False,</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>sys.exit(0)</p>
+</dd>
+<dt>def write_state_to_disk(self, save_dir, filename=’_SUCCESS’) -&gt; None:</dt><dd><dl class="simple">
+<dt>“””Write state file to disk to indicate the state of training process. This is usually used</dt><dd><p>to mark the state of training progress and determine the start when job restarts/resumes.</p>
+</dd>
+<dt>Args:</dt><dd><p>save_dir: A str of local/gcs/hdfs dir to write the state file.
+file_name: A str indicate the state file. Default to <cite>_SUCCESS</cite>.</p>
+</dd>
+</dl>
+<p>“””
+file_path = os.path.join(save_dir, filename)
+if tf.io.gfile.exists(file_path):</p>
+<blockquote>
+<div><p>tf.logging.warn(f’{file_path} already exist.’)
+return</p>
+</div></blockquote>
+<dl class="simple">
+<dt>with tf.io.gfile.GFile(file_path, ‘w’) as f:</dt><dd><p>f.write(‘’)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+</section>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../_sources/twml/twml/trainers/trainer.py.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

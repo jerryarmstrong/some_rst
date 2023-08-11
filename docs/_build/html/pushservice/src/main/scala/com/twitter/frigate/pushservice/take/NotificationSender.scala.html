@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.frigate.pushservice.take</p>
+<p>import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.frigate.common.base.Stats.track
+import com.twitter.frigate.common.store.IbisResponse
+import com.twitter.frigate.common.store.Sent
+import com.twitter.frigate.pushservice.model.PushTypes.PushCandidate
+import com.twitter.frigate.pushservice.take.sender.Ibis2Sender
+import com.twitter.frigate.pushservice.take.sender.NtabSender
+import com.twitter.frigate.scribe.thriftscala.NotificationScribe
+import com.twitter.util.Future
+import com.twitter.frigate.thriftscala.ChannelName</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>NotificationSender wraps up all the notification infra send logic, and serves as an abstract layer</p></li>
+<li><p>between CandidateNotifier and the respective senders including ntab, ibis, which is being</p></li>
+<li><p>gated with both a decider/feature switch</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>class NotificationSender(</dt><dd><p>ibis2Sender: Ibis2Sender,
+ntabSender: NtabSender,
+statsReceiver: StatsReceiver,
+notificationScribe: NotificationScribe =&gt; Unit) {</p>
+<p>private val notificationNotifierStats = statsReceiver.scope(this.getClass.getSimpleName)
+private val ibis2SendLatency = notificationNotifierStats.scope(“ibis2_send”)
+private val loggedOutIbis2SendLatency = notificationNotifierStats.scope(“logged_out_ibis2_send”)
+private val ntabSendLatency = notificationNotifierStats.scope(“ntab_send”)</p>
+<dl class="simple">
+<dt>private val ntabWriteThenSkipPushCounter =</dt><dd><p>notificationNotifierStats.counter(“ntab_write_then_skip_push”)</p>
+</dd>
+<dt>private val ntabWriteThenIbisSendCounter =</dt><dd><p>notificationNotifierStats.counter(“ntab_write_then_ibis_send”)</p>
+</dd>
+</dl>
+<p>notificationNotifierStats.counter(“ins_dark_traffic_send”)</p>
+<dl class="simple">
+<dt>private val ntabOnlyChannelSenderV3Counter =</dt><dd><p>notificationNotifierStats.counter(“ntab_only_channel_send_v3”)</p>
+</dd>
+<dt>def sendIbisDarkWrite(candidate: PushCandidate): Future[IbisResponse] = {</dt><dd><p>ibis2Sender.sendAsDarkWrite(candidate)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def isNtabOnlySend(</dt><dd><p>channels: Seq[ChannelName]</p>
+</dd>
+<dt>): Future[Boolean] = {</dt><dd><p>val isNtabOnlyChannel = channels.contains(ChannelName.NtabOnly)
+if (isNtabOnlyChannel) ntabOnlyChannelSenderV3Counter.incr()</p>
+<p>Future.value(isNtabOnlyChannel)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private def isPushOnly(channels: Seq[ChannelName], candidate: PushCandidate): Future[Boolean] = {</dt><dd><p>Future.value(channels.contains(ChannelName.PushOnly))</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def notify(</dt><dd><p>channels: Seq[ChannelName],
+candidate: PushCandidate</p>
+</dd>
+<dt>): Future[IbisResponse] = {</dt><dd><dl>
+<dt>Future</dt><dd><dl>
+<dt>.join(isPushOnly(channels, candidate), isNtabOnlySend(channels)).map {</dt><dd><dl>
+<dt>case (isPushOnly, isNtabOnly) =&gt;</dt><dd><dl>
+<dt>if (isPushOnly) {</dt><dd><p>track(ibis2SendLatency)(ibis2Sender.send(channels, candidate, notificationScribe, None))</p>
+</dd>
+<dt>} else {</dt><dd><dl>
+<dt>track(ntabSendLatency)(</dt><dd><dl>
+<dt>ntabSender</dt><dd><p>.send(candidate, isNtabOnly))</p>
+</dd>
+<dt>.flatMap { ntabResponse =&gt;</dt><dd><dl>
+<dt>if (isNtabOnly) {</dt><dd><p>ntabWriteThenSkipPushCounter.incr()
+candidate</p>
+<blockquote>
+<div><dl class="simple">
+<dt>.scribeData(channels = channels).foreach(notificationScribe).map(_ =&gt;</dt><dd><p>IbisResponse(Sent))</p>
+</dd>
+</dl>
+</div></blockquote>
+</dd>
+<dt>} else {</dt><dd><p>ntabWriteThenIbisSendCounter.incr()
+track(ibis2SendLatency)(</p>
+<blockquote>
+<div><p>ibis2Sender.send(channels, candidate, notificationScribe, ntabResponse))</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}.flatten</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def loggedOutNotify(</dt><dd><p>candidate: PushCandidate</p>
+</dd>
+<dt>): Future[IbisResponse] = {</dt><dd><dl class="simple">
+<dt>val ibisResponse = {</dt><dd><dl class="simple">
+<dt>track(loggedOutIbis2SendLatency)(</dt><dd><p>ibis2Sender.send(Seq(ChannelName.PushNtab), candidate, notificationScribe, None))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+ibisResponse</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/pushservice/src/main/scala/com/twitter/frigate/pushservice/take/NotificationSender.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

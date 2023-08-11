@@ -1,0 +1,543 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../" id="documentation_options" src="../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.ingester.pipeline.twitter;</p>
+<p>import java.net.URI;
+import java.net.URISyntaxException;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
+import javax.naming.NamingException;</p>
+<p>import com.google.common.base.Preconditions;
+import com.google.common.collect.Maps;
+import com.google.common.collect.Sets;</p>
+<p>import org.apache.commons.lang.StringUtils;
+import org.apache.commons.pipeline.StageException;
+import org.apache.commons.pipeline.validation.ConsumedTypes;
+import org.apache.commons.pipeline.validation.ProducesConsumed;</p>
+<p>import com.twitter.common.text.language.LocaleUtil;
+import com.twitter.search.common.decider.SearchDecider;
+import com.twitter.search.common.indexing.thriftjava.ThriftExpandedUrl;
+import com.twitter.search.common.metrics.Percentile;
+import com.twitter.search.common.metrics.PercentileUtil;
+import com.twitter.search.common.metrics.RelevanceStats;
+import com.twitter.search.common.metrics.SearchRateCounter;
+import com.twitter.search.ingester.model.IngesterTwitterMessage;
+import com.twitter.search.ingester.pipeline.util.BatchedElement;
+import com.twitter.search.ingester.pipeline.util.PipelineStageException;
+import com.twitter.search.ingester.pipeline.wire.WireModule;
+import com.twitter.service.spiderduck.gen.MediaTypes;
+import com.twitter.util.Duration;
+import com.twitter.util.Function;
+import com.twitter.util.Future;</p>
+<p>&#64;ConsumedTypes(IngesterTwitterMessage.class)
+&#64;ProducesConsumed
+public class ResolveCompressedUrlsBatchedStage extends TwitterBatchedBaseStage</p>
+<blockquote>
+<div><blockquote>
+<div><p>&lt;IngesterTwitterMessage, IngesterTwitterMessage&gt; {</p>
+</div></blockquote>
+<p>private static final int PINK_REQUEST_TIMEOUT_MILLIS = 500;
+private static final int PINK_REQUEST_RETRIES = 2;
+private static final String PINK_REQUESTS_BATCH_SIZE_DECIDER_KEY = “pink_requests_batch_size”;
+private AsyncPinkUrlsResolver urlResolver;
+private int resolveUrlPercentage = 100;
+private String pinkClientId;
+private SearchDecider searchDecider;</p>
+<p>// The number of URLs that we attempted to resolve.
+private SearchRateCounter linksAttempted;
+// The number of URLs that were successfully resolved.
+private SearchRateCounter linksSucceeded;
+// The number of URLs ignored because they are too long.
+private SearchRateCounter linksTooLong;
+// The number of URLs truncated because they are too long.
+private SearchRateCounter linksTruncated;</p>
+<p>// The number of resolved URLs without a media type.
+private SearchRateCounter urlsWithoutMediaType;
+// The number of resolved URLs with a specific media type.
+private final Map&lt;MediaTypes, SearchRateCounter&gt; urlsWithMediaTypeMap =</p>
+<blockquote>
+<div><p>Maps.newEnumMap(MediaTypes.class);</p>
+</div></blockquote>
+<p>// The number of tweets for which all URLs were resolved.
+private SearchRateCounter tweetsWithResolvedURLs;
+// The number of tweets for which some URLs were not resolved.
+private SearchRateCounter tweetsWithUnresolvedURLs;</p>
+<p>// How long it takes to fully resolve all URLs in a tweet.
+private Percentile&lt;Long&gt; millisToResolveAllTweetURLs;</p>
+<p>// max age that a tweet can be before passed down the pipeline
+private long tweetMaxAgeToResolve;</p>
+<p>// number of times an element is within quota.
+private SearchRateCounter numberOfElementsWithinQuota;</p>
+<p>// number of times element is not within quota. If element not within quota, we dont batch.
+private SearchRateCounter numberOfElementsNotWithinQuota;</p>
+<p>// number of times element has urls.
+private SearchRateCounter numberOfElementsWithUrls;</p>
+<p>// number of times element does not have urls. If element does not have URL, we dont batch.
+private SearchRateCounter numberOfElementsWithoutUrls;</p>
+<p>// number of calls to needsToBeBatched method.
+private SearchRateCounter numberOfCallsToNeedsToBeBatched;</p>
+<dl class="simple">
+<dt>public void setTweetMaxAgeToResolve(long tweetMaxAgeToResolve) {</dt><dd><p>this.tweetMaxAgeToResolve = tweetMaxAgeToResolve;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;Override
+protected Class&lt;IngesterTwitterMessage&gt; getQueueObjectType() {</p>
+<blockquote>
+<div><p>return IngesterTwitterMessage.class;</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+protected boolean needsToBeBatched(IngesterTwitterMessage element) {</p>
+<blockquote>
+<div><p>numberOfCallsToNeedsToBeBatched.increment();
+boolean isWithinQuota = (element.getId() % 100) &lt; resolveUrlPercentage;</p>
+<dl class="simple">
+<dt>if (isWithinQuota) {</dt><dd><p>this.numberOfElementsWithinQuota.increment();</p>
+</dd>
+<dt>} else {</dt><dd><p>this.numberOfElementsNotWithinQuota.increment();</p>
+</dd>
+</dl>
+<p>}</p>
+<p>boolean hasUrls = !element.getExpandedUrlMap().isEmpty();</p>
+<dl class="simple">
+<dt>if (hasUrls) {</dt><dd><p>this.numberOfElementsWithUrls.increment();</p>
+</dd>
+<dt>} else {</dt><dd><p>this.numberOfElementsWithoutUrls.increment();</p>
+</dd>
+</dl>
+<p>}</p>
+<p>return hasUrls &amp;&amp; isWithinQuota;</p>
+</div></blockquote>
+<p>}</p>
+<p>// Identity transformation. T and U types are the same
+&#64;Override
+protected IngesterTwitterMessage transform(IngesterTwitterMessage element) {</p>
+<blockquote>
+<div><p>return element;</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public void initStats() {</p>
+<blockquote>
+<div><p>super.initStats();
+commonInnerSetupStats();</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+protected void innerSetupStats() {</p>
+<blockquote>
+<div><p>super.innerSetupStats();
+commonInnerSetupStats();</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>private void commonInnerSetupStats() {</dt><dd><p>linksAttempted = RelevanceStats.exportRate(getStageNamePrefix() + “_num_links_attempted”);
+linksSucceeded = RelevanceStats.exportRate(getStageNamePrefix() + “_num_links_succeeded”);
+linksTooLong = RelevanceStats.exportRate(getStageNamePrefix() + “_num_links_toolong”);
+linksTruncated = RelevanceStats.exportRate(getStageNamePrefix() + “_num_links_truncated”);</p>
+<dl>
+<dt>urlsWithoutMediaType = RelevanceStats.exportRate(</dt><dd><p>getStageNamePrefix() + “_urls_without_media_type”);</p>
+</dd>
+<dt>for (MediaTypes mediaType<span class="classifier">MediaTypes.values()) {</span></dt><dd><dl>
+<dt>urlsWithMediaTypeMap.put(</dt><dd><p>mediaType,
+RelevanceStats.exportRate(</p>
+<blockquote>
+<div><p>getStageNamePrefix() + “_urls_with_media_type_” + mediaType.name().toLowerCase()));</p>
+</div></blockquote>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>tweetsWithResolvedURLs = RelevanceStats.exportRate(</dt><dd><p>getStageNamePrefix() + “_num_tweets_with_resolved_urls”);</p>
+</dd>
+<dt>tweetsWithUnresolvedURLs = RelevanceStats.exportRate(</dt><dd><p>getStageNamePrefix() + “_num_tweets_with_unresolved_urls”);</p>
+</dd>
+<dt>millisToResolveAllTweetURLs = PercentileUtil.createPercentile(</dt><dd><p>getStageNamePrefix() + “_millis_to_resolve_all_tweet_urls”);</p>
+</dd>
+<dt>numberOfCallsToNeedsToBeBatched = SearchRateCounter.export(getStageNamePrefix()</dt><dd><ul class="simple">
+<li><p>“_calls_to_needsToBeBatched”);</p></li>
+</ul>
+</dd>
+<dt>numberOfElementsWithinQuota = SearchRateCounter.export(getStageNamePrefix()</dt><dd><ul class="simple">
+<li><p>“_is_within_quota”);</p></li>
+</ul>
+</dd>
+<dt>numberOfElementsNotWithinQuota = SearchRateCounter.export(getStageNamePrefix()</dt><dd><ul class="simple">
+<li><p>“_is_not_within_quota”);</p></li>
+</ul>
+</dd>
+<dt>numberOfElementsWithUrls = SearchRateCounter.export(getStageNamePrefix()</dt><dd><ul class="simple">
+<li><p>“_has_urls”);</p></li>
+</ul>
+</dd>
+<dt>numberOfElementsWithoutUrls = SearchRateCounter.export(getStageNamePrefix()</dt><dd><ul class="simple">
+<li><p>“_does_not_have_urls”);</p></li>
+</ul>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;Override
+protected void doInnerPreprocess() throws StageException, NamingException {</p>
+<blockquote>
+<div><p>searchDecider = new SearchDecider(decider);
+// We need to call this after assigning searchDecider because our updateBatchSize function
+// depends on the searchDecider.
+super.doInnerPreprocess();
+commonInnerSetup();</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+protected void innerSetup() throws PipelineStageException, NamingException {</p>
+<blockquote>
+<div><p>searchDecider = new SearchDecider(decider);
+// We need to call this after assigning searchDecider because our updateBatchSize function
+// depends on the searchDecider.
+super.innerSetup();
+commonInnerSetup();</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>private void commonInnerSetup() throws NamingException {</dt><dd><p>Preconditions.checkNotNull(pinkClientId);
+urlResolver = new AsyncPinkUrlsResolver(</p>
+<blockquote>
+<div><dl>
+<dt>WireModule</dt><dd><p>.getWireModule()
+.getStorer(Duration.fromMilliseconds(PINK_REQUEST_TIMEOUT_MILLIS),</p>
+<blockquote>
+<div><p>PINK_REQUEST_RETRIES),</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>pinkClientId);</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;Override
+protected Future&lt;Collection&lt;IngesterTwitterMessage&gt;&gt; innerProcessBatch(Collection&lt;BatchedElement</p>
+<blockquote>
+<div><blockquote>
+<div><p>&lt;IngesterTwitterMessage, IngesterTwitterMessage&gt;&gt; batch) {</p>
+</div></blockquote>
+<p>// Batch urls
+Map&lt;String, Set&lt;IngesterTwitterMessage&gt;&gt; urlToTweetsMap = createUrlToTweetMap(batch);</p>
+<p>Set&lt;String&gt; urlsToResolve = urlToTweetsMap.keySet();</p>
+<p>updateBatchSize();</p>
+<p>linksAttempted.increment(batch.size());
+// Do the lookup
+return urlResolver.resolveUrls(urlsToResolve).map(processResolvedUrlsFunction(batch));</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+protected void updateBatchSize() {</p>
+<blockquote>
+<div><p>// update batch based on decider
+int decidedBatchSize = searchDecider.featureExists(PINK_REQUESTS_BATCH_SIZE_DECIDER_KEY)</p>
+<blockquote>
+<div><p>? searchDecider.getAvailability(PINK_REQUESTS_BATCH_SIZE_DECIDER_KEY)
+: batchSize;</p>
+</div></blockquote>
+<p>setBatchedStageBatchSize(decidedBatchSize);</p>
+</div></blockquote>
+<p>}</p>
+<p>//if not all urls for a message where resolved re-enqueue until maxAge is reached
+private Function&lt;Map&lt;String, ResolveCompressedUrlsUtils.UrlInfo&gt;,</p>
+<blockquote>
+<div><p>Collection&lt;IngesterTwitterMessage&gt;&gt;</p>
+</div></blockquote>
+<dl>
+<dt>processResolvedUrlsFunction(Collection&lt;BatchedElement&lt;IngesterTwitterMessage,</dt><dd><blockquote>
+<div><p>IngesterTwitterMessage&gt;&gt; batch) {</p>
+</div></blockquote>
+<dl>
+<dt>return Function.func(resolvedUrls -&gt; {</dt><dd><p>linksSucceeded.increment(resolvedUrls.size());</p>
+<dl>
+<dt>for (ResolveCompressedUrlsUtils.UrlInfo urlInfo<span class="classifier">resolvedUrls.values()) {</span></dt><dd><dl class="simple">
+<dt>if (urlInfo.mediaType != null) {</dt><dd><p>urlsWithMediaTypeMap.get(urlInfo.mediaType).increment();</p>
+</dd>
+<dt>} else {</dt><dd><p>urlsWithoutMediaType.increment();</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>Set&lt;IngesterTwitterMessage&gt; successfulTweets = Sets.newHashSet();</p>
+<dl>
+<dt>for (BatchedElement&lt;IngesterTwitterMessage, IngesterTwitterMessage&gt; batchedElement<span class="classifier">batch) {</span></dt><dd><p>IngesterTwitterMessage message = batchedElement.getItem();
+Set&lt;String&gt; tweetUrls = message.getExpandedUrlMap().keySet();</p>
+<p>int resolvedUrlCounter = 0;</p>
+<dl>
+<dt>for (String url<span class="classifier">tweetUrls) {</span></dt><dd><p>ResolveCompressedUrlsUtils.UrlInfo urlInfo = resolvedUrls.get(url);</p>
+<p>// if the url didn’t resolve move on to the next one, this might trigger a re-enqueue
+// if the tweet is still kind of new. But we want to process the rest for when that
+// is not the case and we are going to end up passing it to the next stage
+if (urlInfo == null) {</p>
+<blockquote>
+<div><p>continue;</p>
+</div></blockquote>
+<p>}</p>
+<p>String resolvedUrl = urlInfo.resolvedUrl;
+Locale locale = urlInfo.language == null ? null</p>
+<blockquote>
+<div><p>: LocaleUtil.getLocaleOf(urlInfo.language);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>if (StringUtils.isNotBlank(resolvedUrl)) {</dt><dd><p>ThriftExpandedUrl expandedUrl = message.getExpandedUrlMap().get(url);
+resolvedUrlCounter += 1;
+enrichTweetWithUrlInfo(message, expandedUrl, urlInfo, locale);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}
+long tweetMessageAge = clock.nowMillis() - message.getDate().getTime();</p>
+<dl class="simple">
+<dt>if (resolvedUrlCounter == tweetUrls.size()) {</dt><dd><p>millisToResolveAllTweetURLs.record(tweetMessageAge);
+tweetsWithResolvedURLs.increment();
+successfulTweets.add(message);</p>
+</dd>
+<dt>} else if (tweetMessageAge &gt; tweetMaxAgeToResolve) {</dt><dd><p>tweetsWithUnresolvedURLs.increment();
+successfulTweets.add(message);</p>
+</dd>
+<dt>} else {</dt><dd><p>//re-enqueue if all urls weren’t resolved and the tweet is younger than maxAge
+reEnqueueAndRetry(batchedElement);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}
+return successfulTweets;</p>
+</dd>
+</dl>
+<p>});</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private Map&lt;String, Set&lt;IngesterTwitterMessage&gt;&gt; createUrlToTweetMap(</dt><dd><blockquote>
+<div><p>Collection&lt;BatchedElement&lt;IngesterTwitterMessage, IngesterTwitterMessage&gt;&gt; batch) {</p>
+</div></blockquote>
+<p>Map&lt;String, Set&lt;IngesterTwitterMessage&gt;&gt; urlToTweetsMap = Maps.newHashMap();
+for (BatchedElement&lt;IngesterTwitterMessage, IngesterTwitterMessage&gt; batchedElement : batch) {</p>
+<blockquote>
+<div><p>IngesterTwitterMessage message = batchedElement.getItem();
+for (String originalUrl : message.getExpandedUrlMap().keySet()) {</p>
+<blockquote>
+<div><p>Set&lt;IngesterTwitterMessage&gt; messages = urlToTweetsMap.get(originalUrl);
+if (messages == null) {</p>
+<blockquote>
+<div><p>messages = new HashSet&lt;&gt;();
+urlToTweetsMap.put(originalUrl, messages);</p>
+</div></blockquote>
+<p>}
+messages.add(message);</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}
+return Collections.unmodifiableMap(urlToTweetsMap);</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// enrich the twitterMessage with the resolvedCounter Urls.
+private void enrichTweetWithUrlInfo(IngesterTwitterMessage message,</p>
+<blockquote>
+<div><blockquote>
+<div><p>ThriftExpandedUrl expandedUrl,
+ResolveCompressedUrlsUtils.UrlInfo urlInfo,
+Locale locale) {</p>
+</div></blockquote>
+<p>String truncatedUrl = maybeTruncate(urlInfo.resolvedUrl);
+if (truncatedUrl == null) {</p>
+<blockquote>
+<div><p>return;</p>
+</div></blockquote>
+<p>}</p>
+<p>expandedUrl.setCanonicalLastHopUrl(truncatedUrl);
+if (urlInfo.mediaType != null) {</p>
+<blockquote>
+<div><p>// Overwrite url media type with media type from resolved url only if the media type from
+// resolved url is not Unknown
+if (!expandedUrl.isSetMediaType() || urlInfo.mediaType != MediaTypes.UNKNOWN) {</p>
+<blockquote>
+<div><p>expandedUrl.setMediaType(urlInfo.mediaType);</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}
+if (urlInfo.linkCategory != null) {</p>
+<blockquote>
+<div><p>expandedUrl.setLinkCategory(urlInfo.linkCategory);</p>
+</div></blockquote>
+<p>}
+// Note that if there are multiple links in one tweet message, the language of the
+// link that got examined later in this for loop will overwrite the values that were
+// written before. This is not an optimal design but considering most tweets have
+// only one link, or same-language links, this shouldn’t be a big issue.
+if (locale != null) {</p>
+<blockquote>
+<div><p>message.setLinkLocale(locale);</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>if (urlInfo.description != null) {</dt><dd><p>expandedUrl.setDescription(urlInfo.description);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>if (urlInfo.title != null) {</dt><dd><p>expandedUrl.setTitle(urlInfo.title);</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>// test methods
+public void setResolveUrlPercentage(int percentage) {</p>
+<blockquote>
+<div><p>this.resolveUrlPercentage = percentage;</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>public void setPinkClientId(String pinkClientId) {</dt><dd><p>this.pinkClientId = pinkClientId;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>public static final int MAX_URL_LENGTH = 1000;</p>
+<dl>
+<dt>private String maybeTruncate(String fullUrl) {</dt><dd><dl class="simple">
+<dt>if (fullUrl.length() &lt;= MAX_URL_LENGTH) {</dt><dd><p>return fullUrl;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>try {</dt><dd><p>URI parsed = new URI(fullUrl);</p>
+<p>// Create a URL with an empty query and fragment.
+String simplified = new URI(parsed.getScheme(),</p>
+<blockquote>
+<div><p>parsed.getAuthority(),
+parsed.getPath(),
+null,
+null).toString();</p>
+</div></blockquote>
+<dl class="simple">
+<dt>if (simplified.length() &lt; MAX_URL_LENGTH) {</dt><dd><p>linksTruncated.increment();
+return simplified;</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>} catch (URISyntaxException e) {
+}</p>
+<p>linksTooLong.increment();
+return null;</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../_sources/src/java/com/twitter/search/ingester/pipeline/twitter/ResolveCompressedUrlsBatchedStage.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../../../" id="documentation_options" src="../../../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.follow_recommendations.common.feature_hydration.sources</p>
+<p>import com.google.inject.Provides
+import com.google.inject.Singleton
+import com.twitter.escherbird.util.stitchcache.StitchCache
+import com.twitter.finagle.mtls.authentication.ServiceIdentifier
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.inject.TwitterModule
+import com.twitter.stitch.Stitch
+import com.twitter.storage.client.manhattan.bijections.Bijections.BinaryCompactScalaInjection
+import com.twitter.storage.client.manhattan.bijections.Bijections.LongInjection
+import com.twitter.storage.client.manhattan.kv.Guarantee
+import com.twitter.storage.client.manhattan.kv.ManhattanKVClient
+import com.twitter.storage.client.manhattan.kv.ManhattanKVClientMtlsParams
+import com.twitter.storage.client.manhattan.kv.ManhattanKVEndpoint
+import com.twitter.storage.client.manhattan.kv.ManhattanKVEndpointBuilder
+import com.twitter.storage.client.manhattan.kv.impl.Component
+import com.twitter.storage.client.manhattan.kv.impl.Component0
+import com.twitter.storage.client.manhattan.kv.impl.KeyDescriptor
+import com.twitter.storage.client.manhattan.kv.impl.ValueDescriptor
+import com.twitter.strato.generated.client.ml.featureStore.McUserCountingOnUserClientColumn
+import com.twitter.strato.generated.client.ml.featureStore.onboarding.TimelinesAuthorFeaturesOnUserClientColumn
+import com.twitter.timelines.author_features.v1.thriftscala.AuthorFeatures
+import com.twitter.conversions.DurationOps._
+import com.twitter.onboarding.relevance.features.thriftscala.MCUserCountingFeatures
+import java.lang.{Long =&gt; JLong}
+import scala.util.Random</p>
+<p>object HydrationSourcesModule extends TwitterModule {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>val readFromManhattan = flag(</dt><dd><p>“feature_hydration_enable_reading_from_manhattan”,
+false,
+“Whether to read the data from Manhattan or Strato”)</p>
+</dd>
+<dt>val manhattanAppId =</dt><dd><p>flag(“frs_readonly.appId”, “ml_features_athena”, “RO App Id used by the RO FRS service”)</p>
+</dd>
+<dt>val manhattanDestName = flag(</dt><dd><p>“frs_readonly.destName”,
+“/s/manhattan/athena.native-thrift”,
+“manhattan Dest Name used by the RO FRS service”)</p>
+</dd>
+</dl>
+<p>&#64;Provides
+&#64;Singleton
+def providesAthenaManhattanClient(</p>
+<blockquote>
+<div><p>serviceIdentifier: ServiceIdentifier</p>
+</div></blockquote>
+<dl>
+<dt>): ManhattanKVEndpoint = {</dt><dd><dl class="simple">
+<dt>val client = ManhattanKVClient(</dt><dd><p>manhattanAppId(),
+manhattanDestName(),
+ManhattanKVClientMtlsParams(serviceIdentifier)</p>
+</dd>
+</dl>
+<p>)
+ManhattanKVEndpointBuilder(client)</p>
+<blockquote>
+<div><p>.defaultGuarantee(Guarantee.Weak)
+.build()</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<p>val manhattanAuthorDataset = “timelines_author_features”
+private val defaultCacheMaxKeys = 60000
+private val cacheTTL = 12.hours
+private val earlyExpiration = 0.2</p>
+<p>val authorKeyDesc = KeyDescriptor(Component(LongInjection), Component0)
+val authorDatasetKey = authorKeyDesc.withDataset(manhattanAuthorDataset)
+val authorValDesc = ValueDescriptor(BinaryCompactScalaInjection(AuthorFeatures))</p>
+<p>&#64;Provides
+&#64;Singleton
+def timelinesAuthorStitchCache(</p>
+<blockquote>
+<div><p>manhattanReadOnlyEndpoint: ManhattanKVEndpoint,
+timelinesAuthorFeaturesColumn: TimelinesAuthorFeaturesOnUserClientColumn,
+stats: StatsReceiver</p>
+</div></blockquote>
+<p>): StitchCache[JLong, Option[AuthorFeatures]] = {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>val stitchCacheStats =</dt><dd><dl class="simple">
+<dt>stats</dt><dd><p>.scope(“direct_ds_source_feature_hydration_module”).scope(“timelines_author”)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>val stStat = stitchCacheStats.counter(“readFromStrato-each”)
+val mhtStat = stitchCacheStats.counter(“readFromManhattan-each”)</p>
+<dl>
+<dt>val timelinesAuthorUnderlyingCall = if (readFromManhattan()) {</dt><dd><p>stitchCacheStats.counter(“readFromManhattan”).incr()
+val authorCacheUnderlyingManhattanCall: JLong =&gt; Stitch[Option[AuthorFeatures]] = id =&gt; {</p>
+<blockquote>
+<div><p>mhtStat.incr()
+val key = authorDatasetKey.withPkey(id)
+manhattanReadOnlyEndpoint</p>
+<blockquote>
+<div><dl class="simple">
+<dt>.get(key = key, valueDesc = authorValDesc).map(_.map(value =&gt;</dt><dd><p>clearUnsedFieldsForAuthorFeature(value.contents)))</p>
+</dd>
+</dl>
+</div></blockquote>
+</div></blockquote>
+<p>}
+authorCacheUnderlyingManhattanCall</p>
+</dd>
+<dt>} else {</dt><dd><p>stitchCacheStats.counter(“readFromStrato”).incr()
+val authorCacheUnderlyingStratoCall: JLong =&gt; Stitch[Option[AuthorFeatures]] = id =&gt; {</p>
+<blockquote>
+<div><p>stStat.incr()
+val timelinesAuthorFeaturesFetcher = timelinesAuthorFeaturesColumn.fetcher
+timelinesAuthorFeaturesFetcher</p>
+<blockquote>
+<div><p>.fetch(id).map(result =&gt; result.v.map(clearUnsedFieldsForAuthorFeature))</p>
+</div></blockquote>
+</div></blockquote>
+<p>}
+authorCacheUnderlyingStratoCall</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>StitchCache[JLong, Option[AuthorFeatures]](</dt><dd><p>underlyingCall = timelinesAuthorUnderlyingCall,
+maxCacheSize = defaultCacheMaxKeys,
+ttl = randomizedTTL(cacheTTL.inSeconds).seconds,
+statsReceiver = stitchCacheStats</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<p>}</p>
+<p>// Not adding manhattan since it didn’t seem useful for Author Data, we can add in another phab
+// if deemed helpful
+&#64;Provides
+&#64;Singleton
+def metricCenterUserCountingStitchCache(</p>
+<blockquote>
+<div><p>mcUserCountingFeaturesColumn: McUserCountingOnUserClientColumn,
+stats: StatsReceiver</p>
+</div></blockquote>
+<p>): StitchCache[JLong, Option[MCUserCountingFeatures]] = {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>val stitchCacheStats =</dt><dd><dl class="simple">
+<dt>stats</dt><dd><p>.scope(“direct_ds_source_feature_hydration_module”).scope(“mc_user_counting”)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>val stStat = stitchCacheStats.counter(“readFromStrato-each”)
+stitchCacheStats.counter(“readFromStrato”).incr()</p>
+<dl class="simple">
+<dt>val mcUserCountingCacheUnderlyingCall: JLong =&gt; Stitch[Option[MCUserCountingFeatures]] = id =&gt; {</dt><dd><p>stStat.incr()
+val mcUserCountingFeaturesFetcher = mcUserCountingFeaturesColumn.fetcher
+mcUserCountingFeaturesFetcher.fetch(id).map(_.v)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>StitchCache[JLong, Option[MCUserCountingFeatures]](</dt><dd><p>underlyingCall = mcUserCountingCacheUnderlyingCall,
+maxCacheSize = defaultCacheMaxKeys,
+ttl = randomizedTTL(cacheTTL.inSeconds).seconds,
+statsReceiver = stitchCacheStats</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<p>}</p>
+<p>// clear out fields we don’t need to save cache space
+private def clearUnsedFieldsForAuthorFeature(entry: AuthorFeatures): AuthorFeatures = {</p>
+<blockquote>
+<div><p>entry.unsetUserTopics.unsetUserHealth.unsetAuthorCountryCodeAggregates.unsetOriginalAuthorCountryCodeAggregates</p>
+</div></blockquote>
+<p>}</p>
+<p>// To avoid a cache stampede. See <a class="reference external" href="https://en.wikipedia.org/wiki/Cache_stampede">https://en.wikipedia.org/wiki/Cache_stampede</a>
+private def randomizedTTL(ttl: Long): Long = {</p>
+<blockquote>
+<div><p>(ttl - ttl * earlyExpiration * Random.nextDouble()).toLong</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../../../_sources/follow-recommendations-service/common/src/main/scala/com/twitter/follow_recommendations/common/feature_hydration/sources/HydrationSourcesModule.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

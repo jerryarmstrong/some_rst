@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../../" id="documentation_options" src="../../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.servo.util</p>
+<p>import com.twitter.finagle.Backoff
+import com.twitter.finagle.service.{RetryBudget, RetryPolicy}
+import com.twitter.finagle.stats.{Counter, StatsReceiver}
+import com.twitter.util._
+import java.util.concurrent.CancellationException
+import scala.util.control.NonFatal</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>A RetryHandler can wrap an arbitrary Future-producing operation with retry logic, where the</p></li>
+<li><p>operation may conditionally be retried multiple times.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+</dl>
+<p>trait RetryHandler[-A] {</p>
+<blockquote>
+<div><dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Executes the given operation and performs any applicable retries.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+</dl>
+<p>def apply[A2 &lt;: A](f: =&gt; Future[A2]): Future[A2]</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Wraps an arbitrary function with this RetryHandler’s retrying logic.</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>def wrap[A2 &lt;: A, B](f: B =&gt; Future[A2]): B =&gt; Future[A2] =</dt><dd><p>b =&gt; this(f(b))</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<p>object RetryHandler {</p>
+<blockquote>
+<div><dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Builds a RetryHandler that retries according to the given RetryPolicy.  Retries, if any,</p></li>
+<li><p>will be scheduled on the given Timer to be executed after the appropriate backoff, if any.</p></li>
+<li><p>Retries will be limited according the given <cite>RetryBudget</cite>.</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+<dt>def apply[A](</dt><dd><p>policy: RetryPolicy[Try[A]],
+timer: Timer,
+statsReceiver: StatsReceiver,
+budget: RetryBudget = RetryBudget()</p>
+</dd>
+<dt>): RetryHandler[A] = {</dt><dd><p>val firstTryCounter = statsReceiver.counter(“first_try”)
+val retriesCounter = statsReceiver.counter(“retries”)
+val budgetExhausedCounter = statsReceiver.counter(“budget_exhausted”)</p>
+<dl>
+<dt>new RetryHandler[A] {</dt><dd><dl class="simple">
+<dt>def apply[A2 &lt;: A](f: =&gt; Future[A2]): Future[A2] = {</dt><dd><p>firstTryCounter.incr()
+budget.deposit()
+retry[A2](policy, timer, retriesCounter, budgetExhausedCounter, budget)(f)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Builds a RetryHandler that will only retry on failures that are handled by the given policy,</p></li>
+<li><p>and does not consider any successful future for retries.</p></li>
+</ul>
+<p><a href="#id9"><span class="problematic" id="id10">*</span></a>/</p>
+</dd>
+<dt>def failuresOnly[A](</dt><dd><p>policy: RetryPolicy[Try[Nothing]],
+timer: Timer,
+statsReceiver: StatsReceiver,
+budget: RetryBudget = RetryBudget()</p>
+</dd>
+<dt>): RetryHandler[A] =</dt><dd><p>apply(failureOnlyRetryPolicy(policy), timer, statsReceiver, budget)</p>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Builds a RetryHandler that will retry any failure according to the given backoff schedule,</p></li>
+<li><p>until either either the operation succeeds or all backoffs are exhausted.</p></li>
+</ul>
+<p><a href="#id11"><span class="problematic" id="id12">*</span></a>/</p>
+</dd>
+<dt>def failuresOnly[A](</dt><dd><p>backoffs: Stream[Duration],
+timer: Timer,
+stats: StatsReceiver,
+budget: RetryBudget</p>
+</dd>
+<dt>): RetryHandler[A] =</dt><dd><dl class="simple">
+<dt>failuresOnly(</dt><dd><p>RetryPolicy.backoff[Try[Nothing]](Backoff.fromStream(backoffs)) { case Throw(_) =&gt; true },
+timer,
+stats,
+budget</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Builds a RetryHandler that will retry any failure according to the given backoff schedule,</p></li>
+<li><p>until either either the operation succeeds or all backoffs are exhausted.</p></li>
+</ul>
+<p><a href="#id13"><span class="problematic" id="id14">*</span></a>/</p>
+</dd>
+<dt>def failuresOnly[A](</dt><dd><p>backoffs: Stream[Duration],
+timer: Timer,
+stats: StatsReceiver</p>
+</dd>
+<dt>): RetryHandler[A] =</dt><dd><p>failuresOnly(backoffs, timer, stats, RetryBudget())</p>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Converts a RetryPolicy that only handles failures (Throw) to a RetryPolicy that also</p></li>
+<li><p>handles successes (Return), by flagging that successes need not be retried.</p></li>
+</ul>
+<p><a href="#id15"><span class="problematic" id="id16">*</span></a>/</p>
+</dd>
+<dt>def failureOnlyRetryPolicy[A](policy: RetryPolicy[Try[Nothing]]): RetryPolicy[Try[A]] =</dt><dd><dl>
+<dt>RetryPolicy[Try[A]] {</dt><dd><p>case Return(_) =&gt; None
+case Throw(ex) =&gt;</p>
+<blockquote>
+<div><dl class="simple">
+<dt>policy(Throw(ex)) map {</dt><dd><p>case (backoff, p2) =&gt; (backoff, failureOnlyRetryPolicy(p2))</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>private[this] def retry[A](</dt><dd><p>policy: RetryPolicy[Try[A]],
+timer: Timer,
+retriesCounter: Counter,
+budgetExhausedCounter: Counter,
+budget: RetryBudget</p>
+</dd>
+<dt>)(</dt><dd><p>f: =&gt; Future[A]</p>
+</dd>
+<dt>): Future[A] = {</dt><dd><dl>
+<dt>forceFuture(f).transform { transformed =&gt;</dt><dd><dl>
+<dt>policy(transformed) match {</dt><dd><dl>
+<dt>case Some((backoff, nextPolicy)) =&gt;</dt><dd><dl>
+<dt>if (budget.tryWithdraw()) {</dt><dd><p>retriesCounter.incr()
+schedule(backoff, timer) {</p>
+<blockquote>
+<div><p>retry(nextPolicy, timer, retriesCounter, budgetExhausedCounter, budget)(f)</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+<dt>} else {</dt><dd><p>budgetExhausedCounter.incr()
+Future.const(transformed)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>case None =&gt;</dt><dd><p>Future.const(transformed)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// similar to finagle’s RetryExceptionsFilter
+private[this] def schedule[A](d: Duration, timer: Timer)(f: =&gt; Future[A]) = {</p>
+<blockquote>
+<div><dl>
+<dt>if (d.inNanoseconds &gt; 0) {</dt><dd><p>val promise = new Promise[A]
+val task = timer.schedule(Time.now + d) {</p>
+<blockquote>
+<div><dl>
+<dt>if (!promise.isDefined) {</dt><dd><dl class="simple">
+<dt>try {</dt><dd><p>promise.become(f)</p>
+</dd>
+<dt>} catch {</dt><dd><p>case NonFatal(cause) =&gt;
+// Ignore any exceptions thrown by Promise#become(). This usually means that the promise
+// was already defined and cannot be transformed.</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}
+promise.setInterruptHandler {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case cause =&gt;</dt><dd><p>task.cancel()
+val cancellation = new CancellationException
+cancellation.initCause(cause)
+promise.updateIfEmpty(Throw(cancellation))</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+promise</p>
+</dd>
+</dl>
+<p>} else forceFuture(f)</p>
+</div></blockquote>
+<p>}</p>
+<p>// (Future { f } flatten), but without the allocation
+private[this] def forceFuture[A](f: =&gt; Future[A]) = {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>try {</dt><dd><p>f</p>
+</dd>
+<dt>} catch {</dt><dd><dl class="simple">
+<dt>case NonFatal(cause) =&gt;</dt><dd><p>Future.exception(cause)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../../_sources/tweetypie/servo/util/src/main/scala/com/twitter/servo/util/RetryHandler.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.ann.scalding.offline.com.twitter.ann.scalding.benchmark</p>
+<p>/*
+This job will generate KNN ground truth based user and item embeddings.</p>
+<blockquote>
+<div><p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</div></blockquote>
+<p>import com.twitter.scalding.typed.TypedPipe
+import com.twitter.scalding._
+import com.twitter.scalding_internal.dalv2.DALWrite.D
+import com.twitter.ann.knn.thriftscala.Knn
+import com.twitter.ann.knn.thriftscala.Neighbor
+import com.twitter.ann.scalding.offline.IndexingStrategy
+import com.twitter.ann.scalding.offline.KnnHelper
+import com.twitter.ann.common.Distance
+import com.twitter.ml.featurestore.lib.embedding.EmbeddingWithEntity
+import com.twitter.cortex.ml.embeddings.common.EmbeddingFormatArgsParser
+import com.twitter.cortex.ml.embeddings.common.EntityKind
+import java.util.TimeZone
+import com.twitter.scalding_internal.dalv2.DALWrite._
+import com.twitter.ann.scalding.benchmark.UserItemKnnScalaDataset
+import com.twitter.scalding_internal.job.TwitterExecutionApp
+import com.twitter.ml.featurestore.lib.EntityId
+import com.twitter.ml.featurestore.lib.UserId</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>This job will take consumer and item embeddings(either url or tweet) and output Knn entities (user id, (distance, item id)).</p></li>
+<li></li>
+<li><p>Example command to run this adhoc job:</p></li>
+<li></li>
+<li><p>scalding remote run </p></li>
+<li><p>–target ann/src/main/scala/com/twitter/ann/scalding/benchmark:benchmark-adhoc </p></li>
+<li><p>–hadoop-properties “mapreduce.map.memory.mb=8192 mapreduce.map.java.opts=’-Xmx7618M’ mapreduce.reduce.memory.mb=8192 mapreduce.reduce.java.opts=’-Xmx7618M’ mapred.task.timeout=0” </p></li>
+<li><p>–submitter hadoopnest3.smf1.twitter.com </p></li>
+<li><p>–user cortex-mlx </p></li>
+<li><p>–submitter-memory 8000.megabyte </p></li>
+<li><p>–main-class com.twitter.ann.scalding.offline.com.twitter.ann.scalding.benchmark.KnnJob – </p></li>
+<li><p>–dalEnvironment Prod </p></li>
+<li><p>–search_space_entity_type user </p></li>
+<li><p>–user.feature_store_embedding ConsumerFollowEmbedding300Dataset </p></li>
+<li><p>–user.feature_store_major_version 1569196895 </p></li>
+<li><p>–user.date_range 2019-10-23 </p></li>
+<li><p>–search_space.feature_store_embedding ConsumerFollowEmbedding300Dataset </p></li>
+<li><p>–search_space.feature_store_major_version 1569196895 </p></li>
+<li><p>–search_space.date_range 2019-10-23 </p></li>
+<li><p>–date 2019-10-25 </p></li>
+<li><p>–version “consumer_follower_test” </p></li>
+<li><p>–reducers 10000 </p></li>
+<li><p>–num_of_random_groups 20 </p></li>
+<li><p>–num_replicas 1000 </p></li>
+<li><p>–indexing_strategy.metric InnerProduct </p></li>
+<li><p>–indexing_strategy.type hnsw </p></li>
+<li><p>–indexing_strategy.dimension 300 </p></li>
+<li><p>–indexing_strategy.ef_construction 30 </p></li>
+<li><p>–indexing_strategy.max_m 10 </p></li>
+<li><p>–indexing_strategy.ef_query 50 </p></li>
+<li><p>–search_space_shards 3000 </p></li>
+<li><p>–query_shards 3000 </p></li>
+<li><p>–search_space.read_sample_ratio 0.038</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>trait KnnJobBase {</dt><dd><p>val seed: Long = 123</p>
+<dl class="simple">
+<dt>def getKnnDataset[B &lt;: EntityId, D &lt;: Distance[D]](</dt><dd><p>args: Args</p>
+</dd>
+<dt>)(</dt><dd><p>implicit uniqueID: UniqueID</p>
+</dd>
+</dl>
+<p>): TypedPipe[Knn] = {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>val consumerPipe: TypedPipe[EmbeddingWithEntity[UserId]] = EmbeddingFormatArgsParser.User</dt><dd><p>.getEmbeddingFormat(args, “user”)
+.getEmbeddings</p>
+</dd>
+<dt>val itemPipe = EntityKind</dt><dd><p>.getEntityKind(args(“search_space_entity_type”))
+.parser
+.getEmbeddingFormat(args, “search_space”)
+.getEmbeddings</p>
+</dd>
+</dl>
+<p>KnnHelper
+// Refer to the documentation of findNearestNeighboursWithIndexingStrategy for more
+// information about how to set these settings.</p>
+<blockquote>
+<div><dl class="simple">
+<dt>.findNearestNeighboursWithIndexingStrategy[UserId, B, D](</dt><dd><p>queryEmbeddings = consumerPipe,
+searchSpaceEmbeddings = itemPipe.asInstanceOf[TypedPipe[EmbeddingWithEntity[B]]],
+numNeighbors = args.int(“candidate_per_user”, 20),
+reducersOption = args.optional(“reducers”).map(_.toInt),
+numOfSearchGroups = args.int(“num_of_random_groups”),
+numReplicas = args.int(“num_replicas”),
+indexingStrategy = IndexingStrategy.parse(args).asInstanceOf[IndexingStrategy[D]],
+queryShards = args.optional(“query_shards”).map(_.toInt),
+searchSpaceShards = args.optional(“search_space_shards”).map(_.toInt)</p>
+</dd>
+</dl>
+<p>)
+.map {</p>
+<blockquote>
+<div><dl>
+<dt>case (user, items) =&gt;</dt><dd><dl>
+<dt>val neighbors = items.map {</dt><dd><dl>
+<dt>case (item, distance) =&gt;</dt><dd><dl class="simple">
+<dt>Neighbor(</dt><dd><p>distance.distance,
+item.toThrift</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+Knn(user.toThrift, neighbors)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>object KnnJob extends TwitterExecutionApp with KnnJobBase {</p>
+<blockquote>
+<div><p>val KnnPathSuffix: String = “/user/cortex-mlx/qualatative_analysis/knn_ground_truth/”
+val partitionKey: String = “version”</p>
+<dl>
+<dt>override def job: Execution[Unit] = Execution.withId { implicit uniqueId =&gt;</dt><dd><dl>
+<dt>Execution.getArgs.flatMap { args: Args =&gt;</dt><dd><p>implicit val timeZone: TimeZone = TimeZone.getDefault
+implicit val dateParser: DateParser = DateParser.default
+implicit val dateRange: DateRange = DateRange.parse(args.list(“date”))(timeZone, dateParser)</p>
+<dl class="simple">
+<dt>getKnnDataset(args).writeDALExecution(</dt><dd><p>UserItemKnnScalaDataset,
+D.Daily,
+D.Suffix(KnnPathSuffix),
+D.Parquet,
+Set(D.Partition(partitionKey, args(“version”), D.PartitionType.String))</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/ann/src/main/scala/com/twitter/ann/scalding/benchmark/Knn.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

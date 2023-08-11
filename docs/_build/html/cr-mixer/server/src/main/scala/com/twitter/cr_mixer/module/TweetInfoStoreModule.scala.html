@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.cr_mixer.module</p>
+<p>import com.google.inject.Module
+import com.google.inject.Provides
+import com.google.inject.Singleton
+import com.twitter.bijection.scrooge.BinaryScalaCodec
+import com.twitter.contentrecommender.thriftscala.TweetInfo
+import com.twitter.conversions.DurationOps._
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.finagle.memcached.{Client =&gt; MemcachedClient}
+import com.twitter.finagle.mtls.authentication.ServiceIdentifier
+import com.twitter.frigate.common.store.health.TweetHealthModelStore
+import com.twitter.frigate.common.store.health.TweetHealthModelStore.TweetHealthModelStoreConfig
+import com.twitter.frigate.common.store.health.UserHealthModelStore
+import com.twitter.frigate.thriftscala.TweetHealthScores
+import com.twitter.frigate.thriftscala.UserAgathaScores
+import com.twitter.hermit.store.common.DeciderableReadableStore
+import com.twitter.hermit.store.common.ObservedCachedReadableStore
+import com.twitter.hermit.store.common.ObservedMemcachedReadableStore
+import com.twitter.hermit.store.common.ObservedReadableStore
+import com.twitter.inject.TwitterModule
+import com.twitter.simclusters_v2.common.TweetId
+import com.twitter.simclusters_v2.common.UserId
+import com.twitter.storehaus.ReadableStore
+import com.twitter.strato.client.{Client =&gt; StratoClient}
+import com.twitter.contentrecommender.store.TweetInfoStore
+import com.twitter.contentrecommender.store.TweetyPieFieldsStore
+import com.twitter.cr_mixer.model.ModuleNames
+import com.twitter.cr_mixer.param.decider.CrMixerDecider
+import com.twitter.cr_mixer.param.decider.DeciderKey
+import com.twitter.frigate.data_pipeline.scalding.thriftscala.BlueVerifiedAnnotationsV2
+import com.twitter.recos.user_tweet_graph_plus.thriftscala.UserTweetGraphPlus
+import com.twitter.recos.user_tweet_graph_plus.thriftscala.TweetEngagementScores
+import com.twitter.relevance_platform.common.health_store.UserMediaRepresentationHealthStore
+import com.twitter.relevance_platform.common.health_store.MagicRecsRealTimeAggregatesStore
+import com.twitter.relevance_platform.thriftscala.MagicRecsRealTimeAggregatesScores
+import com.twitter.relevance_platform.thriftscala.UserMediaRepresentationScores
+import com.twitter.storage.client.manhattan.kv.ManhattanKVClientMtlsParams
+import com.twitter.tweetypie.thriftscala.TweetService
+import com.twitter.util.Future
+import com.twitter.util.JavaTimer
+import com.twitter.util.Timer</p>
+<p>import javax.inject.Named</p>
+<dl>
+<dt>object TweetInfoStoreModule extends TwitterModule {</dt><dd><p>implicit val timer: Timer = new JavaTimer(true)
+override def modules: Seq[Module] = Seq(UnifiedCacheClient)</p>
+<p>&#64;Provides
+&#64;Singleton
+def providesTweetInfoStore(</p>
+<blockquote>
+<div><p>statsReceiver: StatsReceiver,
+serviceIdentifier: ServiceIdentifier,
+stratoClient: StratoClient,
+&#64;Named(ModuleNames.UnifiedCache) crMixerUnifiedCacheClient: MemcachedClient,
+manhattanKVClientMtlsParams: ManhattanKVClientMtlsParams,
+tweetyPieService: TweetService.MethodPerEndpoint,
+userTweetGraphPlusService: UserTweetGraphPlus.MethodPerEndpoint,
+&#64;Named(ModuleNames.BlueVerifiedAnnotationStore) blueVerifiedAnnotationStore: ReadableStore[</p>
+<blockquote>
+<div><p>String,
+BlueVerifiedAnnotationsV2</p>
+</div></blockquote>
+<p>],
+decider: CrMixerDecider</p>
+</div></blockquote>
+<p>): ReadableStore[TweetId, TweetInfo] = {</p>
+<blockquote>
+<div><dl>
+<dt>val tweetEngagementScoreStore: ReadableStore[TweetId, TweetEngagementScores] = {</dt><dd><dl>
+<dt>val underlyingStore =</dt><dd><dl>
+<dt>ObservedReadableStore(new ReadableStore[TweetId, TweetEngagementScores] {</dt><dd><dl>
+<dt>override def get(</dt><dd><p>k: TweetId</p>
+</dd>
+<dt>): Future[Option[TweetEngagementScores]] = {</dt><dd><dl class="simple">
+<dt>userTweetGraphPlusService.tweetEngagementScore(k).map {</dt><dd><p>Some(_)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>})(statsReceiver.scope(“UserTweetGraphTweetEngagementScoreStore”))</p>
+</dd>
+<dt>DeciderableReadableStore(</dt><dd><p>underlyingStore,
+decider.deciderGateBuilder.idGate(</p>
+<blockquote>
+<div><p>DeciderKey.enableUtgRealTimeTweetEngagementScoreDeciderKey),</p>
+</div></blockquote>
+<p>statsReceiver.scope(“UserTweetGraphTweetEngagementScoreStore”)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>val tweetHealthModelStore: ReadableStore[TweetId, TweetHealthScores] = {</dt><dd><dl>
+<dt>val underlyingStore = TweetHealthModelStore.buildReadableStore(</dt><dd><p>stratoClient,
+Some(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>TweetHealthModelStoreConfig(</dt><dd><p>enablePBlock = true,
+enableToxicity = true,
+enablePSpammy = true,
+enablePReported = true,
+enableSpammyTweetContent = true,
+enablePNegMultimodal = true,</p>
+</dd>
+</dl>
+<p>))</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>)(statsReceiver.scope(“UnderlyingTweetHealthModelStore”))</p>
+<dl>
+<dt>DeciderableReadableStore(</dt><dd><dl class="simple">
+<dt>ObservedMemcachedReadableStore.fromCacheClient(</dt><dd><p>backingStore = underlyingStore,
+cacheClient = crMixerUnifiedCacheClient,
+ttl = 2.hours</p>
+</dd>
+<dt>)(</dt><dd><p>valueInjection = BinaryScalaCodec(TweetHealthScores),
+statsReceiver = statsReceiver.scope(“memCachedTweetHealthModelStore”),
+keyToString = { k: TweetId =&gt; s”tHMS/$k” }</p>
+</dd>
+</dl>
+<p>),
+decider.deciderGateBuilder.idGate(DeciderKey.enableHealthSignalsScoreDeciderKey),
+statsReceiver.scope(“TweetHealthModelStore”)</p>
+</dd>
+</dl>
+<p>) // use s”tHMS/$k” instead of s”tweetHealthModelStore/$k” to differentiate from CR cache</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>val userHealthModelStore: ReadableStore[UserId, UserAgathaScores] = {</dt><dd><dl>
+<dt>val underlyingStore = UserHealthModelStore.buildReadableStore(stratoClient)(</dt><dd><p>statsReceiver.scope(“UnderlyingUserHealthModelStore”))</p>
+</dd>
+<dt>DeciderableReadableStore(</dt><dd><dl class="simple">
+<dt>ObservedMemcachedReadableStore.fromCacheClient(</dt><dd><p>backingStore = underlyingStore,
+cacheClient = crMixerUnifiedCacheClient,
+ttl = 18.hours</p>
+</dd>
+<dt>)(</dt><dd><p>valueInjection = BinaryScalaCodec(UserAgathaScores),
+statsReceiver = statsReceiver.scope(“memCachedUserHealthModelStore”),
+keyToString = { k: UserId =&gt; s”uHMS/$k” }</p>
+</dd>
+</dl>
+<p>),
+decider.deciderGateBuilder.idGate(DeciderKey.enableUserAgathaScoreDeciderKey),
+statsReceiver.scope(“UserHealthModelStore”)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>val userMediaRepresentationHealthStore: ReadableStore[UserId, UserMediaRepresentationScores] = {</dt><dd><dl>
+<dt>val underlyingStore =</dt><dd><dl class="simple">
+<dt>UserMediaRepresentationHealthStore.buildReadableStore(</dt><dd><p>manhattanKVClientMtlsParams,
+statsReceiver.scope(“UnderlyingUserMediaRepresentationHealthStore”)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>DeciderableReadableStore(</dt><dd><dl class="simple">
+<dt>ObservedMemcachedReadableStore.fromCacheClient(</dt><dd><p>backingStore = underlyingStore,
+cacheClient = crMixerUnifiedCacheClient,
+ttl = 12.hours</p>
+</dd>
+<dt>)(</dt><dd><p>valueInjection = BinaryScalaCodec(UserMediaRepresentationScores),
+statsReceiver = statsReceiver.scope(“memCacheUserMediaRepresentationHealthStore”),
+keyToString = { k: UserId =&gt; s”uMRHS/$k” }</p>
+</dd>
+</dl>
+<p>),
+decider.deciderGateBuilder.idGate(DeciderKey.enableUserMediaRepresentationStoreDeciderKey),
+statsReceiver.scope(“UserMediaRepresentationHealthStore”)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>val magicRecsRealTimeAggregatesStore: ReadableStore[</dt><dd><p>TweetId,
+MagicRecsRealTimeAggregatesScores</p>
+</dd>
+<dt>] = {</dt><dd><dl>
+<dt>val underlyingStore =</dt><dd><dl class="simple">
+<dt>MagicRecsRealTimeAggregatesStore.buildReadableStore(</dt><dd><p>serviceIdentifier,
+statsReceiver.scope(“UnderlyingMagicRecsRealTimeAggregatesScores”)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>DeciderableReadableStore(</dt><dd><p>underlyingStore,
+decider.deciderGateBuilder.idGate(DeciderKey.enableMagicRecsRealTimeAggregatesStore),
+statsReceiver.scope(“MagicRecsRealTimeAggregatesStore”)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>val tweetInfoStore: ReadableStore[TweetId, TweetInfo] = {</dt><dd><dl class="simple">
+<dt>val underlyingStore = TweetInfoStore(</dt><dd><p>TweetyPieFieldsStore.getStoreFromTweetyPie(tweetyPieService),
+userMediaRepresentationHealthStore,
+magicRecsRealTimeAggregatesStore,
+tweetEngagementScoreStore,
+blueVerifiedAnnotationStore</p>
+</dd>
+</dl>
+<p>)(statsReceiver.scope(“tweetInfoStore”))</p>
+<dl class="simple">
+<dt>val memcachedStore = ObservedMemcachedReadableStore.fromCacheClient(</dt><dd><p>backingStore = underlyingStore,
+cacheClient = crMixerUnifiedCacheClient,
+ttl = 15.minutes,
+// Hydrating tweetInfo is now a required step for all candidates,
+// hence we needed to tune these thresholds.
+asyncUpdate = serviceIdentifier.environment == “prod”</p>
+</dd>
+<dt>)(</dt><dd><p>valueInjection = BinaryScalaCodec(TweetInfo),
+statsReceiver = statsReceiver.scope(“memCachedTweetInfoStore”),
+keyToString = { k: TweetId =&gt; s”tIS/$k” }</p>
+</dd>
+</dl>
+<p>)</p>
+<dl class="simple">
+<dt>ObservedCachedReadableStore.from(</dt><dd><p>memcachedStore,
+ttl = 15.minutes,
+maxKeys = 8388607, // Check TweetInfo definition. size~92b. Around 736 MB
+windowSize = 10000L,
+cacheName = “tweet_info_cache”,
+maxMultiGetSize = 20</p>
+</dd>
+</dl>
+<p>)(statsReceiver.scope(“inMemoryCachedTweetInfoStore”))</p>
+</dd>
+</dl>
+<p>}
+tweetInfoStore</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/cr-mixer/server/src/main/scala/com/twitter/cr_mixer/module/TweetInfoStoreModule.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

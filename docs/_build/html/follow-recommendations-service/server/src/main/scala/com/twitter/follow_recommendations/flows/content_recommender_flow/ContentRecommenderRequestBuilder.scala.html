@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../../" id="documentation_options" src="../../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.follow_recommendations.flows.content_recommender_flow</p>
+<p>import com.twitter.conversions.DurationOps._
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.follow_recommendations.common.clients.geoduck.UserLocationFetcher
+import com.twitter.follow_recommendations.common.clients.socialgraph.SocialGraphClient
+import com.twitter.follow_recommendations.common.clients.user_state.UserStateClient
+import com.twitter.follow_recommendations.common.utils.RescueWithStatsUtils.rescueOptionalWithStats
+import com.twitter.follow_recommendations.common.utils.RescueWithStatsUtils.rescueWithStats
+import com.twitter.follow_recommendations.common.utils.RescueWithStatsUtils.rescueWithStatsWithin
+import com.twitter.follow_recommendations.products.common.ProductRequest
+import com.twitter.stitch.Stitch</p>
+<p>import javax.inject.Inject
+import javax.inject.Singleton</p>
+<p>&#64;Singleton
+class ContentRecommenderRequestBuilder &#64;Inject() (</p>
+<blockquote>
+<div><p>socialGraph: SocialGraphClient,
+userLocationFetcher: UserLocationFetcher,
+userStateClient: UserStateClient,
+statsReceiver: StatsReceiver) {</p>
+<p>val stats: StatsReceiver = statsReceiver.scope(“content_recommender_request_builder”)
+val invalidRelationshipUsersStats: StatsReceiver = stats.scope(“invalidRelationshipUserIds”)
+private val invalidRelationshipUsersMaxSizeCounter =</p>
+<blockquote>
+<div><p>invalidRelationshipUsersStats.counter(“maxSize”)</p>
+</div></blockquote>
+<dl>
+<dt>private val invalidRelationshipUsersNotMaxSizeCounter =</dt><dd><p>invalidRelationshipUsersStats.counter(“notMaxSize”)</p>
+</dd>
+<dt>def build(req: ProductRequest): Stitch[ContentRecommenderRequest] = {</dt><dd><dl>
+<dt>val userStateStitch = Stitch</dt><dd><dl class="simple">
+<dt>.collect(req.recommendationRequest.clientContext.userId.map(userId =&gt;</dt><dd><p>userStateClient.getUserState(userId))).map(_.flatten)</p>
+</dd>
+</dl>
+</dd>
+<dt>val recentFollowedUserIdsStitch =</dt><dd><dl>
+<dt>Stitch</dt><dd><dl>
+<dt>.collect(req.recommendationRequest.clientContext.userId.map { userId =&gt;</dt><dd><dl>
+<dt>rescueWithStatsWithin(</dt><dd><p>socialGraph.getRecentFollowedUserIds(userId),
+stats,
+“recentFollowedUserIds”,
+req</p>
+<blockquote>
+<div><dl class="simple">
+<dt>.params(</dt><dd><p>ContentRecommenderParams.RecentFollowingPredicateBudgetInMillisecond).millisecond</p>
+</dd>
+</dl>
+</div></blockquote>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>})</p>
+</dd>
+</dl>
+</dd>
+<dt>val recentFollowedByUserIdsStitch =</dt><dd><dl>
+<dt>if (req.params(ContentRecommenderParams.GetFollowersFromSgs)) {</dt><dd><dl>
+<dt>Stitch</dt><dd><dl>
+<dt>.collect(</dt><dd><dl>
+<dt>req.recommendationRequest.clientContext.userId.map(userId =&gt;</dt><dd><dl>
+<dt>rescueWithStatsWithin(</dt><dd><p>socialGraph.getRecentFollowedByUserIdsFromCachedColumn(userId),
+stats,
+“recentFollowedByUserIds”,
+req</p>
+<blockquote>
+<div><p>.params(ContentRecommenderParams.RecentFollowingPredicateBudgetInMillisecond)
+.millisecond</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>)))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>} else Stitch.None</p>
+</dd>
+<dt>val invalidRelationshipUserIdsStitch: Stitch[Option[Seq[Long]]] =</dt><dd><dl>
+<dt>if (req.params(ContentRecommenderParams.EnableInvalidRelationshipPredicate)) {</dt><dd><dl>
+<dt>Stitch</dt><dd><dl>
+<dt>.collect(</dt><dd><dl>
+<dt>req.recommendationRequest.clientContext.userId.map { userId =&gt;</dt><dd><dl>
+<dt>rescueWithStats(</dt><dd><dl>
+<dt>socialGraph</dt><dd><p>.getInvalidRelationshipUserIdsFromCachedColumn(userId)
+.onSuccess(ids =&gt;</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (ids.size &gt;= SocialGraphClient.MaxNumInvalidRelationship) {</dt><dd><p>invalidRelationshipUsersMaxSizeCounter.incr()</p>
+</dd>
+<dt>} else {</dt><dd><p>invalidRelationshipUsersNotMaxSizeCounter.incr()</p>
+</dd>
+</dl>
+<p>}),</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>stats,
+“invalidRelationshipUserIds”</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+<dt>} else {</dt><dd><p>Stitch.None</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>val locationStitch =</dt><dd><dl>
+<dt>rescueOptionalWithStats(</dt><dd><dl class="simple">
+<dt>userLocationFetcher.getGeohashAndCountryCode(</dt><dd><p>req.recommendationRequest.clientContext.userId,
+req.recommendationRequest.clientContext.ipAddress</p>
+</dd>
+</dl>
+<p>),
+stats,
+“userLocation”</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>Stitch</dt><dd><dl>
+<dt>.join(</dt><dd><p>recentFollowedUserIdsStitch,
+recentFollowedByUserIdsStitch,
+invalidRelationshipUserIdsStitch,
+locationStitch,
+userStateStitch)</p>
+</dd>
+<dt>.map {</dt><dd><dl>
+<dt>case (</dt><dd><blockquote>
+<div><p>recentFollowedUserIds,
+recentFollowedByUserIds,
+invalidRelationshipUserIds,
+location,
+userState) =&gt;</p>
+</div></blockquote>
+<dl class="simple">
+<dt>ContentRecommenderRequest(</dt><dd><p>req.params,
+req.recommendationRequest.clientContext,
+req.recommendationRequest.excludedIds.getOrElse(Nil),
+recentFollowedUserIds,
+recentFollowedByUserIds,
+invalidRelationshipUserIds.map(_.toSet),
+req.recommendationRequest.displayLocation,
+req.recommendationRequest.maxResults,
+req.recommendationRequest.debugParams.flatMap(_.debugOptions),
+location,
+userState</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../../_sources/follow-recommendations-service/server/src/main/scala/com/twitter/follow_recommendations/flows/content_recommender_flow/ContentRecommenderRequestBuilder.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

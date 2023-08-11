@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../" id="documentation_options" src="../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../_static/doctools.js?v=888ff710"></script>
+    <script src="../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+   
+  <link rel="stylesheet" href="../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>“””
+Contains aggregation metrics.
+“””
+from typing import Tuple, Union</p>
+<p>import torch
+import torchmetrics</p>
+<dl>
+<dt>def update_mean(</dt><dd><p>current_mean: torch.Tensor,
+current_weight_sum: torch.Tensor,
+value: torch.Tensor,
+weight: torch.Tensor,</p>
+</dd>
+<dt>) -&gt; Tuple[torch.Tensor, torch.Tensor]:</dt><dd><p>“””
+Update the mean according to Welford formula:
+<a class="reference external" href="https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Weighted_batched_version">https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Weighted_batched_version</a>.
+See also <a class="reference external" href="https://nullbuffer.com/articles/welford_algorithm.html">https://nullbuffer.com/articles/welford_algorithm.html</a> for more information.
+Args:</p>
+<blockquote>
+<div><p>current_mean: The value of the current accumulated mean.
+current_weight_sum: The current weighted sum.
+value: The new value that needs to be added to get a new mean.
+weight: The weights for the new value.</p>
+</div></blockquote>
+<p>Returns: The updated mean and updated weighted sum.</p>
+<p>“””
+weight = torch.broadcast_to(weight, value.shape)</p>
+<p># Avoiding (on purpose) in-place operation when using += in case
+# current_mean and current_weight_sum share the same storage
+current_weight_sum = current_weight_sum + torch.sum(weight)
+current_mean = current_mean + torch.sum((weight / current_weight_sum) * (value - current_mean))
+return current_mean, current_weight_sum</p>
+</dd>
+<dt>def stable_mean_dist_reduce_fn(state: torch.Tensor) -&gt; torch.Tensor:</dt><dd><p>“””
+Merge the state from multiple workers.
+Args:</p>
+<blockquote>
+<div><p>state: A tensor with the first dimension indicating workers.</p>
+</div></blockquote>
+<p>Returns: The accumulated mean from all workers.</p>
+<p>“””
+mean, weight_sum = update_mean(</p>
+<blockquote>
+<div><p>current_mean=torch.as_tensor(0.0, dtype=state.dtype, device=state.device),
+current_weight_sum=torch.as_tensor(0.0, dtype=state.dtype, device=state.device),
+value=state[:, 0],
+weight=state[:, 1],</p>
+</div></blockquote>
+<p>)
+return torch.stack([mean, weight_sum])</p>
+</dd>
+<dt>class StableMean(torchmetrics.Metric):</dt><dd><p>“””
+This implements a numerical stable mean metrics computation using Welford algorithm according to
+<a class="reference external" href="https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Weighted_batched_version">https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Weighted_batched_version</a>.
+For example when using float32, the algorithm will give a valid output even if the “sum” is larger</p>
+<blockquote>
+<div><p>than the maximum float32 as far as the mean is within the limit of float32.</p>
+</div></blockquote>
+<p>See also <a class="reference external" href="https://nullbuffer.com/articles/welford_algorithm.html">https://nullbuffer.com/articles/welford_algorithm.html</a> for more information.
+“””</p>
+<dl>
+<dt>def __init__(self, <a href="#id1"><span class="problematic" id="id2">**</span></a>kwargs):</dt><dd><p>“””
+Args:</p>
+<blockquote>
+<div><p><a href="#id3"><span class="problematic" id="id4">**</span></a>kwargs: Additional parameters supported by all torchmetrics.Metric.</p>
+</div></blockquote>
+<p>“””
+super().__init__(<a href="#id5"><span class="problematic" id="id6">**</span></a>kwargs)
+self.add_state(</p>
+<blockquote>
+<div><p>“mean_and_weight_sum”,
+default=torch.zeros(2),
+dist_reduce_fx=stable_mean_dist_reduce_fn,</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+<dt>def update(self, value: torch.Tensor, weight: Union[float, torch.Tensor] = 1.0) -&gt; None:</dt><dd><p>“””
+Update the current mean.
+Args:</p>
+<blockquote>
+<div><p>value: Value to update the mean with.
+weight: weight to use. Shape should be broadcastable to that of value.</p>
+</div></blockquote>
+<p>“””
+mean, weight_sum = self.mean_and_weight_sum[0], self.mean_and_weight_sum[1]</p>
+<dl class="simple">
+<dt>if not isinstance(weight, torch.Tensor):</dt><dd><p>weight = torch.as_tensor(weight, dtype=value.dtype, device=value.device)</p>
+</dd>
+<dt>self.mean_and_weight_sum[0], self.mean_and_weight_sum[1] = update_mean(</dt><dd><p>mean, weight_sum, value, torch.as_tensor(weight)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>def compute(self) -&gt; torch.Tensor:</dt><dd><p>“””
+Compute and return the accumulated mean.
+“””
+return self.mean_and_weight_sum[0]</p>
+</dd>
+</dl>
+</dd>
+</dl>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../_sources/metrics/aggregation.py.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

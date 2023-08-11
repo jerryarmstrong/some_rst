@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../../../" id="documentation_options" src="../../../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.product_mixer.core.service.feature_hydrator_observer</p>
+<p>import com.twitter.finagle.stats.BroadcastStatsReceiver
+import com.twitter.finagle.stats.Counter
+import com.twitter.finagle.stats.RollupStatsReceiver
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.ml.featurestore.lib.data.HydrationError
+import com.twitter.product_mixer.core.feature.Feature
+import com.twitter.product_mixer.core.feature.featuremap.FeatureMap
+import com.twitter.product_mixer.core.feature.featurestorev1.featurevalue.FeatureStoreV1ResponseFeature
+import com.twitter.product_mixer.core.functional_component.feature_hydrator.FeatureHydrator
+import com.twitter.product_mixer.core.functional_component.feature_hydrator.featurestorev1.FeatureStoreV1CandidateFeatureHydrator
+import com.twitter.product_mixer.core.functional_component.feature_hydrator.featurestorev1.FeatureStoreV1QueryFeatureHydrator
+import com.twitter.product_mixer.core.model.common.identifier.ComponentIdentifier
+import com.twitter.product_mixer.core.service.Executor
+import com.twitter.product_mixer.shared_library.observer.Observer
+import com.twitter.servo.util.CancelledExceptionExtractor
+import com.twitter.util.Throw
+import com.twitter.util.Throwables</p>
+<dl>
+<dt>class FeatureHydratorObserver(</dt><dd><p>statsReceiver: StatsReceiver,
+hydrators: Seq[FeatureHydrator[_]],
+context: Executor.Context) {</p>
+<dl>
+<dt>private val hydratorAndFeatureToStats: Map[</dt><dd><p>ComponentIdentifier,
+Map[Feature[_, _], FeatureCounters]</p>
+</dd>
+<dt>] =</dt><dd><dl>
+<dt>hydrators.map { hydrator =&gt;</dt><dd><p>val hydratorScope = Executor.buildScopes(context, hydrator.identifier)
+val featureToCounterMap: Map[Feature[_, _], FeatureCounters] = hydrator.features</p>
+<blockquote>
+<div><dl class="simple">
+<dt>.asInstanceOf[Set[Feature[_, _]]].map { feature =&gt;</dt><dd><p>val scopedStats = scopedBroadcastStats(hydratorScope, feature)
+// Initialize so we have them registered
+val requestsCounter = scopedStats.counter(Observer.Requests)
+val successCounter = scopedStats.counter(Observer.Success)
+// These are dynamic so we can’t really cache them
+scopedStats.counter(Observer.Failures)
+scopedStats.counter(Observer.Cancelled)
+feature -&gt; FeatureCounters(requestsCounter, successCounter, scopedStats)</p>
+</dd>
+</dl>
+<p>}.toMap</p>
+</div></blockquote>
+<p>hydrator.identifier -&gt; featureToCounterMap</p>
+</dd>
+</dl>
+<p>}.toMap</p>
+</dd>
+<dt>def observeFeatureSuccessAndFailures(</dt><dd><p>hydrator: FeatureHydrator[_],
+featureMaps: Seq[FeatureMap]</p>
+</dd>
+</dl>
+<p>): Unit = {</p>
+<blockquote>
+<div><p>val features = hydrator.features.asInstanceOf[Set[Feature[_, _]]]</p>
+<dl>
+<dt>val failedFeaturesWithErrorNames: Map[Feature[_, _], Seq[Seq[String]]] = hydrator match {</dt><dd><dl>
+<dt>case _: FeatureStoreV1QueryFeatureHydrator[_] |</dt><dd><blockquote>
+<div><p>_: FeatureStoreV1CandidateFeatureHydrator[_, _] =&gt;</p>
+</div></blockquote>
+<dl>
+<dt>featureMaps.toIterator</dt><dd><dl>
+<dt>.flatMap(_.getTry(FeatureStoreV1ResponseFeature).toOption.map(_.failedFeatures)).flatMap {</dt><dd><dl>
+<dt>failureMap: Map[_ &lt;: Feature[_, _], Set[HydrationError]] =&gt;</dt><dd><dl>
+<dt>failureMap.flatMap {</dt><dd><dl>
+<dt>case (feature, errors: Set[HydrationError]) =&gt;</dt><dd><dl class="simple">
+<dt>errors.headOption.map { error =&gt;</dt><dd><p>feature -&gt; Seq(Observer.Failures, error.errorType)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}.toIterator</p>
+</dd>
+</dl>
+</dd>
+<dt>}.toSeq.groupBy { case (feature, _) =&gt; feature }.mapValues { seqOfTuples =&gt;</dt><dd><p>seqOfTuples.map { case (_, error) =&gt; error }</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+<dt>case _: FeatureHydrator[_] =&gt;</dt><dd><dl>
+<dt>features.toIterator</dt><dd><dl>
+<dt>.flatMap { feature =&gt;</dt><dd><dl>
+<dt>featureMaps</dt><dd><dl>
+<dt>.flatMap(_.underlyingMap</dt><dd><dl class="simple">
+<dt>.get(feature).collect {</dt><dd><dl class="simple">
+<dt>case Throw(CancelledExceptionExtractor(throwable)) =&gt;</dt><dd><p>(feature, Observer.Cancelled +: Throwables.mkString(throwable))</p>
+</dd>
+<dt>case Throw(throwable) =&gt;</dt><dd><p>(feature, Observer.Failures +: Throwables.mkString(throwable))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>})</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+<dt>}.toSeq.groupBy { case (feature, _) =&gt; feature }.mapValues { seqOfTuples =&gt;</dt><dd><p>seqOfTuples.map { case (_, error) =&gt; error }</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>val failedFeaturesWithErrorCountsMap: Map[Feature[_, _], Map[Seq[String], Int]] =</dt><dd><p>failedFeaturesWithErrorNames.mapValues(_.groupBy { statKey =&gt; statKey }.mapValues(_.size))</p>
+</dd>
+<dt>val featuresToCounterMap = hydratorAndFeatureToStats.getOrElse(</dt><dd><p>hydrator.identifier,
+throw new MissingHydratorException(hydrator.identifier))</p>
+</dd>
+<dt>features.foreach { feature =&gt;</dt><dd><dl class="simple">
+<dt>val hydratorFeatureCounters: FeatureCounters = featuresToCounterMap.getOrElse(</dt><dd><p>feature,
+throw new MissingFeatureException(hydrator.identifier, feature))</p>
+</dd>
+</dl>
+<p>val failedMapsCount = failedFeaturesWithErrorNames.getOrElse(feature, Seq.empty).size
+val failedFeatureErrorCounts = failedFeaturesWithErrorCountsMap.getOrElse(feature, Map.empty)</p>
+<p>hydratorFeatureCounters.requestsCounter.incr(featureMaps.size)
+hydratorFeatureCounters.successCounter.incr(featureMaps.size - failedMapsCount)
+failedFeatureErrorCounts.foreach {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case (failure, count) =&gt;</dt><dd><p>hydratorFeatureCounters.scopedStats.counter(failure: _*).incr(count)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>private def scopedBroadcastStats(</dt><dd><p>hydratorScope: Executor.Scopes,
+feature: Feature[_, _],</p>
+</dd>
+<dt>): StatsReceiver = {</dt><dd><p>val suffix = Seq(“Feature”, feature.toString)
+val localScope = hydratorScope.componentScopes ++ suffix
+val relativeScope = hydratorScope.relativeScope ++ suffix
+new RollupStatsReceiver(</p>
+<blockquote>
+<div><dl>
+<dt>BroadcastStatsReceiver(</dt><dd><dl class="simple">
+<dt>Seq(</dt><dd><p>statsReceiver.scope(localScope: _*),
+statsReceiver.scope(relativeScope: _*),</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>))</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>case class FeatureCounters(</dt><dd><p>requestsCounter: Counter,
+successCounter: Counter,
+scopedStats: StatsReceiver)</p>
+</dd>
+<dt>class MissingHydratorException(featureHydratorIdentifier: ComponentIdentifier)</dt><dd><p>extends Exception(s”Missing Feature Hydrator in Stats Map: ${featureHydratorIdentifier.name}”)</p>
+</dd>
+<dt>class MissingFeatureException(</dt><dd><p>featureHydratorIdentifier: ComponentIdentifier,
+feature: Feature[_, _])</p>
+<blockquote>
+<div><dl class="simple">
+<dt>extends Exception(</dt><dd><p>s”Missing Feature in Stats Map: ${feature.toString} for ${featureHydratorIdentifier.name}”)</p>
+</dd>
+</dl>
+</div></blockquote>
+</dd>
+</dl>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../../../_sources/product-mixer/core/src/main/scala/com/twitter/product_mixer/core/service/feature_hydrator_observer/FeatureHydratorObserver.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

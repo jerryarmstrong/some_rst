@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../" id="documentation_options" src="../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.earlybird.index;</p>
+<p>import java.io.IOException;</p>
+<p>import com.twitter.search.common.util.io.flushable.DataDeserializer;
+import com.twitter.search.common.util.io.flushable.DataSerializer;
+import com.twitter.search.common.util.io.flushable.FlushInfo;
+import com.twitter.search.common.util.io.flushable.Flushable;
+import com.twitter.search.core.earlybird.index.DocIDToTweetIDMapper;</p>
+<p>import it.unimi.dsi.fastutil.longs.Long2IntMap;
+import it.unimi.dsi.fastutil.longs.Long2IntOpenHashMap;
+import it.unimi.dsi.fastutil.longs.LongArrays;</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>After a segment is complete, we call <a class="reference external" href="mailto:{&#37;&#52;&#48;link">{<span>&#64;</span>link</a> EarlybirdSegment#optimizeIndexes()} to compact the</p></li>
+<li><p>doc IDs assigned to the tweets in this segment, so that we can do faster ceil and floor lookups.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>public class OptimizedTweetIDMapper extends TweetIDMapper {</dt><dd><p>// Maps doc IDs to tweet IDs. Therefore, it should be sorted in descending order of tweet IDs.
+protected final long[] inverseMap;
+private final Long2IntMap tweetIdToDocIdMap;</p>
+<dl>
+<dt>private OptimizedTweetIDMapper(long[] inverseMap,</dt><dd><blockquote>
+<div><p>long minTweetID,
+long maxTweetID,
+int minDocID,
+int maxDocID) {</p>
+</div></blockquote>
+<p>super(minTweetID, maxTweetID, minDocID, maxDocID, inverseMap.length);
+this.inverseMap = inverseMap;
+this.tweetIdToDocIdMap = buildTweetIdToDocIdMap();</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>public OptimizedTweetIDMapper(OutOfOrderRealtimeTweetIDMapper source) throws IOException {</dt><dd><dl class="simple">
+<dt>super(source.getMinTweetID(),</dt><dd><p>source.getMaxTweetID(),
+0,
+source.getNumDocs() - 1,
+source.getNumDocs());</p>
+</dd>
+</dl>
+<p>inverseMap = source.sortTweetIds();
+tweetIdToDocIdMap = buildTweetIdToDocIdMap();</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private Long2IntMap buildTweetIdToDocIdMap() {</dt><dd><p>int[] values = new int[inverseMap.length];
+for (int i = 0; i &lt; values.length; i++) {</p>
+<blockquote>
+<div><p>values[i] = i;</p>
+</div></blockquote>
+<p>}</p>
+<p>Long2IntMap map = new Long2IntOpenHashMap(inverseMap, values);
+map.defaultReturnValue(-1);
+return map;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;Override
+public int getDocID(long tweetID) {</p>
+<blockquote>
+<div><p>return tweetIdToDocIdMap.getOrDefault(tweetID, ID_NOT_FOUND);</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+protected int getNextDocIDInternal(int docID) {</p>
+<blockquote>
+<div><p>// The doc IDs are consecutive and TweetIDMapper already checked the boundary conditions.
+return docID + 1;</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+protected int getPreviousDocIDInternal(int docID) {</p>
+<blockquote>
+<div><p>// The doc IDs are consecutive and TweetIDMapper already checked the boundary conditions.
+return docID - 1;</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public long getTweetID(int internalID) {</p>
+<blockquote>
+<div><p>return inverseMap[internalID];</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+protected int findDocIDBoundInternal(long tweetID, boolean findMaxDocID) {</p>
+<blockquote>
+<div><p>int docId = tweetIdToDocIdMap.get(tweetID);
+if (docId &gt;= 0) {</p>
+<blockquote>
+<div><p>return docId;</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>int binarySearchResult =</dt><dd><p>LongArrays.binarySearch(inverseMap, tweetID, (k1, k2) -&gt; -Long.compare(k1, k2));</p>
+</dd>
+</dl>
+<p>// Since the tweet ID is not present in this mapper, the binary search should return a negative
+// value (-insertionPoint - 1). And since TweetIDMapper.findDocIdBound() already verified that
+// tweetID is not smaller than all tweet IDs in this mapper, and not larger than all tweet IDs
+// in this mapper, the insertionPoint should never be 0 or inverseMap.length.
+int insertionPoint = -binarySearchResult - 1;
+// The insertion point is the index in the tweet array of the upper bound of the search, so if
+// we want the lower bound, because doc IDs are dense, we subtract one.
+return findMaxDocID ? insertionPoint : insertionPoint - 1;</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+protected final int addMappingInternal(final long tweetID) {</p>
+<blockquote>
+<div><p>throw new UnsupportedOperationException(“The OptimizedTweetIDMapper is immutable.”);</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public DocIDToTweetIDMapper optimize() {</p>
+<blockquote>
+<div><p>throw new UnsupportedOperationException(“OptimizedTweetIDMapper is already optimized.”);</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public FlushHandler getFlushHandler() {</p>
+<blockquote>
+<div><p>return new FlushHandler(this);</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>public static class FlushHandler extends Flushable.Handler&lt;OptimizedTweetIDMapper&gt; {</dt><dd><p>private static final String MIN_TWEET_ID_PROP_NAME = “MinTweetID”;
+private static final String MAX_TWEET_ID_PROP_NAME = “MaxTweetID”;
+private static final String MIN_DOC_ID_PROP_NAME = “MinDocID”;
+private static final String MAX_DOC_ID_PROP_NAME = “MaxDocID”;</p>
+<dl class="simple">
+<dt>public FlushHandler() {</dt><dd><p>super();</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public FlushHandler(OptimizedTweetIDMapper objectToFlush) {</dt><dd><p>super(objectToFlush);</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;Override
+protected void doFlush(FlushInfo flushInfo, DataSerializer out) throws IOException {</p>
+<blockquote>
+<div><p>OptimizedTweetIDMapper objectToFlush = getObjectToFlush();
+flushInfo.addLongProperty(MIN_TWEET_ID_PROP_NAME, objectToFlush.getMinTweetID());
+flushInfo.addLongProperty(MAX_TWEET_ID_PROP_NAME, objectToFlush.getMaxTweetID());
+flushInfo.addIntProperty(MIN_DOC_ID_PROP_NAME, objectToFlush.getMinDocID());
+flushInfo.addIntProperty(MAX_DOC_ID_PROP_NAME, objectToFlush.getMaxDocID());
+out.writeLongArray(objectToFlush.inverseMap);</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+protected OptimizedTweetIDMapper doLoad(FlushInfo flushInfo, DataDeserializer in)</p>
+<blockquote>
+<div><blockquote>
+<div><p>throws IOException {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>return new OptimizedTweetIDMapper(in.readLongArray(),</dt><dd><p>flushInfo.getLongProperty(MIN_TWEET_ID_PROP_NAME),
+flushInfo.getLongProperty(MAX_TWEET_ID_PROP_NAME),
+flushInfo.getIntProperty(MIN_DOC_ID_PROP_NAME),
+flushInfo.getIntProperty(MAX_DOC_ID_PROP_NAME));</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../_sources/src/java/com/twitter/search/earlybird/index/OptimizedTweetIDMapper.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

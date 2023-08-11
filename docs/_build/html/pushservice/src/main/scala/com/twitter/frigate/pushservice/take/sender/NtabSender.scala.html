@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../../" id="documentation_options" src="../../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.frigate.pushservice.take.sender</p>
+<p>import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.frigate.common.history.History
+import com.twitter.frigate.common.rec_types.RecTypes
+import com.twitter.frigate.pushservice.model.PushTypes.PushCandidate
+import com.twitter.frigate.pushservice.model.ibis.PushOverrideInfo
+import com.twitter.frigate.pushservice.params.PushConstants
+import com.twitter.frigate.pushservice.params.{PushFeatureSwitchParams =&gt; FSParams}
+import com.twitter.frigate.pushservice.take.NotificationServiceRequest
+import com.twitter.frigate.thriftscala.FrigateNotification
+import com.twitter.hermit.store.common.ReadableWritableStore
+import com.twitter.notificationservice.api.thriftscala.DeleteCurrentTimelineForUserRequest
+import com.twitter.notificationservice.thriftscala.CreateGenericNotificationResponse
+import com.twitter.notificationservice.thriftscala.DeleteGenericNotificationRequest
+import com.twitter.notificationservice.thriftscala.GenericNotificationKey
+import com.twitter.notificationservice.thriftscala.GenericNotificationOverrideKey
+import com.twitter.storehaus.ReadableStore
+import com.twitter.util.Future</p>
+<dl class="simple">
+<dt>object OverrideCandidate extends Enumeration {</dt><dd><p>val One: String = “overrideEntry1”</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>class NtabSender(</dt><dd><dl class="simple">
+<dt>notificationServiceSender: ReadableStore[</dt><dd><p>NotificationServiceRequest,
+CreateGenericNotificationResponse</p>
+</dd>
+</dl>
+<p>],
+nTabHistoryStore: ReadableWritableStore[(Long, String), GenericNotificationOverrideKey],
+nTabDelete: DeleteGenericNotificationRequest =&gt; Future[Unit],
+nTabDeleteTimeline: DeleteCurrentTimelineForUserRequest =&gt; Future[Unit]</p>
+</dd>
+<dt>)(</dt><dd><p>implicit statsReceiver: StatsReceiver) {</p>
+<p>private[this] val nTabDeleteRequests = statsReceiver.counter(“ntab_delete_request”)
+private[this] val nTabDeleteTimelineRequests =</p>
+<blockquote>
+<div><p>statsReceiver.counter(“ntab_delete_timeline_request”)</p>
+</div></blockquote>
+<dl>
+<dt>private[this] val ntabOverrideImpressionNotFound =</dt><dd><p>statsReceiver.counter(“ntab_impression_not_found”)</p>
+</dd>
+<dt>private[this] val nTabOverrideOverriddenStat =</dt><dd><p>statsReceiver.counter(“ntab_override_overridden”)</p>
+</dd>
+<dt>private[this] val storeGenericNotifOverrideKey =</dt><dd><p>statsReceiver.counter(“ntab_store_generic_notif_key”)</p>
+</dd>
+<dt>private[this] val prevGenericNotifKeyNotFound =</dt><dd><p>statsReceiver.counter(“ntab_prev_generic_notif_key_not_found”)</p>
+</dd>
+<dt>private[this] val ntabOverride =</dt><dd><p>statsReceiver.scope(“ntab_override”)</p>
+</dd>
+<dt>private[this] val ntabRequestWithOverrideId =</dt><dd><p>ntabOverride.counter(“request”)</p>
+</dd>
+<dt>private[this] val storeGenericNotifOverrideKeyWithOverrideId =</dt><dd><p>ntabOverride.counter(“store_override_key”)</p>
+</dd>
+<dt>def send(</dt><dd><p>candidate: PushCandidate,
+isNtabOnlyNotification: Boolean</p>
+</dd>
+<dt>): Future[Option[CreateGenericNotificationResponse]] = {</dt><dd><dl>
+<dt>if (candidate.target.params(FSParams.EnableOverrideIdNTabRequest)) {</dt><dd><p>ntabRequestWithOverrideId.incr()
+overridePreviousEntry(candidate).flatMap { _ =&gt;</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (shouldDisableNtabOverride(candidate)) {</dt><dd><p>sendNewEntry(candidate, isNtabOnlyNotification, None)</p>
+</dd>
+<dt>} else {</dt><dd><p>sendNewEntry(candidate, isNtabOnlyNotification, Some(OverrideCandidate.One))</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+<dt>} else {</dt><dd><dl class="simple">
+<dt>for {</dt><dd><p>notificationOverwritten &lt;- overrideNSlot(candidate)
+_ &lt;- deleteCachedApiTimeline(candidate, notificationOverwritten)
+gnResponse &lt;- sendNewEntry(candidate, isNtabOnlyNotification)</p>
+</dd>
+</dl>
+<p>} yield gnResponse</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def sendNewEntry(</dt><dd><p>candidate: PushCandidate,
+isNtabOnlyNotif: Boolean,
+overrideId: Option[String] = None</p>
+</dd>
+<dt>): Future[Option[CreateGenericNotificationResponse]] = {</dt><dd><dl>
+<dt>notificationServiceSender</dt><dd><dl>
+<dt>.get(</dt><dd><dl class="simple">
+<dt>NotificationServiceRequest(</dt><dd><p>candidate,
+impressionId = candidate.impressionId,
+isBadgeUpdate = isNtabOnlyNotif,
+overrideId = overrideId</p>
+</dd>
+</dl>
+<p>)).flatMap {
+case Some(response) =&gt;</p>
+<blockquote>
+<div><p>storeGenericNotifKey(candidate, response, overrideId).map { _ =&gt; Some(response) }</p>
+</div></blockquote>
+<p>case _ =&gt; Future.None</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def storeGenericNotifKey(</dt><dd><p>candidate: PushCandidate,
+createGenericNotificationResponse: CreateGenericNotificationResponse,
+overrideId: Option[String]</p>
+</dd>
+<dt>): Future[Unit] = {</dt><dd><dl>
+<dt>if (candidate.target.params(FSParams.EnableStoringNtabGenericNotifKey)) {</dt><dd><dl>
+<dt>createGenericNotificationResponse.successKey match {</dt><dd><dl>
+<dt>case Some(genericNotificationKey) =&gt;</dt><dd><p>val userId = genericNotificationKey.userId
+if (overrideId.nonEmpty) {</p>
+<blockquote>
+<div><p>storeGenericNotifOverrideKeyWithOverrideId.incr()</p>
+</div></blockquote>
+<p>}
+val gnOverrideKey = GenericNotificationOverrideKey(</p>
+<blockquote>
+<div><p>userId = userId,
+hashKey = genericNotificationKey.hashKey,
+timestampMillis = genericNotificationKey.timestampMillis,
+overrideId = overrideId</p>
+</div></blockquote>
+<p>)
+val mhKeyVal =</p>
+<blockquote>
+<div><p>((userId, candidate.impressionId), gnOverrideKey)</p>
+</div></blockquote>
+<p>storeGenericNotifOverrideKey.incr()
+nTabHistoryStore.put(mhKeyVal)</p>
+</dd>
+</dl>
+<p>case _ =&gt; Future.Unit</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>} else Future.Unit</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def candidateEligibleForOverride(</dt><dd><p>targetHistory: History,
+targetEntries: Seq[FrigateNotification],</p>
+</dd>
+<dt>): FrigateNotification = {</dt><dd><dl>
+<dt>val timestampToEntriesMap =</dt><dd><dl class="simple">
+<dt>targetEntries.map { entry =&gt;</dt><dd><dl class="simple">
+<dt>PushOverrideInfo</dt><dd><p>.getTimestampInMillisForFrigateNotification(entry, targetHistory, statsReceiver)
+.getOrElse(PushConstants.DefaultLookBackForHistory.ago.inMilliseconds) -&gt; entry</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}.toMap</p>
+</dd>
+</dl>
+<p>PushOverrideInfo.getOldestFrigateNotification(timestampToEntriesMap)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def overrideNSlot(candidate: PushCandidate): Future[Boolean] = {</dt><dd><dl>
+<dt>if (candidate.target.params(FSParams.EnableNslotsForOverrideOnNtab)) {</dt><dd><p>val targetHistoryFut = candidate.target.history
+targetHistoryFut.flatMap { targetHistory =&gt;</p>
+<blockquote>
+<div><dl>
+<dt>val nonEligibleOverrideTypes =</dt><dd><p>Seq(RecTypes.RecommendedSpaceFanoutTypes ++ RecTypes.ScheduledSpaceReminderTypes)</p>
+</dd>
+<dt>val overrideNotifs = PushOverrideInfo</dt><dd><dl class="simple">
+<dt>.getOverrideEligiblePushNotifications(</dt><dd><p>targetHistory,
+candidate.target.params(FSParams.OverrideNotificationsLookbackDurationForNTab),
+statsReceiver</p>
+</dd>
+<dt>).filterNot {</dt><dd><dl class="simple">
+<dt>case notification =&gt;</dt><dd><p>nonEligibleOverrideTypes.contains(notification.commonRecommendationType)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>val maxNumUnreadEntries =</dt><dd><p>candidate.target.params(FSParams.OverrideNotificationsMaxCountForNTab)</p>
+</dd>
+<dt>if (overrideNotifs.nonEmpty &amp;&amp; overrideNotifs.size &gt;= maxNumUnreadEntries) {</dt><dd><dl class="simple">
+<dt>val eligibleOverrideCandidateOpt = candidateEligibleForOverride(</dt><dd><p>targetHistory,
+overrideNotifs</p>
+</dd>
+</dl>
+<p>)
+eligibleOverrideCandidateOpt match {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case overrideCandidate if overrideCandidate.impressionId.nonEmpty =&gt;</dt><dd><dl class="simple">
+<dt>deleteNTabEntryFromGenericNotificationStore(</dt><dd><p>candidate.target.targetId,
+eligibleOverrideCandidateOpt.impressionId.head)</p>
+</dd>
+</dl>
+</dd>
+<dt>case _ =&gt;</dt><dd><p>ntabOverrideImpressionNotFound.incr()
+Future.False</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>} else Future.False</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+<dt>} else {</dt><dd><p>Future.False</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private def shouldDisableNtabOverride(candidate: PushCandidate): Boolean =</dt><dd><p>RecTypes.isSendHandlerType(candidate.commonRecType)</p>
+</dd>
+</dl>
+<p>private def overridePreviousEntry(candidate: PushCandidate): Future[Boolean] = {</p>
+<blockquote>
+<div><dl>
+<dt>if (shouldDisableNtabOverride(candidate)) {</dt><dd><p>nTabOverrideOverriddenStat.incr()
+Future.False</p>
+</dd>
+<dt>} else {</dt><dd><p>val targetHistoryFut = candidate.target.history
+targetHistoryFut.flatMap { targetHistory =&gt;</p>
+<blockquote>
+<div><dl class="simple">
+<dt>val impressionIds = PushOverrideInfo.getImpressionIdsOfPrevEligiblePushNotif(</dt><dd><p>targetHistory,
+candidate.target.params(FSParams.OverrideNotificationsLookbackDurationForImpressionId),
+statsReceiver)</p>
+</dd>
+<dt>if (impressionIds.nonEmpty) {</dt><dd><p>deleteNTabEntryFromGenericNotificationStore(candidate.target.targetId, impressionIds.head)</p>
+</dd>
+<dt>} else {</dt><dd><p>ntabOverrideImpressionNotFound.incr()
+Future.False // no deletes issued</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>private def deleteCachedApiTimeline(</dt><dd><p>candidate: PushCandidate,
+isNotificationOverridden: Boolean</p>
+</dd>
+<dt>): Future[Unit] = {</dt><dd><dl class="simple">
+<dt>if (isNotificationOverridden &amp;&amp; candidate.target.params(FSParams.EnableDeletingNtabTimeline)) {</dt><dd><p>val deleteTimelineRequest = DeleteCurrentTimelineForUserRequest(candidate.target.targetId)
+nTabDeleteTimelineRequests.incr()
+nTabDeleteTimeline(deleteTimelineRequest)</p>
+</dd>
+<dt>} else {</dt><dd><p>Future.Unit</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def deleteNTabEntryFromGenericNotificationStore(</dt><dd><p>targetUserId: Long,
+targetImpressionId: String</p>
+</dd>
+<dt>): Future[Boolean] = {</dt><dd><p>val mhKey = (targetUserId, targetImpressionId)
+val genericNotificationKeyFut = nTabHistoryStore.get(mhKey)
+genericNotificationKeyFut.flatMap {</p>
+<blockquote>
+<div><dl>
+<dt>case Some(genericNotifOverrideKey) =&gt;</dt><dd><dl class="simple">
+<dt>val gnKey = GenericNotificationKey(</dt><dd><p>userId = genericNotifOverrideKey.userId,
+hashKey = genericNotifOverrideKey.hashKey,
+timestampMillis = genericNotifOverrideKey.timestampMillis</p>
+</dd>
+</dl>
+<p>)
+val deleteEntryRequest = DeleteGenericNotificationRequest(gnKey)
+nTabDeleteRequests.incr()
+nTabDelete(deleteEntryRequest).map(_ =&gt; true)</p>
+</dd>
+<dt>case _ =&gt;</dt><dd><p>prevGenericNotifKeyNotFound.incr()
+Future.False</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../../_sources/pushservice/src/main/scala/com/twitter/frigate/pushservice/take/sender/NtabSender.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

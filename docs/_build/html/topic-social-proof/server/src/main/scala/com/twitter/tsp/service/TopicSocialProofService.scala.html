@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.tsp.service</p>
+<p>import com.twitter.abdecider.ABDeciderFactory
+import com.twitter.abdecider.LoggingABDecider
+import com.twitter.tsp.thriftscala.TspTweetInfo
+import com.twitter.discovery.common.configapi.FeatureContextBuilder
+import com.twitter.finagle.mtls.authentication.ServiceIdentifier
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.gizmoduck.thriftscala.LookupContext
+import com.twitter.gizmoduck.thriftscala.QueryFields
+import com.twitter.gizmoduck.thriftscala.User
+import com.twitter.gizmoduck.thriftscala.UserService
+import com.twitter.hermit.store.gizmoduck.GizmoduckUserStore
+import com.twitter.logging.Logger
+import com.twitter.simclusters_v2.common.SemanticCoreEntityId
+import com.twitter.simclusters_v2.common.TweetId
+import com.twitter.simclusters_v2.common.UserId
+import com.twitter.spam.rtf.thriftscala.SafetyLevel
+import com.twitter.stitch.storehaus.StitchOfReadableStore
+import com.twitter.storehaus.ReadableStore
+import com.twitter.strato.client.{Client =&gt; StratoClient}
+import com.twitter.timelines.configapi
+import com.twitter.timelines.configapi.CompositeConfig
+import com.twitter.tsp.common.FeatureSwitchConfig
+import com.twitter.tsp.common.FeatureSwitchesBuilder
+import com.twitter.tsp.common.LoadShedder
+import com.twitter.tsp.common.ParamsBuilder
+import com.twitter.tsp.common.RecTargetFactory
+import com.twitter.tsp.common.TopicSocialProofDecider
+import com.twitter.tsp.handlers.TopicSocialProofHandler
+import com.twitter.tsp.stores.LocalizedUttRecommendableTopicsStore
+import com.twitter.tsp.stores.LocalizedUttTopicNameRequest
+import com.twitter.tsp.stores.TopicResponses
+import com.twitter.tsp.stores.TopicSocialProofStore
+import com.twitter.tsp.stores.TopicSocialProofStore.TopicSocialProof
+import com.twitter.tsp.stores.TopicStore
+import com.twitter.tsp.stores.UttTopicFilterStore
+import com.twitter.tsp.thriftscala.TopicSocialProofRequest
+import com.twitter.tsp.thriftscala.TopicSocialProofResponse
+import com.twitter.util.JavaTimer
+import com.twitter.util.Timer
+import javax.inject.Inject
+import javax.inject.Singleton
+import com.twitter.topiclisting.TopicListing
+import com.twitter.topiclisting.utt.UttLocalization</p>
+<p>&#64;Singleton
+class TopicSocialProofService &#64;Inject() (</p>
+<blockquote>
+<div><p>topicSocialProofStore: ReadableStore[TopicSocialProofStore.Query, Seq[TopicSocialProof]],
+tweetInfoStore: ReadableStore[TweetId, TspTweetInfo],
+serviceIdentifier: ServiceIdentifier,
+stratoClient: StratoClient,
+gizmoduck: UserService.MethodPerEndpoint,
+topicListing: TopicListing,
+uttLocalization: UttLocalization,
+decider: TopicSocialProofDecider,
+loadShedder: LoadShedder,
+stats: StatsReceiver) {</p>
+<p>import TopicSocialProofService._</p>
+<p>private val statsReceiver = stats.scope(“topic-social-proof-management”)</p>
+<p>private val isProd: Boolean = serviceIdentifier.environment == “prod”</p>
+<dl>
+<dt>private val optOutStratoStorePath: String =</dt><dd><p>if (isProd) “interests/optOutInterests” else “interests/staging/optOutInterests”</p>
+</dd>
+<dt>private val notInterestedInStorePath: String =</dt><dd><p>if (isProd) “interests/notInterestedTopicsGetter”
+else “interests/staging/notInterestedTopicsGetter”</p>
+</dd>
+<dt>private val userOptOutTopicsStore: ReadableStore[UserId, TopicResponses] =</dt><dd><dl class="simple">
+<dt>TopicStore.userOptOutTopicStore(stratoClient, optOutStratoStorePath)(</dt><dd><p>statsReceiver.scope(“ints_interests_opt_out_store”))</p>
+</dd>
+</dl>
+</dd>
+<dt>private val explicitFollowingTopicsStore: ReadableStore[UserId, TopicResponses] =</dt><dd><dl class="simple">
+<dt>TopicStore.explicitFollowingTopicStore(stratoClient)(</dt><dd><p>statsReceiver.scope(“ints_explicit_following_interests_store”))</p>
+</dd>
+</dl>
+</dd>
+<dt>private val userNotInterestedInTopicsStore: ReadableStore[UserId, TopicResponses] =</dt><dd><dl class="simple">
+<dt>TopicStore.notInterestedInTopicsStore(stratoClient, notInterestedInStorePath)(</dt><dd><p>statsReceiver.scope(“ints_not_interested_in_store”))</p>
+</dd>
+</dl>
+</dd>
+<dt>private lazy val localizedUttRecommendableTopicsStore: ReadableStore[</dt><dd><p>LocalizedUttTopicNameRequest,
+Set[</p>
+<blockquote>
+<div><p>SemanticCoreEntityId</p>
+</div></blockquote>
+<p>]</p>
+</dd>
+</dl>
+<p>] = new LocalizedUttRecommendableTopicsStore(uttLocalization)</p>
+<p>implicit val timer: Timer = new JavaTimer(true)</p>
+<dl class="simple">
+<dt>private lazy val uttTopicFilterStore = new UttTopicFilterStore(</dt><dd><p>topicListing = topicListing,
+userOptOutTopicsStore = userOptOutTopicsStore,
+explicitFollowingTopicsStore = explicitFollowingTopicsStore,
+notInterestedTopicsStore = userNotInterestedInTopicsStore,
+localizedUttRecommendableTopicsStore = localizedUttRecommendableTopicsStore,
+timer = timer,
+stats = statsReceiver.scope(“UttTopicFilterStore”)</p>
+</dd>
+</dl>
+<p>)</p>
+<p>private lazy val scribeLogger: Option[Logger] = Some(Logger.get(“client_event”))</p>
+<dl>
+<dt>private lazy val abDecider: LoggingABDecider =</dt><dd><dl class="simple">
+<dt>ABDeciderFactory(</dt><dd><p>abDeciderYmlPath = configRepoDirectory + “/abdecider/abdecider.yml”,
+scribeLogger = scribeLogger,
+decider = None,
+environment = Some(“production”),</p>
+</dd>
+</dl>
+<p>).buildWithLogging()</p>
+</dd>
+<dt>private val builder: FeatureSwitchesBuilder = FeatureSwitchesBuilder(</dt><dd><p>statsReceiver = statsReceiver.scope(“featureswitches-v2”),
+abDecider = abDecider,
+featuresDirectory = “features/topic-social-proof/main”,
+configRepoDirectory = configRepoDirectory,
+addServiceDetailsFromAurora = !serviceIdentifier.isLocal,
+fastRefresh = !isProd</p>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>private lazy val overridesConfig: configapi.Config = {</dt><dd><dl>
+<dt>new CompositeConfig(</dt><dd><dl class="simple">
+<dt>Seq(</dt><dd><p>FeatureSwitchConfig.config</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<p>private val featureContextBuilder: FeatureContextBuilder = FeatureContextBuilder(builder.build())</p>
+<dl class="simple">
+<dt>private val paramsBuilder: ParamsBuilder = ParamsBuilder(</dt><dd><p>featureContextBuilder,
+abDecider,
+overridesConfig,
+statsReceiver.scope(“params”)</p>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>private val userStore: ReadableStore[UserId, User] = {</dt><dd><dl class="simple">
+<dt>val queryFields: Set[QueryFields] = Set(</dt><dd><p>QueryFields.Profile,
+QueryFields.Account,
+QueryFields.Roles,
+QueryFields.Discoverability,
+QueryFields.Safety,
+QueryFields.Takedowns</p>
+</dd>
+</dl>
+<p>)
+val context: LookupContext = LookupContext(safetyLevel = Some(SafetyLevel.Recommendations))</p>
+<dl class="simple">
+<dt>GizmoduckUserStore(</dt><dd><p>client = gizmoduck,
+queryFields = queryFields,
+context = context,
+statsReceiver = statsReceiver.scope(“gizmoduck”)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private val recTargetFactory: RecTargetFactory = RecTargetFactory(</dt><dd><p>abDecider,
+userStore,
+paramsBuilder,
+statsReceiver</p>
+</dd>
+</dl>
+<p>)</p>
+<dl class="simple">
+<dt>private val topicSocialProofHandler =</dt><dd><dl class="simple">
+<dt>new TopicSocialProofHandler(</dt><dd><p>topicSocialProofStore,
+tweetInfoStore,
+uttTopicFilterStore,
+recTargetFactory,
+decider,
+statsReceiver.scope(“TopicSocialProofHandler”),
+loadShedder,
+timer)</p>
+</dd>
+</dl>
+</dd>
+<dt>val topicSocialProofHandlerStoreStitch: TopicSocialProofRequest =&gt; com.twitter.stitch.Stitch[</dt><dd><p>TopicSocialProofResponse</p>
+</dd>
+</dl>
+<p>] = StitchOfReadableStore(topicSocialProofHandler.toReadableStore)</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>object TopicSocialProofService {</dt><dd><p>private val configRepoDirectory = “/usr/local/config”</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/topic-social-proof/server/src/main/scala/com/twitter/tsp/service/TopicSocialProofService.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

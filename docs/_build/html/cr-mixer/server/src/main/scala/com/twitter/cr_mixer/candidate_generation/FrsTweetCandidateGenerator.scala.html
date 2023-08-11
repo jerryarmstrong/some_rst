@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.cr_mixer.candidate_generation</p>
+<p>import com.twitter.contentrecommender.thriftscala.TweetInfo
+import com.twitter.cr_mixer.config.TimeoutConfig
+import com.twitter.cr_mixer.model.FrsTweetCandidateGeneratorQuery
+import com.twitter.cr_mixer.model.ModuleNames
+import com.twitter.cr_mixer.model.TweetWithAuthor
+import com.twitter.cr_mixer.param.FrsParams
+import com.twitter.cr_mixer.similarity_engine.EarlybirdSimilarityEngineRouter
+import com.twitter.cr_mixer.source_signal.FrsStore
+import com.twitter.cr_mixer.source_signal.FrsStore.FrsQueryResult
+import com.twitter.cr_mixer.thriftscala.FrsTweet
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.finagle.util.DefaultTimer
+import com.twitter.frigate.common.util.StatsUtil
+import com.twitter.hermit.constants.AlgorithmFeedbackTokens
+import com.twitter.hermit.constants.AlgorithmFeedbackTokens.AlgorithmToFeedbackTokenMap
+import com.twitter.hermit.model.Algorithm
+import com.twitter.simclusters_v2.common.TweetId
+import com.twitter.simclusters_v2.common.UserId
+import com.twitter.storehaus.ReadableStore
+import com.twitter.timelines.configapi.Params
+import com.twitter.util.Future
+import javax.inject.Inject
+import javax.inject.Named
+import javax.inject.Singleton</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>TweetCandidateGenerator based on FRS seed users. For now this candidate generator fetches seed</p></li>
+<li><p>users from FRS, and retrieves the seed users’ past tweets from Earlybird with Earlybird light</p></li>
+<li><p>ranking models.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+</dl>
+<p>&#64;Singleton
+class FrsTweetCandidateGenerator &#64;Inject() (</p>
+<blockquote>
+<div><p>&#64;Named(ModuleNames.FrsStore) frsStore: ReadableStore[FrsStore.Query, Seq[FrsQueryResult]],
+frsBasedSimilarityEngine: EarlybirdSimilarityEngineRouter,
+tweetInfoStore: ReadableStore[TweetId, TweetInfo],
+timeoutConfig: TimeoutConfig,
+globalStats: StatsReceiver) {
+import FrsTweetCandidateGenerator._</p>
+<p>private val timer = DefaultTimer
+private val stats: StatsReceiver = globalStats.scope(this.getClass.getCanonicalName)
+private val fetchSeedsStats = stats.scope(“fetchSeeds”)
+private val fetchCandidatesStats = stats.scope(“fetchCandidates”)
+private val filterCandidatesStats = stats.scope(“filterCandidates”)
+private val hydrateCandidatesStats = stats.scope(“hydrateCandidates”)
+private val getCandidatesStats = stats.scope(“getCandidates”)</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>The function retrieves the candidate for the given user as follows:</p></li>
+<li><ol class="arabic simple">
+<li><p>Seed user fetch from FRS.</p></li>
+</ol>
+</li>
+<li><ol class="arabic simple" start="2">
+<li><p>Candidate fetch from Earlybird.</p></li>
+</ol>
+</li>
+<li><ol class="arabic simple" start="3">
+<li><p>Filtering.</p></li>
+</ol>
+</li>
+<li><ol class="arabic simple" start="4">
+<li><p>Candidate hydration.</p></li>
+</ol>
+</li>
+<li><ol class="arabic simple" start="5">
+<li><p>Truncation.</p></li>
+</ol>
+</li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>def get(</dt><dd><p>frsTweetCandidateGeneratorQuery: FrsTweetCandidateGeneratorQuery</p>
+</dd>
+<dt>): Future[Seq[FrsTweet]] = {</dt><dd><p>val userId = frsTweetCandidateGeneratorQuery.userId
+val product = frsTweetCandidateGeneratorQuery.product
+val allStats = stats.scope(“all”)
+val perProductStats = stats.scope(“perProduct”, product.name)
+StatsUtil.trackItemsStats(allStats) {</p>
+<blockquote>
+<div><dl>
+<dt>StatsUtil.trackItemsStats(perProductStats) {</dt><dd><dl>
+<dt>val result = for {</dt><dd><dl>
+<dt>seedAuthorWithScores &lt;- StatsUtil.trackOptionItemMapStats(fetchSeedsStats) {</dt><dd><dl class="simple">
+<dt>fetchSeeds(</dt><dd><p>userId,
+frsTweetCandidateGeneratorQuery.impressedUserList,
+frsTweetCandidateGeneratorQuery.languageCodeOpt,
+frsTweetCandidateGeneratorQuery.countryCodeOpt,
+frsTweetCandidateGeneratorQuery.params,</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}
+tweetCandidates &lt;- StatsUtil.trackOptionItemsStats(fetchCandidatesStats) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>fetchCandidates(</dt><dd><p>userId,
+seedAuthorWithScores.map(_.keys.toSeq).getOrElse(Seq.empty),
+frsTweetCandidateGeneratorQuery.impressedTweetList,
+seedAuthorWithScores.map(_.mapValues(_.score)).getOrElse(Map.empty),
+frsTweetCandidateGeneratorQuery.params</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<p>}
+filteredTweetCandidates &lt;- StatsUtil.trackOptionItemsStats(filterCandidatesStats) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>filterCandidates(</dt><dd><p>tweetCandidates,
+frsTweetCandidateGeneratorQuery.params</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<p>}
+hydratedTweetCandidates &lt;- StatsUtil.trackOptionItemsStats(hydrateCandidatesStats) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>hydrateCandidates(</dt><dd><p>seedAuthorWithScores,
+filteredTweetCandidates</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+<dt>} yield {</dt><dd><dl class="simple">
+<dt>hydratedTweetCandidates</dt><dd><p>.map(_.take(frsTweetCandidateGeneratorQuery.maxNumResults)).getOrElse(Seq.empty)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+result.raiseWithin(timeoutConfig.frsBasedTweetEndpointTimeout)(timer)</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Fetch recommended seed users from FRS</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>private def fetchSeeds(</dt><dd><p>userId: UserId,
+userDenyList: Set[UserId],
+languageCodeOpt: Option[String],
+countryCodeOpt: Option[String],
+params: Params</p>
+</dd>
+<dt>): Future[Option[Map[UserId, FrsQueryResult]]] = {</dt><dd><dl>
+<dt>frsStore</dt><dd><dl>
+<dt>.get(</dt><dd><dl class="simple">
+<dt>FrsStore.Query(</dt><dd><p>userId,
+params(FrsParams.FrsBasedCandidateGenerationMaxSeedsNumParam),
+params(FrsParams.FrsBasedCandidateGenerationDisplayLocationParam).displayLocation,
+userDenyList.toSeq,
+languageCodeOpt,
+countryCodeOpt</p>
+</dd>
+</dl>
+<p>)).map {
+_.map { seedAuthors =&gt;</p>
+<blockquote>
+<div><p>seedAuthors.map(user =&gt; user.userId -&gt; user).toMap</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Fetch tweet candidates from Earlybird</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+<dt>private def fetchCandidates(</dt><dd><p>searcherUserId: UserId,
+seedAuthors: Seq[UserId],
+impressedTweetList: Set[TweetId],
+frsUserToScores: Map[UserId, Double],
+params: Params</p>
+</dd>
+<dt>): Future[Option[Seq[TweetWithAuthor]]] = {</dt><dd><dl>
+<dt>if (seedAuthors.nonEmpty) {</dt><dd><p>// call earlybird
+val query = EarlybirdSimilarityEngineRouter.queryFromParams(</p>
+<blockquote>
+<div><p>Some(searcherUserId),
+seedAuthors,
+impressedTweetList,
+frsUserToScoresForScoreAdjustment = Some(frsUserToScores),
+params</p>
+</div></blockquote>
+<p>)
+frsBasedSimilarityEngine.get(query)</p>
+</dd>
+</dl>
+<p>} else Future.None</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Filter candidates that do not pass visibility filter policy</p></li>
+</ul>
+<p><a href="#id9"><span class="problematic" id="id10">*</span></a>/</p>
+</dd>
+<dt>private def filterCandidates(</dt><dd><p>candidates: Option[Seq[TweetWithAuthor]],
+params: Params</p>
+</dd>
+<dt>): Future[Option[Seq[TweetWithAuthor]]] = {</dt><dd><p>val tweetIds = candidates.map(_.map(_.tweetId).toSet).getOrElse(Set.empty)
+if (params(FrsParams.FrsBasedCandidateGenerationEnableVisibilityFilteringParam))</p>
+<blockquote>
+<div><dl>
+<dt>Future</dt><dd><dl>
+<dt>.collect(tweetInfoStore.multiGet(tweetIds)).map { tweetInfos =&gt;</dt><dd><dl class="simple">
+<dt>candidates.map {</dt><dd><p>// If tweetInfo does not exist, we will filter out this tweet candidate.
+_.filter(candidate =&gt; tweetInfos.getOrElse(candidate.tweetId, None).isDefined)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl class="simple">
+<dt>else {</dt><dd><p>Future.value(candidates)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Hydrate the candidates with the FRS candidate sources and scores</p></li>
+</ul>
+<p><a href="#id11"><span class="problematic" id="id12">*</span></a>/</p>
+</dd>
+<dt>private def hydrateCandidates(</dt><dd><p>frsAuthorWithScores: Option[Map[UserId, FrsQueryResult]],
+candidates: Option[Seq[TweetWithAuthor]]</p>
+</dd>
+<dt>): Future[Option[Seq[FrsTweet]]] = {</dt><dd><dl>
+<dt>Future.value {</dt><dd><dl>
+<dt>candidates.map {</dt><dd><dl>
+<dt>_.map { tweetWithAuthor =&gt;</dt><dd><p>val frsQueryResult = frsAuthorWithScores.flatMap(_.get(tweetWithAuthor.authorId))
+FrsTweet(</p>
+<blockquote>
+<div><p>tweetId = tweetWithAuthor.tweetId,
+authorId = tweetWithAuthor.authorId,
+frsPrimarySource = frsQueryResult.flatMap(_.primarySource),
+frsAuthorScore = frsQueryResult.map(_.score),
+frsCandidateSourceScores = frsQueryResult.flatMap { result =&gt;</p>
+<blockquote>
+<div><dl>
+<dt>result.sourceWithScores.map {</dt><dd><dl>
+<dt>_.collect {</dt><dd><p>// see TokenStrToAlgorithmMap &#64; <a class="reference external" href="https://sourcegraph.twitter.biz/git.twitter.biz/source/-/blob/hermit/hermit-core/src/main/scala/com/twitter/hermit/constants/AlgorithmFeedbackTokens.scala">https://sourcegraph.twitter.biz/git.twitter.biz/source/-/blob/hermit/hermit-core/src/main/scala/com/twitter/hermit/constants/AlgorithmFeedbackTokens.scala</a>
+// see Algorithm &#64; <a class="reference external" href="https://sourcegraph.twitter.biz/git.twitter.biz/source/-/blob/hermit/hermit-core/src/main/scala/com/twitter/hermit/model/Algorithm.scala">https://sourcegraph.twitter.biz/git.twitter.biz/source/-/blob/hermit/hermit-core/src/main/scala/com/twitter/hermit/model/Algorithm.scala</a>
+case (candidateSourceAlgoStr, score)</p>
+<blockquote>
+<div><blockquote>
+<div><dl class="simple">
+<dt>if AlgorithmFeedbackTokens.TokenStrToAlgorithmMap.contains(</dt><dd><p>candidateSourceAlgoStr) =&gt;</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl>
+<dt>AlgorithmToFeedbackTokenMap.getOrElse(</dt><dd><dl class="simple">
+<dt>AlgorithmFeedbackTokens.TokenStrToAlgorithmMap</dt><dd><p>.getOrElse(candidateSourceAlgoStr, DefaultAlgo),</p>
+</dd>
+</dl>
+<p>DefaultAlgoToken) -&gt; score</p>
+</dd>
+</dl>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>object FrsTweetCandidateGenerator {</dt><dd><p>val DefaultAlgo: Algorithm.Value = Algorithm.Other
+// 9999 is the token for Algorithm.Other
+val DefaultAlgoToken: Int = AlgorithmToFeedbackTokenMap.getOrElse(DefaultAlgo, 9999)</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/cr-mixer/server/src/main/scala/com/twitter/cr_mixer/candidate_generation/FrsTweetCandidateGenerator.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

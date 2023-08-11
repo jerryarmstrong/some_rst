@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../" id="documentation_options" src="../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.common.relevance.scorers;</p>
+<p>import java.util.Map;
+import java.util.concurrent.ConcurrentMap;</p>
+<p>import com.google.common.base.Preconditions;
+import com.google.common.collect.Maps;</p>
+<p>import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;</p>
+<p>import com.twitter.common_internal.text.version.PenguinVersion;
+import com.twitter.search.common.metrics.RelevanceStats;
+import com.twitter.search.common.metrics.SearchRateCounter;
+import com.twitter.search.common.relevance.config.TweetProcessingConfig;
+import com.twitter.search.common.relevance.entities.TwitterMessage;
+import com.twitter.search.common.relevance.features.TweetFeatures;
+import com.twitter.search.common.relevance.features.TweetTextFeatures;
+import com.twitter.search.common.relevance.features.TweetTextQuality;</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Compute a text score for TwitterMessage based on its offensiveness,</p></li>
+<li><p>shoutness, length, readability and hashtag properties extracted from</p></li>
+<li><p>tweet text.</p></li>
+<li><p>&lt;p/&gt;</p></li>
+<li><p>Formula:</p></li>
+<li><p>text_score = offensive_text_damping * offensive_username_damping *</p></li>
+<li><p>Sigma(feature_score_weight * feature_score)</p></li>
+<li><p>&lt;p/&gt;</p></li>
+<li><p>scored features are: length, readability, shout, entropy, links</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>public class TweetTextScorer extends TweetScorer {</dt><dd><p>private static final Logger LOG = LoggerFactory.getLogger(TweetTextScorer.class);</p>
+<p>private static final double DEFAULT_OFFENSIVE_TERM_DAMPING = 0.2d;
+private static final double DEFAULT_OFFENSIVE_NAME_DAMPING = 0.2d;</p>
+<p>// Sigma of all weights = 1.0d
+private static final double DEFAULT_LENGTH_WEIGHT = 0.5d;
+private static final double DEFAULT_READABILITY_WEIGHT = 0.1d;
+private static final double DEFAULT_SHOUT_WEIGHT = 0.1d;
+private static final double DEFAULT_ENTROPY_WEIGHT = 0.25d;
+private static final double DEFAULT_LINK_WEIGHT = 0.05d;</p>
+<p>private static final double DEFAULT_NO_DAMPING = 1.0d;</p>
+<p>// Sigmoid alpha values for normalization
+private static final double DEFAULT_READABILITY_ALPHA = 0.05d;
+private static final double DEFAULT_ENTROPY_ALPHA = 0.5d;
+private static final double DEFAULT_LENGTH_ALPHA = 0.03d;</p>
+<dl class="simple">
+<dt>private static final ConcurrentMap&lt;String, SearchRateCounter&gt; RATE_COUNTERS =</dt><dd><p>Maps.newConcurrentMap();</p>
+</dd>
+<dt>private static final ConcurrentMap&lt;PenguinVersion, Map&lt;Integer, SearchRateCounter&gt;&gt;</dt><dd><p>SCORE_HISTOGRAMS = Maps.newConcurrentMap();</p>
+</dd>
+</dl>
+<p>private double offensiveTermDamping = DEFAULT_OFFENSIVE_TERM_DAMPING;
+private double offensiveNameDamping = DEFAULT_OFFENSIVE_NAME_DAMPING;</p>
+<p>private double lengthWeight = DEFAULT_LENGTH_WEIGHT;
+private double readabilityWeight = DEFAULT_READABILITY_WEIGHT;
+private double shoutWeight = DEFAULT_SHOUT_WEIGHT;
+private double entropyWeight = DEFAULT_ENTROPY_WEIGHT;
+private double linkWeight = DEFAULT_LINK_WEIGHT;</p>
+<p>private double readabilityAlpha = DEFAULT_READABILITY_ALPHA;
+private double entropyAlpha = DEFAULT_ENTROPY_ALPHA;
+private double lengthAlpha = DEFAULT_LENGTH_ALPHA;</p>
+<p>/** Configure from a config file, validate the configuration. <a href="#id3"><span class="problematic" id="id4">*</span></a>/
+public TweetTextScorer(String configFile) {</p>
+<blockquote>
+<div><p>TweetProcessingConfig.init(configFile);</p>
+<p>// get dampings
+checkWeightRange(offensiveTermDamping = TweetProcessingConfig</p>
+<blockquote>
+<div><p>.getDouble(“offensive_term_damping”, DEFAULT_OFFENSIVE_TERM_DAMPING));</p>
+</div></blockquote>
+<dl class="simple">
+<dt>checkWeightRange(offensiveNameDamping = TweetProcessingConfig</dt><dd><p>.getDouble(“offensive_name_damping”, DEFAULT_OFFENSIVE_NAME_DAMPING));</p>
+</dd>
+</dl>
+<p>// get weights
+checkWeightRange(lengthWeight = TweetProcessingConfig</p>
+<blockquote>
+<div><p>.getDouble(“length_weight”, DEFAULT_LENGTH_WEIGHT));</p>
+</div></blockquote>
+<dl class="simple">
+<dt>checkWeightRange(readabilityWeight = TweetProcessingConfig</dt><dd><p>.getDouble(“readability_weight”, DEFAULT_READABILITY_WEIGHT));</p>
+</dd>
+<dt>checkWeightRange(shoutWeight = TweetProcessingConfig</dt><dd><p>.getDouble(“shout_weight”, DEFAULT_SHOUT_WEIGHT));</p>
+</dd>
+<dt>checkWeightRange(entropyWeight = TweetProcessingConfig</dt><dd><p>.getDouble(“entropy_weight”, DEFAULT_ENTROPY_WEIGHT));</p>
+</dd>
+<dt>checkWeightRange(linkWeight = TweetProcessingConfig</dt><dd><p>.getDouble(“link_weight”, DEFAULT_LINK_WEIGHT));</p>
+</dd>
+</dl>
+<p>// check sigma of weights
+Preconditions.checkArgument(</p>
+<blockquote>
+<div><p>lengthWeight + readabilityWeight + shoutWeight + entropyWeight + linkWeight == 1.0d);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>readabilityAlpha = TweetProcessingConfig</dt><dd><p>.getDouble(“readability_alpha”, DEFAULT_READABILITY_ALPHA);</p>
+</dd>
+</dl>
+<p>entropyAlpha = TweetProcessingConfig.getDouble(“entropy_alpha”, DEFAULT_ENTROPY_ALPHA);
+lengthAlpha = TweetProcessingConfig.getDouble(“length_alpha”, DEFAULT_LENGTH_ALPHA);</p>
+</div></blockquote>
+<p>}</p>
+<p>/** Creates a new TweetTextScorer instance. <a href="#id5"><span class="problematic" id="id6">*</span></a>/
+public TweetTextScorer() {
+}</p>
+<p>/** Scores the given tweet. <a href="#id7"><span class="problematic" id="id8">*</span></a>/
+public void scoreTweet(final TwitterMessage tweet) {</p>
+<blockquote>
+<div><p>Preconditions.checkNotNull(tweet);</p>
+<dl>
+<dt>for (PenguinVersion penguinVersion<span class="classifier">tweet.getSupportedPenguinVersions()) {</span></dt><dd><p>TweetFeatures features = Preconditions.checkNotNull(tweet.getTweetFeatures(penguinVersion));
+TweetTextFeatures textFeatures = Preconditions.checkNotNull(features.getTweetTextFeatures());
+TweetTextQuality textQuality = Preconditions.checkNotNull(features.getTweetTextQuality());
+boolean isOffensiveText = textQuality.hasBoolQuality(</p>
+<blockquote>
+<div><p>TweetTextQuality.BooleanQualityType.OFFENSIVE);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>boolean isOffensiveScreenName = textQuality.hasBoolQuality(</dt><dd><p>TweetTextQuality.BooleanQualityType.OFFENSIVE_USER);</p>
+</dd>
+</dl>
+<p>double shoutScore = DEFAULT_NO_DAMPING - textQuality.getShout();
+double lengthScore = normalize(textFeatures.getLength(), lengthAlpha);
+double readabilityScore = normalize(textQuality.getReadability(), readabilityAlpha);
+double entropyScore = normalize(textQuality.getEntropy(), entropyAlpha);</p>
+<dl class="simple">
+<dt>double score = (isOffensiveText ? offensiveTermDamping<span class="classifier">DEFAULT_NO_DAMPING)</span></dt><dd><ul class="simple">
+<li><p>(isOffensiveScreenName ? offensiveNameDamping : DEFAULT_NO_DAMPING)</p></li>
+<li><dl class="simple">
+<dt>(lengthWeight * lengthScore</dt><dd><ul>
+<li><p>readabilityWeight * readabilityScore</p></li>
+<li><p>shoutWeight * shoutScore</p></li>
+<li><p>entropyWeight * entropyScore</p></li>
+<li><p>linkWeight * (tweet.getExpandedUrlMapSize() &gt; 0 ? 1 : 0));</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ul>
+</dd>
+</dl>
+<p>// scale to [0, 100] byte
+textQuality.setTextScore((byte) (score * 100));</p>
+<dl class="simple">
+<dt>updateStats(</dt><dd><p>isOffensiveText,
+isOffensiveScreenName,
+textFeatures,
+score,
+getRateCounterStat(”<a href="#id9"><span class="problematic" id="id10">num_offensive_text_</span></a>”, penguinVersion),
+getRateCounterStat(”<a href="#id11"><span class="problematic" id="id12">num_offensive_user_</span></a>”, penguinVersion),
+getRateCounterStat(”<a href="#id13"><span class="problematic" id="id14">num_no_trends_</span></a>”, penguinVersion),
+getRateCounterStat(”<a href="#id15"><span class="problematic" id="id16">num_has_trends_</span></a>”, penguinVersion),
+getRateCounterStat(”<a href="#id17"><span class="problematic" id="id18">num_too_many_trends_</span></a>”, penguinVersion),
+getRateCounterStat(”<a href="#id19"><span class="problematic" id="id20">num_scored_tweets_</span></a>”, penguinVersion),
+getScoreHistogram(penguinVersion));</p>
+</dd>
+<dt>if (LOG.isDebugEnabled()) {</dt><dd><dl class="simple">
+<dt>LOG.debug(String.format(</dt><dd><p>“Tweet length [%.2f] weighted length [%.2f], readability [%.2f] ”
++ “weighted readability [%.2f], shout [%.2f] weighted shout [%.2f], ”
++ “entropy [%.2f], weighted entropy [%.2f], ”
++ “score [%.2f], text [%s], penguin version [%s]”,
+lengthScore,
+lengthWeight * lengthScore,
+readabilityScore,
+readabilityWeight * readabilityScore,
+shoutScore,
+shoutWeight * shoutScore,
+entropyScore,
+entropyWeight * entropyScore,
+score,
+tweet.getText(),
+penguinVersion));</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>private void updateStats(boolean isOffensiveText,</dt><dd><blockquote>
+<div><p>boolean isOffensiveScreenName,
+TweetTextFeatures textFeatures,
+double score,
+SearchRateCounter offensiveTextCounter,
+SearchRateCounter offensiveUserNameCounter,
+SearchRateCounter noTrendsCounter,
+SearchRateCounter hasTrendsCounter,
+SearchRateCounter tooManyTrendsHashtagsCounter,
+SearchRateCounter scoredTweets,
+Map&lt;Integer, SearchRateCounter&gt; scoreHistogram) {</p>
+</div></blockquote>
+<p>// set stats
+if (isOffensiveText) {</p>
+<blockquote>
+<div><p>offensiveTextCounter.increment();</p>
+</div></blockquote>
+<p>}
+if (isOffensiveScreenName) {</p>
+<blockquote>
+<div><p>offensiveUserNameCounter.increment();</p>
+</div></blockquote>
+<p>}
+if (textFeatures.getTrendingTermsSize() == 0) {</p>
+<blockquote>
+<div><p>noTrendsCounter.increment();</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>hasTrendsCounter.increment();</p>
+</dd>
+</dl>
+<p>}
+if (TwitterMessage.hasMultipleHashtagsOrTrends(textFeatures)) {</p>
+<blockquote>
+<div><p>tooManyTrendsHashtagsCounter.increment();</p>
+</div></blockquote>
+<p>}
+scoredTweets.increment();</p>
+<p>int bucket = (int) Math.floor(score * 10) * 10;
+scoreHistogram.get(bucket).increment();</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// normalize the passed in value to smoothed [0, 1.0d] range
+private static double normalize(double value, double alpha) {</p>
+<blockquote>
+<div><p>return 2 * (1.0d / (1.0d + Math.exp(-(alpha * value))) - 0.5);</p>
+</div></blockquote>
+<p>}</p>
+<p>// Make sure weight values are within the range of [0.0, 1.0]
+private void checkWeightRange(double value) {</p>
+<blockquote>
+<div><p>Preconditions.checkArgument(value &gt;= 0.0d &amp;&amp; value &lt;= 1.0d);</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>private Map&lt;Integer, SearchRateCounter&gt; getScoreHistogram(PenguinVersion penguinVersion) {</dt><dd><p>Map&lt;Integer, SearchRateCounter&gt; scoreHistogram = SCORE_HISTOGRAMS.get(penguinVersion);
+if (scoreHistogram == null) {</p>
+<blockquote>
+<div><p>scoreHistogram = Maps.newHashMap();
+String statsName = “num_text_score_%d_%s”;</p>
+<dl class="simple">
+<dt>for (int i = 0; i &lt;= 100; i += 10) {</dt><dd><dl class="simple">
+<dt>scoreHistogram.put(i, RelevanceStats.exportRate(</dt><dd><p>String.format(statsName, i, penguinVersion.name().toLowerCase())));</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>scoreHistogram = SCORE_HISTOGRAMS.putIfAbsent(penguinVersion, scoreHistogram);
+if (scoreHistogram == null) {</p>
+<blockquote>
+<div><p>scoreHistogram = SCORE_HISTOGRAMS.get(penguinVersion);</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>return scoreHistogram;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private SearchRateCounter getRateCounterStat(String statPrefix, PenguinVersion penguinVersion) {</dt><dd><p>String statName = statPrefix + penguinVersion.name().toLowerCase();
+SearchRateCounter rateCounter = RATE_COUNTERS.get(statName);
+if (rateCounter == null) {</p>
+<blockquote>
+<div><p>// Only one RateCounter instance is created for each stat name. So we don’t need to worry
+// that another thread might’ve created this instance in the meantime: we can just create/get
+// it, and store it in the map.
+rateCounter = RelevanceStats.exportRate(statName);
+RATE_COUNTERS.put(statName, rateCounter);</p>
+</div></blockquote>
+<p>}
+return rateCounter;</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../_sources/src/java/com/twitter/search/common/relevance/scorers/TweetTextScorer.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

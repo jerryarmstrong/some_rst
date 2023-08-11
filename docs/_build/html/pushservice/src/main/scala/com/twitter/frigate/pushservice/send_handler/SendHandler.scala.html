@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.frigate.pushservice.send_handler</p>
+<p>import com.twitter.finagle.stats.BroadcastStatsReceiver
+import com.twitter.finagle.stats.Stat
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.frigate.common.base.CandidateDetails
+import com.twitter.frigate.common.base.CandidateFilteringOnlyFlow
+import com.twitter.frigate.common.base.CandidateResult
+import com.twitter.frigate.common.base.FeatureMap
+import com.twitter.frigate.common.base.OK
+import com.twitter.frigate.common.base.Response
+import com.twitter.frigate.common.base.Result
+import com.twitter.frigate.common.base.Stats.track
+import com.twitter.frigate.common.config.CommonConstants
+import com.twitter.frigate.common.logger.MRLogger
+import com.twitter.frigate.common.rec_types.RecTypes
+import com.twitter.frigate.common.util.InvalidRequestException
+import com.twitter.frigate.common.util.MrNtabCopyObjects
+import com.twitter.frigate.pushservice.model.PushTypes.PushCandidate
+import com.twitter.frigate.pushservice.model.PushTypes.RawCandidate
+import com.twitter.frigate.pushservice.model.PushTypes.Target
+import com.twitter.frigate.pushservice.config.Config
+import com.twitter.frigate.pushservice.ml.HydrationContextBuilder
+import com.twitter.frigate.pushservice.params.PushFeatureSwitchParams.EnableMagicFanoutNewsForYouNtabCopy
+import com.twitter.frigate.pushservice.scriber.MrRequestScribeHandler
+import com.twitter.frigate.pushservice.send_handler.generator.PushRequestToCandidate
+import com.twitter.frigate.pushservice.take.SendHandlerNotifier
+import com.twitter.frigate.pushservice.take.candidate_validator.SendHandlerPostCandidateValidator
+import com.twitter.frigate.pushservice.take.candidate_validator.SendHandlerPreCandidateValidator
+import com.twitter.frigate.pushservice.target.PushTargetUserBuilder
+import com.twitter.frigate.pushservice.util.ResponseStatsTrackUtils.trackStatsForResponseToRequest
+import com.twitter.frigate.pushservice.util.SendHandlerPredicateUtil
+import com.twitter.frigate.pushservice.thriftscala.PushRequest
+import com.twitter.frigate.pushservice.thriftscala.PushRequestScribe
+import com.twitter.frigate.pushservice.thriftscala.PushResponse
+import com.twitter.frigate.thriftscala.CommonRecommendationType
+import com.twitter.nrel.heavyranker.FeatureHydrator
+import com.twitter.util._</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>A handler for sending PushRequests</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>class SendHandler(</dt><dd><p>pushTargetUserBuilder: PushTargetUserBuilder,
+preCandidateValidator: SendHandlerPreCandidateValidator,
+postCandidateValidator: SendHandlerPostCandidateValidator,
+sendHandlerNotifier: SendHandlerNotifier,
+candidateHydrator: SendHandlerPushCandidateHydrator,
+featureHydrator: FeatureHydrator,
+sendHandlerPredicateUtil: SendHandlerPredicateUtil,
+mrRequestScriberNode: String</p>
+</dd>
+<dt>)(</dt><dd><p>implicit val statsReceiver: StatsReceiver,
+implicit val config: Config)</p>
+<blockquote>
+<div><p>extends CandidateFilteringOnlyFlow[Target, RawCandidate, PushCandidate] {</p>
+</div></blockquote>
+<p>implicit private val timer: Timer = new JavaTimer(true)
+val stats = statsReceiver.scope(“SendHandler”)
+val log = MRLogger(“SendHandler”)</p>
+<p>private val buildTargetStats = stats.scope(“build_target”)</p>
+<dl>
+<dt>private val candidateHydrationLatency: Stat =</dt><dd><p>stats.stat(“candidateHydrationLatency”)</p>
+</dd>
+<dt>private val candidatePreValidatorLatency: Stat =</dt><dd><p>stats.stat(“candidatePreValidatorLatency”)</p>
+</dd>
+<dt>private val candidatePostValidatorLatency: Stat =</dt><dd><p>stats.stat(“candidatePostValidatorLatency”)</p>
+</dd>
+<dt>private val featureHydrationLatency: StatsReceiver =</dt><dd><p>stats.scope(“featureHydrationLatency”)</p>
+</dd>
+<dt>private val mrRequestScribeHandler =</dt><dd><p>new MrRequestScribeHandler(mrRequestScriberNode, stats.scope(“mr_request_scribe”))</p>
+</dd>
+<dt>def apply(request: PushRequest): Future[PushResponse] = {</dt><dd><dl class="simple">
+<dt>val receivers = Seq(</dt><dd><p>stats,
+stats.scope(request.notification.commonRecommendationType.toString)</p>
+</dd>
+</dl>
+<p>)
+val bStats = BroadcastStatsReceiver(receivers)
+bStats.counter(“requests”).incr()
+Stat</p>
+<blockquote>
+<div><dl>
+<dt>.timeFuture(bStats.stat(“latency”))(</dt><dd><p>process(request).raiseWithin(CommonConstants.maxPushRequestDuration))</p>
+</dd>
+<dt>.onSuccess {</dt><dd><dl>
+<dt>case (pushResp, rawCandidate) =&gt;</dt><dd><dl class="simple">
+<dt>trackStatsForResponseToRequest(</dt><dd><p>rawCandidate.commonRecType,
+rawCandidate.target,
+pushResp,
+receivers)(statsReceiver)</p>
+</dd>
+<dt>if (!request.context.exists(_.darkWrite.contains(true))) {</dt><dd><p>config.requestScribe(PushRequestScribe(request, pushResp))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+.onFailure { ex =&gt;</p>
+<blockquote>
+<div><p>bStats.counter(“failures”).incr()
+bStats.scope(“failures”).counter(ex.getClass.getCanonicalName).incr()</p>
+</div></blockquote>
+<p>}
+.map {</p>
+<blockquote>
+<div><p>case (pushResp, _) =&gt; pushResp</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def process(request: PushRequest): Future[(PushResponse, RawCandidate)] = {</dt><dd><p>val recType = request.notification.commonRecommendationType</p>
+<dl>
+<dt>track(buildTargetStats)(</dt><dd><dl>
+<dt>pushTargetUserBuilder</dt><dd><dl class="simple">
+<dt>.buildTarget(</dt><dd><p>request.userId,
+request.context</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+<dt>).flatMap { targetUser =&gt;</dt><dd><dl class="simple">
+<dt>val responseWithScribedInfo = request.context.exists { context =&gt;</dt><dd><p>context.responseWithScribedInfo.contains(true)</p>
+</dd>
+</dl>
+<p>}
+val newRequest =</p>
+<blockquote>
+<div><dl>
+<dt>if (request.notification.commonRecommendationType == CommonRecommendationType.MagicFanoutNewsEvent &amp;&amp;</dt><dd><p>targetUser.params(EnableMagicFanoutNewsForYouNtabCopy)) {
+val newNotification = request.notification.copy(ntabCopyId =</p>
+<blockquote>
+<div><p>Some(MrNtabCopyObjects.MagicFanoutNewsForYouCopy.copyId))</p>
+</div></blockquote>
+<p>request.copy(notification = newNotification)</p>
+</dd>
+</dl>
+<p>} else request</p>
+</div></blockquote>
+<dl>
+<dt>if (RecTypes.isSendHandlerType(recType) || newRequest.context.exists(</dt><dd><blockquote>
+<div><p>_.allowCRT.contains(true))) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>val rawCandidateFut = PushRequestToCandidate.generatePushCandidate(</dt><dd><p>newRequest.notification,
+targetUser</p>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>rawCandidateFut.flatMap { rawCandidate =&gt;</dt><dd><dl class="simple">
+<dt>val pushResponse = process(targetUser, Seq(rawCandidate)).flatMap {</dt><dd><p>sendHandlerNotifier.checkResponseAndNotify(_, responseWithScribedInfo)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>pushResponse.map { pushResponse =&gt;</dt><dd><p>(pushResponse, rawCandidate)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>} else {</dt><dd><p>Future.exception(InvalidRequestException(s”${recType.name} not supported in SendHandler”))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private def hydrateFeatures(</dt><dd><p>candidateDetails: Seq[CandidateDetails[PushCandidate]],
+target: Target,</p>
+</dd>
+</dl>
+<p>): Future[Seq[CandidateDetails[PushCandidate]]] = {</p>
+<blockquote>
+<div><dl>
+<dt>candidateDetails.headOption match {</dt><dd><dl>
+<dt>case Some(candidateDetail)</dt><dd><blockquote>
+<div><p>if RecTypes.notEligibleForModelScoreTracking(candidateDetail.candidate.commonRecType) =&gt;</p>
+</div></blockquote>
+<p>Future.value(candidateDetails)</p>
+</dd>
+<dt>case Some(candidateDetail) =&gt;</dt><dd><p>val hydrationContextFut = HydrationContextBuilder.build(candidateDetail.candidate)
+hydrationContextFut.flatMap { hc =&gt;</p>
+<blockquote>
+<div><dl>
+<dt>featureHydrator</dt><dd><p>.hydrateCandidate(Seq(hc), target.mrRequestContextForFeatureStore)
+.map { hydrationResult =&gt;</p>
+<blockquote>
+<div><p>val features = hydrationResult.getOrElse(hc, FeatureMap())
+candidateDetail.candidate.mergeFeatures(features)
+candidateDetails</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>case _ =&gt; Future.Nil</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>override def process(</dt><dd><p>target: Target,
+externalCandidates: Seq[RawCandidate]</p>
+</dd>
+<dt>): Future[Response[PushCandidate, Result]] = {</dt><dd><p>val candidate = externalCandidates.map(CandidateDetails(_, “realtime”))</p>
+<dl>
+<dt>for {</dt><dd><p>hydratedCandidatesWithCopy &lt;- hydrateCandidates(candidate)</p>
+<dl class="simple">
+<dt>(candidates, preHydrationFilteredCandidates) &lt;- track(filterStats)(</dt><dd><p>filter(target, hydratedCandidatesWithCopy)</p>
+</dd>
+</dl>
+<p>)</p>
+<dl class="simple">
+<dt>featureHydratedCandidates &lt;-</dt><dd><p>track(featureHydrationLatency)(hydrateFeatures(candidates, target))</p>
+</dd>
+<dt>allTakeCandidateResults &lt;- track(takeStats)(</dt><dd><p>take(target, featureHydratedCandidates, desiredCandidateCount(target))</p>
+</dd>
+</dl>
+<p>)</p>
+<dl class="simple">
+<dt>_ &lt;- mrRequestScribeHandler.scribeForCandidateFiltering(</dt><dd><p>target = target,
+hydratedCandidates = hydratedCandidatesWithCopy,
+preRankingFilteredCandidates = preHydrationFilteredCandidates,
+rankedCandidates = featureHydratedCandidates,
+rerankedCandidates = Seq.empty,
+restrictFilteredCandidates = Seq.empty, // no restrict step
+allTakeCandidateResults = allTakeCandidateResults</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>} yield {</p>
+<blockquote>
+<div><dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>We combine the results for all filtering steps and pass on in sequence to next step</p></li>
+<li></li>
+<li><p>This is done to ensure the filtering reason for the candidate from multiple levels of</p></li>
+<li><p>filtering is carried all the way until [[PushResponse]] is built and returned from</p></li>
+<li><p>frigate-pushservice-send</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+</dl>
+<p>Response(OK, allTakeCandidateResults ++ preHydrationFilteredCandidates)</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>override def hydrateCandidates(</dt><dd><p>candidates: Seq[CandidateDetails[RawCandidate]]</p>
+</dd>
+<dt>): Future[Seq[CandidateDetails[PushCandidate]]] = {</dt><dd><p>Stat.timeFuture(candidateHydrationLatency)(candidateHydrator(candidates))</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// Filter Step - pre-predicates and app specific predicates
+override def filter(</p>
+<blockquote>
+<div><p>target: Target,
+hydratedCandidatesDetails: Seq[CandidateDetails[PushCandidate]]</p>
+</div></blockquote>
+<dl>
+<dt>): Future[</dt><dd><p>(Seq[CandidateDetails[PushCandidate]], Seq[CandidateResult[PushCandidate, Result]])</p>
+</dd>
+<dt>] = {</dt><dd><dl>
+<dt>Stat.timeFuture(candidatePreValidatorLatency)(</dt><dd><dl class="simple">
+<dt>sendHandlerPredicateUtil.preValidationForCandidate(</dt><dd><p>hydratedCandidatesDetails,
+preCandidateValidator</p>
+</dd>
+</dl>
+<p>))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>// Post Validation - Take step
+override def validCandidates(</p>
+<blockquote>
+<div><p>target: Target,
+candidates: Seq[PushCandidate]</p>
+</div></blockquote>
+<dl>
+<dt>): Future[Seq[Result]] = {</dt><dd><dl class="simple">
+<dt>Stat.timeFuture(candidatePostValidatorLatency)(Future.collect(candidates.map { candidate =&gt;</dt><dd><dl class="simple">
+<dt>sendHandlerPredicateUtil</dt><dd><p>.postValidationForCandidate(candidate, postCandidateValidator)
+.map(res =&gt; res.result)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/pushservice/src/main/scala/com/twitter/frigate/pushservice/send_handler/SendHandler.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

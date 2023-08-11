@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../../" id="documentation_options" src="../../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.servo.forked</p>
+<p>import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.logging.Logger
+import com.twitter.servo.util.ExceptionCounter
+import com.twitter.util.{Duration, Time, Local, TimeoutException}
+import java.util.concurrent.{LinkedBlockingQueue, TimeUnit, CountDownLatch}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>A forking action executor that executes the actions in a separate</p></li>
+<li><p>thread, using a bounded queue as the communication channel. If the</p></li>
+<li><p>queue is full (the secondary thread is slow to drain it), then the</p></li>
+<li><p>items will be dropped rather than enqueued.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>class QueueExecutor(maxQueueSize: Int, stats: StatsReceiver) extends Forked.Executor {</dt><dd><p>private val forkExceptionsCounter = new ExceptionCounter(stats)
+private val enqueuedCounter = stats.counter(“forked_actions_enqueued”)
+private val droppedCounter = stats.counter(“forked_actions_dropped”)
+private val log = Logger.get(“Forked.QueueExecutor”)</p>
+<p>&#64;volatile private var isStopped = false
+private val releaseCountDownLatch = new CountDownLatch(1)
+private val queue = new LinkedBlockingQueue[() =&gt; Unit](maxQueueSize)
+private val thread = new Thread {</p>
+<blockquote>
+<div><dl>
+<dt>override def run(): Unit = {</dt><dd><dl>
+<dt>while (!isStopped) {</dt><dd><dl>
+<dt>try {</dt><dd><p>queue.take()()</p>
+</dd>
+<dt>} catch {</dt><dd><p>// Ignore interrupts from other threads
+case _: InterruptedException =&gt;
+// TODO: handle fatal errors more seriously
+case e: Throwable =&gt;</p>
+<blockquote>
+<div><p>forkExceptionsCounter(e)
+log.error(e, “Executing queued action”)</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}
+releaseCountDownLatch.countDown()</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>thread.setDaemon(true)
+thread.start()</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Interrupts the thread and directs it to stop processing. This</p></li>
+<li><p>method will not return until the processing thread has finished</p></li>
+<li><p>or the timeout occurs. Ok to call multiple times.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>def release(timeout: Duration): Unit = {</dt><dd><dl>
+<dt>if (!isStopped) {</dt><dd><p>isStopped = true
+thread.interrupt()
+releaseCountDownLatch.await(timeout.inMilliseconds, TimeUnit.MILLISECONDS) || {</p>
+<blockquote>
+<div><p>throw new TimeoutException(timeout.toString)</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Blocks until all the items currently in the queue have been</p></li>
+<li><p>executed, or the timeout occurs. Mostly useful during testing.</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>def waitForQueueToDrain(timeout: Duration): Unit = {</dt><dd><p>val latch = new CountDownLatch(1)
+val start = Time.now
+queue.offer(() =&gt; latch.countDown(), timeout.inMilliseconds, TimeUnit.MILLISECONDS)
+val remaining = timeout - (Time.now - start)
+latch.await(remaining.inMilliseconds, TimeUnit.MILLISECONDS) || {</p>
+<blockquote>
+<div><p>throw new TimeoutException(remaining.toString)</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Queue the action for execution in this object’s thread.</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+<dt>def apply(action: () =&gt; Unit) =</dt><dd><dl class="simple">
+<dt>if (queue.offer(Local.closed(action)))</dt><dd><p>enqueuedCounter.incr()</p>
+</dd>
+<dt>else</dt><dd><p>droppedCounter.incr()</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../../_sources/tweetypie/servo/util/src/main/scala/com/twitter/servo/forked/QueueExecutor.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

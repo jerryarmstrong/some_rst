@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../../../" id="documentation_options" src="../../../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.follow_recommendations.common.clients.addressbook</p>
+<p>import com.twitter.addressbook.datatypes.thriftscala.QueryType
+import com.twitter.addressbook.thriftscala.AddressBookGetRequest
+import com.twitter.addressbook.thriftscala.AddressBookGetResponse
+import com.twitter.addressbook.thriftscala.Addressbook2
+import com.twitter.addressbook.thriftscala.ClientInfo
+import com.twitter.finagle.stats.NullStatsReceiver
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.wtf.scalding.jobs.addressbook.thriftscala.STPResultFeature
+import com.twitter.follow_recommendations.common.clients.addressbook.models.Contact
+import com.twitter.follow_recommendations.common.clients.addressbook.models.EdgeType
+import com.twitter.follow_recommendations.common.clients.addressbook.models.QueryOption
+import com.twitter.follow_recommendations.common.clients.addressbook.models.RecordIdentifier
+import com.twitter.wtf.scalding.jobs.address_book.ABUtil.hashContact
+import com.twitter.wtf.scalding.jobs.address_book.ABUtil.normalizeEmail
+import com.twitter.wtf.scalding.jobs.address_book.ABUtil.normalizePhoneNumber
+import com.twitter.hermit.usercontacts.thriftscala.{UserContacts =&gt; tUserContacts}
+import com.twitter.stitch.Stitch
+import com.twitter.strato.client.Fetcher
+import javax.inject.Inject
+import javax.inject.Singleton</p>
+<p>&#64;Singleton
+class AddressbookClient &#64;Inject() (</p>
+<blockquote>
+<div><p>addressbookService: Addressbook2.MethodPerEndpoint,
+statsReceiver: StatsReceiver = NullStatsReceiver) {</p>
+<p>private val stats: StatsReceiver = statsReceiver.scope(this.getClass.getSimpleName)</p>
+<dl>
+<dt>private[this] def getResponseFromService(</dt><dd><p>identifiers: Seq[RecordIdentifier],
+batchSize: Int,
+edgeType: EdgeType,
+maxFetches: Int,
+queryOption: Option[QueryOption]</p>
+</dd>
+<dt>): Stitch[Seq[AddressBookGetResponse]] = {</dt><dd><dl>
+<dt>Stitch</dt><dd><dl>
+<dt>.collect(</dt><dd><dl>
+<dt>identifiers.map { identifier =&gt;</dt><dd><dl>
+<dt>Stitch.callFuture(</dt><dd><dl class="simple">
+<dt>addressbookService.get(AddressBookGetRequest(</dt><dd><p>clientInfo = ClientInfo(None),
+identifier = identifier.toThrift,
+edgeType = edgeType.toThrift,
+queryType = QueryType.UserId,
+queryOption = queryOption.map(_.toThrift),
+maxFetches = maxFetches,
+resultBatchSize = batchSize</p>
+</dd>
+</dl>
+<p>)))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private[this] def getContactsResponseFromService(</dt><dd><p>identifiers: Seq[RecordIdentifier],
+batchSize: Int,
+edgeType: EdgeType,
+maxFetches: Int,
+queryOption: Option[QueryOption]</p>
+</dd>
+<dt>): Stitch[Seq[AddressBookGetResponse]] = {</dt><dd><dl>
+<dt>Stitch</dt><dd><dl>
+<dt>.collect(</dt><dd><dl>
+<dt>identifiers.map { identifier =&gt;</dt><dd><dl>
+<dt>Stitch.callFuture(</dt><dd><dl class="simple">
+<dt>addressbookService.get(AddressBookGetRequest(</dt><dd><p>clientInfo = ClientInfo(None),
+identifier = identifier.toThrift,
+edgeType = edgeType.toThrift,
+queryType = QueryType.Contact,
+queryOption = queryOption.map(_.toThrift),
+maxFetches = maxFetches,
+resultBatchSize = batchSize</p>
+</dd>
+</dl>
+<p>)))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/** Mode of addressbook resolving logic</dt><dd><ul class="simple">
+<li><p>ManhattanThenABV2: fetching manhattan cached result and backfill with addressbook v2</p></li>
+<li><p>ABV2Only: calling addressbook v2 directly without fetching manhattan cached result</p></li>
+<li><p>This can be controlled by passing a fetcher or not. Passing a fetcher will attempt to use it,</p></li>
+<li><p>if not then it won’t.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>def getUsers(</dt><dd><p>userId: Long,
+identifiers: Seq[RecordIdentifier],
+batchSize: Int,
+edgeType: EdgeType,
+fetcherOption: Option[Fetcher[Long, Unit, tUserContacts]] = None,
+maxFetches: Int = 1,
+queryOption: Option[QueryOption] = None,</p>
+</dd>
+<dt>): Stitch[Seq[Long]] = {</dt><dd><dl>
+<dt>fetcherOption match {</dt><dd><dl>
+<dt>case Some(fetcher) =&gt;</dt><dd><dl>
+<dt>getUsersFromManhattan(userId, fetcher).flatMap { userContacts =&gt;</dt><dd><dl>
+<dt>if (userContacts.isEmpty) {</dt><dd><p>stats.counter(“mhEmptyThenFromAbService”).incr()
+getResponseFromService(identifiers, batchSize, edgeType, maxFetches, queryOption)</p>
+<blockquote>
+<div><p>.map(_.flatMap(_.users).flatten.distinct)</p>
+</div></blockquote>
+</dd>
+<dt>} else {</dt><dd><p>stats.counter(“fromManhattan”).incr()
+Stitch.value(userContacts)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>case None =&gt;</dt><dd><p>stats.counter(“fromAbService”).incr()
+getResponseFromService(identifiers, batchSize, edgeType, maxFetches, queryOption)</p>
+<blockquote>
+<div><p>.map(_.flatMap(_.users).flatten.distinct)</p>
+</div></blockquote>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>def getHashedContacts(</dt><dd><p>normalizeFn: String =&gt; String,
+extractField: String,</p>
+</dd>
+<dt>)(</dt><dd><p>userId: Long,
+identifiers: Seq[RecordIdentifier],
+batchSize: Int,
+edgeType: EdgeType,
+fetcherOption: Option[Fetcher[String, Unit, STPResultFeature]] = None,
+maxFetches: Int = 1,
+queryOption: Option[QueryOption] = None,</p>
+</dd>
+</dl>
+<p>): Stitch[Seq[String]] = {</p>
+<blockquote>
+<div><dl>
+<dt>fetcherOption match {</dt><dd><dl>
+<dt>case Some(fetcher) =&gt;</dt><dd><dl>
+<dt>getContactsFromManhattan(userId, fetcher).flatMap { userContacts =&gt;</dt><dd><dl>
+<dt>if (userContacts.isEmpty) {</dt><dd><dl>
+<dt>getContactsResponseFromService(</dt><dd><p>identifiers,
+batchSize,
+edgeType,
+maxFetches,
+queryOption)
+.map { response =&gt;</p>
+<blockquote>
+<div><dl>
+<dt>for {</dt><dd><p>resp &lt;- response
+contacts &lt;- resp.contacts
+contactsThrift = contacts.map(Contact.fromThrift)
+contactsSet = extractField match {</p>
+<blockquote>
+<div><p>case “emails” =&gt; contactsThrift.flatMap(_.emails.toSeq.flatten)
+case “phoneNumbers” =&gt; contactsThrift.flatMap(_.phoneNumbers.toSeq.flatten)</p>
+</div></blockquote>
+<p>}
+hashedAndNormalizedContacts = contactsSet.map(c =&gt; hashContact(normalizeFn(c)))</p>
+</dd>
+</dl>
+<p>} yield hashedAndNormalizedContacts</p>
+</div></blockquote>
+<p>}.map(_.flatten)</p>
+</dd>
+</dl>
+</dd>
+<dt>} else {</dt><dd><p>Stitch.Nil</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>case None =&gt; {</dt><dd><dl>
+<dt>getContactsResponseFromService(identifiers, batchSize, edgeType, maxFetches, queryOption)</dt><dd><dl>
+<dt>.map { response =&gt;</dt><dd><dl>
+<dt>for {</dt><dd><p>resp &lt;- response
+contacts &lt;- resp.contacts
+contactsThrift = contacts.map(Contact.fromThrift)
+contactsSet = extractField match {</p>
+<blockquote>
+<div><p>case “emails” =&gt; contactsThrift.flatMap(_.emails.toSeq.flatten)
+case “phoneNumbers” =&gt; contactsThrift.flatMap(_.phoneNumbers.toSeq.flatten)</p>
+</div></blockquote>
+<p>}
+hashedAndNormalizedContacts = contactsSet.map(c =&gt; hashContact(normalizeFn(c)))</p>
+</dd>
+</dl>
+<p>} yield hashedAndNormalizedContacts</p>
+</dd>
+</dl>
+<p>}.map(_.flatten)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>def getEmailContacts = getHashedContacts(normalizeEmail, “emails”) _
+def getPhoneContacts = getHashedContacts(normalizePhoneNumber, “phoneNumbers”) _</p>
+<dl class="simple">
+<dt>private def getUsersFromManhattan(</dt><dd><p>userId: Long,
+fetcher: Fetcher[Long, Unit, tUserContacts],</p>
+</dd>
+<dt>): Stitch[Seq[Long]] = fetcher</dt><dd><p>.fetch(userId)
+.map(_.v.map(_.destinationIds).toSeq.flatten.distinct)</p>
+</dd>
+<dt>private def getContactsFromManhattan(</dt><dd><p>userId: Long,
+fetcher: Fetcher[String, Unit, STPResultFeature],</p>
+</dd>
+<dt>): Stitch[Seq[String]] = fetcher</dt><dd><p>.fetch(userId.toString)
+.map(_.v.map(_.strongTieUserFeature.map(_.destId)).toSeq.flatten.distinct)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>object AddressbookClient {</dt><dd><p>val AddressBook2BatchSize = 500</p>
+<dl>
+<dt>def createQueryOption(edgeType: EdgeType, isPhone: Boolean): Option[QueryOption] =</dt><dd><dl>
+<dt>(edgeType, isPhone) match {</dt><dd><dl>
+<dt>case (EdgeType.Reverse, _) =&gt;</dt><dd><p>None</p>
+</dd>
+<dt>case (EdgeType.Forward, true) =&gt;</dt><dd><dl>
+<dt>Some(</dt><dd><dl class="simple">
+<dt>QueryOption(</dt><dd><p>onlyDiscoverableInExpansion = false,
+onlyConfirmedInExpansion = false,
+onlyDiscoverableInResult = false,
+onlyConfirmedInResult = false,
+fetchGlobalApiNamespace = false,
+isDebugRequest = false,
+resolveEmails = false,
+resolvePhoneNumbers = true</p>
+</dd>
+</dl>
+<p>))</p>
+</dd>
+</dl>
+</dd>
+<dt>case (EdgeType.Forward, false) =&gt;</dt><dd><dl>
+<dt>Some(</dt><dd><dl class="simple">
+<dt>QueryOption(</dt><dd><p>onlyDiscoverableInExpansion = false,
+onlyConfirmedInExpansion = false,
+onlyDiscoverableInResult = false,
+onlyConfirmedInResult = false,
+fetchGlobalApiNamespace = false,
+isDebugRequest = false,
+resolveEmails = true,
+resolvePhoneNumbers = false</p>
+</dd>
+</dl>
+<p>))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../../../_sources/follow-recommendations-service/common/src/main/scala/com/twitter/follow_recommendations/common/clients/addressbook/AddressbookClient.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../../../" id="documentation_options" src="../../../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.product_mixer.component_library.scorer.cortex</p>
+<p>import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.product_mixer.component_library.scorer.common.MLModelInferenceClient
+import com.twitter.product_mixer.component_library.scorer.tensorbuilder.ModelInferRequestBuilder
+import com.twitter.product_mixer.core.feature.Feature
+import com.twitter.product_mixer.core.feature.featuremap.FeatureMap
+import com.twitter.product_mixer.core.feature.featuremap.FeatureMapBuilder
+import com.twitter.product_mixer.core.functional_component.scorer.Scorer
+import com.twitter.product_mixer.core.model.common.CandidateWithFeatures
+import com.twitter.product_mixer.core.model.common.UniversalNoun
+import com.twitter.product_mixer.core.model.common.identifier.ScorerIdentifier
+import com.twitter.product_mixer.core.pipeline.PipelineQuery
+import com.twitter.product_mixer.core.pipeline.pipeline_failure.IllegalStateFailure
+import com.twitter.product_mixer.core.pipeline.pipeline_failure.PipelineFailure
+import com.twitter.stitch.Stitch
+import com.twitter.util.logging.Logging
+import inference.GrpcService.ModelInferRequest
+import inference.GrpcService.ModelInferResponse.InferOutputTensor
+import scala.collection.convert.ImplicitConversions.`collection AsScalaIterable`</p>
+<dl>
+<dt>private[scorer] class CortexManagedInferenceServiceTensorScorer[</dt><dd><p>Query &lt;: PipelineQuery,
+Candidate &lt;: UniversalNoun[Any]</p>
+</dd>
+<dt>](</dt><dd><p>override val identifier: ScorerIdentifier,
+modelInferRequestBuilder: ModelInferRequestBuilder[</p>
+<blockquote>
+<div><p>Query,
+Candidate</p>
+</div></blockquote>
+<p>],
+resultFeatureExtractors: Seq[FeatureWithExtractor[Query, Candidate, _]],
+client: MLModelInferenceClient,
+statsReceiver: StatsReceiver)</p>
+<blockquote>
+<div><p>extends Scorer[Query, Candidate]
+with Logging {</p>
+</div></blockquote>
+<p>require(resultFeatureExtractors.nonEmpty, “Result Extractors cannot be empty”)</p>
+<p>private val managedServiceRequestFailures = statsReceiver.counter(“managedServiceRequestFailures”)
+override val features: Set[Feature[_, _]] =</p>
+<blockquote>
+<div><p>resultFeatureExtractors.map(_.feature).toSet.asInstanceOf[Set[Feature[_, _]]]</p>
+</div></blockquote>
+<dl>
+<dt>override def apply(</dt><dd><p>query: Query,
+candidates: Seq[CandidateWithFeatures[Candidate]]</p>
+</dd>
+<dt>): Stitch[Seq[FeatureMap]] = {</dt><dd><p>val batchInferRequest: ModelInferRequest = modelInferRequestBuilder(query, candidates)</p>
+<dl>
+<dt>val managedServiceResponse: Stitch[Seq[InferOutputTensor]] =</dt><dd><dl class="simple">
+<dt>client.score(batchInferRequest).map(_.getOutputsList.toSeq).onFailure { e =&gt;</dt><dd><p>error(s”request to ML Managed Service Failed: $e”)
+managedServiceRequestFailures.incr()</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>managedServiceResponse.map { responses =&gt;</dt><dd><p>extractResponse(query, candidates.map(_.candidate), responses)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def extractResponse(</dt><dd><p>query: Query,
+candidates: Seq[Candidate],
+tensorOutput: Seq[InferOutputTensor]</p>
+</dd>
+<dt>): Seq[FeatureMap] = {</dt><dd><p>val featureMapBuilders = candidates.map { _ =&gt; FeatureMapBuilder.apply() }
+// Extract the feature for each candidate from the tensor outputs
+resultFeatureExtractors.foreach {</p>
+<blockquote>
+<div><dl>
+<dt>case FeatureWithExtractor(feature, extractor) =&gt;</dt><dd><p>val extractedValues = extractor.apply(query, tensorOutput)
+if (candidates.size != extractedValues.size) {</p>
+<blockquote>
+<div><dl>
+<dt>throw PipelineFailure(</dt><dd><p>IllegalStateFailure,
+s”Managed Service returned a different number of $feature than the number of candidates.” +</p>
+<blockquote>
+<div><p>s”Returned ${extractedValues.size} scores but there were ${candidates.size} candidates.”</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<p>}
+// Go through the extracted features list one by one and update the feature map result for each candidate.
+featureMapBuilders.zip(extractedValues).foreach {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case (builder, value) =&gt;</dt><dd><p>builder.add(feature, Some(value))</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<p>featureMapBuilders.map(_.build())</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>case class FeatureWithExtractor[</dt><dd><p>-Query &lt;: PipelineQuery,
+-Candidate &lt;: UniversalNoun[Any],
+ResultType</p>
+</dd>
+<dt>](</dt><dd><p>feature: Feature[Candidate, Option[ResultType]],
+featureExtractor: ModelFeatureExtractor[Query, ResultType])</p>
+</dd>
+<dt>class UnexpectedFeatureTypeException(feature: Feature[_, _])</dt><dd><p>extends UnsupportedOperationException(s”Unsupported Feature type passed in $feature”)</p>
+</dd>
+</dl>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../../../_sources/product-mixer/component-library/src/main/scala/com/twitter/product_mixer/component_library/scorer/cortex/CortexManagedInferenceServiceTensorScorer.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

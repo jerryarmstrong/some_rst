@@ -1,0 +1,545 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../" id="documentation_options" src="../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.simclusters_v2.scalding</p>
+<p>import com.twitter.dal.client.dataset.KeyValDALDataset
+import com.twitter.dal.client.dataset.SnapshotDALDataset
+import com.twitter.scalding._
+import com.twitter.scalding_internal.dalv2.DAL
+import com.twitter.scalding_internal.dalv2.DALWrite.D
+import com.twitter.scalding_internal.dalv2.DALWrite.WriteExtension
+import com.twitter.scalding_internal.dalv2.remote_access.AllowCrossClusterSameDC
+import com.twitter.scalding_internal.dalv2.remote_access.AllowCrossDC
+import com.twitter.scalding_internal.multiformat.format.keyval.KeyVal
+import com.twitter.simclusters_v2.common.ClusterId
+import com.twitter.simclusters_v2.common.ModelVersions
+import com.twitter.simclusters_v2.common.UserId
+import com.twitter.simclusters_v2.hdfs_sources.AdhocKeyValSources
+import com.twitter.simclusters_v2.hdfs_sources.AggregatableProducerSimclustersEmbeddingsByLogFavScore2020ScalaDataset
+import com.twitter.simclusters_v2.hdfs_sources.SimclustersV2InterestedInFromAggregatableProducerEmbeddings20M145K2020ScalaDataset
+import com.twitter.simclusters_v2.hdfs_sources.SimclustersV2UserToInterestedInFromAggregatableProducerEmbeddings20M145K2020ScalaDataset
+import com.twitter.simclusters_v2.hdfs_sources.UserAndNeighborsFixedPathSource
+import com.twitter.simclusters_v2.hdfs_sources.UserUserNormalizedGraphScalaDataset
+import com.twitter.simclusters_v2.thriftscala.ClustersUserIsInterestedIn
+import com.twitter.simclusters_v2.thriftscala.InternalId
+import com.twitter.simclusters_v2.thriftscala.ModelVersion
+import com.twitter.simclusters_v2.thriftscala.SimClustersEmbedding
+import com.twitter.simclusters_v2.thriftscala.SimClustersEmbeddingId
+import com.twitter.simclusters_v2.thriftscala.UserAndNeighbors
+import com.twitter.simclusters_v2.thriftscala.UserToInterestedInClusterScores
+import com.twitter.simclusters_v2.thriftscala.UserToInterestedInClusters
+import com.twitter.wtf.scalding.jobs.common.AdhocExecutionApp
+import com.twitter.wtf.scalding.jobs.common.ScheduledExecutionApp
+import java.util.TimeZone</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Production job for computing interestedIn data set from the aggregatable producer embeddings for the model version 20M145K2020.</p></li>
+<li><p>It writes the data set in KeyVal format to produce a MH DAL data set.</p></li>
+<li></li>
+<li><p>A high level description of this job:</p></li>
+<li><ul>
+<li><p>Read the APE dataset</p></li>
+</ul>
+</li>
+<li><ul>
+<li><p>Apply log1p to the scores from the above dataset as the scores for producers is high</p></li>
+</ul>
+</li>
+<li><ul>
+<li><p>Normalize the scores for each producer (offline benchmarking has shown better results from this step.)</p></li>
+</ul>
+</li>
+<li><ul>
+<li><p>Truncate the number of clusters for each producer from the APE dataset to reduce noise</p></li>
+</ul>
+</li>
+<li><ul>
+<li><p>Compute interestedIn</p></li>
+</ul>
+</li>
+<li></li>
+<li><p>To deploy the job:</p></li>
+<li></li>
+<li><p>capesospy-v2 update –build_locally –start_cron interested_in_from_ape_2020 </p></li>
+<li><p>src/scala/com/twitter/simclusters_v2/capesos_config/atla_proc.yaml</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+</dl>
+<p>object InterestedInFromAPE2020BatchApp extends InterestedInFromAggregatableProducerEmbeddingsBase {</p>
+<blockquote>
+<div><p>override val firstTime: RichDate = RichDate(“2021-03-03”)</p>
+<p>override val batchIncrement: Duration = Days(7)</p>
+<p>override def modelVersion: ModelVersion = ModelVersion.Model20m145k2020</p>
+<dl class="simple">
+<dt>override def producerEmbeddingsInputKVDataset: KeyValDALDataset[</dt><dd><p>KeyVal[SimClustersEmbeddingId, SimClustersEmbedding]</p>
+</dd>
+</dl>
+<p>] = AggregatableProducerSimclustersEmbeddingsByLogFavScore2020ScalaDataset</p>
+<dl class="simple">
+<dt>override def interestedInFromAPEOutputKVDataset: KeyValDALDataset[</dt><dd><p>KeyVal[UserId, ClustersUserIsInterestedIn]</p>
+</dd>
+</dl>
+<p>] = SimclustersV2InterestedInFromAggregatableProducerEmbeddings20M145K2020ScalaDataset</p>
+<dl class="simple">
+<dt>override def interestedInFromAPEOutputThriftDatset: SnapshotDALDataset[</dt><dd><p>UserToInterestedInClusters</p>
+</dd>
+</dl>
+<p>] = SimclustersV2UserToInterestedInFromAggregatableProducerEmbeddings20M145K2020ScalaDataset</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>trait InterestedInFromAggregatableProducerEmbeddingsBase extends ScheduledExecutionApp {</dt><dd><p>def modelVersion: ModelVersion</p>
+<dl class="simple">
+<dt>def interestedInFromAPEOutputKVDataset: KeyValDALDataset[</dt><dd><p>KeyVal[UserId, ClustersUserIsInterestedIn]</p>
+</dd>
+</dl>
+<p>]</p>
+<dl class="simple">
+<dt>def producerEmbeddingsInputKVDataset: KeyValDALDataset[</dt><dd><p>KeyVal[SimClustersEmbeddingId, SimClustersEmbedding]</p>
+</dd>
+</dl>
+<p>]</p>
+<p>def interestedInFromAPEOutputThriftDatset: SnapshotDALDataset[UserToInterestedInClusters]</p>
+<dl>
+<dt>override def runOnDateRange(</dt><dd><p>args: Args</p>
+</dd>
+<dt>)(</dt><dd><p>implicit dateRange: DateRange,
+timeZone: TimeZone,
+uniqueID: UniqueID</p>
+</dd>
+<dt>): Execution[Unit] = {</dt><dd><p>//Input args for the run
+val socialProofThreshold = args.int(“socialProofThreshold”, 2)
+val maxClustersFromProducer = args.int(“maxClustersPerProducer”, 5)
+val maxClustersPerUserFinalResult = args.int(“maxInterestedInClustersPerUser”, 200)</p>
+<p>//Path variables
+val interestedInFromProducersPath =</p>
+<blockquote>
+<div><p>s”/user/cassowary/manhattan_sequence_files/interested_in_from_ape/” + modelVersion</p>
+</div></blockquote>
+<dl>
+<dt>val interestedInFromProducersThriftPath =</dt><dd><p>s”/user/cassowary/manhattan_sequence_files/interested_in_from_ape_thrift/” + modelVersion</p>
+</dd>
+<dt>val userUserGraph: TypedPipe[UserAndNeighbors] =</dt><dd><dl class="simple">
+<dt>DAL</dt><dd><p>.readMostRecentSnapshotNoOlderThan(UserUserNormalizedGraphScalaDataset, Days(30))
+.withRemoteReadPolicy(AllowCrossDC)
+.toTypedPipe</p>
+</dd>
+</dl>
+</dd>
+<dt>val producerEmbeddings = DAL</dt><dd><dl class="simple">
+<dt>.readMostRecentSnapshotNoOlderThan(</dt><dd><p>producerEmbeddingsInputKVDataset,
+Days(30)).withRemoteReadPolicy(AllowCrossClusterSameDC).toTypedPipe.map {
+case KeyVal(producer, embeddings) =&gt; (producer, embeddings)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>val result = InterestedInFromAggregatableProducerEmbeddingsBase.run(</dt><dd><p>userUserGraph,
+producerEmbeddings,
+maxClustersFromProducer,
+socialProofThreshold,
+maxClustersPerUserFinalResult,
+modelVersion)</p>
+</dd>
+<dt>val keyValExec =</dt><dd><dl>
+<dt>result</dt><dd><p>.map { case (userId, clusters) =&gt; KeyVal(userId, clusters) }
+.writeDALVersionedKeyValExecution(</p>
+<blockquote>
+<div><p>interestedInFromAPEOutputKVDataset,
+D.Suffix(interestedInFromProducersPath)</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+<dt>val thriftExec =</dt><dd><dl>
+<dt>result</dt><dd><dl class="simple">
+<dt>.map {</dt><dd><dl class="simple">
+<dt>case (userId, clusters) =&gt;</dt><dd><dl class="simple">
+<dt>UserToInterestedInClusters(</dt><dd><p>userId,
+ModelVersions.toKnownForModelVersion(modelVersion),
+clusters.clusterIdToScores)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+.writeDALSnapshotExecution(</p>
+<blockquote>
+<div><p>interestedInFromAPEOutputThriftDatset,
+D.Daily,
+D.Suffix(interestedInFromProducersThriftPath),
+D.EBLzo(),
+dateRange.end</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>Execution.zip(keyValExec, thriftExec).unit</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Adhoc job to generate the interestedIn from aggregatable producer embeddings for the model version 20M145K2020</p></li>
+<li></li>
+<li><p>scalding remote run </p></li>
+<li><p>–user cassowary </p></li>
+<li><p>–keytab /var/lib/tss/keys/fluffy/keytabs/client/cassowary.keytab </p></li>
+<li><p>–principal <a class="reference external" href="mailto:service_acoount&#37;&#52;&#48;TWITTER&#46;BIZ">service_acoount<span>&#64;</span>TWITTER<span>&#46;</span>BIZ</a> </p></li>
+<li><p>–cluster bluebird-qus1 </p></li>
+<li><p>–main-class com.twitter.simclusters_v2.scalding.InterestedInFromAPE2020AdhocApp </p></li>
+<li><p>–target src/scala/com/twitter/simclusters_v2/scalding:interested_in_from_ape_2020-adhoc </p></li>
+<li><p>–hadoop-properties “mapreduce.map.memory.mb=8192 mapreduce.map.java.opts=’-Xmx7618M’ mapreduce.reduce.memory.mb=8192 mapreduce.reduce.java.opts=’-Xmx7618M’” </p></li>
+<li><p>– –outputDir /gcs/user/cassowary/adhoc/your_ldap/interested_in_from_ape_2020_keyval –date 2021-03-05</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>object InterestedInFromAPE2020AdhocApp extends AdhocExecutionApp {</dt><dd><dl>
+<dt>override def runOnDateRange(</dt><dd><p>args: Args</p>
+</dd>
+<dt>)(</dt><dd><p>implicit dateRange: DateRange,
+timeZone: TimeZone,
+uniqueID: UniqueID</p>
+</dd>
+<dt>): Execution[Unit] = {</dt><dd><p>val outputDir = args(“outputDir”)
+val socialProofThreshold = args.int(“socialProofThreshold”, 2)
+val maxClustersPerUserFinalResult = args.int(“maxInterestedInClustersPerUser”, 200)
+val maxClustersFromProducer = args.int(“maxClustersFromProducer”, 5)
+val inputGraph = args.optional(“graphInputDir”) match {</p>
+<blockquote>
+<div><p>case Some(inputDir) =&gt; TypedPipe.from(UserAndNeighborsFixedPathSource(inputDir))
+case None =&gt;</p>
+<blockquote>
+<div><dl class="simple">
+<dt>DAL</dt><dd><p>.readMostRecentSnapshotNoOlderThan(UserUserNormalizedGraphScalaDataset, Days(30))
+.withRemoteReadPolicy(AllowCrossClusterSameDC)
+.toTypedPipe</p>
+</dd>
+</dl>
+</div></blockquote>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>val producerEmbeddings = DAL</dt><dd><dl class="simple">
+<dt>.readMostRecentSnapshotNoOlderThan(</dt><dd><p>AggregatableProducerSimclustersEmbeddingsByLogFavScore2020ScalaDataset,
+Days(30)).withRemoteReadPolicy(AllowCrossClusterSameDC).toTypedPipe.map {
+case KeyVal(producer, embeddings) =&gt; (producer, embeddings)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>val result = InterestedInFromAggregatableProducerEmbeddingsBase.run(</dt><dd><p>inputGraph,
+producerEmbeddings,
+maxClustersFromProducer,
+socialProofThreshold,
+maxClustersPerUserFinalResult,
+ModelVersion.Model20m145k2020)</p>
+</dd>
+<dt>result</dt><dd><p>.writeExecution(AdhocKeyValSources.interestedInSource(outputDir))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Helper functions</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+</dl>
+<p>object InterestedInFromAggregatableProducerEmbeddingsBase {</p>
+<blockquote>
+<div><dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Helper function to prune the embeddings</p></li>
+<li><p>&#64;param embeddingsWithScore embeddings</p></li>
+<li><p>&#64;param maxClusters number of clusters to keep, per userId</p></li>
+<li><p>&#64;param uniqueId for stats</p></li>
+<li><p>&#64;return</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+<dt>def getPrunedEmbeddings(</dt><dd><p>embeddingsWithScore: TypedPipe[(UserId, Seq[(ClusterId, Float)])],
+maxClusters: Int</p>
+</dd>
+<dt>)(</dt><dd><p>implicit uniqueId: UniqueID</p>
+</dd>
+<dt>): TypedPipe[(UserId, Array[(ClusterId, Float)])] = {</dt><dd><p>val numProducerMappings = Stat(“num_producer_embeddings_total”)
+val numProducersWithLargeClusterMappings = Stat(</p>
+<blockquote>
+<div><p>“num_producers_with_more_clusters_than_threshold”)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>val numProducersWithSmallClusterMappings = Stat(</dt><dd><p>“num_producers_with_clusters_less_than_threshold”)</p>
+</dd>
+</dl>
+<p>val totalClustersCoverageProducerEmbeddings = Stat(“num_clusters_total_producer_embeddings”)
+embeddingsWithScore.map {</p>
+<blockquote>
+<div><dl>
+<dt>case (producerId, clusterArray) =&gt;</dt><dd><p>numProducerMappings.inc()
+val clusterSize = clusterArray.size
+totalClustersCoverageProducerEmbeddings.incBy(clusterSize)
+val prunedList = if (clusterSize &gt; maxClusters) {</p>
+<blockquote>
+<div><p>numProducersWithLargeClusterMappings.inc()
+clusterArray</p>
+<blockquote>
+<div><dl class="simple">
+<dt>.sortBy {</dt><dd><p>case (_, knownForScore) =&gt; -knownForScore</p>
+</dd>
+</dl>
+<p>}.take(maxClusters)</p>
+</div></blockquote>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>numProducersWithSmallClusterMappings.inc()
+clusterArray</p>
+</dd>
+</dl>
+<p>}
+(producerId, prunedList.toArray)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>helper function to remove all scores except follow and logFav</p></li>
+<li><p>&#64;param interestedInResult interestedIn clusters for a user</p></li>
+<li><p>&#64;return</p></li>
+</ul>
+<p><a href="#id9"><span class="problematic" id="id10">*</span></a>/</p>
+</dd>
+<dt>def getInterestedInDiscardScores(</dt><dd><p>interestedInResult: TypedPipe[(UserId, List[(ClusterId, UserToInterestedInClusterScores)])]</p>
+</dd>
+<dt>): TypedPipe[(UserId, List[(ClusterId, UserToInterestedInClusterScores)])] = {</dt><dd><dl>
+<dt>interestedInResult.map {</dt><dd><dl>
+<dt>case (srcId, fullClusterList) =&gt;</dt><dd><dl>
+<dt>val fullClusterListWithDiscardedScores = fullClusterList.map {</dt><dd><dl>
+<dt>case (clusterId, clusterDetails) =&gt;</dt><dd><dl class="simple">
+<dt>val clusterDetailsWithoutSocial = UserToInterestedInClusterScores(</dt><dd><p>// We are not planning to use the other scores except for logFav and Follow.
+// Hence, setting others as None for now, we can add them back when needed
+followScore = clusterDetails.followScore,
+logFavScore = clusterDetails.logFavScore,
+logFavScoreClusterNormalizedOnly = clusterDetails.logFavScoreClusterNormalizedOnly</p>
+</dd>
+</dl>
+<p>)
+(clusterId, clusterDetailsWithoutSocial)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+(srcId, fullClusterListWithDiscardedScores)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Helper function to normalize the embeddings</p></li>
+<li><p>&#64;param embeddings cluster embeddings</p></li>
+<li><p>&#64;return</p></li>
+</ul>
+<p><a href="#id11"><span class="problematic" id="id12">*</span></a>/</p>
+</dd>
+<dt>def getNormalizedEmbeddings(</dt><dd><p>embeddings: TypedPipe[(UserId, Seq[(ClusterId, Float)])]</p>
+</dd>
+<dt>): TypedPipe[(UserId, Seq[(ClusterId, Float)])] = {</dt><dd><dl>
+<dt>embeddings.map {</dt><dd><dl>
+<dt>case (userId, clustersWithScores) =&gt;</dt><dd><p>val l2norm = math.sqrt(clustersWithScores.map(_._2).map(score =&gt; score * score).sum)
+(</p>
+<blockquote>
+<div><p>userId,
+clustersWithScores.map {</p>
+<blockquote>
+<div><p>case (clusterId, score) =&gt; (clusterId, (score / l2norm).toFloat)</p>
+</div></blockquote>
+<p>})</p>
+</div></blockquote>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def run(</dt><dd><p>userUserGraph: TypedPipe[UserAndNeighbors],
+producerEmbeddings: TypedPipe[(SimClustersEmbeddingId, SimClustersEmbedding)],
+maxClustersFromProducer: Int,
+socialProofThreshold: Int,
+maxClustersPerUserFinalResult: Int,
+modelVersion: ModelVersion</p>
+</dd>
+<dt>)(</dt><dd><p>implicit uniqueId: UniqueID</p>
+</dd>
+<dt>): TypedPipe[(UserId, ClustersUserIsInterestedIn)] = {</dt><dd><p>import InterestedInFromKnownFor._</p>
+<dl>
+<dt>val producerEmbeddingsWithScore: TypedPipe[(UserId, Seq[(ClusterId, Float)])] =</dt><dd><dl>
+<dt>producerEmbeddings.map {</dt><dd><dl>
+<dt>case (</dt><dd><blockquote>
+<div><p>SimClustersEmbeddingId(embeddingType, modelVersion, InternalId.UserId(producerId)),
+simclusterEmbedding) =&gt;</p>
+</div></blockquote>
+<dl>
+<dt>(</dt><dd><p>producerId,
+simclusterEmbedding.embedding.map { simclusterWithScore =&gt;</p>
+<blockquote>
+<div><p>// APE dataset has very high producer scores, hence applying log to smoothen them out before
+// computing interestedIn
+(simclusterWithScore.clusterId, math.log(1.0 + simclusterWithScore.score).toFloat)</p>
+</div></blockquote>
+<p>})</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>val result = keepOnlyTopClusters(</dt><dd><dl>
+<dt>getInterestedInDiscardScores(</dt><dd><dl>
+<dt>attachNormalizedScores(</dt><dd><dl>
+<dt>userClusterPairsWithoutNormalization(</dt><dd><p>userUserGraph,
+getPrunedEmbeddings(</p>
+<blockquote>
+<div><p>getNormalizedEmbeddings(producerEmbeddingsWithScore),
+maxClustersFromProducer),</p>
+</div></blockquote>
+<p>socialProofThreshold,</p>
+</dd>
+</dl>
+<p>))),</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>maxClustersPerUserFinalResult,
+ModelVersions.toKnownForModelVersion(modelVersion)</p>
+</dd>
+</dl>
+<p>)
+result</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../_sources/src/scala/com/twitter/simclusters_v2/scalding/InterestedInFromAggregatableProducerEmbeddings.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

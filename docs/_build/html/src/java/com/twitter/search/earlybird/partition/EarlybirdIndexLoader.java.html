@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../" id="documentation_options" src="../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.earlybird.partition;</p>
+<p>import java.io.BufferedInputStream;
+import java.io.IOException;
+import java.time.Duration;
+import java.util.List;
+import java.util.Optional;
+import java.util.SortedMap;</p>
+<p>import com.google.common.base.Stopwatch;</p>
+<p>import org.apache.commons.compress.utils.Lists;
+import org.apache.hadoop.fs.FSDataInputStream;
+import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.Path;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;</p>
+<p>import com.twitter.common.util.Clock;
+import com.twitter.search.common.partitioning.base.TimeSlice;
+import com.twitter.search.common.util.io.flushable.DataDeserializer;
+import com.twitter.search.common.util.io.flushable.FlushInfo;
+import com.twitter.search.earlybird.common.NonPagingAssert;
+import com.twitter.search.earlybird.common.config.EarlybirdConfig;
+import com.twitter.search.earlybird.index.EarlybirdSegmentFactory;
+import com.twitter.search.earlybird.util.ActionLogger;
+import com.twitter.search.earlybird.util.ParallelUtil;</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Loads an index from HDFS, if possible, or indexes all tweets from scratch using a</p></li>
+<li><p>FreshStartupHandler.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>public class EarlybirdIndexLoader {</dt><dd><p>private static final Logger LOG = LoggerFactory.getLogger(EarlybirdIndexLoader.class);</p>
+<p>public static final String ENV_FOR_TESTS = “test_env”;</p>
+<p>// To determine whether we should or should not load the most recent index from HDFS if available.
+public static final long INDEX_FRESHNESS_THRESHOLD_MILLIS = Duration.ofDays(1).toMillis();</p>
+<dl class="simple">
+<dt>private static final NonPagingAssert LOADING_TOO_MANY_NON_OPTIMIZED_SEGMENTS =</dt><dd><p>new NonPagingAssert(“loading_too_many_non_optimized_segments”);</p>
+</dd>
+</dl>
+<p>private final FileSystem fileSystem;
+private final Path indexPath;
+private final PartitionConfig partitionConfig;
+private final EarlybirdSegmentFactory earlybirdSegmentFactory;
+private final SegmentSyncConfig segmentSyncConfig;
+private final Clock clock;
+// Aurora environment we’re running in: “prod”, “loadtest”, “staging2” etc. etc
+private final String environment;</p>
+<dl class="simple">
+<dt>public EarlybirdIndexLoader(</dt><dd><p>FileSystem fileSystem,
+String indexHDFSPath,
+String environment,
+PartitionConfig partitionConfig,
+EarlybirdSegmentFactory earlybirdSegmentFactory,
+SegmentSyncConfig segmentSyncConfig,
+Clock clock</p>
+</dd>
+<dt>) {</dt><dd><p>this.fileSystem = fileSystem;
+this.partitionConfig = partitionConfig;
+this.earlybirdSegmentFactory = earlybirdSegmentFactory;
+this.segmentSyncConfig = segmentSyncConfig;
+this.indexPath = EarlybirdIndexFlusher.buildPathToIndexes(indexHDFSPath, partitionConfig);
+this.clock = clock;
+this.environment = environment;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Tries to load an index from HDFS for this FlushVersion/Partition/Cluster. Returns an empty</p></li>
+<li><p>option if there is no index found.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>public Optional&lt;EarlybirdIndex&gt; loadIndex() {</dt><dd><dl>
+<dt>try {</dt><dd><dl>
+<dt>Optional&lt;EarlybirdIndex&gt; loadedIndex =</dt><dd><p>ActionLogger.call(“Load index from HDFS.”, this::loadFromHDFS);</p>
+</dd>
+<dt>if (loadedIndex.isPresent()) {</dt><dd><p>EarlybirdIndex index = loadedIndex.get();
+int numOfNonOptimized = index.numOfNonOptimizedSegments();
+if (numOfNonOptimized &gt; EarlybirdIndex.MAX_NUM_OF_NON_OPTIMIZED_SEGMENTS) {</p>
+<blockquote>
+<div><p>// We should never have too many unoptimized segments. If this happens we likely have a
+// bug somewhere that caused another Earlybird to flush too many unoptimized segments.
+// Use NonPagingAssert to alert the oncall if this happens so they can look into it.
+LOG.error(“Found {} non-optimized segments when loading from disk!”, numOfNonOptimized);
+LOADING_TOO_MANY_NON_OPTIMIZED_SEGMENTS.assertFailed();</p>
+<p>// If there are too many unoptimized segments, optimize the older ones until there are
+// only MAX_NUM_OF_NON_OPTIMIZED_SEGMENTS left in the unoptimized state. The segment info
+// list is always in order, so we will never try to optimize the most recent segments
+// here.
+int numSegmentsToOptimize =</p>
+<blockquote>
+<div><p>numOfNonOptimized - EarlybirdIndex.MAX_NUM_OF_NON_OPTIMIZED_SEGMENTS;</p>
+</div></blockquote>
+<p>LOG.info(“Will try to optimize {} segments”, numSegmentsToOptimize);
+for (SegmentInfo segmentInfo : index.getSegmentInfoList()) {</p>
+<blockquote>
+<div><dl>
+<dt>if (numSegmentsToOptimize &gt; 0 &amp;&amp; !segmentInfo.isOptimized()) {</dt><dd><p>Stopwatch optimizationStopwatch = Stopwatch.createStarted();
+LOG.info(“Starting to optimize segment: {}”, segmentInfo.getSegmentName());
+segmentInfo.getIndexSegment().optimizeIndexes();
+numSegmentsToOptimize–;
+LOG.info(“Optimization of segment {} finished in {}.”,</p>
+<blockquote>
+<div><p>segmentInfo.getSegmentName(), optimizationStopwatch);</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>int newNumOfNonOptimized = index.numOfNonOptimizedSegments();
+LOG.info(“Loaded {} segments. {} are unoptimized.”,</p>
+<blockquote>
+<div><p>index.getSegmentInfoList().size(),
+newNumOfNonOptimized);</p>
+</div></blockquote>
+<p>return loadedIndex;</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>} catch (Throwable e) {</dt><dd><p>LOG.error(“Error loading index from HDFS, will index from scratch.”, e);</p>
+</dd>
+</dl>
+<p>}</p>
+<p>return Optional.empty();</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private Optional&lt;EarlybirdIndex&gt; loadFromHDFS() throws Exception {</dt><dd><dl class="simple">
+<dt>SortedMap&lt;Long, Path&gt; pathsByTime =</dt><dd><p>EarlybirdIndexFlusher.getIndexPathsByTime(indexPath, fileSystem);</p>
+</dd>
+<dt>if (pathsByTime.isEmpty()) {</dt><dd><p>LOG.info(“Could not load index from HDFS (path: {}), will index from scratch.”, indexPath);
+return Optional.empty();</p>
+</dd>
+</dl>
+<p>}</p>
+<p>long mostRecentIndexTimeMillis = pathsByTime.lastKey();
+Path mostRecentIndexPath = pathsByTime.get(mostRecentIndexTimeMillis);</p>
+<dl>
+<dt>if (clock.nowMillis() - mostRecentIndexTimeMillis &gt; INDEX_FRESHNESS_THRESHOLD_MILLIS) {</dt><dd><dl class="simple">
+<dt>LOG.info(“Most recent index in HDFS (path: {}) is old, will do a fresh startup.”,</dt><dd><p>mostRecentIndexPath);</p>
+</dd>
+</dl>
+<p>return Optional.empty();</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>EarlybirdIndex index = ActionLogger.call(</dt><dd><p>“loading index from “ + mostRecentIndexPath,
+() -&gt; loadIndex(mostRecentIndexPath));</p>
+</dd>
+</dl>
+<p>return Optional.of(index);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private EarlybirdIndex loadIndex(Path flushPath) throws Exception {</dt><dd><p>Path indexInfoPath = flushPath.suffix(“/” + EarlybirdIndexFlusher.INDEX_INFO);</p>
+<p>FlushInfo indexInfo;
+try (FSDataInputStream infoInputStream = fileSystem.open(indexInfoPath)) {</p>
+<blockquote>
+<div><p>indexInfo = FlushInfo.loadFromYaml(infoInputStream);</p>
+</div></blockquote>
+<p>}</p>
+<p>FlushInfo segmentsFlushInfo = indexInfo.getSubProperties(EarlybirdIndexFlusher.SEGMENTS);
+List&lt;String&gt; segmentNames = Lists.newArrayList(segmentsFlushInfo.getKeyIterator());</p>
+<p>// This should only happen if you’re running in stagingN and loading a prod index through
+// the read_index_from_prod_location flag. In this case, we point to a directory that has
+// a lot more than the number of segments we want in staging and we trim this list to the
+// desired number.
+if (environment.matches(“staging\d”)) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (segmentNames.size() &gt; partitionConfig.getMaxEnabledLocalSegments()) {</dt><dd><dl class="simple">
+<dt>LOG.info(“Trimming list of loaded segments from size {} to size {}.”,</dt><dd><p>segmentNames.size(), partitionConfig.getMaxEnabledLocalSegments());</p>
+</dd>
+<dt>segmentNames = segmentNames.subList(</dt><dd><p>segmentNames.size() - partitionConfig.getMaxEnabledLocalSegments(),
+segmentNames.size());</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>List&lt;SegmentInfo&gt; segmentInfoList = ParallelUtil.parmap(“load-index”, name -&gt; {</dt><dd><p>FlushInfo subProperties = segmentsFlushInfo.getSubProperties(name);
+long timesliceID = subProperties.getLongProperty(EarlybirdIndexFlusher.TIMESLICE_ID);
+return ActionLogger.call(</p>
+<blockquote>
+<div><p>“loading segment “ + name,
+() -&gt; loadSegment(flushPath, name, timesliceID));</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}, segmentNames);</p>
+<dl class="simple">
+<dt>return new EarlybirdIndex(</dt><dd><p>segmentInfoList,
+indexInfo.getLongProperty(EarlybirdIndexFlusher.TWEET_KAFKA_OFFSET),
+indexInfo.getLongProperty(EarlybirdIndexFlusher.UPDATE_KAFKA_OFFSET));</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private SegmentInfo loadSegment(</dt><dd><p>Path flushPath,
+String segmentName,
+long timesliceID</p>
+</dd>
+<dt>) throws IOException {</dt><dd><p>Path segmentPrefix = flushPath.suffix(“/” + segmentName);
+Path segmentPath = segmentPrefix.suffix(EarlybirdIndexFlusher.DATA_SUFFIX);</p>
+<dl class="simple">
+<dt>TimeSlice timeSlice = new TimeSlice(</dt><dd><p>timesliceID,
+EarlybirdConfig.getMaxSegmentSize(),
+partitionConfig.getIndexingHashPartitionID(),
+partitionConfig.getNumPartitions());</p>
+</dd>
+<dt>SegmentInfo segmentInfo = new SegmentInfo(</dt><dd><p>timeSlice.getSegment(),
+earlybirdSegmentFactory,
+segmentSyncConfig);</p>
+</dd>
+</dl>
+<p>Path infoPath = segmentPrefix.suffix(EarlybirdIndexFlusher.INFO_SUFFIX);
+FlushInfo flushInfo;
+try (FSDataInputStream infoInputStream = fileSystem.open(infoPath)) {</p>
+<blockquote>
+<div><p>flushInfo = FlushInfo.loadFromYaml(infoInputStream);</p>
+</div></blockquote>
+<p>}</p>
+<p>FSDataInputStream inputStream = fileSystem.open(segmentPath);</p>
+<p>// It’s significantly slower to read from the FSDataInputStream on demand, so we
+// use a buffered reader to pre-read bigger chunks.
+int bufferSize = 1 &lt;&lt; 22; // 4MB
+BufferedInputStream bufferedInputStream = new BufferedInputStream(inputStream, bufferSize);</p>
+<p>DataDeserializer in = new DataDeserializer(bufferedInputStream, segmentName);
+segmentInfo.getIndexSegment().load(in, flushInfo);</p>
+<p>return segmentInfo;</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../_sources/src/java/com/twitter/search/earlybird/partition/EarlybirdIndexLoader.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

@@ -1,0 +1,1064 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../" id="documentation_options" src="../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.simclusters_v2.scalding</p>
+<p>import com.twitter.algebird.Semigroup
+import com.twitter.bijection.Injection
+import com.twitter.dal.client.dataset.KeyValDALDataset
+import com.twitter.scalding.TypedPipe
+import com.twitter.scalding._
+import com.twitter.scalding_internal.dalv2.DAL
+import com.twitter.scalding_internal.dalv2.DALWrite._
+import com.twitter.scalding_internal.job.TwitterExecutionApp
+import com.twitter.scalding_internal.job.analytics_batch.AnalyticsBatchExecution
+import com.twitter.scalding_internal.job.analytics_batch.AnalyticsBatchExecutionArgs
+import com.twitter.scalding_internal.job.analytics_batch.BatchDescription
+import com.twitter.scalding_internal.job.analytics_batch.BatchFirstTime
+import com.twitter.scalding_internal.job.analytics_batch.BatchIncrement
+import com.twitter.scalding_internal.job.analytics_batch.TwitterScheduledExecutionApp
+import com.twitter.scalding_internal.multiformat.format.keyval.KeyVal
+import com.twitter.simclusters_v2.common.ClusterId
+import com.twitter.simclusters_v2.common.ModelVersions
+import com.twitter.simclusters_v2.common.UserId
+import com.twitter.simclusters_v2.hdfs_sources._
+import com.twitter.simclusters_v2.scalding.common.Util
+import com.twitter.simclusters_v2.thriftscala._</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>This file implements the job for computing users’ interestedIn vector from KnownFor data set.</p></li>
+<li></li>
+<li><p>It reads the UserUserNormalizedGraphScalaDataset to get user-user follow + fav graph, and then</p></li>
+<li><p>based on the known-for clusters of each followed/faved user, we calculate how much a user is</p></li>
+<li><p>interestedIn a cluster.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Production job for computing interestedIn data set for the model version 20M145K2020.</p></li>
+<li></li>
+<li><p>To deploy the job:</p></li>
+<li></li>
+<li><p>capesospy-v2 update –build_locally –start_cron interested_in_for_20M_145k_2020 </p></li>
+</ul>
+<p>src/scala/com/twitter/simclusters_v2/capesos_config/atla_proc.yaml
+<a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>object InterestedInFromKnownFor20M145K2020 extends InterestedInFromKnownForBatchBase {</dt><dd><p>override val firstTime: String = “2020-10-06”
+override val outputKVDataset: KeyValDALDataset[KeyVal[Long, ClustersUserIsInterestedIn]] =</p>
+<blockquote>
+<div><p>SimclustersV2RawInterestedIn20M145K2020ScalaDataset</p>
+</div></blockquote>
+<p>override val outputPath: String = InternalDataPaths.RawInterestedIn2020Path
+override val knownForModelVersion: String = ModelVersions.Model20M145K2020
+override val knownForDALDataset: KeyValDALDataset[KeyVal[Long, ClustersUserIsKnownFor]] =</p>
+<blockquote>
+<div><p>SimclustersV2KnownFor20M145K2020ScalaDataset</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>base class for the main logic of computing interestedIn from KnownFor data set.</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>trait InterestedInFromKnownForBatchBase extends TwitterScheduledExecutionApp {</dt><dd><p>implicit val tz = DateOps.UTC
+implicit val parser = DateParser.default</p>
+<p>def firstTime: String
+val batchIncrement: Duration = Days(7)
+val lookBackDays: Duration = Days(30)</p>
+<p>def outputKVDataset: KeyValDALDataset[KeyVal[Long, ClustersUserIsInterestedIn]]
+def outputPath: String
+def knownForModelVersion: String
+def knownForDALDataset: KeyValDALDataset[KeyVal[Long, ClustersUserIsKnownFor]]</p>
+<dl class="simple">
+<dt>private lazy val execArgs = AnalyticsBatchExecutionArgs(</dt><dd><p>batchDesc = BatchDescription(this.getClass.getName.replace(“$”, “”)),
+firstTime = BatchFirstTime(RichDate(firstTime)),
+lastTime = None,
+batchIncrement = BatchIncrement(batchIncrement)</p>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>override def scheduledJob: Execution[Unit] = AnalyticsBatchExecution(execArgs) {</dt><dd><dl>
+<dt>implicit dateRange =&gt;</dt><dd><dl>
+<dt>Execution.withId { implicit uniqueId =&gt;</dt><dd><dl>
+<dt>Execution.withArgs { args =&gt;</dt><dd><dl class="simple">
+<dt>val normalizedGraph =</dt><dd><p>DAL.readMostRecentSnapshot(UserUserNormalizedGraphScalaDataset).toTypedPipe</p>
+</dd>
+<dt>val knownFor = KnownForSources.fromKeyVal(</dt><dd><p>DAL.readMostRecentSnapshot(knownForDALDataset, dateRange.extend(Days(30))).toTypedPipe,
+knownForModelVersion</p>
+</dd>
+</dl>
+<p>)</p>
+<p>val socialProofThreshold = args.int(“socialProofThreshold”, 2)
+val maxClustersPerUser = args.int(“maxClustersPerUser”, 50)</p>
+<dl>
+<dt>val result = InterestedInFromKnownFor</dt><dd><dl class="simple">
+<dt>.run(</dt><dd><p>normalizedGraph,
+knownFor,
+socialProofThreshold,
+maxClustersPerUser,
+knownForModelVersion</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>val writeKeyValResultExec = result</dt><dd><p>.map { case (userId, clusters) =&gt; KeyVal(userId, clusters) }
+.writeDALVersionedKeyValExecution(</p>
+<blockquote>
+<div><p>outputKVDataset,
+D.Suffix(outputPath)</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>// read previous data set for validation purpose
+val previousDataset = if (RichDate(firstTime).timestamp != dateRange.start.timestamp) {</p>
+<blockquote>
+<div><dl>
+<dt>DAL</dt><dd><p>.readMostRecentSnapshot(outputKVDataset, dateRange.prepend(lookBackDays)).toTypedPipe
+.map {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case KeyVal(user, interestedIn) =&gt;</dt><dd><p>(user, interestedIn)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>TypedPipe.empty</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>Util.printCounters(</dt><dd><dl>
+<dt>Execution</dt><dd><dl class="simple">
+<dt>.zip(</dt><dd><p>writeKeyValResultExec,
+InterestedInFromKnownFor.dataSetStats(result, “NewResult”),
+InterestedInFromKnownFor.dataSetStats(previousDataset, “OldResult”)</p>
+</dd>
+</dl>
+<p>).unit</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Adhoc job to compute user interestedIn.</p></li>
+<li></li>
+<li><p>scalding remote run –target src/scala/com/twitter/simclusters_v2/scalding:interested_in_adhoc </p></li>
+<li><p>–user recos-platform </p></li>
+<li><p>–submitter hadoopnest2.atla.twitter.com </p></li>
+<li><p>–main-class com.twitter.simclusters_v2.scalding.InterestedInFromKnownForAdhoc – </p></li>
+<li><p>–date 2019-08-26  –outputDir /user/recos-platform/adhoc/simclusters_interested_in_log_fav</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+<dt>object InterestedInFromKnownForAdhoc extends TwitterExecutionApp {</dt><dd><dl>
+<dt>def job: Execution[Unit] =</dt><dd><dl>
+<dt>Execution.getConfigMode.flatMap {</dt><dd><dl>
+<dt>case (config, mode) =&gt;</dt><dd><dl>
+<dt>Execution.withId { implicit uniqueId =&gt;</dt><dd><p>val args = config.getArgs
+val normalizedGraph = TypedPipe.from(</p>
+<blockquote>
+<div><p>UserAndNeighborsFixedPathSource(args(“graphInputDir”))</p>
+</div></blockquote>
+<p>)
+val socialProofThreshold = args.int(“socialProofThreshold”, 2)
+val maxClustersPerUser = args.int(“maxClustersPerUser”, 20)
+val knownForModelVersion = args(“knownForModelVersion”)
+val knownFor = KnownForSources.readKnownFor(args(“knownForInputDir”))</p>
+<p>val outputSink = AdhocKeyValSources.interestedInSource(args(“outputDir”))
+Util.printCounters(</p>
+<blockquote>
+<div><dl>
+<dt>InterestedInFromKnownFor</dt><dd><dl class="simple">
+<dt>.run(</dt><dd><p>normalizedGraph,
+knownFor,
+socialProofThreshold,
+maxClustersPerUser,
+knownForModelVersion</p>
+</dd>
+</dl>
+<p>).writeExecution(outputSink)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Adhoc job to check the output of an adhoc interestedInSource.</p></li>
+</ul>
+<p><a href="#id9"><span class="problematic" id="id10">*</span></a>/</p>
+</dd>
+<dt>object DumpInterestedInAdhoc extends TwitterExecutionApp {</dt><dd><dl>
+<dt>def job: Execution[Unit] =</dt><dd><dl>
+<dt>Execution.getConfigMode.flatMap {</dt><dd><dl>
+<dt>case (config, mode) =&gt;</dt><dd><dl>
+<dt>Execution.withId { implicit uniqueId =&gt;</dt><dd><p>val args = config.getArgs
+val users = args.list(“users”).map(_.toLong).toSet
+val input = TypedPipe.from(AdhocKeyValSources.interestedInSource(args(“inputDir”)))
+input.filter { case (userId, rec) =&gt; users.contains(userId) }.toIterableExecution.map {</p>
+<blockquote>
+<div><p>s =&gt; println(s.map(Util.prettyJsonMapper.writeValueAsString).mkString(”n”))</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Helper functions</p></li>
+</ul>
+<p><a href="#id11"><span class="problematic" id="id12">*</span></a>/</p>
+</dd>
+<dt>object InterestedInFromKnownFor {</dt><dd><p>private def ifNanMake0(x: Double): Double = if (x.isNaN) 0.0 else x</p>
+<dl>
+<dt>case class SrcClusterIntermediateInfo(</dt><dd><p>followScore: Double,
+followScoreProducerNormalized: Double,
+favScore: Double,
+favScoreProducerNormalized: Double,
+logFavScore: Double,
+logFavScoreProducerNormalized: Double,
+followSocialProof: List[Long],
+favSocialProof: List[Long]) {
+// overriding for the sake of unit tests
+override def equals(obj: scala.Any): Boolean = {</p>
+<blockquote>
+<div><dl>
+<dt>obj match {</dt><dd><dl class="simple">
+<dt>case that: SrcClusterIntermediateInfo =&gt;</dt><dd><dl class="simple">
+<dt>math.abs(followScore - that.followScore) &lt; 1e-5 &amp;&amp;</dt><dd><p>math.abs(followScoreProducerNormalized - that.followScoreProducerNormalized) &lt; 1e-5 &amp;&amp;
+math.abs(favScore - that.favScore) &lt; 1e-5 &amp;&amp;
+math.abs(favScoreProducerNormalized - that.favScoreProducerNormalized) &lt; 1e-5 &amp;&amp;
+math.abs(logFavScore - that.logFavScore) &lt; 1e-5 &amp;&amp;
+math.abs(logFavScoreProducerNormalized - that.logFavScoreProducerNormalized) &lt; 1e-5 &amp;&amp;
+followSocialProof.toSet == that.followSocialProof.toSet &amp;&amp;
+favSocialProof.toSet == that.favSocialProof.toSet</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>case _ =&gt; false</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>implicit object SrcClusterIntermediateInfoSemigroup</dt><dd><blockquote>
+<div><p>extends Semigroup[SrcClusterIntermediateInfo] {</p>
+</div></blockquote>
+<dl>
+<dt>override def plus(</dt><dd><p>left: SrcClusterIntermediateInfo,
+right: SrcClusterIntermediateInfo</p>
+</dd>
+<dt>): SrcClusterIntermediateInfo = {</dt><dd><dl>
+<dt>SrcClusterIntermediateInfo(</dt><dd><p>followScore = left.followScore + right.followScore,
+followScoreProducerNormalized =</p>
+<blockquote>
+<div><p>left.followScoreProducerNormalized + right.followScoreProducerNormalized,</p>
+</div></blockquote>
+<p>favScore = left.favScore + right.favScore,
+favScoreProducerNormalized =</p>
+<blockquote>
+<div><p>left.favScoreProducerNormalized + right.favScoreProducerNormalized,</p>
+</div></blockquote>
+<p>logFavScore = left.logFavScore + right.logFavScore,
+logFavScoreProducerNormalized =</p>
+<blockquote>
+<div><p>left.logFavScoreProducerNormalized + right.logFavScoreProducerNormalized,</p>
+</div></blockquote>
+<dl class="simple">
+<dt>followSocialProof =</dt><dd><p>Semigroup.plus(left.followSocialProof, right.followSocialProof).distinct,</p>
+</dd>
+</dl>
+<p>favSocialProof = Semigroup.plus(left.favSocialProof, right.favSocialProof).distinct</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>&#64;param adjacencyLists User-User follow/fav graph</p></li>
+<li><p>&#64;param knownFor KnownFor data set. Each user can be known for several clusters with certain</p></li>
+<li><p>knownFor weights.</p></li>
+<li><p>&#64;param socialProofThreshold A user will only be interested in a cluster if they follow/fav at</p></li>
+<li><p>least certain number of users known for this cluster.</p></li>
+<li><p>&#64;param uniqueId required for these Stat</p></li>
+<li><p>&#64;return</p></li>
+</ul>
+<p><a href="#id13"><span class="problematic" id="id14">*</span></a>/</p>
+</dd>
+<dt>def userClusterPairsWithoutNormalization(</dt><dd><p>adjacencyLists: TypedPipe[UserAndNeighbors],
+knownFor: TypedPipe[(Long, Array[(Int, Float)])],
+socialProofThreshold: Int</p>
+</dd>
+<dt>)(</dt><dd><p>implicit uniqueId: UniqueID</p>
+</dd>
+<dt>): TypedPipe[((Long, Int), SrcClusterIntermediateInfo)] = {</dt><dd><p>val edgesToUsersWithKnownFor = Stat(“num_edges_to_users_with_known_for”)
+val srcDestClusterTriples = Stat(“num_src_dest_cluster_triples”)
+val srcClusterPairsBeforeSocialProofThresholding =</p>
+<blockquote>
+<div><p>Stat(“num_src_cluster_pairs_before_social_proof_thresholding”)</p>
+</div></blockquote>
+<dl>
+<dt>val srcClusterPairsAfterSocialProofThresholding =</dt><dd><p>Stat(“num_src_cluster_pairs_after_social_proof_thresholding”)</p>
+</dd>
+<dt>val edges = adjacencyLists.flatMap {</dt><dd><dl>
+<dt>case UserAndNeighbors(srcId, neighborsWithWeights) =&gt;</dt><dd><dl>
+<dt>neighborsWithWeights.map { neighborWithWeights =&gt;</dt><dd><dl class="simple">
+<dt>(</dt><dd><p>neighborWithWeights.neighborId,
+neighborWithWeights.copy(neighborId = srcId)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>implicit val l2b: Long =&gt; Array[Byte] = Injection.long2BigEndian</p>
+<dl>
+<dt>edges</dt><dd><p>.sketch(4000)
+.join(knownFor)
+.flatMap {</p>
+<blockquote>
+<div><dl>
+<dt>case (destId, (srcWithWeights, clusterArray)) =&gt;</dt><dd><p>edgesToUsersWithKnownFor.inc()
+clusterArray.toList.map {</p>
+<blockquote>
+<div><dl>
+<dt>case (clusterId, knownForScoreF) =&gt;</dt><dd><p>val knownForScore = math.max(0.0, knownForScoreF.toDouble)</p>
+<p>srcDestClusterTriples.inc()
+val followScore =</p>
+<blockquote>
+<div><p>if (srcWithWeights.isFollowed.contains(true)) knownForScore else 0.0</p>
+</div></blockquote>
+<dl class="simple">
+<dt>val followScoreProducerNormalizedOnly =</dt><dd><dl class="simple">
+<dt>srcWithWeights.followScoreNormalizedByNeighborFollowersL2.getOrElse(</dt><dd><p>0.0) * knownForScore</p>
+</dd>
+</dl>
+</dd>
+<dt>val favScore =</dt><dd><p>srcWithWeights.favScoreHalfLife100Days.getOrElse(0.0) * knownForScore</p>
+</dd>
+<dt>val favScoreProducerNormalizedOnly =</dt><dd><dl class="simple">
+<dt>srcWithWeights.favScoreHalfLife100DaysNormalizedByNeighborFaversL2.getOrElse(</dt><dd><p>0.0) * knownForScore</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>val logFavScore = srcWithWeights.logFavScore.getOrElse(0.0) * knownForScore</p>
+<dl class="simple">
+<dt>val logFavScoreProducerNormalizedOnly = srcWithWeights.logFavScoreL2Normalized</dt><dd><p>.getOrElse(0.0) * knownForScore</p>
+</dd>
+<dt>val followSocialProof = if (srcWithWeights.isFollowed.contains(true)) {</dt><dd><p>List(destId)</p>
+</dd>
+</dl>
+<p>} else Nil
+val favSocialProof = if (srcWithWeights.favScoreHalfLife100Days.exists(_ &gt; 0)) {</p>
+<blockquote>
+<div><p>List(destId)</p>
+</div></blockquote>
+<p>} else Nil</p>
+<dl>
+<dt>(</dt><dd><p>(srcWithWeights.neighborId, clusterId),
+SrcClusterIntermediateInfo(</p>
+<blockquote>
+<div><p>followScore,
+followScoreProducerNormalizedOnly,
+favScore,
+favScoreProducerNormalizedOnly,
+logFavScore,
+logFavScoreProducerNormalizedOnly,
+followSocialProof,
+favSocialProof</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+.sumByKey
+.withReducers(10000)
+.filter {</p>
+<blockquote>
+<div><dl>
+<dt>case ((_, _), SrcClusterIntermediateInfo(_, _, _, _, _, _, followProof, favProof)) =&gt;</dt><dd><p>srcClusterPairsBeforeSocialProofThresholding.inc()
+val distinctSocialProof = (followProof ++ favProof).toSet
+val result = distinctSocialProof.size &gt;= socialProofThreshold
+if (result) {</p>
+<blockquote>
+<div><p>srcClusterPairsAfterSocialProofThresholding.inc()</p>
+</div></blockquote>
+<p>}
+result</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Add the cluster-level l2 norm scores, and use them to normalize follow/fav scores.</p></li>
+</ul>
+<p><a href="#id15"><span class="problematic" id="id16">*</span></a>/</p>
+</dd>
+<dt>def attachNormalizedScores(</dt><dd><p>intermediate: TypedPipe[((Long, Int), SrcClusterIntermediateInfo)]</p>
+</dd>
+<dt>)(</dt><dd><p>implicit uniqueId: UniqueID</p>
+</dd>
+</dl>
+<p>): TypedPipe[(Long, List[(Int, UserToInterestedInClusterScores)])] = {</p>
+<blockquote>
+<div><p>def square(x: Double): Double = x * x</p>
+<dl>
+<dt>val clusterCountsAndNorms =</dt><dd><dl>
+<dt>intermediate</dt><dd><dl>
+<dt>.map {</dt><dd><dl>
+<dt>case (</dt><dd><blockquote>
+<div><blockquote>
+<div><p>(_, clusterId),
+SrcClusterIntermediateInfo(</p>
+<blockquote>
+<div><p>followScore,
+followScoreProducerNormalizedOnly,
+favScore,
+favScoreProducerNormalizedOnly,
+logFavScore,
+logFavScoreProducerNormalizedOnly,
+_,
+_</p>
+</div></blockquote>
+<p>)</p>
+</div></blockquote>
+<p>) =&gt;</p>
+</div></blockquote>
+<dl>
+<dt>(</dt><dd><p>clusterId,
+(</p>
+<blockquote>
+<div><p>1,
+square(followScore),
+square(followScoreProducerNormalizedOnly),
+square(favScore),
+square(favScoreProducerNormalizedOnly),
+square(logFavScore),
+square(logFavScoreProducerNormalizedOnly)</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+.sumByKey
+//        .withReducers(100)
+.map {</p>
+<blockquote>
+<div><dl>
+<dt>case (</dt><dd><blockquote>
+<div><p>clusterId,
+(</p>
+<blockquote>
+<div><p>cnt,
+squareFollowScore,
+squareFollowScoreProducerNormalizedOnly,
+squareFavScore,
+squareFavScoreProducerNormalizedOnly,
+squareLogFavScore,
+squareLogFavScoreProducerNormalizedOnly</p>
+</div></blockquote>
+<p>)) =&gt;</p>
+</div></blockquote>
+<dl>
+<dt>(</dt><dd><p>clusterId,
+(</p>
+<blockquote>
+<div><p>cnt,
+math.sqrt(squareFollowScore),
+math.sqrt(squareFollowScoreProducerNormalizedOnly),
+math.sqrt(squareFavScore),
+math.sqrt(squareFavScoreProducerNormalizedOnly),
+math.sqrt(squareLogFavScore),
+math.sqrt(squareLogFavScoreProducerNormalizedOnly)</p>
+</div></blockquote>
+<p>))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>implicit val i2b: Int =&gt; Array[Byte] = Injection.int2BigEndian</p>
+<dl>
+<dt>intermediate</dt><dd><dl class="simple">
+<dt>.map {</dt><dd><dl class="simple">
+<dt>case ((srcId, clusterId), clusterScoresTuple) =&gt;</dt><dd><p>(clusterId, (srcId, clusterScoresTuple))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+.sketch(reducers = 900)
+.join(clusterCountsAndNorms)
+.map {</p>
+<blockquote>
+<div><dl>
+<dt>case (</dt><dd><blockquote>
+<div><blockquote>
+<div><p>clusterId,
+(</p>
+<blockquote>
+<div><dl>
+<dt>(</dt><dd><p>srcId,
+SrcClusterIntermediateInfo(</p>
+<blockquote>
+<div><p>followScore,
+followScoreProducerNormalizedOnly,
+favScore,
+favScoreProducerNormalizedOnly,
+logFavScore,
+logFavScoreProducerNormalizedOnly, // not used for now
+followProof,
+favProof</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>),
+(</p>
+<blockquote>
+<div><p>cnt,
+followNorm,
+followProducerNormalizedNorm,
+favNorm,
+favProducerNormalizedNorm,
+logFavNorm,
+logFavProducerNormalizedNorm // not used for now</p>
+</div></blockquote>
+<p>)</p>
+</div></blockquote>
+<p>)</p>
+</div></blockquote>
+<p>) =&gt;</p>
+</div></blockquote>
+<dl>
+<dt>(</dt><dd><p>srcId,
+List(</p>
+<blockquote>
+<div><dl>
+<dt>(</dt><dd><p>clusterId,
+UserToInterestedInClusterScores(</p>
+<blockquote>
+<div><p>followScore = Some(ifNanMake0(followScore)),
+followScoreClusterNormalizedOnly = Some(ifNanMake0(followScore / followNorm)),
+followScoreProducerNormalizedOnly =</p>
+<blockquote>
+<div><p>Some(ifNanMake0(followScoreProducerNormalizedOnly)),</p>
+</div></blockquote>
+<dl class="simple">
+<dt>followScoreClusterAndProducerNormalized = Some(</dt><dd><p>ifNanMake0(followScoreProducerNormalizedOnly / followProducerNormalizedNorm)),</p>
+</dd>
+</dl>
+<p>favScore = Some(ifNanMake0(favScore)),
+favScoreClusterNormalizedOnly = Some(ifNanMake0(favScore / favNorm)),
+favScoreProducerNormalizedOnly = Some(ifNanMake0(favScoreProducerNormalizedOnly)),
+favScoreClusterAndProducerNormalized =</p>
+<blockquote>
+<div><p>Some(ifNanMake0(favScoreProducerNormalizedOnly / favProducerNormalizedNorm)),</p>
+</div></blockquote>
+<p>usersBeingFollowed = Some(followProof),
+usersThatWereFaved = Some(favProof),
+numUsersInterestedInThisClusterUpperBound = Some(cnt),
+logFavScore = Some(ifNanMake0(logFavScore)),
+logFavScoreClusterNormalizedOnly = Some(ifNanMake0(logFavScore / logFavNorm))</p>
+</div></blockquote>
+<p>))</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+.sumByKey
+//      .withReducers(1000)
+.toTypedPipe</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>aggregate cluster scores for each user, to be used instead of attachNormalizedScores</p></li>
+<li><p>when we donot want to compute cluster-level l2 norm scores</p></li>
+</ul>
+<p><a href="#id17"><span class="problematic" id="id18">*</span></a>/</p>
+</dd>
+<dt>def groupClusterScores(</dt><dd><p>intermediate: TypedPipe[((Long, Int), SrcClusterIntermediateInfo)]</p>
+</dd>
+<dt>)(</dt><dd><p>implicit uniqueId: UniqueID</p>
+</dd>
+</dl>
+<p>): TypedPipe[(Long, List[(Int, UserToInterestedInClusterScores)])] = {</p>
+<blockquote>
+<div><dl>
+<dt>intermediate</dt><dd><dl>
+<dt>.map {</dt><dd><dl>
+<dt>case (</dt><dd><blockquote>
+<div><blockquote>
+<div><p>(srcId, clusterId),
+SrcClusterIntermediateInfo(</p>
+<blockquote>
+<div><p>followScore,
+followScoreProducerNormalizedOnly,
+favScore,
+favScoreProducerNormalizedOnly,
+logFavScore,
+logFavScoreProducerNormalizedOnly,
+followProof,
+favProof</p>
+</div></blockquote>
+<p>)</p>
+</div></blockquote>
+<p>) =&gt;</p>
+</div></blockquote>
+<dl>
+<dt>(</dt><dd><p>srcId,
+List(</p>
+<blockquote>
+<div><dl>
+<dt>(</dt><dd><p>clusterId,
+UserToInterestedInClusterScores(</p>
+<blockquote>
+<div><p>followScore = Some(ifNanMake0(followScore)),
+followScoreProducerNormalizedOnly =</p>
+<blockquote>
+<div><p>Some(ifNanMake0(followScoreProducerNormalizedOnly)),</p>
+</div></blockquote>
+<p>favScore = Some(ifNanMake0(favScore)),
+favScoreProducerNormalizedOnly = Some(ifNanMake0(favScoreProducerNormalizedOnly)),
+usersBeingFollowed = Some(followProof),
+usersThatWereFaved = Some(favProof),
+logFavScore = Some(ifNanMake0(logFavScore)),</p>
+</div></blockquote>
+<p>))</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+.sumByKey
+.withReducers(1000)
+.toTypedPipe</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>For each user, only keep up to a certain number of clusters.</p></li>
+<li><p>&#64;param allInterests user with a list of interestedIn clusters.</p></li>
+<li><p>&#64;param maxClustersPerUser number of clusters to keep for each user</p></li>
+<li><p>&#64;param knownForModelVersion known for model version</p></li>
+<li><p>&#64;param uniqueId required for these Stat</p></li>
+<li><p>&#64;return</p></li>
+</ul>
+<p><a href="#id19"><span class="problematic" id="id20">*</span></a>/</p>
+</dd>
+<dt>def keepOnlyTopClusters(</dt><dd><p>allInterests: TypedPipe[(Long, List[(Int, UserToInterestedInClusterScores)])],
+maxClustersPerUser: Int,
+knownForModelVersion: String</p>
+</dd>
+<dt>)(</dt><dd><p>implicit uniqueId: UniqueID</p>
+</dd>
+<dt>): TypedPipe[(Long, ClustersUserIsInterestedIn)] = {</dt><dd><dl>
+<dt>val userClusterPairsBeforeUserTruncation =</dt><dd><p>Stat(“num_user_cluster_pairs_before_user_truncation”)</p>
+</dd>
+<dt>val userClusterPairsAfterUserTruncation =</dt><dd><p>Stat(“num_user_cluster_pairs_after_user_truncation”)</p>
+</dd>
+<dt>val usersWithALotOfClusters =</dt><dd><p>Stat(s”num_users_with_more_than_${maxClustersPerUser}_clusters”)</p>
+</dd>
+<dt>allInterests</dt><dd><dl>
+<dt>.map {</dt><dd><dl>
+<dt>case (srcId, fullClusterList) =&gt;</dt><dd><p>userClusterPairsBeforeUserTruncation.incBy(fullClusterList.size)
+val truncatedClusters = if (fullClusterList.size &gt; maxClustersPerUser) {</p>
+<blockquote>
+<div><p>usersWithALotOfClusters.inc()
+fullClusterList</p>
+<blockquote>
+<div><dl>
+<dt>.sortBy {</dt><dd><dl>
+<dt>case (_, clusterScores) =&gt;</dt><dd><dl class="simple">
+<dt>(</dt><dd><p>-clusterScores.favScore.getOrElse(0.0),
+-clusterScores.logFavScore.getOrElse(0.0),
+-clusterScores.followScore.getOrElse(0.0),
+-clusterScores.logFavScoreClusterNormalizedOnly.getOrElse(0.0),
+-clusterScores.followScoreProducerNormalizedOnly.getOrElse(0.0)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+.take(maxClustersPerUser)</p>
+</div></blockquote>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>fullClusterList</p>
+</dd>
+</dl>
+<p>}
+userClusterPairsAfterUserTruncation.incBy(truncatedClusters.size)
+(srcId, ClustersUserIsInterestedIn(knownForModelVersion, truncatedClusters.toMap))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def run(</dt><dd><p>adjacencyLists: TypedPipe[UserAndNeighbors],
+knownFor: TypedPipe[(UserId, Array[(ClusterId, Float)])],
+socialProofThreshold: Int,
+maxClustersPerUser: Int,
+knownForModelVersion: String</p>
+</dd>
+<dt>)(</dt><dd><p>implicit uniqueId: UniqueID</p>
+</dd>
+<dt>): TypedPipe[(UserId, ClustersUserIsInterestedIn)] = {</dt><dd><dl>
+<dt>keepOnlyTopClusters(</dt><dd><dl>
+<dt>attachNormalizedScores(</dt><dd><dl class="simple">
+<dt>userClusterPairsWithoutNormalization(</dt><dd><p>adjacencyLists,
+knownFor,
+socialProofThreshold</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>),
+maxClustersPerUser,
+knownForModelVersion</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>run the interestedIn job, cluster normalized scores are not attached to user’s clusters.</p></li>
+</ul>
+<p><a href="#id21"><span class="problematic" id="id22">*</span></a>/</p>
+</dd>
+<dt>def runWithoutClusterNormalizedScores(</dt><dd><p>adjacencyLists: TypedPipe[UserAndNeighbors],
+knownFor: TypedPipe[(UserId, Array[(ClusterId, Float)])],
+socialProofThreshold: Int,
+maxClustersPerUser: Int,
+knownForModelVersion: String</p>
+</dd>
+<dt>)(</dt><dd><p>implicit uniqueId: UniqueID</p>
+</dd>
+<dt>): TypedPipe[(UserId, ClustersUserIsInterestedIn)] = {</dt><dd><dl>
+<dt>keepOnlyTopClusters(</dt><dd><dl>
+<dt>groupClusterScores(</dt><dd><dl class="simple">
+<dt>userClusterPairsWithoutNormalization(</dt><dd><p>adjacencyLists,
+knownFor,
+socialProofThreshold</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>),
+maxClustersPerUser,
+knownForModelVersion</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>print out some basic stats of the data set to make sure things are not broken</p></li>
+</ul>
+<p><a href="#id23"><span class="problematic" id="id24">*</span></a>/</p>
+</dd>
+<dt>def dataSetStats(</dt><dd><p>interestedInData: TypedPipe[(UserId, ClustersUserIsInterestedIn)],
+dataSetName: String = “”</p>
+</dd>
+</dl>
+<p>): Execution[Unit] = {</p>
+<blockquote>
+<div><dl>
+<dt>Execution</dt><dd><dl>
+<dt>.zip(</dt><dd><dl>
+<dt>Util.printSummaryOfNumericColumn(</dt><dd><dl class="simple">
+<dt>interestedInData.map {</dt><dd><dl class="simple">
+<dt>case (user, interestedIn) =&gt;</dt><dd><p>interestedIn.clusterIdToScores.size</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>},
+Some(s”$dataSetName UserInterestedIn Size”)</p>
+</dd>
+</dl>
+<p>),
+Util.printSummaryOfNumericColumn(</p>
+<blockquote>
+<div><dl>
+<dt>interestedInData.flatMap {</dt><dd><dl>
+<dt>case (user, interestedIn) =&gt;</dt><dd><dl class="simple">
+<dt>interestedIn.clusterIdToScores.map {</dt><dd><dl class="simple">
+<dt>case (_, scores) =&gt;</dt><dd><p>scores.favScore.getOrElse(0.0)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>},
+Some(s”$dataSetName UserInterestedIn favScore”)</p>
+</div></blockquote>
+<p>),
+Util.printSummaryOfNumericColumn(</p>
+<blockquote>
+<div><dl>
+<dt>interestedInData.flatMap {</dt><dd><dl>
+<dt>case (user, interestedIn) =&gt;</dt><dd><dl class="simple">
+<dt>interestedIn.clusterIdToScores.map {</dt><dd><dl class="simple">
+<dt>case (_, scores) =&gt;</dt><dd><p>scores.favScoreClusterNormalizedOnly.getOrElse(0.0)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>},
+Some(s”$dataSetName UserInterestedIn favScoreClusterNormalizedOnly”)</p>
+</div></blockquote>
+<p>),
+Util.printSummaryOfNumericColumn(</p>
+<blockquote>
+<div><dl>
+<dt>interestedInData.flatMap {</dt><dd><dl>
+<dt>case (user, interestedIn) =&gt;</dt><dd><dl class="simple">
+<dt>interestedIn.clusterIdToScores.map {</dt><dd><dl class="simple">
+<dt>case (_, scores) =&gt;</dt><dd><p>scores.logFavScoreClusterNormalizedOnly.getOrElse(0.0)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>},
+Some(s”$dataSetName UserInterestedIn logFavScoreClusterNormalizedOnly”)</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>).unit</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../_sources/src/scala/com/twitter/simclusters_v2/scalding/InterestedInFromKnownFor.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

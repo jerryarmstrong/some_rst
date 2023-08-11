@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.visibility.interfaces.push_service</p>
+<p>import com.twitter.gizmoduck.thriftscala.User
+import com.twitter.servo.util.Gate
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.stitch.Stitch
+import com.twitter.stitch.tweetypie.TweetyPie.TweetyPieResult
+import com.twitter.storehaus.ReadableStore
+import com.twitter.strato.client.{Client =&gt; StratoClient}
+import com.twitter.tweetypie.thriftscala.Tweet
+import com.twitter.visibility.VisibilityLibrary
+import com.twitter.visibility.builder.tweets.TweetFeatures
+import com.twitter.visibility.builder.tweets.StratoTweetLabelMaps
+import com.twitter.visibility.builder.users.AuthorFeatures
+import com.twitter.visibility.builder.users.RelationshipFeatures
+import com.twitter.visibility.builder.users.ViewerFeatures
+import com.twitter.visibility.builder.VisibilityResult
+import com.twitter.visibility.common._
+import com.twitter.visibility.common.UserRelationshipSource
+import com.twitter.visibility.common.UserSource
+import com.twitter.visibility.features.FeatureMap
+import com.twitter.visibility.features.TweetIsInnerQuotedTweet
+import com.twitter.visibility.features.TweetIsRetweet
+import com.twitter.visibility.features.TweetIsSourceTweet
+import com.twitter.visibility.interfaces.push_service.PushServiceVisibilityLibraryUtil._
+import com.twitter.visibility.models.ContentId
+import com.twitter.visibility.models.ViewerContext</p>
+<dl class="simple">
+<dt>object TweetType extends Enumeration {</dt><dd><p>type TweetType = Value
+val ORIGINAL, SOURCE, QUOTED = Value</p>
+</dd>
+</dl>
+<p>}
+import com.twitter.visibility.interfaces.push_service.TweetType._</p>
+<dl>
+<dt>object PushServiceVisibilityLibrary {</dt><dd><p>type Type = PushServiceVisibilityRequest =&gt; Stitch[PushServiceVisibilityResponse]</p>
+<dl>
+<dt>def apply(</dt><dd><p>visibilityLibrary: VisibilityLibrary,
+userSource: UserSource,
+userRelationshipSource: UserRelationshipSource,
+stratoClient: StratoClient,
+enableParityTest: Gate[Unit] = Gate.False,
+cachedTweetyPieStoreV2: ReadableStore[Long, TweetyPieResult] = ReadableStore.empty,
+safeCachedTweetyPieStoreV2: ReadableStore[Long, TweetyPieResult] = ReadableStore.empty,</p>
+</dd>
+<dt>)(</dt><dd><p>implicit statsReceiver: StatsReceiver</p>
+</dd>
+<dt>): Type = {</dt><dd><p>val stats = statsReceiver.scope(“push_service_vf”)
+val candidateTweetCounter = stats.counter(“request_cnt”)
+val allowedTweetCounter = stats.counter(“allow_cnt”)
+val droppedTweetCounter = stats.counter(“drop_cnt”)
+val failedTweetCounter = stats.counter(“fail_cnt”)
+val authorLabelsEmptyCount = stats.counter(“author_labels_empty_cnt”)
+val authorLabelsCount = stats.counter(“author_labels_cnt”)</p>
+<dl class="simple">
+<dt>val tweetLabelMaps = new StratoTweetLabelMaps(</dt><dd><dl class="simple">
+<dt>SafetyLabelMapSource.fromSafetyLabelMapFetcher(</dt><dd><p>PushServiceSafetyLabelMapFetcher(stratoClient, stats)))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>val viewerFeatures = new ViewerFeatures(UserSource.empty, stats)
+val tweetFeatures = new TweetFeatures(tweetLabelMaps, stats)
+val authorFeatures = new AuthorFeatures(userSource, stats)
+val relationshipFeatures = new RelationshipFeatures(UserRelationshipSource.empty, stats)</p>
+<dl class="simple">
+<dt>val parityTester = new PushServiceVisibilityLibraryParity(</dt><dd><p>cachedTweetyPieStoreV2,
+safeCachedTweetyPieStoreV2</p>
+</dd>
+</dl>
+<p>)(statsReceiver)</p>
+<dl>
+<dt>def buildFeatureMap(</dt><dd><p>request: PushServiceVisibilityRequest,
+tweet: Tweet,
+tweetType: TweetType,
+author: Option[User] = None,</p>
+</dd>
+<dt>): FeatureMap = {</dt><dd><p>val authorId = author.map(_.id) orElse getAuthorId(tweet)
+(author.map(authorFeatures.forAuthor(_)) orElse</p>
+<blockquote>
+<div><p>getAuthorId(tweet).map(authorFeatures.forAuthorId(_))) match {
+case Some(authorVisibilityFeatures) =&gt;</p>
+<blockquote>
+<div><dl>
+<dt>visibilityLibrary.featureMapBuilder(</dt><dd><dl class="simple">
+<dt>Seq(</dt><dd><p>viewerFeatures.forViewerContext(ViewerContext.fromContextWithViewerIdFallback(None)),
+tweetFeatures.forTweet(tweet),
+authorVisibilityFeatures,
+relationshipFeatures.forAuthorId(authorId.get, None),
+_.withConstantFeature(TweetIsInnerQuotedTweet, tweetType == QUOTED),
+_.withConstantFeature(TweetIsRetweet, request.isRetweet),
+_.withConstantFeature(TweetIsSourceTweet, tweetType == SOURCE)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<dl>
+<dt>case _ =&gt;</dt><dd><dl>
+<dt>visibilityLibrary.featureMapBuilder(</dt><dd><dl class="simple">
+<dt>Seq(</dt><dd><p>viewerFeatures.forViewerContext(ViewerContext.fromContextWithViewerIdFallback(None)),
+tweetFeatures.forTweet(tweet),
+_.withConstantFeature(TweetIsInnerQuotedTweet, tweetType == QUOTED),
+_.withConstantFeature(TweetIsRetweet, request.isRetweet),
+_.withConstantFeature(TweetIsSourceTweet, tweetType == SOURCE)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def runRuleEngineForTweet(</dt><dd><p>request: PushServiceVisibilityRequest,
+tweet: Tweet,
+tweetType: TweetType,
+author: Option[User] = None,</p>
+</dd>
+<dt>): Stitch[VisibilityResult] = {</dt><dd><p>val featureMap = buildFeatureMap(request, tweet, tweetType, author)
+val contentId = ContentId.TweetId(tweet.id)
+visibilityLibrary.runRuleEngine(</p>
+<blockquote>
+<div><p>contentId,
+featureMap,
+request.viewerContext,
+request.safetyLevel)</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def runRuleEngineForAuthor(</dt><dd><p>request: PushServiceVisibilityRequest,
+tweet: Tweet,
+tweetType: TweetType,
+author: Option[User] = None,</p>
+</dd>
+<dt>): Stitch[VisibilityResult] = {</dt><dd><p>val featureMap = buildFeatureMap(request, tweet, tweetType, author)
+val authorId = author.map(_.id).getOrElse(getAuthorId(tweet).get)
+val contentId = ContentId.UserId(authorId)
+visibilityLibrary.runRuleEngine(</p>
+<blockquote>
+<div><p>contentId,
+featureMap,
+request.viewerContext,
+request.safetyLevel)</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def getAllVisibilityFilters(</dt><dd><p>request: PushServiceVisibilityRequest</p>
+</dd>
+<dt>): Stitch[PushServiceVisibilityResponse] = {</dt><dd><dl class="simple">
+<dt>val tweetResult =</dt><dd><p>runRuleEngineForTweet(request, request.tweet, ORIGINAL, Some(request.author))</p>
+</dd>
+<dt>val authorResult =</dt><dd><p>runRuleEngineForAuthor(request, request.tweet, ORIGINAL, Some(request.author))</p>
+</dd>
+<dt>val sourceTweetResult = request.sourceTweet</dt><dd><p>.map(runRuleEngineForTweet(request, _, SOURCE).map(Some(_))).getOrElse(Stitch.None)</p>
+</dd>
+<dt>val quotedTweetResult = request.quotedTweet</dt><dd><p>.map(runRuleEngineForTweet(request, _, QUOTED).map(Some(_))).getOrElse(Stitch.None)</p>
+</dd>
+<dt>Stitch.join(tweetResult, authorResult, sourceTweetResult, quotedTweetResult).map {</dt><dd><dl class="simple">
+<dt>case (tweetResult, authorResult, sourceTweetResult, quotedTweetResult) =&gt;</dt><dd><dl class="simple">
+<dt>PushServiceVisibilityResponse(</dt><dd><p>tweetResult,
+authorResult,
+sourceTweetResult,
+quotedTweetResult)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>{ request: PushServiceVisibilityRequest =&gt;</dt><dd><p>candidateTweetCounter.incr()</p>
+<dl class="simple">
+<dt>request.author.labels match {</dt><dd><p>case Some(labels) if (!labels._1.isEmpty) =&gt; authorLabelsCount.incr()
+case _ =&gt; authorLabelsEmptyCount.incr()</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>val response = getAllVisibilityFilters(request)</dt><dd><dl class="simple">
+<dt>.onSuccess { response =&gt;</dt><dd><p>if (response.shouldAllow) allowedTweetCounter.incr() else droppedTweetCounter.incr()</p>
+</dd>
+</dl>
+<p>}.onFailure { _ =&gt; failedTweetCounter.incr() }</p>
+</dd>
+<dt>if (enableParityTest()) {</dt><dd><p>response.applyEffect { resp =&gt; Stitch.async(parityTester.runParityTest(request, resp)) }</p>
+</dd>
+<dt>} else {</dt><dd><p>response</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/visibilitylib/src/main/scala/com/twitter/visibility/interfaces/push_service/PushServiceVisibilityLibrary.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

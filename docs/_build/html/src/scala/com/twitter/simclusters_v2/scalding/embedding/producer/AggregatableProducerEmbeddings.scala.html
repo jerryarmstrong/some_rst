@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../" id="documentation_options" src="../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.simclusters_v2.scalding.embedding.producer</p>
+<p>import com.twitter.scalding._
+import com.twitter.scalding_internal.multiformat.format.keyval.KeyVal
+import com.twitter.scalding_internal.source.lzo_scrooge.FixedPathLzoScrooge
+import com.twitter.simclusters_v2.hdfs_sources.{DataSources, InterestedInSources}
+import com.twitter.simclusters_v2.scalding.common.matrix.{SparseMatrix, SparseRowMatrix}
+import com.twitter.simclusters_v2.scalding.embedding.ProducerEmbeddingsFromInterestedIn
+import com.twitter.simclusters_v2.scalding.embedding.common.EmbeddingUtil.{</p>
+<blockquote>
+<div><p>ClusterId,
+ProducerId,
+UserId</p>
+</div></blockquote>
+<p>}
+import com.twitter.simclusters_v2.scalding.embedding.common.SimClustersEmbeddingBaseJob
+import com.twitter.simclusters_v2.thriftscala.{EmbeddingType, _}
+import java.util.TimeZone</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>This file implements a new Producer SimClusters Embeddings.</p></li>
+<li><p>The differences with existing producer embeddings are:</p></li>
+<li></li>
+<li><ol class="arabic simple">
+<li><p>the embedding scores are not normalized, so that one can aggregate multiple producer embeddings by adding them.</p></li>
+</ol>
+</li>
+<li><ol class="arabic simple" start="2">
+<li><p>we use log-fav scores in the user-producer graph and user-simclusters graph.</p></li>
+</ol>
+</li>
+<li><p>LogFav scores are smoother than fav scores we previously used and they are less sensitive to outliers</p></li>
+<li></li>
+<li></li>
+<li></li>
+<li><p>The main difference with other normalized embeddings is the <cite>convertEmbeddingToAggregatableEmbeddings</cite> function</p></li>
+<li><p>where we multiply the normalized embedding with producer’s norms. The resulted embeddings are then</p></li>
+<li><p>unnormalized and aggregatable.</p></li>
+<li></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+</dl>
+<p>trait AggregatableProducerEmbeddingsBaseApp extends SimClustersEmbeddingBaseJob[ProducerId] {</p>
+<blockquote>
+<div><p>val userToProducerScoringFn: NeighborWithWeights =&gt; Double
+val userToClusterScoringFn: UserToInterestedInClusterScores =&gt; Double
+val modelVersion: ModelVersion</p>
+<p>// Minimum engagement threshold
+val minNumFavers: Int = ProducerEmbeddingsFromInterestedIn.minNumFaversForProducer</p>
+<p>override def numClustersPerNoun: Int = 60</p>
+<p>override def numNounsPerClusters: Int = 500 // this is not used for now</p>
+<p>override def thresholdForEmbeddingScores: Double = 0.01</p>
+<dl class="simple">
+<dt>override def prepareNounToUserMatrix(</dt><dd><p>implicit dateRange: DateRange,
+timeZone: TimeZone,
+uniqueID: UniqueID</p>
+</dd>
+</dl>
+<p>): SparseMatrix[ProducerId, UserId, Double] = {</p>
+<blockquote>
+<div><dl>
+<dt>SparseMatrix(</dt><dd><dl>
+<dt>ProducerEmbeddingsFromInterestedIn</dt><dd><dl>
+<dt>.getFilteredUserUserNormalizedGraph(</dt><dd><p>DataSources.userUserNormalizedGraphSource,
+DataSources.userNormsAndCounts,
+userToProducerScoringFn,
+_.faverCount.exists(</p>
+<blockquote>
+<div><p>_ &gt; minNumFavers</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>)
+.map {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case (userId, (producerId, score)) =&gt;</dt><dd><p>(producerId, userId, score)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>})</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>override def prepareUserToClusterMatrix(</dt><dd><p>implicit dateRange: DateRange,
+timeZone: TimeZone,
+uniqueID: UniqueID</p>
+</dd>
+<dt>): SparseRowMatrix[UserId, ClusterId, Double] = {</dt><dd><dl>
+<dt>SparseRowMatrix(</dt><dd><dl>
+<dt>ProducerEmbeddingsFromInterestedIn</dt><dd><dl>
+<dt>.getUserSimClustersMatrix(</dt><dd><dl class="simple">
+<dt>InterestedInSources</dt><dd><p>.simClustersInterestedInSource(modelVersion, dateRange.embiggen(Days(5)), timeZone),</p>
+</dd>
+</dl>
+<p>userToClusterScoringFn,
+modelVersion</p>
+</dd>
+</dl>
+<p>)
+.mapValues(_.toMap),</p>
+</dd>
+</dl>
+<p>isSkinnyMatrix = true</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// in order to make the embeddings aggregatable, we need to revert the normalization
+// (multiply the norms) we did when computing embeddings in the base job.
+def convertEmbeddingToAggregatableEmbeddings(</p>
+<blockquote>
+<div><p>embeddings: TypedPipe[(ProducerId, Seq[(ClusterId, Double)])]</p>
+</div></blockquote>
+<dl>
+<dt>)(</dt><dd><p>implicit dateRange: DateRange,
+timeZone: TimeZone,
+uniqueID: UniqueID</p>
+</dd>
+<dt>): TypedPipe[(ProducerId, Seq[(ClusterId, Double)])] = {</dt><dd><dl>
+<dt>embeddings.join(prepareNounToUserMatrix.rowL2Norms).map {</dt><dd><dl>
+<dt>case (producerId, (embeddingVec, norm)) =&gt;</dt><dd><dl class="simple">
+<dt>producerId -&gt; embeddingVec.map {</dt><dd><p>case (id, score) =&gt; (id, score * norm)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>override final def writeClusterToNounsIndex(</dt><dd><p>output: TypedPipe[(ClusterId, Seq[(ProducerId, Double)])]</p>
+</dd>
+<dt>)(</dt><dd><p>implicit dateRange: DateRange,
+timeZone: TimeZone,
+uniqueID: UniqueID</p>
+</dd>
+</dl>
+<p>): Execution[Unit] = { Execution.unit } // we do not need this for now</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Override this method to write the manhattan dataset.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>def writeToManhattan(</dt><dd><p>output: TypedPipe[KeyVal[SimClustersEmbeddingId, SimClustersEmbedding]]</p>
+</dd>
+<dt>)(</dt><dd><p>implicit dateRange: DateRange,
+timeZone: TimeZone,
+uniqueID: UniqueID</p>
+</dd>
+</dl>
+<p>): Execution[Unit]</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Override this method to writethrough the thrift dataset.</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>def writeToThrift(</dt><dd><p>output: TypedPipe[SimClustersEmbeddingWithId]</p>
+</dd>
+<dt>)(</dt><dd><p>implicit dateRange: DateRange,
+timeZone: TimeZone,
+uniqueID: UniqueID</p>
+</dd>
+</dl>
+<p>): Execution[Unit]</p>
+<p>val embeddingType: EmbeddingType</p>
+<dl>
+<dt>override final def writeNounToClustersIndex(</dt><dd><p>output: TypedPipe[(ProducerId, Seq[(ClusterId, Double)])]</p>
+</dd>
+<dt>)(</dt><dd><p>implicit dateRange: DateRange,
+timeZone: TimeZone,
+uniqueID: UniqueID</p>
+</dd>
+<dt>): Execution[Unit] = {</dt><dd><dl>
+<dt>val convertedEmbeddings = convertEmbeddingToAggregatableEmbeddings(output)</dt><dd><dl>
+<dt>.map {</dt><dd><dl>
+<dt>case (producerId, topSimClustersWithScore) =&gt;</dt><dd><dl class="simple">
+<dt>val id = SimClustersEmbeddingId(</dt><dd><p>embeddingType = embeddingType,
+modelVersion = modelVersion,
+internalId = InternalId.UserId(producerId))</p>
+</dd>
+<dt>val embeddings = SimClustersEmbedding(topSimClustersWithScore.map {</dt><dd><p>case (clusterId, score) =&gt; SimClusterWithScore(clusterId, score)</p>
+</dd>
+</dl>
+<p>})</p>
+<p>SimClustersEmbeddingWithId(id, embeddings)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>val keyValuePairs = convertedEmbeddings.map { simClustersEmbeddingWithId =&gt;</dt><dd><p>KeyVal(simClustersEmbeddingWithId.embeddingId, simClustersEmbeddingWithId.embedding)</p>
+</dd>
+</dl>
+<p>}
+val manhattanExecution = writeToManhattan(keyValuePairs)</p>
+<p>val thriftExecution = writeToThrift(convertedEmbeddings)</p>
+<p>Execution.zip(manhattanExecution, thriftExecution).unit</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../_sources/src/scala/com/twitter/simclusters_v2/scalding/embedding/producer/AggregatableProducerEmbeddings.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

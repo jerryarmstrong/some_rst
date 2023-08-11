@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../" id="documentation_options" src="../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>use log::debug;
+use std::fs;</p>
+<p>use serde_json::{Map, Value};</p>
+<p>use crate::error::SegDenseError;
+use crate::mapper::{FeatureInfo, FeatureMapper, MapWriter};
+use crate::segdense_transform_spec_home_recap_2022::{self as seg_dense, InputFeature};</p>
+<dl class="simple">
+<dt>pub fn load_config(file_name: &amp;str) -&gt; Result&lt;seg_dense::Root, SegDenseError&gt; {</dt><dd><p>let json_str = fs::read_to_string(file_name)?;
+// &amp;format!(“Unable to load segdense file {}”, file_name));
+let seg_dense_config = parse(&amp;json_str)?;
+// &amp;format!(“Unable to parse segdense file {}”, file_name));
+Ok(seg_dense_config)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>pub fn parse(json_str: &amp;str) -&gt; Result&lt;seg_dense::Root, SegDenseError&gt; {</dt><dd><p>let root: seg_dense::Root = serde_json::from_str(json_str)?;
+Ok(root)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Given a json string containing a seg dense schema create a feature mapper</p></li>
+<li><p>which is essentially:</p></li>
+<li></li>
+<li><p>{feature-id -&gt; (Tensor Index, Index of feature within the tensor)}</p></li>
+<li></li>
+<li><p>Feature id : 64 bit hash of the feature name used in DataRecords.</p></li>
+<li></li>
+<li><p>Tensor Index : A vector of tensors is passed to the model. Tensor</p></li>
+<li><p>index refers to the tensor this feature is part of.</p></li>
+<li></li>
+<li><p>Index of feature in tensor : The tensors are vectors, the index of</p></li>
+<li><p>feature is the position to put the feature value.</p></li>
+<li></li>
+<li><p>There are many assumptions made in this function that is very model specific.</p></li>
+<li><p>These assumptions are called out below and need to be schematized eventually.</p></li>
+<li></li>
+<li><p>Call this once for each segdense schema and cache the FeatureMapper.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>pub fn safe_load_config(json_str: &amp;str) -&gt; Result&lt;FeatureMapper, SegDenseError&gt; {</dt><dd><p>let root = parse(json_str)?;
+load_from_parsed_config(root)</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// Perf note : make ‘root’ un-owned
+pub fn load_from_parsed_config(root: seg_dense::Root) -&gt; Result&lt;FeatureMapper, SegDenseError&gt; {</p>
+<blockquote>
+<div><p>let v = root.input_features_map;</p>
+<p>// Do error check
+let map: Map&lt;String, Value&gt; = match v {</p>
+<blockquote>
+<div><p>Value::Object(map) =&gt; map,
+_ =&gt; return Err(SegDenseError::JsonMissingObject),</p>
+</div></blockquote>
+<p>};</p>
+<p>let mut fm: FeatureMapper = FeatureMapper::new();</p>
+<p>let items = map.values();</p>
+<p>// Perf : Consider a way to avoid clone here
+for item in items.cloned() {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>let mut vec = match item {</dt><dd><p>Value::Array(v) =&gt; v,
+_ =&gt; return Err(SegDenseError::JsonMissingArray),</p>
+</dd>
+</dl>
+<p>};</p>
+<dl class="simple">
+<dt>if vec.len() != 1 {</dt><dd><p>return Err(SegDenseError::JsonArraySize);</p>
+</dd>
+</dl>
+<p>}</p>
+<p>let val = vec.pop().unwrap();</p>
+<p>let input_feature: seg_dense::InputFeature = serde_json::from_value(val)?;
+let feature_id = input_feature.feature_id;
+let feature_info = to_feature_info(&amp;input_feature);</p>
+<dl>
+<dt>match feature_info {</dt><dd><dl class="simple">
+<dt>Some(info) =&gt; {</dt><dd><p>debug!(“{:?}”, info);
+fm.set(feature_id, info)</p>
+</dd>
+</dl>
+<p>}
+None =&gt; (),</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>Ok(fm)</p>
+</div></blockquote>
+<p>}
+#[allow(dead_code)]
+fn add_feature_info_to_mapper(</p>
+<blockquote>
+<div><p>feature_mapper: &amp;mut FeatureMapper,
+input_features: &amp;Vec&lt;InputFeature&gt;,</p>
+</div></blockquote>
+<dl>
+<dt>) {</dt><dd><dl>
+<dt>for input_feature in input_features.iter() {</dt><dd><p>let feature_id = input_feature.feature_id;
+let feature_info = to_feature_info(input_feature);</p>
+<dl>
+<dt>match feature_info {</dt><dd><dl class="simple">
+<dt>Some(info) =&gt; {</dt><dd><p>debug!(“{:?}”, info);
+feature_mapper.set(feature_id, info)</p>
+</dd>
+</dl>
+<p>}
+None =&gt; (),</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>pub fn to_feature_info(input_feature: &amp;seg_dense::InputFeature) -&gt; Option&lt;FeatureInfo&gt; {</dt><dd><dl class="simple">
+<dt>if input_feature.maybe_exclude {</dt><dd><p>return None;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// This part needs to be schema driven
+//
+//   tensor index : Which of these tensors this feature is part of
+//      [Continious, Binary, Discrete, User_embedding, user_eng_embedding, author_embedding]
+//      Note that this order is fixed/hardcoded here, and need to be schematized
+//
+let tensor_idx: i8 = match input_feature.feature_id {</p>
+<blockquote>
+<div><p>// user.timelines.twhin_user_follow_embeddings.twhin_user_follow_embeddings
+// Feature name is mapped to a feature-id value. The hardcoded values below correspond to a specific feature name.
+-2550691008059411095 =&gt; 3,</p>
+<p>// user.timelines.twhin_user_engagement_embeddings.twhin_user_engagement_embeddings
+5390650078733277231 =&gt; 4,</p>
+<p>// original_author.timelines.twhin_author_follow_embeddings.twhin_author_follow_embeddings
+3223956748566688423 =&gt; 5,</p>
+<dl class="simple">
+<dt>_ =&gt; match input_feature.feature_type {</dt><dd><p>//   feature_type : src/thrift/com/twitter/ml/api/data.thrift
+//       BINARY = 1, CONTINUOUS = 2, DISCRETE = 3,
+//    Map to slots in [Continious, Binary, Discrete, ..]
+1 =&gt; 1,
+2 =&gt; 0,
+3 =&gt; 2,
+_ =&gt; -1,</p>
+</dd>
+</dl>
+<p>},</p>
+</div></blockquote>
+<p>};</p>
+<dl class="simple">
+<dt>if input_feature.index &lt; 0 {</dt><dd><p>return None;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// Handle this case later
+if tensor_idx == -1 {</p>
+<blockquote>
+<div><p>return None;</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>Some(FeatureInfo {</dt><dd><p>tensor_index: tensor_idx,
+index_within_tensor: input_feature.index,</p>
+</dd>
+</dl>
+<p>})</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../_sources/navi/segdense/src/util.rs.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

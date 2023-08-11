@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.timelineranker.clients</p>
+<p>import com.twitter.cortex_core.thriftscala.ModelName
+import com.twitter.cortex_tweet_annotate.thriftscala._
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.logging.Logger
+import com.twitter.mediaservices.commons.mediainformation.thriftscala.CalibrationLevel
+import com.twitter.timelines.model.TweetId
+import com.twitter.timelines.util.stats.RequestScope
+import com.twitter.timelines.util.stats.RequestStats
+import com.twitter.timelines.util.stats.ScopedFactory
+import com.twitter.timelines.util.FailOpenHandler
+import com.twitter.util.Future</p>
+<dl>
+<dt>object CortexTweetQueryServiceClient {</dt><dd><p>private[this] val logger = Logger.get(getClass.getSimpleName)</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>A tweet is considered safe if Cortex NSFA model gives it a score that is above the threshold.</p></li>
+<li><p>Both the score and the threshold are returned in a response from getTweetSignalByIds endpoint.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>private def getSafeTweet(</dt><dd><p>request: TweetSignalRequest,
+response: ModelResponseResult</p>
+</dd>
+<dt>): Option[TweetId] = {</dt><dd><p>val tweetId = request.tweetId
+response match {</p>
+<blockquote>
+<div><dl>
+<dt>case ModelResponseResult(ModelResponseState.Success, Some(tid), Some(modelResponse), _) =&gt;</dt><dd><p>val prediction = modelResponse.predictions.flatMap(_.headOption)
+val score = prediction.map(_.score.score)
+val highRecallBucket = prediction.flatMap(_.calibrationBuckets).flatMap { buckets =&gt;</p>
+<blockquote>
+<div><p>buckets.find(_.description.contains(CalibrationLevel.HighRecall))</p>
+</div></blockquote>
+<p>}
+val threshold = highRecallBucket.map(_.threshold)
+(score, threshold) match {</p>
+<blockquote>
+<div><dl>
+<dt>case (Some(s), Some(t)) if (s &gt; t) =&gt;</dt><dd><p>Some(tid)</p>
+</dd>
+<dt>case (Some(s), Some(t)) =&gt;</dt><dd><dl class="simple">
+<dt>logger.ifDebug(</dt><dd><p>s”Cortex NSFA score for tweet $tweetId is $s (threshold is $t), removing as unsafe.”</p>
+</dd>
+</dl>
+<p>)
+None</p>
+</dd>
+<dt>case _ =&gt;</dt><dd><p>logger.ifDebug(s”Unexpected response, removing tweet $tweetId as unsafe.”)
+None</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+<dt>case _ =&gt;</dt><dd><dl class="simple">
+<dt>logger.ifWarning(</dt><dd><p>s”Cortex tweet NSFA call was not successful, removing tweet $tweetId as unsafe.”</p>
+</dd>
+</dl>
+<p>)
+None</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Enables calling cortex tweet query service to get NSFA scores on the tweet.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>class CortexTweetQueryServiceClient(</dt><dd><p>cortexClient: CortexTweetQueryService.MethodPerEndpoint,
+requestScope: RequestScope,
+statsReceiver: StatsReceiver)</p>
+<blockquote>
+<div><p>extends RequestStats {</p>
+</div></blockquote>
+<p>import CortexTweetQueryServiceClient._</p>
+<p>private[this] val logger = Logger.get(getClass.getSimpleName)</p>
+<dl class="simple">
+<dt>private[this] val getTweetSignalByIdsRequestStats =</dt><dd><p>requestScope.stats(“cortex”, statsReceiver, suffix = Some(“getTweetSignalByIds”))</p>
+</dd>
+<dt>private[this] val getTweetSignalByIdsRequestScopedStatsReceiver =</dt><dd><p>getTweetSignalByIdsRequestStats.scopedStatsReceiver</p>
+</dd>
+<dt>private[this] val failedCortexTweetQueryServiceScope =</dt><dd><p>getTweetSignalByIdsRequestScopedStatsReceiver.scope(Failures)</p>
+</dd>
+<dt>private[this] val failedCortexTweetQueryServiceCallCounter =</dt><dd><p>failedCortexTweetQueryServiceScope.counter(“failOpen”)</p>
+</dd>
+<dt>private[this] val cortexTweetQueryServiceFailOpenHandler = new FailOpenHandler(</dt><dd><p>getTweetSignalByIdsRequestScopedStatsReceiver</p>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>def getSafeTweets(tweetIds: Seq[TweetId]): Future[Seq[TweetId]] = {</dt><dd><p>val requests = tweetIds.map { id =&gt; TweetSignalRequest(id, ModelName.TweetToNsfa) }
+val results = cortexClient</p>
+<blockquote>
+<div><dl class="simple">
+<dt>.getTweetSignalByIds(</dt><dd><p>GetTweetSignalByIdsRequest(requests)</p>
+</dd>
+</dl>
+<p>)
+.map(_.results)</p>
+</div></blockquote>
+<dl>
+<dt>cortexTweetQueryServiceFailOpenHandler(</dt><dd><dl>
+<dt>results.map { responses =&gt;</dt><dd><dl class="simple">
+<dt>requests.zip(responses).flatMap {</dt><dd><dl class="simple">
+<dt>case (request, response) =&gt;</dt><dd><p>getSafeTweet(request, response)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>) { _ =&gt;</dt><dd><p>failedCortexTweetQueryServiceCallCounter.incr()
+logger.ifWarning(s”Cortex tweet NSFA call failed, considering tweets $tweetIds as unsafe.”)
+Future.value(Seq())</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>class ScopedCortexTweetQueryServiceClientFactory(</dt><dd><p>cortexClient: CortexTweetQueryService.MethodPerEndpoint,
+statsReceiver: StatsReceiver)</p>
+<blockquote>
+<div><p>extends ScopedFactory[CortexTweetQueryServiceClient] {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>override def scope(scope: RequestScope): CortexTweetQueryServiceClient = {</dt><dd><p>new CortexTweetQueryServiceClient(cortexClient, scope, statsReceiver)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/timelineranker/server/src/main/scala/com/twitter/timelineranker/clients/CortexTweetQueryServiceClient.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

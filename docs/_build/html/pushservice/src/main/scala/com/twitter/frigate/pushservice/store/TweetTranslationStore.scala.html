@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.frigate.pushservice.store</p>
+<p>import com.twitter.context.TwitterContext
+import com.twitter.context.thriftscala.Viewer
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.frigate.TwitterContextPermit
+import com.twitter.frigate.pushservice.model.PushTypes.Target
+import com.twitter.frigate.pushservice.params.PushFeatureSwitchParams
+import com.twitter.frigate.pushservice.params.PushParams
+import com.twitter.frigate.thriftscala.CommonRecommendationType
+import com.twitter.kujaku.domain.thriftscala.CacheUsageType
+import com.twitter.kujaku.domain.thriftscala.MachineTranslation
+import com.twitter.kujaku.domain.thriftscala.MachineTranslationResponse
+import com.twitter.kujaku.domain.thriftscala.TranslationSource
+import com.twitter.storehaus.ReadableStore
+import com.twitter.strato.generated.client.translation.service.IsTweetTranslatableClientColumn
+import com.twitter.strato.generated.client.translation.service.platform.MachineTranslateTweetClientColumn
+import com.twitter.tweetypie.thriftscala.Tweet
+import com.twitter.util.Future
+import com.twitter.util.logging.Logging</p>
+<dl>
+<dt>object TweetTranslationStore {</dt><dd><dl class="simple">
+<dt>case class Key(</dt><dd><p>target: Target,
+tweetId: Long,
+tweet: Option[Tweet],
+crt: CommonRecommendationType)</p>
+</dd>
+<dt>case class Value(</dt><dd><p>translatedTweetText: String,
+localizedSourceLanguage: String)</p>
+</dd>
+<dt>val allowedCRTs = Set[CommonRecommendationType](</dt><dd><p>CommonRecommendationType.TwistlyTweet</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>case class TweetTranslationStore(</dt><dd><dl class="simple">
+<dt>translateTweetStore: ReadableStore[</dt><dd><p>MachineTranslateTweetClientColumn.Key,
+MachineTranslationResponse</p>
+</dd>
+</dl>
+<p>],
+isTweetTranslatableStore: ReadableStore[IsTweetTranslatableClientColumn.Key, Boolean],
+statsReceiver: StatsReceiver)</p>
+<blockquote>
+<div><p>extends ReadableStore[TweetTranslationStore.Key, TweetTranslationStore.Value]
+with Logging {</p>
+</div></blockquote>
+<p>private val stats = statsReceiver.scope(“tweetTranslationStore”)
+private val isTranslatableCounter = stats.counter(“tweetIsTranslatable”)
+private val notTranslatableCounter = stats.counter(“tweetIsNotTranslatable”)
+private val protectedUserCounter = stats.counter(“protectedUser”)
+private val notProtectedUserCounter = stats.counter(“notProtectedUser”)
+private val validLanguageCounter = stats.counter(“validTweetLanguage”)
+private val invalidLanguageCounter = stats.counter(“invalidTweetLanguage”)
+private val validCrtCounter = stats.counter(“validCrt”)
+private val invalidCrtCounter = stats.counter(“invalidCrt”)
+private val paramEnabledCounter = stats.counter(“paramEnabled”)
+private val paramDisabledCounter = stats.counter(“paramDisabled”)</p>
+<p>private val twitterContext = TwitterContext(TwitterContextPermit)</p>
+<dl>
+<dt>override def get(k: TweetTranslationStore.Key): Future[Option[TweetTranslationStore.Value]] = {</dt><dd><dl>
+<dt>k.target.inferredUserDeviceLanguage.flatMap {</dt><dd><dl>
+<dt>case Some(deviceLanguage) =&gt;</dt><dd><dl>
+<dt>setTwitterContext(k.target, deviceLanguage) {</dt><dd><dl>
+<dt>translateTweet(</dt><dd><p>target = k.target,
+tweetId = k.tweetId,
+tweet = k.tweet,
+crt = k.crt,
+deviceLanguage = deviceLanguage).map { responseOpt =&gt;
+responseOpt.flatMap { response =&gt;</p>
+<blockquote>
+<div><dl>
+<dt>response.translatorLocalizedSourceLanguage</dt><dd><dl>
+<dt>.map { localizedSourceLanguage =&gt;</dt><dd><dl class="simple">
+<dt>TweetTranslationStore.Value(</dt><dd><p>translatedTweetText = response.translation,
+localizedSourceLanguage = localizedSourceLanguage</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>}.filter { _ =&gt;</dt><dd><p>response.translationSource == TranslationSource.Google</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>case None =&gt; Future.None</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// Don’t sent protected tweets to external API for translation
+private def checkProtectedUser(target: Target): Future[Boolean] = {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>target.targetUser.map(_.flatMap(_.safety).forall(_.isProtected)).onSuccess {</dt><dd><p>case true =&gt; protectedUserCounter.incr()
+case false =&gt; notProtectedUserCounter.incr()</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>private def isTweetTranslatable(</dt><dd><p>target: Target,
+tweetId: Long,
+tweet: Option[Tweet],
+crt: CommonRecommendationType,
+deviceLanguage: String</p>
+</dd>
+<dt>): Future[Boolean] = {</dt><dd><p>val tweetLangOpt = tweet.flatMap(_.language)
+val isValidLanguage = tweetLangOpt.exists { tweetLang =&gt;</p>
+<blockquote>
+<div><p>tweetLang.confidence &gt; 0.5 &amp;&amp;
+tweetLang.language != deviceLanguage</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>if (isValidLanguage) {</dt><dd><p>validLanguageCounter.incr()</p>
+</dd>
+<dt>} else {</dt><dd><p>invalidLanguageCounter.incr()</p>
+</dd>
+</dl>
+<p>}</p>
+<p>val isValidCrt = TweetTranslationStore.allowedCRTs.contains(crt)
+if (isValidCrt) {</p>
+<blockquote>
+<div><p>validCrtCounter.incr()</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>invalidCrtCounter.incr()</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>if (isValidCrt &amp;&amp; isValidLanguage &amp;&amp; target.params(PushParams.EnableIsTweetTranslatableCheck)) {</dt><dd><dl>
+<dt>checkProtectedUser(target).flatMap {</dt><dd><dl>
+<dt>case false =&gt;</dt><dd><dl class="simple">
+<dt>val isTweetTranslatableKey = IsTweetTranslatableClientColumn.Key(</dt><dd><p>tweetId = tweetId,
+destinationLanguage = Some(deviceLanguage),
+translationSource = Some(TranslationSource.Google.name),
+excludePreferredLanguages = Some(true)</p>
+</dd>
+</dl>
+<p>)
+isTweetTranslatableStore</p>
+<blockquote>
+<div><dl class="simple">
+<dt>.get(isTweetTranslatableKey).map { resultOpt =&gt;</dt><dd><p>resultOpt.getOrElse(false)</p>
+</dd>
+<dt>}.onSuccess {</dt><dd><p>case true =&gt; isTranslatableCounter.incr()
+case false =&gt; notTranslatableCounter.incr()</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+</dd>
+<dt>case true =&gt;</dt><dd><p>Future.False</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>} else {</dt><dd><p>Future.False</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def translateTweet(</dt><dd><p>tweetId: Long,
+deviceLanguage: String</p>
+</dd>
+<dt>): Future[Option[MachineTranslation]] = {</dt><dd><dl class="simple">
+<dt>val translateKey = MachineTranslateTweetClientColumn.Key(</dt><dd><p>tweetId = tweetId,
+destinationLanguage = deviceLanguage,
+translationSource = TranslationSource.Google,
+translatableEntityTypes = Seq(),
+onlyCached = false,
+cacheUsageType = CacheUsageType.Default</p>
+</dd>
+</dl>
+<p>)
+translateTweetStore.get(translateKey).map {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>_.collect {</dt><dd><p>case MachineTranslationResponse.Result(result) =&gt; result</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def translateTweet(</dt><dd><p>target: Target,
+tweetId: Long,
+tweet: Option[Tweet],
+crt: CommonRecommendationType,
+deviceLanguage: String</p>
+</dd>
+<dt>): Future[Option[MachineTranslation]] = {</dt><dd><dl>
+<dt>isTweetTranslatable(target, tweetId, tweet, crt, deviceLanguage).flatMap {</dt><dd><dl>
+<dt>case true =&gt;</dt><dd><p>val isEnabledByParam = target.params(PushFeatureSwitchParams.EnableTweetTranslation)
+if (isEnabledByParam) {</p>
+<blockquote>
+<div><p>paramEnabledCounter.incr()
+translateTweet(tweetId, deviceLanguage)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>paramDisabledCounter.incr()
+Future.None</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>case false =&gt;</dt><dd><p>Future.None</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def setTwitterContext[Rep](</dt><dd><p>target: Target,
+deviceLanguage: String</p>
+</dd>
+<dt>)(</dt><dd><p>f: =&gt; Future[Rep]</p>
+</dd>
+<dt>): Future[Rep] = {</dt><dd><dl>
+<dt>twitterContext() match {</dt><dd><dl>
+<dt>case Some(viewer) if viewer.userId.nonEmpty &amp;&amp; viewer.authenticatedUserId.nonEmpty =&gt;</dt><dd><p>// If the context is already setup with a user ID just use it
+f</p>
+</dd>
+<dt>case _ =&gt;</dt><dd><p>// If not, create a new context containing the viewer user id
+twitterContext.let(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>Viewer(</dt><dd><p>userId = Some(target.targetId),
+requestLanguageCode = Some(deviceLanguage),
+authenticatedUserId = Some(target.targetId)</p>
+</dd>
+</dl>
+<p>)) {
+f</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/pushservice/src/main/scala/com/twitter/frigate/pushservice/store/TweetTranslationStore.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

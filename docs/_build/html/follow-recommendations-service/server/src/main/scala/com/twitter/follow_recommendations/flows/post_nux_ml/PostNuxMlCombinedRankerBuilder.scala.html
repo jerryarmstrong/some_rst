@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../../" id="documentation_options" src="../../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.follow_recommendations.flows.post_nux_ml</p>
+<p>import com.google.inject.Inject
+import com.google.inject.Singleton
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.follow_recommendations.common.base.IdentityRanker
+import com.twitter.follow_recommendations.common.base.IdentityTransform
+import com.twitter.follow_recommendations.common.base.Ranker
+import com.twitter.follow_recommendations.common.base.Transform
+import com.twitter.follow_recommendations.common.feature_hydration.common.HasPreFetchedFeature
+import com.twitter.follow_recommendations.common.models._
+import com.twitter.follow_recommendations.common.rankers.common.RankerId
+import com.twitter.follow_recommendations.common.rankers.fatigue_ranker.ImpressionBasedFatigueRanker
+import com.twitter.follow_recommendations.common.rankers.first_n_ranker.FirstNRanker
+import com.twitter.follow_recommendations.common.rankers.first_n_ranker.FirstNRankerParams
+import com.twitter.follow_recommendations.common.rankers.interleave_ranker.InterleaveRanker
+import com.twitter.follow_recommendations.common.rankers.ml_ranker.ranking.HydrateFeaturesTransform
+import com.twitter.follow_recommendations.common.rankers.ml_ranker.ranking.MlRanker
+import com.twitter.follow_recommendations.common.rankers.ml_ranker.ranking.MlRankerParams
+import com.twitter.follow_recommendations.common.rankers.weighted_candidate_source_ranker.WeightedCandidateSourceRanker
+import com.twitter.follow_recommendations.configapi.candidates.HydrateCandidateParamsTransform
+import com.twitter.product_mixer.core.model.common.identifier.CandidateSourceIdentifier
+import com.twitter.product_mixer.core.model.marshalling.request.HasClientContext
+import com.twitter.timelines.configapi.HasParams</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Used to build the combined ranker comprising 4 stages of ranking:</p></li>
+<li><ul>
+<li><p>weighted sampler</p></li>
+</ul>
+</li>
+<li><ul>
+<li><p>truncating to the top N merged results for ranking</p></li>
+</ul>
+</li>
+<li><ul>
+<li><p>ML ranker</p></li>
+</ul>
+</li>
+<li><ul>
+<li><p>Interleaving ranker for producer-side experiments</p></li>
+</ul>
+</li>
+<li><ul>
+<li><p>impression-based fatigueing</p></li>
+</ul>
+</li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+</dl>
+<p>&#64;Singleton
+class PostNuxMlCombinedRankerBuilder[</p>
+<blockquote>
+<div><p>T &lt;: HasParams with HasSimilarToContext with HasClientContext with HasExcludedUserIds with HasDisplayLocation with HasDebugOptions with HasPreFetchedFeature with HasDismissedUserIds with HasQualityFactor] &#64;Inject() (
+firstNRanker: FirstNRanker[T],
+hydrateFeaturesTransform: HydrateFeaturesTransform[T],
+hydrateCandidateParamsTransform: HydrateCandidateParamsTransform[T],
+mlRanker: MlRanker[T],
+statsReceiver: StatsReceiver) {
+private[this] val stats: StatsReceiver = statsReceiver.scope(“post_nux_ml_ranker”)</p>
+<p>// we construct each ranker independently and chain them together
+def build(</p>
+<blockquote>
+<div><p>request: T,
+candidateSourceWeights: Map[CandidateSourceIdentifier, Double]</p>
+</div></blockquote>
+<dl>
+<dt>): Ranker[T, CandidateUser] = {</dt><dd><p>val displayLocationStats = stats.scope(request.displayLocation.toString)
+val weightedRankerStats: StatsReceiver =</p>
+<blockquote>
+<div><p>displayLocationStats.scope(“weighted_candidate_source_ranker”)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>val firstNRankerStats: StatsReceiver =</dt><dd><p>displayLocationStats.scope(“first_n_ranker”)</p>
+</dd>
+<dt>val hydrateCandidateParamsStats =</dt><dd><p>displayLocationStats.scope(“hydrate_candidate_params”)</p>
+</dd>
+</dl>
+<p>val fatigueRankerStats = displayLocationStats.scope(“fatigue_ranker”)
+val interleaveRankerStats =</p>
+<blockquote>
+<div><p>displayLocationStats.scope(“interleave_ranker”)</p>
+</div></blockquote>
+<p>val allRankersStats = displayLocationStats.scope(“all_rankers”)</p>
+<p>// Checking if the heavy-ranker is an experimental model.
+// If it is, InterleaveRanker and candidate parameter hydration are disabled.
+// <em>NOTE</em> that consumer-side experiments should at any time take a small % of traffic, less
+// than 20% for instance, to leave enough room for producer experiments. Increasing bucket
+// size for producer experiments lead to other issues and is not a viable option for faster
+// experiments.
+val requestRankerId = request.params(MlRankerParams.RequestScorerIdParam)
+if (requestRankerId != RankerId.PostNuxProdRanker) {</p>
+<blockquote>
+<div><p>hydrateCandidateParamsStats.counter(s”disabled_by_${requestRankerId.toString}”).incr()
+interleaveRankerStats.counter(s”disabled_by_${requestRankerId.toString}”).incr()</p>
+</div></blockquote>
+<p>}</p>
+<p>// weighted ranker that samples from the candidate sources
+val weightedRanker = WeightedCandidateSourceRanker</p>
+<blockquote>
+<div><dl class="simple">
+<dt>.build[T](</dt><dd><p>candidateSourceWeights,
+request.params(PostNuxMlParams.CandidateShuffler).shuffle(request.getRandomizationSeed),
+randomSeed = request.getRandomizationSeed</p>
+</dd>
+</dl>
+<p>).observe(weightedRankerStats)</p>
+</div></blockquote>
+<p>// ranker that takes the first n results (ie truncates output) while merging duplicates
+val firstNRankerObs = firstNRanker.observe(firstNRankerStats)
+// either ML ranker that uses deepbirdv2 to score or no ranking
+val mainRanker: Ranker[T, CandidateUser] =</p>
+<blockquote>
+<div><p>buildMainRanker(request, requestRankerId == RankerId.PostNuxProdRanker, displayLocationStats)</p>
+</div></blockquote>
+<p>// fatigue ranker that uses wtf impressions to fatigue
+val fatigueRanker = buildFatigueRanker(request, fatigueRankerStats).observe(fatigueRankerStats)</p>
+<p>// interleaveRanker combines rankings from several rankers and enforces candidates’ ranks in
+// experiment buckets according to their assigned ranker model.
+val interleaveRanker =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>buildInterleaveRanker(</dt><dd><p>request,
+requestRankerId == RankerId.PostNuxProdRanker,
+interleaveRankerStats)
+.observe(interleaveRankerStats)</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl class="simple">
+<dt>weightedRanker</dt><dd><p>.andThen(firstNRankerObs)
+.andThen(mainRanker)
+.andThen(fatigueRanker)
+.andThen(interleaveRanker)
+.observe(allRankersStats)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>def buildMainRanker(</dt><dd><p>request: T,
+isMainRankerPostNuxProd: Boolean,
+displayLocationStats: StatsReceiver</p>
+</dd>
+</dl>
+<p>): Ranker[T, CandidateUser] = {</p>
+<blockquote>
+<div><p>// note that we may be disabling heavy ranker for users not bucketed
+// (due to empty results from the new candidate source)
+// need a better solution in the future
+val mlRankerStats = displayLocationStats.scope(“ml_ranker”)
+val noMlRankerStats = displayLocationStats.scope(“no_ml_ranker”)
+val hydrateFeaturesStats =</p>
+<blockquote>
+<div><p>displayLocationStats.scope(“hydrate_features”)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>val hydrateCandidateParamsStats =</dt><dd><p>displayLocationStats.scope(“hydrate_candidate_params”)</p>
+</dd>
+<dt>val notHydrateCandidateParamsStats =</dt><dd><p>displayLocationStats.scope(“not_hydrate_candidate_params”)</p>
+</dd>
+</dl>
+<p>val rankerStats = displayLocationStats.scope(“ranker”)
+val mlRankerDisabledByExperimentsCounter =</p>
+<blockquote>
+<div><p>mlRankerStats.counter(“disabled_by_experiments”)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>val mlRankerDisabledByQualityFactorCounter =</dt><dd><p>mlRankerStats.counter(“disabled_by_quality_factor”)</p>
+</dd>
+<dt>val disabledByQualityFactor = request.qualityFactor</dt><dd><p>.exists(_ &lt;= request.params(PostNuxMlParams.TurnoffMLScorerQFThreshold))</p>
+</dd>
+<dt>if (disabledByQualityFactor)</dt><dd><p>mlRankerDisabledByQualityFactorCounter.incr()</p>
+</dd>
+</dl>
+<p>if (request.params(PostNuxMlParams.UseMlRanker) &amp;&amp; !disabledByQualityFactor) {</p>
+<blockquote>
+<div><dl>
+<dt>val hydrateFeatures = hydrateFeaturesTransform</dt><dd><p>.observe(hydrateFeaturesStats)</p>
+</dd>
+<dt>val optionalHydratedParamsTransform: Transform[T, CandidateUser] = {</dt><dd><p>// We disable candidate parameter hydration for experimental heavy-ranker models.
+if (isMainRankerPostNuxProd &amp;&amp;</p>
+<blockquote>
+<div><p>request.params(PostNuxMlParams.EnableCandidateParamHydration)) {
+hydrateCandidateParamsTransform</p>
+<blockquote>
+<div><p>.observe(hydrateCandidateParamsStats)</p>
+</div></blockquote>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><dl class="simple">
+<dt>new IdentityTransform[T, CandidateUser]()</dt><dd><p>.observe(notHydrateCandidateParamsStats)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}
+val candidateSize = request.params(FirstNRankerParams.CandidatesToRank)
+Ranker</p>
+<blockquote>
+<div><dl class="simple">
+<dt>.chain(</dt><dd><p>hydrateFeatures.andThen(optionalHydratedParamsTransform),
+mlRanker.observe(mlRankerStats),</p>
+</dd>
+</dl>
+<p>)
+.within(</p>
+<blockquote>
+<div><p>request.params(PostNuxMlParams.MlRankerBudget),
+rankerStats.scope(s”n$candidateSize”))</p>
+</div></blockquote>
+</div></blockquote>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>new IdentityRanker[T, CandidateUser].observe(noMlRankerStats)</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>def buildInterleaveRanker(</dt><dd><p>request: T,
+isMainRankerPostNuxProd: Boolean,
+interleaveRankerStats: StatsReceiver</p>
+</dd>
+<dt>): Ranker[T, CandidateUser] = {</dt><dd><p>// InterleaveRanker is enabled only for display locations powered by the PostNux heavy-ranker.
+if (request.params(PostNuxMlParams.EnableInterleaveRanker) &amp;&amp;</p>
+<blockquote>
+<div><p>// InterleaveRanker is disabled for requests with experimental heavy-rankers.
+isMainRankerPostNuxProd) {
+new InterleaveRanker[T](interleaveRankerStats)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>new IdentityRanker[T, CandidateUser]()</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def buildFatigueRanker(</dt><dd><p>request: T,
+fatigueRankerStats: StatsReceiver</p>
+</dd>
+<dt>): Ranker[T, CandidateUser] = {</dt><dd><dl>
+<dt>if (request.params(PostNuxMlParams.EnableFatigueRanker)) {</dt><dd><dl>
+<dt>ImpressionBasedFatigueRanker</dt><dd><dl class="simple">
+<dt>.build[T](</dt><dd><p>fatigueRankerStats</p>
+</dd>
+</dl>
+<p>).within(request.params(PostNuxMlParams.FatigueRankerBudget), fatigueRankerStats)</p>
+</dd>
+</dl>
+</dd>
+<dt>} else {</dt><dd><p>new IdentityRanker[T, CandidateUser]()</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../../_sources/follow-recommendations-service/server/src/main/scala/com/twitter/follow_recommendations/flows/post_nux_ml/PostNuxMlCombinedRankerBuilder.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

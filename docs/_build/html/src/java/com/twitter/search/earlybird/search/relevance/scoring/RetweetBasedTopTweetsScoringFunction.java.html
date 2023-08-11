@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.earlybird.search.relevance.scoring;</p>
+<p>import java.io.IOException;</p>
+<p>import org.apache.lucene.search.Explanation;</p>
+<p>import com.twitter.search.common.relevance.features.MutableFeatureNormalizers;
+import com.twitter.search.common.schema.base.ImmutableSchemaInterface;
+import com.twitter.search.common.schema.earlybird.EarlybirdFieldConstants.EarlybirdFieldConstant;
+import com.twitter.search.earlybird.common.config.EarlybirdConfig;
+import com.twitter.search.earlybird.thrift.ThriftSearchResultMetadata;
+import com.twitter.search.earlybird.thrift.ThriftSearchResultMetadataOptions;
+import com.twitter.search.earlybird.thrift.ThriftSearchResultType;
+import com.twitter.search.earlybird.thrift.ThriftSearchResultsRelevanceStats;</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>A toptweets query cache index selection scoring function that is based purely on retweet counts.</p></li>
+<li><p>The goal of this scoring functon is to deprecate itweet score in entirety.</p></li>
+<li></li>
+<li><p>Once all legacy itweet scores are drained from existing earlybird index, new parus score replaces</p></li>
+<li><p>existing itweet score position, then this class will be deprecated, a new scoring function</p></li>
+<li><p>using parus score shall replace this.</p></li>
+<li></li>
+<li><p>this scoring function is only used in Query Cache for marking top tweets</p></li>
+<li><p>in the background. When searched, those tweets are still ranked with linear or model-based</p></li>
+<li><p>scoring function.</p></li>
+<li></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>public class RetweetBasedTopTweetsScoringFunction extends ScoringFunction {</dt><dd><p>private static final double DEFAULT_RECENCY_SCORE_FRACTION = 0.1;
+private static final double DEFAULT_SIGMOID_APLHA = 0.008;
+private static final int DEFAULT_RECENCY_CENTER_MINUTES = 1080;</p>
+<p>// if you update the default cut off, make sure you update the query cache filter in
+// querycache.yml
+//
+// we know currently each time slice, each partition has about 10K entries in toptweets query
+// cache. These are unique tweets. Looking at retweet updates, each time slice, each partition has
+// about 650K unique tweets that received retweet. To create roughly similar number of entries in
+// query cache, we need top 2% of such tweets, and that sets to min retweet count to 4.
+// In this linear scoring function, we will rescale retweet count to [0, 1] range,
+// with an input range of [0, 20]. Given the realtime factor’s weight of 0.1, that give our
+// minimal retweet score threshold to: 4/20 * 0.9 = 0.18.
+// Testing on prod showed much higher volume due to the generous setting of max value of 20,
+// (highest we have seen is 14). Adjusted to 0.21 which gave us similar volume.
+private static final double DEFAULT_CUT_OFF_SCORE = 0.21;</p>
+<p>// Normalize retweet counts from [0, 20] range to [0, 1] range
+private static final double MAX_RETWEET_COUNT = 20.0;
+private static final double MIN_USER_REPUTATION = 40.0;  // matches itweet system threshold</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>The scores for the retweet based top tweets have to be in the [0, 1] interval. So we can’t use</p></li>
+<li><p>SKIP_HIT as the lowest possible score, and instead have to use Float.MIN_VALUE.</p></li>
+<li></li>
+<li><p>It’s OK to use different values for these constants, because they do not interfere with each</p></li>
+<li><p>other. This constant is only used in RetweetBasedTopTweetsScoringFunction, which is only used</p></li>
+<li><p>to filter the hits for the [score_filter retweets minScore maxScore] operator. So the scores</p></li>
+<li><p>returned by RetweetBasedTopTweetsScoringFunction.score() do not have any impact on the final</p></li>
+<li><p>hit score.</p></li>
+<li></li>
+<li><p>See EarlybirdLuceneQueryVisitor.visitScoredFilterOperator() and ScoreFilterQuery for more details.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+</dl>
+<p>private static final float RETWEET_BASED_TOP_TWEETS_LOWEST_SCORE = Float.MIN_VALUE;</p>
+<p>private final double recencyScoreFraction;
+private final double sigmoidAlpha;
+private final double cutOffScore;
+private final int recencyCenterMinutes;
+private final double maxRecency;</p>
+<p>private final int currentTimeSeconds;</p>
+<p>private ThriftSearchResultMetadata metadata = null;
+private double score;
+private double retweetCount;</p>
+<dl class="simple">
+<dt>public RetweetBasedTopTweetsScoringFunction(ImmutableSchemaInterface schema) {</dt><dd><dl class="simple">
+<dt>this(schema, DEFAULT_RECENCY_SCORE_FRACTION,</dt><dd><p>DEFAULT_SIGMOID_APLHA,
+DEFAULT_CUT_OFF_SCORE,
+DEFAULT_RECENCY_CENTER_MINUTES);</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Creates a no decay scoring function (used by top archive).</p></li>
+<li><p>Otherwise same as default constructor.</p></li>
+<li><p>&#64;param nodecay  If no decay is set to true. Alpha is set to 0.0.</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>public RetweetBasedTopTweetsScoringFunction(ImmutableSchemaInterface schema, boolean nodecay) {</dt><dd><dl class="simple">
+<dt>this(schema, DEFAULT_RECENCY_SCORE_FRACTION,</dt><dd><p>nodecay ? 0.0 : DEFAULT_SIGMOID_APLHA,
+DEFAULT_CUT_OFF_SCORE,
+DEFAULT_RECENCY_CENTER_MINUTES);</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>public RetweetBasedTopTweetsScoringFunction(ImmutableSchemaInterface schema,</dt><dd><blockquote>
+<div><p>double recencyScoreFraction, double sigmoidAlpha,
+double cutOffScore, int recencyCenterMinutes) {</p>
+</div></blockquote>
+<p>super(schema);
+this.recencyScoreFraction = recencyScoreFraction;
+this.sigmoidAlpha = sigmoidAlpha;
+this.cutOffScore = cutOffScore;
+this.recencyCenterMinutes = recencyCenterMinutes;
+this.maxRecency = computeSigmoid(0);
+this.currentTimeSeconds = (int) (System.currentTimeMillis() / 1000);</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;Override
+protected float score(float luceneQueryScore) throws IOException {</p>
+<blockquote>
+<div><p>// Reset the data for each tweet!!!
+metadata = null;
+if (documentFeatures.isFlagSet(EarlybirdFieldConstant.IS_OFFENSIVE_FLAG)</p>
+<blockquote>
+<div><blockquote>
+<div><dl class="simple">
+<dt>|| (documentFeatures.getFeatureValue(EarlybirdFieldConstant.USER_REPUTATION)</dt><dd><p>&lt; MIN_USER_REPUTATION)) {</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>score = RETWEET_BASED_TOP_TWEETS_LOWEST_SCORE;</p>
+</div></blockquote>
+<dl>
+<dt>} else {</dt><dd><p>// Note that here we want the post log2 value, as the MAX_RETWEET_COUNT was actually
+// set up for that.
+retweetCount = MutableFeatureNormalizers.BYTE_NORMALIZER.unnormAndLog2(</p>
+<blockquote>
+<div><p>(byte) documentFeatures.getFeatureValue(EarlybirdFieldConstant.RETWEET_COUNT));</p>
+</div></blockquote>
+<p>final double recencyScore = computeTopTweetRecencyScore();</p>
+<dl class="simple">
+<dt>score = (retweetCount / MAX_RETWEET_COUNT) * (1 - recencyScoreFraction)</dt><dd><ul class="simple">
+<li><p>recencyScoreFraction * recencyScore;</p></li>
+</ul>
+</dd>
+<dt>if (score &lt; this.cutOffScore) {</dt><dd><p>score = RETWEET_BASED_TOP_TWEETS_LOWEST_SCORE;</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>return (float) score;</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>private double computeSigmoid(double x) {</dt><dd><p>return 1.0f / (1.0f + Math.exp(sigmoidAlpha * (x - recencyCenterMinutes)));</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private double computeTopTweetRecencyScore() {</dt><dd><dl class="simple">
+<dt>double diffMinutes =</dt><dd><p>Math.max(0, currentTimeSeconds - timeMapper.getTime(getCurrentDocID())) / 60.0;</p>
+</dd>
+</dl>
+<p>return computeSigmoid(diffMinutes) / maxRecency;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;Override
+protected Explanation doExplain(float luceneScore) {</p>
+<blockquote>
+<div><p>return null;</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public ThriftSearchResultMetadata getResultMetadata(ThriftSearchResultMetadataOptions options) {</p>
+<blockquote>
+<div><dl>
+<dt>if (metadata == null) {</dt><dd><dl class="simple">
+<dt>metadata = new ThriftSearchResultMetadata()</dt><dd><p>.setResultType(ThriftSearchResultType.POPULAR)
+.setPenguinVersion(EarlybirdConfig.getPenguinVersionByte());</p>
+</dd>
+</dl>
+<p>metadata.setRetweetCount((int) retweetCount);
+metadata.setScore(score);</p>
+</dd>
+</dl>
+<p>}
+return metadata;</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public void updateRelevanceStats(ThriftSearchResultsRelevanceStats relevanceStats) {
+}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/src/java/com/twitter/search/earlybird/search/relevance/scoring/RetweetBasedTopTweetsScoringFunction.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

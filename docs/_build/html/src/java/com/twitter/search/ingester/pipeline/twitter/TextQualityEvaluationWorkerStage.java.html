@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../" id="documentation_options" src="../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.ingester.pipeline.twitter;
+import java.util.List;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.ExecutorService;
+import javax.naming.NamingException;
+import com.google.common.collect.ImmutableList;
+import com.google.common.collect.Queues;
+import org.apache.commons.pipeline.StageException;
+import org.apache.commons.pipeline.validation.ConsumedTypes;
+import org.apache.commons.pipeline.validation.ProducesConsumed;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import com.twitter.common_internal.text.version.PenguinVersion;
+import com.twitter.search.common.metrics.SearchCustomGauge;
+import com.twitter.search.common.metrics.SearchRateCounter;
+import com.twitter.search.common.relevance.classifiers.TweetEvaluator;
+import com.twitter.search.common.relevance.classifiers.TweetOffensiveEvaluator;
+import com.twitter.search.common.relevance.classifiers.TweetTextClassifier;
+import com.twitter.search.common.relevance.classifiers.TweetTextEvaluator;
+import com.twitter.search.common.relevance.entities.TwitterMessage;
+import com.twitter.search.common.relevance.scorers.TweetTextScorer;</p>
+<p>&#64;ConsumedTypes(TwitterMessage.class)
+&#64;ProducesConsumed
+public class TextQualityEvaluationWorkerStage extends TwitterBaseStage</p>
+<blockquote>
+<div><blockquote>
+<div><p>&lt;TwitterMessage, TwitterMessage&gt; {</p>
+</div></blockquote>
+<p>private static final Logger LOG = LoggerFactory.getLogger(TextQualityEvaluationWorkerStage.class);</p>
+<p>private static final int NUM_THREADS = 5;
+private static final long SLOW_TWEET_TIME_MILLIS = 1000;
+// based on the batched branch 3 elements in the queue times 200 tweets per batch.
+private static final int MAX_QUEUE_SIZE = 100;
+private final BlockingQueue&lt;TwitterMessage&gt; messages =</p>
+<blockquote>
+<div><p>Queues.newLinkedBlockingQueue(MAX_QUEUE_SIZE);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>private static final String DO_TEXT_QUALITY_EVALUATION_DECIDER_KEY_TEMPLATE =</dt><dd><p>“ingester_%s_do_text_quality_evaluation”;</p>
+</dd>
+</dl>
+<p>private ExecutorService executorService = null;
+private SearchRateCounter unscoredTweetCounter;
+private TweetTextClassifier classifier;
+private final TweetTextScorer scorer = new TweetTextScorer(null);
+// Defined as static so that ClassifierWorker thread can use it
+private static SearchRateCounter slowTweetCounter;
+private SearchRateCounter threadErrorCounter;
+private SearchRateCounter threadInterruptionCounter;
+private String deciderKey;</p>
+<p>&#64;Override
+public void initStats() {</p>
+<blockquote>
+<div><p>super.initStats();
+innerSetupStats();</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>public SearchRateCounter getUnscoredTweetCounter() {</dt><dd><p>return unscoredTweetCounter;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;Override
+protected void innerSetupStats() {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>threadErrorCounter = SearchRateCounter.export(</dt><dd><p>getStageNamePrefix() + “_text_quality_evaluation_thread_error”);</p>
+</dd>
+<dt>threadInterruptionCounter = SearchRateCounter.export(</dt><dd><p>getStageNamePrefix() + “_text_quality_evaluation_thread_interruption”);</p>
+</dd>
+<dt>unscoredTweetCounter = SearchRateCounter.export(</dt><dd><p>getStageNamePrefix() + “_text_quality_evaluation_tweets_unscored_count”);</p>
+</dd>
+<dt>slowTweetCounter = SearchRateCounter.export(</dt><dd><p>getStageNamePrefix() + “_text_quality_evaluation_slow_tweet_count”);</p>
+</dd>
+</dl>
+<p>SearchCustomGauge.export(getStageNamePrefix() + “_queue_size”, messages::size);</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+protected void doInnerPreprocess() throws StageException, NamingException {</p>
+<blockquote>
+<div><p>innerSetup();
+executorService = wireModule.getThreadPool(NUM_THREADS);
+for (int i = 0; i &lt; NUM_THREADS; i++) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>executorService.submit(</dt><dd><p>new ClassifierWorker());</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+LOG.info(“Initialized {} classfiers and scorers.”, NUM_THREADS);</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+protected void innerSetup() throws NamingException {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>deciderKey = String.format(DO_TEXT_QUALITY_EVALUATION_DECIDER_KEY_TEMPLATE,</dt><dd><p>earlybirdCluster.getNameForStats());</p>
+</dd>
+</dl>
+<p>List&lt;PenguinVersion&gt; supportedPenguinVersions = wireModule.getPenguinVersions();
+TweetOffensiveEvaluator tweetOffensiveEvaluator = wireModule.getTweetOffensiveEvaluator();</p>
+<dl class="simple">
+<dt>ImmutableList&lt;TweetEvaluator&gt; evaluators =</dt><dd><p>ImmutableList.of(tweetOffensiveEvaluator, new TweetTextEvaluator());</p>
+</dd>
+<dt>classifier = new TweetTextClassifier(</dt><dd><p>evaluators,
+wireModule.getServiceIdentifier(),
+supportedPenguinVersions);</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public void innerProcess(Object obj) throws StageException {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (!(obj instanceof TwitterMessage)) {</dt><dd><p>LOG.error(“Object is not a TwitterMessage object: {}”, obj);
+return;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>if (decider.isAvailable(deciderKey)) {</dt><dd><p>TwitterMessage message = TwitterMessage.class.cast(obj);
+try {</p>
+<blockquote>
+<div><p>messages.put(message);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} catch (InterruptedException ie) {</dt><dd><p>LOG.error(“Interrupted exception adding to the queue”, ie);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>} else {</dt><dd><p>unscoredTweetCounter.increment();
+emitAndCount(obj);</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+protected TwitterMessage innerRunStageV2(TwitterMessage message) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (decider.isAvailable(deciderKey)) {</dt><dd><p>classifyAndScore(message);</p>
+</dd>
+<dt>} else {</dt><dd><p>unscoredTweetCounter.increment();</p>
+</dd>
+</dl>
+<p>}</p>
+<p>return message;</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>private void classifyAndScore(TwitterMessage message) {</dt><dd><p>long startTime = clock.nowMillis();
+try {</p>
+<blockquote>
+<div><p>// The tweet signature computed here might not be correct, since we did not resolve the
+// tweet URLs yet. This is why BasicIndexingConverter does not set the tweet signature
+// feature on the event it builds.
+//
+// We correct the tweet signature later in the ComputeTweetSignatureStage, and
+// DelayedIndexingConverter sets this feature on the URL update event it creates.
+synchronized (this) {</p>
+<blockquote>
+<div><p>scorer.classifyAndScoreTweet(classifier, message);</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<dl>
+<dt>} catch (Exception e) {</dt><dd><p>threadErrorCounter.increment();
+LOG.error(“Uncaught exception from classifyAndScoreTweet”, e);</p>
+</dd>
+<dt>} finally {</dt><dd><p>long elapsedTime = clock.nowMillis() - startTime;
+if (elapsedTime &gt; SLOW_TWEET_TIME_MILLIS) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>LOG.warn(“Took {}ms to classify and score tweet {}: {}”,</dt><dd><p>elapsedTime, message.getId(), message);</p>
+</dd>
+</dl>
+<p>slowTweetCounter.increment();</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;Override
+public void innerPostprocess() {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (executorService != null) {</dt><dd><p>executorService.shutdownNow();</p>
+</dd>
+</dl>
+<p>}
+executorService = null;</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>private class ClassifierWorker implements Runnable {</dt><dd><dl>
+<dt>public void run() {</dt><dd><dl>
+<dt>while (!Thread.currentThread().isInterrupted()) {</dt><dd><p>TwitterMessage message;
+try {</p>
+<blockquote>
+<div><p>message = messages.take();</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} catch (InterruptedException ie) {</dt><dd><p>threadInterruptionCounter.increment();
+LOG.error(“Interrupted exception polling from the queue”, ie);
+continue;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// We want to emit even if we couldn’t score the tweet.
+classifyAndScore(message);
+emitAndCount(message);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../_sources/src/java/com/twitter/search/ingester/pipeline/twitter/TextQualityEvaluationWorkerStage.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

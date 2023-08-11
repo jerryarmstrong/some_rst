@@ -1,0 +1,503 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.tweetypie
+package repository</p>
+<p>import com.fasterxml.jackson.databind.ObjectMapper
+import com.fasterxml.jackson.module.scala.DefaultScalaModule
+import com.twitter.finagle.tracing.Trace
+import com.twitter.servo.cache._
+import com.twitter.servo.repository._
+import com.twitter.servo.util.Transformer
+import com.twitter.snowflake.id.SnowflakeId
+import com.twitter.stitch.Stitch
+import com.twitter.tweetypie.client_id.ClientIdHelper
+import com.twitter.tweetypie.core.FilteredState.Unavailable.BounceDeleted
+import com.twitter.tweetypie.core.FilteredState.Unavailable.TweetDeleted
+import com.twitter.tweetypie.core._
+import com.twitter.tweetypie.repository.CachedBounceDeleted.isBounceDeleted
+import com.twitter.tweetypie.repository.CachedBounceDeleted.toBounceDeletedTweetResult
+import com.twitter.tweetypie.thriftscala.CachedTweet
+import com.twitter.util.Base64Long</p>
+<dl class="simple">
+<dt>case class TweetKey(cacheVersion: Int, id: TweetId)</dt><dd><p>extends ScopedCacheKey(“t”, “t”, cacheVersion, Base64Long.toBase64(id))</p>
+</dd>
+<dt>case class TweetKeyFactory(cacheVersion: Int) {</dt><dd><p>val fromId: TweetId =&gt; TweetKey = (id: TweetId) =&gt; TweetKey(cacheVersion, id)
+val fromTweet: Tweet =&gt; TweetKey = (tweet: Tweet) =&gt; fromId(tweet.id)
+val fromCachedTweet: CachedTweet =&gt; TweetKey = (ms: CachedTweet) =&gt; fromTweet(ms.tweet)</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// Helper methods for working with cached bounce-deleted tweets,
+// grouped together here to keep the definitions of “bounce
+// deleted” in one place.
+object CachedBounceDeleted {</p>
+<blockquote>
+<div><p>// CachedTweet for use in CachingTweetStore
+def toBounceDeletedCachedTweet(tweetId: TweetId): CachedTweet =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>CachedTweet(</dt><dd><p>tweet = Tweet(id = tweetId),
+isBounceDeleted = Some(true)</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>def isBounceDeleted(cached: Cached[CachedTweet]): Boolean =</dt><dd><dl class="simple">
+<dt>cached.status == CachedValueStatus.Found &amp;&amp;</dt><dd><p>cached.value.flatMap(_.isBounceDeleted).contains(true)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>// TweetResult for use in CachingTweetRepository
+def toBounceDeletedTweetResult(tweetId: TweetId): TweetResult =</p>
+<blockquote>
+<div><dl>
+<dt>TweetResult(</dt><dd><dl class="simple">
+<dt>TweetData(</dt><dd><p>tweet = Tweet(id = tweetId),
+isBounceDeleted = true</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>def isBounceDeleted(tweetResult: TweetResult): Boolean =</dt><dd><p>tweetResult.value.isBounceDeleted</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>object TweetResultCache {</dt><dd><dl>
+<dt>def apply(</dt><dd><p>tweetDataCache: Cache[TweetId, Cached[TweetData]]</p>
+</dd>
+<dt>): Cache[TweetId, Cached[TweetResult]] = {</dt><dd><dl>
+<dt>val transformer: Transformer[Cached[TweetResult], Cached[TweetData]] =</dt><dd><dl class="simple">
+<dt>new Transformer[Cached[TweetResult], Cached[TweetData]] {</dt><dd><dl class="simple">
+<dt>def to(cached: Cached[TweetResult]) =</dt><dd><p>Return(cached.map(_.value))</p>
+</dd>
+<dt>def from(cached: Cached[TweetData]) =</dt><dd><p>Return(cached.map(TweetResult(_)))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>new KeyValueTransformingCache(</dt><dd><p>tweetDataCache,
+transformer,
+identity</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>object TweetDataCache {</dt><dd><dl>
+<dt>def apply(</dt><dd><p>cachedTweetCache: Cache[TweetKey, Cached[CachedTweet]],
+tweetKeyFactory: TweetId =&gt; TweetKey</p>
+</dd>
+<dt>): Cache[TweetId, Cached[TweetData]] = {</dt><dd><dl>
+<dt>val transformer: Transformer[Cached[TweetData], Cached[CachedTweet]] =</dt><dd><dl class="simple">
+<dt>new Transformer[Cached[TweetData], Cached[CachedTweet]] {</dt><dd><dl class="simple">
+<dt>def to(cached: Cached[TweetData]) =</dt><dd><p>Return(cached.map(_.toCachedTweet))</p>
+</dd>
+<dt>def from(cached: Cached[CachedTweet]) =</dt><dd><p>Return(cached.map(c =&gt; TweetData.fromCachedTweet(c, cached.cachedAt)))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>new KeyValueTransformingCache(</dt><dd><p>cachedTweetCache,
+transformer,
+tweetKeyFactory</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>object TombstoneTtl {</dt><dd><p>import CachedResult._</p>
+<dl>
+<dt>def fixed(ttl: Duration): CachedNotFound[TweetId] =&gt; Duration =</dt><dd><p>_ =&gt; ttl</p>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>A simple ttl calculator that is set to <cite>min</cite> if the age is less than <cite>from</cite>,</p></li>
+<li><p>then linearly interpolated  between <cite>min</cite> and <cite>max</cite> when the age is between <cite>from</cite> and <cite>to</cite>,</p></li>
+<li><p>and then equal to <cite>max</cite> if the age is greater than <cite>to</cite>.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>def linear(</dt><dd><p>min: Duration,
+max: Duration,
+from: Duration,
+to: Duration</p>
+</dd>
+<dt>): CachedNotFound[TweetId] =&gt; Duration = {</dt><dd><p>val rate = (max - min).inMilliseconds / (to - from).inMilliseconds.toDouble
+cached =&gt; {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (SnowflakeId.isSnowflakeId(cached.key)) {</dt><dd><p>val age = cached.cachedAt - SnowflakeId(cached.key).time
+if (age &lt;= from) min
+else if (age &gt;= to) max
+else min + (age - from) * rate</p>
+</dd>
+<dt>} else {</dt><dd><p>// When it’s not a snowflake id, cache it for the maximum time.
+max</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Checks if the given <cite>cached</cite> value is an expired tombstone</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>def isExpired(</dt><dd><p>tombstoneTtl: CachedNotFound[TweetId] =&gt; Duration,
+cached: CachedNotFound[TweetId]</p>
+</dd>
+<dt>): Boolean =</dt><dd><p>Time.now - cached.cachedAt &gt; tombstoneTtl(cached)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>object CachingTweetRepository {</dt><dd><p>import CachedResult._
+import CachedResultAction._</p>
+<p>val failuresLog: Logger = Logger(“com.twitter.tweetypie.repository.CachingTweetRepoFailures”)</p>
+<dl>
+<dt>def apply(</dt><dd><p>cache: LockingCache[TweetId, Cached[TweetResult]],
+tombstoneTtl: CachedNotFound[TweetId] =&gt; Duration,
+stats: StatsReceiver,
+clientIdHelper: ClientIdHelper,
+logCacheExceptions: Gate[Unit] = Gate.False,</p>
+</dd>
+<dt>)(</dt><dd><p>underlying: TweetResultRepository.Type</p>
+</dd>
+<dt>): TweetResultRepository.Type = {</dt><dd><dl>
+<dt>val cachingRepo: ((TweetId, TweetQuery.Options)) =&gt; Stitch[TweetResult] =</dt><dd><dl>
+<dt>CacheStitch[(TweetId, TweetQuery.Options), TweetId, TweetResult](</dt><dd><p>repo = underlying.tupled,
+cache = StitchLockingCache(</p>
+<blockquote>
+<div><p>underlying = cache,
+picker = new TweetRepoCachePicker[TweetResult](_.value.cachedAt)</p>
+</div></blockquote>
+<p>),
+queryToKey = _._1, // extract tweet id from (TweetId, TweetQuery.Options)
+handler = mkHandler(tombstoneTtl, stats, logCacheExceptions, clientIdHelper),
+cacheable = cacheable</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>(tweetId, options) =&gt;</dt><dd><dl class="simple">
+<dt>if (options.cacheControl.readFromCache) {</dt><dd><p>cachingRepo((tweetId, options))</p>
+</dd>
+<dt>} else {</dt><dd><p>underlying(tweetId, options)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>val cacheable: CacheStitch.Cacheable[(TweetId, TweetQuery.Options), TweetResult] = {</dt><dd><dl>
+<dt>case ((tweetId, options), tweetResult) =&gt;</dt><dd><dl>
+<dt>if (!options.cacheControl.writeToCache) {</dt><dd><p>None</p>
+</dd>
+<dt>} else {</dt><dd><dl>
+<dt>tweetResult match {</dt><dd><p>// Write stitch.NotFound as a NotFound cache entry
+case Throw(com.twitter.stitch.NotFound) =&gt;</p>
+<blockquote>
+<div><p>Some(StitchLockingCache.Val.NotFound)</p>
+</div></blockquote>
+<p>// Write FilteredState.TweetDeleted as a Deleted cache entry
+case Throw(TweetDeleted) =&gt;</p>
+<blockquote>
+<div><p>Some(StitchLockingCache.Val.Deleted)</p>
+</div></blockquote>
+<p>// Write BounceDeleted as a Found cache entry, with the CachedTweet.isBounceDeleted flag.
+// servo.cache.thriftscala.CachedValueStatus.Deleted tombstones do not allow for storing
+// app-defined metadata.
+case Throw(BounceDeleted) =&gt;</p>
+<blockquote>
+<div><p>Some(StitchLockingCache.Val.Found(toBounceDeletedTweetResult(tweetId)))</p>
+</div></blockquote>
+<p>// Regular found tweets are not written to cache here - instead the cacheable result is
+// written to cache via TweetHydration.cacheChanges
+case Return(_: TweetResult) =&gt; None</p>
+<p>// Don’t write other exceptions back to cache
+case _ =&gt; None</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>object LogLens {</dt><dd><p>private[this] val mapper = new ObjectMapper().registerModule(DefaultScalaModule)</p>
+<dl class="simple">
+<dt>def logMessage(logger: Logger, clientIdHelper: ClientIdHelper, data: (String, Any)*): Unit = {</dt><dd><p>val allData = data ++ defaultData(clientIdHelper)
+val msg = mapper.writeValueAsString(Map(allData: _*))
+logger.info(msg)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def defaultData(clientIdHelper: ClientIdHelper): Seq[(String, Any)] = {</dt><dd><p>val viewer = TwitterContext()
+Seq(</p>
+<blockquote>
+<div><p>“client_id” -&gt; clientIdHelper.effectiveClientId,
+“trace_id” -&gt; Trace.id.traceId.toString,
+“audit_ip” -&gt; viewer.flatMap(_.auditIp),
+“application_id” -&gt; viewer.flatMap(_.clientApplicationId),
+“user_agent” -&gt; viewer.flatMap(_.userAgent),
+“authenticated_user_id” -&gt; viewer.flatMap(_.authenticatedUserId)</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def mkHandler(</dt><dd><p>tombstoneTtl: CachedNotFound[TweetId] =&gt; Duration,
+stats: StatsReceiver,
+logCacheExceptions: Gate[Unit],
+clientIdHelper: ClientIdHelper,</p>
+</dd>
+<dt>): Handler[TweetId, TweetResult] = {</dt><dd><p>val baseHandler = defaultHandler[TweetId, TweetResult]
+val cacheErrorState = HydrationState(modified = false, cacheErrorEncountered = true)
+val cachedFoundCounter = stats.counter(“cached_found”)
+val notFoundCounter = stats.counter(“not_found”)
+val cachedNotFoundAsNotFoundCounter = stats.counter(“cached_not_found_as_not_found”)
+val cachedNotFoundAsMissCounter = stats.counter(“cached_not_found_as_miss”)
+val cachedDeletedCounter = stats.counter(“cached_deleted”)
+val cachedBounceDeletedCounter = stats.counter(“cached_bounce_deleted”)
+val failedCounter = stats.counter(“failed”)
+val otherCounter = stats.counter(“other”)</p>
+<dl>
+<dt>{</dt><dd><dl>
+<dt>case res &#64; CachedFound(_, tweetResult, _, _) =&gt;</dt><dd><dl class="simple">
+<dt>if (isBounceDeleted(tweetResult)) {</dt><dd><p>cachedBounceDeletedCounter.incr()
+HandleAsFailed(FilteredState.Unavailable.BounceDeleted)</p>
+</dd>
+<dt>} else {</dt><dd><p>cachedFoundCounter.incr()
+baseHandler(res)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>case res &#64; NotFound(_) =&gt;</dt><dd><p>notFoundCounter.incr()
+baseHandler(res)</p>
+</dd>
+</dl>
+<p>// expires NotFound tombstones if old enough
+case cached &#64; CachedNotFound(_, _, _) =&gt;</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (TombstoneTtl.isExpired(tombstoneTtl, cached)) {</dt><dd><p>cachedNotFoundAsMissCounter.incr()
+HandleAsMiss</p>
+</dd>
+<dt>} else {</dt><dd><p>cachedNotFoundAsNotFoundCounter.incr()
+HandleAsNotFound</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<dl class="simple">
+<dt>case CachedDeleted(_, _, _) =&gt;</dt><dd><p>cachedDeletedCounter.incr()
+HandleAsFailed(FilteredState.Unavailable.TweetDeleted)</p>
+</dd>
+</dl>
+<p>// don’t attempt to write back to cache on a cache read failure
+case Failed(k, t) =&gt;</p>
+<blockquote>
+<div><p>// After result is found, mark it with cacheErrorEncountered
+failedCounter.incr()</p>
+<dl>
+<dt>if (logCacheExceptions()) {</dt><dd><dl class="simple">
+<dt>LogLens.logMessage(</dt><dd><p>failuresLog,
+clientIdHelper,
+“type” -&gt; “cache_failed”,
+“tweet_id” -&gt; k,
+“throwable” -&gt; t.getClass.getName</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<p>TransformSubAction[TweetResult](HandleAsDoNotCache, _.mapState(_ ++ cacheErrorState))</p>
+</div></blockquote>
+<dl class="simple">
+<dt>case res =&gt;</dt><dd><p>otherCounter.incr()
+baseHandler(res)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>A LockingCache.Picker for use with CachingTweetRepository which prevents overwriting values in</p></li>
+<li><p>cache that are newer than the value previously read from cache.</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>class TweetRepoCachePicker[T](cachedAt: T =&gt; Option[Time]) extends LockingCache.Picker[Cached[T]] {</dt><dd><p>private val newestPicker = new PreferNewestCached[T]</p>
+<dl>
+<dt>override def apply(newValue: Cached[T], oldValue: Cached[T]): Option[Cached[T]] = {</dt><dd><dl>
+<dt>oldValue.status match {</dt><dd><p>// never overwrite a <cite>Deleted</cite> tombstone via read-through.
+case CachedValueStatus.Deleted =&gt; None</p>
+<p>// only overwrite a <cite>Found</cite> value with an update based off of that same cache entry.
+case CachedValueStatus.Found =&gt;</p>
+<blockquote>
+<div><dl class="simple">
+<dt>newValue.value.flatMap(cachedAt) match {</dt><dd><p>// if prevCacheAt is the same as oldValue.cachedAt, then the value in cache hasn’t changed
+case Some(prevCachedAt) if prevCachedAt == oldValue.cachedAt =&gt; Some(newValue)
+// otherwise, the value in cache has changed since we read it, so don’t overwrite
+case _ =&gt; None</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>// we may hit an expired/older tombstone, which should be safe to overwrite with a fresh
+// tombstone of a new value returned from Manhattan.
+case CachedValueStatus.NotFound =&gt; newestPicker(newValue, oldValue)</p>
+<p>// we shouldn’t see any other CachedValueStatus, but if we do, play it safe and don’t
+// overwrite (it will be as if the read that triggered this never happened)
+case _ =&gt; None</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/tweetypie/server/src/main/scala/com/twitter/tweetypie/repository/CachingTweetRepository.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

@@ -1,0 +1,580 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../../../" id="documentation_options" src="../../../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.product_mixer.core.pipeline.product</p>
+<p>import com.twitter.finagle.mtls.authentication.ServiceIdentifier
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.finagle.tracing.Trace
+import com.twitter.finagle.transport.Transport
+import com.twitter.product_mixer.core.functional_component.common.access_policy.AccessPolicy
+import com.twitter.product_mixer.core.functional_component.common.alert.Alert
+import com.twitter.product_mixer.core.functional_component.gate.Gate
+import com.twitter.product_mixer.core.gate.DenyLoggedOutUsersGate
+import com.twitter.product_mixer.core.gate.ParamGate
+import com.twitter.product_mixer.core.gate.ParamGate.EnabledGateSuffix
+import com.twitter.product_mixer.core.gate.ParamGate.SupportedClientGateSuffix
+import com.twitter.product_mixer.core.model.common.Component
+import com.twitter.product_mixer.core.model.common.identifier.ComponentIdentifier
+import com.twitter.product_mixer.core.model.common.identifier.ComponentIdentifierStack
+import com.twitter.product_mixer.core.model.common.identifier.ProductPipelineIdentifier
+import com.twitter.product_mixer.core.model.common.identifier.PipelineStepIdentifier
+import com.twitter.product_mixer.core.model.marshalling.request.Request
+import com.twitter.product_mixer.core.pipeline.InvalidStepStateException
+import com.twitter.product_mixer.core.pipeline.Pipeline
+import com.twitter.product_mixer.core.pipeline.PipelineBuilder
+import com.twitter.product_mixer.core.pipeline.PipelineQuery
+import com.twitter.product_mixer.core.pipeline.mixer.MixerPipelineBuilderFactory
+import com.twitter.product_mixer.core.pipeline.mixer.MixerPipelineConfig
+import com.twitter.product_mixer.core.pipeline.mixer.MixerPipelineResult
+import com.twitter.product_mixer.core.pipeline.pipeline_failure.PipelineFailureClassifier
+import com.twitter.product_mixer.core.pipeline.pipeline_failure.ProductDisabled
+import com.twitter.product_mixer.core.pipeline.recommendation.RecommendationPipelineBuilderFactory
+import com.twitter.product_mixer.core.pipeline.recommendation.RecommendationPipelineConfig
+import com.twitter.product_mixer.core.pipeline.recommendation.RecommendationPipelineResult
+import com.twitter.product_mixer.core.quality_factor.HasQualityFactorStatus
+import com.twitter.product_mixer.core.quality_factor.QualityFactorObserver
+import com.twitter.product_mixer.core.quality_factor.QualityFactorStatus
+import com.twitter.product_mixer.core.service.Executor
+import com.twitter.product_mixer.core.service.gate_executor.GateExecutor
+import com.twitter.product_mixer.core.service.gate_executor.GateExecutorResult
+import com.twitter.product_mixer.core.service.gate_executor.StoppedGateException
+import com.twitter.product_mixer.core.service.pipeline_execution_logger.PipelineExecutionLogger
+import com.twitter.product_mixer.core.service.pipeline_executor.PipelineExecutor
+import com.twitter.product_mixer.core.service.pipeline_executor.PipelineExecutorRequest
+import com.twitter.product_mixer.core.service.pipeline_executor.PipelineExecutorResult
+import com.twitter.product_mixer.core.service.pipeline_selector_executor.PipelineSelectorExecutor
+import com.twitter.product_mixer.core.service.pipeline_selector_executor.PipelineSelectorExecutorResult
+import com.twitter.product_mixer.core.service.quality_factor_executor.QualityFactorExecutorResult
+import com.twitter.stitch.Arrow
+import com.twitter.stringcenter.client.StringCenterRequestContext
+import com.twitter.stringcenter.client.stitch.StringCenterRequestContextLetter
+import com.twitter.timelines.configapi.Params
+import com.twitter.util.logging.Logging
+import org.slf4j.MDC</p>
+<dl>
+<dt>class ProductPipelineBuilder[TRequest &lt;: Request, Query &lt;: PipelineQuery, Response](</dt><dd><p>gateExecutor: GateExecutor,
+pipelineSelectorExecutor: PipelineSelectorExecutor,
+pipelineExecutor: PipelineExecutor,
+mixerPipelineBuilderFactory: MixerPipelineBuilderFactory,
+recommendationPipelineBuilderFactory: RecommendationPipelineBuilderFactory,
+override val statsReceiver: StatsReceiver,
+pipelineExecutionLogger: PipelineExecutionLogger)</p>
+<blockquote>
+<div><p>extends PipelineBuilder[ProductPipelineRequest[TRequest]]
+with Logging { builder =&gt;</p>
+</div></blockquote>
+<p>override type UnderlyingResultType = Response
+override type PipelineResultType = ProductPipelineResult[Response]</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Query Transformer Step is implemented inline instead of using an executor.</p></li>
+<li></li>
+<li><p>It’s a simple, synchronous step that executes the query transformer.</p></li>
+<li></li>
+<li><p>Since the output of the transformer is used in multiple other steps (Gate, Pipeline Execution),</p></li>
+<li><p>we’ve promoted the transformer to a step so that it’s outputs can be reused easily.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>def pipelineQueryTransformerStep(</dt><dd><p>queryTransformer: (TRequest, Params) =&gt; Query,
+context: Executor.Context</p>
+</dd>
+<dt>): Step[ProductPipelineRequest[TRequest], Query] =</dt><dd><p>new Step[ProductPipelineRequest[TRequest], Query] {</p>
+<blockquote>
+<div><dl>
+<dt>override def identifier: PipelineStepIdentifier =</dt><dd><p>ProductPipelineConfig.pipelineQueryTransformerStep</p>
+</dd>
+<dt>override def executorArrow: Arrow[ProductPipelineRequest[TRequest], Query] = {</dt><dd><dl>
+<dt>wrapWithErrorHandling(context, identifier)(</dt><dd><dl class="simple">
+<dt>Arrow.map[ProductPipelineRequest[TRequest], Query] {</dt><dd><p>case ProductPipelineRequest(request, params) =&gt; queryTransformer(request, params)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>override def inputAdaptor(</dt><dd><p>query: ProductPipelineRequest[TRequest],
+previousResult: ProductPipelineResult[Response]</p>
+</dd>
+</dl>
+<p>): ProductPipelineRequest[TRequest] = query</p>
+<dl class="simple">
+<dt>override def resultUpdater(</dt><dd><p>previousPipelineResult: ProductPipelineResult[Response],
+executorResult: Query</p>
+</dd>
+<dt>): ProductPipelineResult[Response] =</dt><dd><p>previousPipelineResult.copy(transformedQuery = Some(executorResult))</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+<dt>def qualityFactorStep(</dt><dd><p>qualityFactorStatus: QualityFactorStatus</p>
+</dd>
+<dt>): Step[Query, QualityFactorExecutorResult] = {</dt><dd><dl>
+<dt>new Step[Query, QualityFactorExecutorResult] {</dt><dd><p>override def identifier: PipelineStepIdentifier = ProductPipelineConfig.qualityFactorStep</p>
+<dl>
+<dt>override def executorArrow: Arrow[Query, QualityFactorExecutorResult] =</dt><dd><dl>
+<dt>Arrow</dt><dd><dl>
+<dt>.map[Query, QualityFactorExecutorResult] { _ =&gt;</dt><dd><dl class="simple">
+<dt>QualityFactorExecutorResult(</dt><dd><dl class="simple">
+<dt>pipelineQualityFactors =</dt><dd><p>qualityFactorStatus.qualityFactorByPipeline.mapValues(_.currentValue)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+<dt>override def inputAdaptor(</dt><dd><p>query: ProductPipelineRequest[TRequest],
+previousResult: ProductPipelineResult[Response]</p>
+</dd>
+<dt>): Query = previousResult.transformedQuery</dt><dd><dl class="simple">
+<dt>.getOrElse {</dt><dd><p>throw InvalidStepStateException(identifier, “TransformedQuery”)</p>
+</dd>
+</dl>
+<p>}.asInstanceOf[Query]</p>
+</dd>
+<dt>override def resultUpdater(</dt><dd><p>previousPipelineResult: ProductPipelineResult[Response],
+executorResult: QualityFactorExecutorResult</p>
+</dd>
+<dt>): ProductPipelineResult[Response] = {</dt><dd><dl>
+<dt>previousPipelineResult.copy(</dt><dd><dl class="simple">
+<dt>transformedQuery = previousPipelineResult.transformedQuery.map {</dt><dd><dl class="simple">
+<dt>case queryWithQualityFactor: HasQualityFactorStatus =&gt;</dt><dd><dl class="simple">
+<dt>queryWithQualityFactor</dt><dd><p>.withQualityFactorStatus(qualityFactorStatus).asInstanceOf[Query]</p>
+</dd>
+</dl>
+</dd>
+<dt>case query =&gt;</dt><dd><p>query</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>},
+qualityFactorResult = Some(executorResult)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def gatesStep(</dt><dd><p>gates: Seq[Gate[Query]],
+context: Executor.Context</p>
+</dd>
+<dt>): Step[Query, GateExecutorResult] = new Step[Query, GateExecutorResult] {</dt><dd><p>override def identifier: PipelineStepIdentifier = ProductPipelineConfig.gatesStep</p>
+<dl class="simple">
+<dt>override def executorArrow: Arrow[Query, GateExecutorResult] = {</dt><dd><p>gateExecutor.arrow(gates, context)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>override def inputAdaptor(</dt><dd><p>query: ProductPipelineRequest[TRequest],
+previousResult: ProductPipelineResult[Response]</p>
+</dd>
+<dt>): Query = previousResult.transformedQuery</dt><dd><dl class="simple">
+<dt>.getOrElse {</dt><dd><p>throw InvalidStepStateException(identifier, “TransformedQuery”)</p>
+</dd>
+</dl>
+<p>}.asInstanceOf[Query]</p>
+</dd>
+<dt>override def resultUpdater(</dt><dd><p>previousPipelineResult: ProductPipelineResult[Response],
+executorResult: GateExecutorResult</p>
+</dd>
+<dt>): ProductPipelineResult[Response] =</dt><dd><p>previousPipelineResult.copy(gateResult = Some(executorResult))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def pipelineSelectorStep(</dt><dd><p>pipelineByIdentifer: Map[ComponentIdentifier, Pipeline[Query, Response]],
+pipelineSelector: Query =&gt; ComponentIdentifier,
+context: Executor.Context</p>
+</dd>
+<dt>): Step[Query, PipelineSelectorExecutorResult] =</dt><dd><dl>
+<dt>new Step[Query, PipelineSelectorExecutorResult] {</dt><dd><p>override def identifier: PipelineStepIdentifier = ProductPipelineConfig.pipelineSelectorStep</p>
+<dl class="simple">
+<dt>override def executorArrow: Arrow[</dt><dd><p>Query,
+PipelineSelectorExecutorResult</p>
+</dd>
+</dl>
+<p>] = pipelineSelectorExecutor.arrow(pipelineByIdentifer, pipelineSelector, context)</p>
+<dl class="simple">
+<dt>override def inputAdaptor(</dt><dd><p>query: ProductPipelineRequest[TRequest],
+previousResult: ProductPipelineResult[Response]</p>
+</dd>
+<dt>): Query =</dt><dd><dl class="simple">
+<dt>previousResult.transformedQuery</dt><dd><dl class="simple">
+<dt>.getOrElse(throw InvalidStepStateException(identifier, “TransformedQuery”)).asInstanceOf[</dt><dd><p>Query]</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+<dt>override def resultUpdater(</dt><dd><p>previousPipelineResult: ProductPipelineResult[Response],
+executorResult: PipelineSelectorExecutorResult</p>
+</dd>
+<dt>): ProductPipelineResult[Response] =</dt><dd><p>previousPipelineResult.copy(pipelineSelectorResult = Some(executorResult))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>def pipelineExecutionStep(</dt><dd><p>pipelineByIdentifier: Map[ComponentIdentifier, Pipeline[Query, Response]],
+qualityFactorObserverByPipeline: Map[ComponentIdentifier, QualityFactorObserver],
+context: Executor.Context</p>
+</dd>
+<dt>): Step[PipelineExecutorRequest[Query], PipelineExecutorResult[Response]] =</dt><dd><dl>
+<dt>new Step[PipelineExecutorRequest[Query], PipelineExecutorResult[Response]] {</dt><dd><p>override def identifier: PipelineStepIdentifier = ProductPipelineConfig.pipelineExecutionStep</p>
+<dl class="simple">
+<dt>override def executorArrow: Arrow[</dt><dd><p>PipelineExecutorRequest[Query],
+PipelineExecutorResult[Response]</p>
+</dd>
+<dt>] = {</dt><dd><p>pipelineExecutor.arrow(pipelineByIdentifier, qualityFactorObserverByPipeline, context)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>override def inputAdaptor(</dt><dd><p>request: ProductPipelineRequest[TRequest],
+previousResult: ProductPipelineResult[Response]</p>
+</dd>
+<dt>): PipelineExecutorRequest[Query] = {</dt><dd><dl>
+<dt>val query = previousResult.transformedQuery</dt><dd><dl class="simple">
+<dt>.getOrElse {</dt><dd><p>throw InvalidStepStateException(identifier, “TransformedQuery”)</p>
+</dd>
+</dl>
+<p>}.asInstanceOf[Query]</p>
+</dd>
+<dt>val pipelineIdentifier = previousResult.pipelineSelectorResult</dt><dd><dl class="simple">
+<dt>.map(_.pipelineIdentifier).getOrElse {</dt><dd><p>throw InvalidStepStateException(identifier, “PipelineSelectorResult”)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>PipelineExecutorRequest(query, pipelineIdentifier)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>override def resultUpdater(</dt><dd><p>previousPipelineResult: ProductPipelineResult[Response],
+executorResult: PipelineExecutorResult[Response]</p>
+</dd>
+</dl>
+<p>): ProductPipelineResult[Response] = {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>val mixerPipelineResult = executorResult.pipelineResult match {</dt><dd><dl class="simple">
+<dt>case mixerPipelineResult: MixerPipelineResult[Response] &#64;unchecked =&gt;</dt><dd><p>Some(mixerPipelineResult)</p>
+</dd>
+<dt>case _ =&gt;</dt><dd><p>None</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>val recommendationPipelineResult = executorResult.pipelineResult match {</dt><dd><dl>
+<dt>case recommendationPipelineResult: RecommendationPipelineResult[</dt><dd><blockquote>
+<div><blockquote>
+<div><p>_,
+Response</p>
+</div></blockquote>
+<p>] &#64;unchecked =&gt;</p>
+</div></blockquote>
+<p>Some(recommendationPipelineResult)</p>
+</dd>
+<dt>case _ =&gt;</dt><dd><p>None</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>previousPipelineResult.copy(</dt><dd><p>mixerPipelineResult = mixerPipelineResult,
+recommendationPipelineResult = recommendationPipelineResult,
+traceId = Trace.idOption.map(_.traceId.toString()),
+result = executorResult.pipelineResult.result</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>def build(</dt><dd><p>parentComponentIdentifierStack: ComponentIdentifierStack,
+config: ProductPipelineConfig[TRequest, Query, Response]</p>
+</dd>
+</dl>
+<p>): ProductPipeline[TRequest, Response] = {</p>
+<blockquote>
+<div><p>val pipelineIdentifier = config.identifier</p>
+<dl>
+<dt>val context = Executor.Context(</dt><dd><dl class="simple">
+<dt>PipelineFailureClassifier(</dt><dd><p>config.failureClassifier.orElse(StoppedGateException.classifier(ProductDisabled))),</p>
+</dd>
+</dl>
+<p>parentComponentIdentifierStack.push(pipelineIdentifier)</p>
+</dd>
+</dl>
+<p>)</p>
+<dl class="simple">
+<dt>val denyLoggedOutUsersGate = if (config.denyLoggedOutUsers) {</dt><dd><p>Some(DenyLoggedOutUsersGate(pipelineIdentifier))</p>
+</dd>
+<dt>} else {</dt><dd><p>None</p>
+</dd>
+</dl>
+<p>}
+val enabledGate: ParamGate =</p>
+<blockquote>
+<div><p>ParamGate(pipelineIdentifier + EnabledGateSuffix, config.paramConfig.EnabledDeciderParam)</p>
+</div></blockquote>
+<dl>
+<dt>val supportedClientGate =</dt><dd><dl class="simple">
+<dt>ParamGate(</dt><dd><p>pipelineIdentifier + SupportedClientGateSuffix,
+config.paramConfig.SupportedClientParam)</p>
+</dd>
+</dl>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Evaluate enabled decider gate first since if it’s off, there is no reason to proceed</p></li>
+<li><p>Next evaluate supported client feature switch gate, followed by customer configured gates</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>val allGates =</dt><dd><p>denyLoggedOutUsersGate.toSeq ++: enabledGate +: supportedClientGate +: config.gates</p>
+</dd>
+<dt>val childPipelines: Seq[Pipeline[Query, Response]] =</dt><dd><dl class="simple">
+<dt>config.pipelines.map {</dt><dd><dl class="simple">
+<dt>case mixerConfig: MixerPipelineConfig[Query, _, Response] =&gt;</dt><dd><p>mixerConfig.build(context.componentStack, mixerPipelineBuilderFactory)</p>
+</dd>
+<dt>case recommendationConfig: RecommendationPipelineConfig[Query, _, _, Response] =&gt;</dt><dd><p>recommendationConfig.build(context.componentStack, recommendationPipelineBuilderFactory)</p>
+</dd>
+<dt>case other =&gt;</dt><dd><dl class="simple">
+<dt>throw new IllegalArgumentException(</dt><dd><p>s”Product Pipelines only support Mixer and Recommendation pipelines, not $other”)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>val pipelineByIdentifier: Map[ComponentIdentifier, Pipeline[Query, Response]] =</dt><dd><dl class="simple">
+<dt>childPipelines.map { pipeline =&gt;</dt><dd><p>(pipeline.identifier, pipeline)</p>
+</dd>
+</dl>
+<p>}.toMap</p>
+</dd>
+<dt>val qualityFactorStatus: QualityFactorStatus =</dt><dd><p>QualityFactorStatus.build(config.qualityFactorConfigs)</p>
+</dd>
+<dt>val qualityFactorObserverByPipeline = qualityFactorStatus.qualityFactorByPipeline.mapValues {</dt><dd><dl class="simple">
+<dt>qualityFactor =&gt;</dt><dd><p>qualityFactor.buildObserver()</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>buildGaugesForQualityFactor(pipelineIdentifier, qualityFactorStatus, statsReceiver)</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Initialize MDC with access logging with everything we have at request time. We can put</p></li>
+<li><p>more stuff into MDC later down the pipeline, but at risk of exceptions/errors preventing</p></li>
+<li><p>them from being added</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>val mdcInitArrow =</dt><dd><dl class="simple">
+<dt>Arrow.map[ProductPipelineRequest[TRequest], ProductPipelineRequest[TRequest]] { request =&gt;</dt><dd><p>val serviceIdentifier = ServiceIdentifier.fromCertificate(Transport.peerCertificate)
+MDC.put(“product”, config.product.identifier.name)
+MDC.put(“serviceIdentifier”, ServiceIdentifier.asString(serviceIdentifier))
+request</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>val builtSteps = Seq(</dt><dd><p>pipelineQueryTransformerStep(config.pipelineQueryTransformer, context),
+qualityFactorStep(qualityFactorStatus),
+gatesStep(allGates, context),
+pipelineSelectorStep(pipelineByIdentifier, config.pipelineSelector, context),
+pipelineExecutionStep(pipelineByIdentifier, qualityFactorObserverByPipeline, context)</p>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>val underlying: Arrow[ProductPipelineRequest[TRequest], ProductPipelineResult[Response]] =</dt><dd><dl class="simple">
+<dt>buildCombinedArrowFromSteps(</dt><dd><p>steps = builtSteps,
+context = context,
+initialEmptyResult = ProductPipelineResult.empty,
+stepsInOrderFromConfig = ProductPipelineConfig.stepsInOrder</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Unlike other components and pipelines, [[ProductPipeline]] must be observed in the</p></li>
+<li><p>[[ProductPipelineBuilder]] directly because the resulting [[ProductPipeline.arrow]]</p></li>
+<li><p>is run directly without an executor so must contain all stats.</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+<dt>val observed =</dt><dd><dl class="simple">
+<dt>wrapProductPipelineWithExecutorBookkeeping[</dt><dd><p>ProductPipelineRequest[TRequest],
+ProductPipelineResult[Response]</p>
+</dd>
+</dl>
+<p>](context, pipelineIdentifier)(underlying)</p>
+</dd>
+<dt>val finalArrow: Arrow[ProductPipelineRequest[TRequest], ProductPipelineResult[Response]] =</dt><dd><dl>
+<dt>Arrow</dt><dd><dl>
+<dt>.letWithArg[</dt><dd><p>ProductPipelineRequest[TRequest],
+ProductPipelineResult[Response],
+StringCenterRequestContext](StringCenterRequestContextLetter)(request =&gt;
+StringCenterRequestContext(</p>
+<blockquote>
+<div><p>request.request.clientContext.languageCode,
+request.request.clientContext.countryCode</p>
+</div></blockquote>
+<p>))(
+mdcInitArrow</p>
+<blockquote>
+<div><p>.andThen(observed)
+.onSuccess(result =&gt; result.transformedQuery.map(pipelineExecutionLogger(_, result))))</p>
+</div></blockquote>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>val configFromBuilder = config
+new ProductPipeline[TRequest, Response] {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>override private[core] val config: ProductPipelineConfig[TRequest, _, Response] =</dt><dd><p>configFromBuilder</p>
+</dd>
+<dt>override val arrow: Arrow[ProductPipelineRequest[TRequest], ProductPipelineResult[Response]] =</dt><dd><p>finalArrow</p>
+</dd>
+</dl>
+<p>override val identifier: ProductPipelineIdentifier = pipelineIdentifier
+override val alerts: Seq[Alert] = config.alerts
+override val debugAccessPolicies: Set[AccessPolicy] = config.debugAccessPolicies
+override val children: Seq[Component] = allGates ++ childPipelines</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../../../_sources/product-mixer/core/src/main/scala/com/twitter/product_mixer/core/pipeline/product/ProductPipelineBuilder.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

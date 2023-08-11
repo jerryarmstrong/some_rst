@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../" id="documentation_options" src="../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>from __future__ import annotations</p>
+<p>from absl import logging
+import torch
+from typing import Optional, Callable, Mapping, Dict, Sequence, TYPE_CHECKING
+from tml.projects.home.recap.model import feature_transform
+from tml.projects.home.recap.model import config as model_config_mod
+from tml.projects.home.recap.model import mlp
+from tml.projects.home.recap.model import mask_net
+from tml.projects.home.recap.model import numeric_calibration
+from tml.projects.home.recap.model.model_and_loss import ModelAndLoss
+import tml.projects.home.recap.model.config as model_config_mod</p>
+<dl>
+<dt>if TYPE_CHECKING:</dt><dd><p>from tml.projects.home.recap import config as config_mod
+from tml.projects.home.recap.data.config import RecapDataConfig
+from tml.projects.home.recap.model.config import ModelConfig</p>
+</dd>
+<dt>def sanitize(task_name):</dt><dd><p>return task_name.replace(“.”, “__”)</p>
+</dd>
+<dt>def unsanitize(sanitized_task_name):</dt><dd><p>return sanitized_task_name.replace(“__”, “.”)</p>
+</dd>
+<dt>def _build_single_task_model(task: model_config_mod.TaskModel, input_shape: int):</dt><dd><p>“”” “Builds a model for a single task”””
+if task.mlp_config:</p>
+<blockquote>
+<div><p>return mlp.Mlp(in_features=input_shape, mlp_config=task.mlp_config)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>elif task.dcn_config:</dt><dd><p>return dcn.Dcn(dcn_config=task.dcn_config, in_features=input_shape)</p>
+</dd>
+<dt>elif task.mask_net_config:</dt><dd><p>return mask_net.MaskNet(mask_net_config=task.mask_net_config, in_features=input_shape)</p>
+</dd>
+<dt>else:</dt><dd><p>raise ValueError(“This should never be reached.”)</p>
+</dd>
+</dl>
+</dd>
+<dt>class MultiTaskRankingModel(torch.nn.Module):</dt><dd><p>“””Multi-task ranking model.”””</p>
+<dl>
+<dt>def __init__(</dt><dd><p>self,
+input_shapes: Mapping[str, torch.Size],
+config: ModelConfig,
+data_config: RecapDataConfig,
+return_backbone: bool = False,</p>
+</dd>
+<dt>):</dt><dd><p>“””Constructor for Multi task learning.</p>
+<p>Assumptions made:
+1. Tasks specified in data config match model architecture.</p>
+<p>These are all validated in config.
+“””
+super().__init__()</p>
+<p>self._config = config
+self._data_config = data_config</p>
+<dl class="simple">
+<dt>self._preprocessor = feature_transform.build_features_preprocessor(</dt><dd><p>config.featurization_config, input_shapes</p>
+</dd>
+</dl>
+<p>)</p>
+<p>self.return_backbone = return_backbone</p>
+<p>self.embeddings = None
+self.small_embeddings = None
+embedding_dims = 0
+if config.large_embeddings:</p>
+<blockquote>
+<div><p>from large_embeddings.models.learnable_embeddings import LargeEmbeddings</p>
+<p>self.embeddings = LargeEmbeddings(large_embeddings_config=config.large_embeddings)</p>
+<p>embedding_dims += sum([table.embedding_dim for table in config.large_embeddings.tables])
+logging.info(f”Emb dim: {embedding_dims}”)</p>
+</div></blockquote>
+<dl>
+<dt>if config.small_embeddings:</dt><dd><p>self.small_embeddings = SmallEmbedding(config.small_embeddings)
+embedding_dims += sum([table.embedding_dim for table in config.small_embeddings.tables])
+logging.info(f”Emb dim (with small embeddings): {embedding_dims}”)</p>
+</dd>
+<dt>if “user_embedding” in data_config.seg_dense_schema.renamed_features:</dt><dd><p>embedding_dims += input_shapes[“user_embedding”][-1]
+self._user_embedding_layer_norm = torch.nn.LayerNorm(input_shapes[“user_embedding”][-1])</p>
+</dd>
+<dt>else:</dt><dd><p>self._user_embedding_layer_norm = None</p>
+</dd>
+<dt>if “user_eng_embedding” in data_config.seg_dense_schema.renamed_features:</dt><dd><p>embedding_dims += input_shapes[“user_eng_embedding”][-1]
+self._user_eng_embedding_layer_norm = torch.nn.LayerNorm(</p>
+<blockquote>
+<div><p>input_shapes[“user_eng_embedding”][-1]</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+<dt>else:</dt><dd><p>self._user_eng_embedding_layer_norm = None</p>
+</dd>
+<dt>if “author_embedding” in data_config.seg_dense_schema.renamed_features:</dt><dd><p>embedding_dims += input_shapes[“author_embedding”][-1]
+self._author_embedding_layer_norm = torch.nn.LayerNorm(input_shapes[“author_embedding”][-1])</p>
+</dd>
+<dt>else:</dt><dd><p>self._author_embedding_layer_norm = None</p>
+</dd>
+</dl>
+<p>input_dims = input_shapes[“continuous”][-1] + input_shapes[“binary”][-1] + embedding_dims</p>
+<dl class="simple">
+<dt>if config.position_debias_config:</dt><dd><p>self.position_debias_model = PositionDebias(config.position_debias_config)
+input_dims += self.position_debias_model.out_features</p>
+</dd>
+<dt>else:</dt><dd><p>self.position_debias_model = None</p>
+</dd>
+</dl>
+<p>logging.info(f”input dim: {input_dims}”)</p>
+<dl class="simple">
+<dt>if config.multi_task_type in [</dt><dd><p>model_config_mod.MultiTaskType.SHARE_ALL,
+model_config_mod.MultiTaskType.SHARE_PARTIAL,</p>
+</dd>
+<dt>]:</dt><dd><p>self._backbone = _build_single_task_model(config.backbone, input_dims)</p>
+</dd>
+<dt>else:</dt><dd><p>self._backbone = None</p>
+</dd>
+</dl>
+<p>_towers: Dict[str, torch.nn.Module] = {}
+_calibrators: Dict[str, torch.nn.Module] = {}
+_affine_maps: Dict[str, torch.nn.Module] = {}</p>
+<dl>
+<dt>for task_name, task_architecture in config.tasks.items():</dt><dd><p>safe_name = sanitize(task_name)</p>
+<p># Complex input dimension calculation.
+if config.multi_task_type == model_config_mod.MultiTaskType.SHARE_NONE:</p>
+<blockquote>
+<div><p>num_inputs = input_dims</p>
+</div></blockquote>
+<dl class="simple">
+<dt>elif config.multi_task_type == model_config_mod.MultiTaskType.SHARE_ALL:</dt><dd><p>num_inputs = self._backbone.out_features</p>
+</dd>
+<dt>elif config.multi_task_type == model_config_mod.MultiTaskType.SHARE_PARTIAL:</dt><dd><p>num_inputs = input_dims + self._backbone.out_features</p>
+</dd>
+<dt>else:</dt><dd><p>raise ValueError(“Unreachable branch of enum.”)</p>
+</dd>
+</dl>
+<p># Annoyingly, ModuleDict doesn’t allow . inside key names.
+_towers[safe_name] = _build_single_task_model(task_architecture, num_inputs)</p>
+<dl class="simple">
+<dt>if task_architecture.affine_map:</dt><dd><p>affine_map = torch.nn.Linear(1, 1)
+affine_map.weight.data = torch.tensor([[task_architecture.affine_map.scale]])
+affine_map.bias.data = torch.tensor([task_architecture.affine_map.bias])
+_affine_maps[safe_name] = affine_map</p>
+</dd>
+<dt>else:</dt><dd><p>_affine_maps[safe_name] = torch.nn.Identity()</p>
+</dd>
+<dt>_calibrators[safe_name] = numeric_calibration.NumericCalibration(</dt><dd><p>pos_downsampling_rate=data_config.tasks[task_name].pos_downsampling_rate,
+neg_downsampling_rate=data_config.tasks[task_name].neg_downsampling_rate,</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>self._task_names = list(config.tasks.keys())
+self._towers = torch.nn.ModuleDict(_towers)
+self._affine_maps = torch.nn.ModuleDict(_affine_maps)
+self._calibrators = torch.nn.ModuleDict(_calibrators)</p>
+<p>self._counter = torch.autograd.Variable(torch.tensor(0), requires_grad=False)</p>
+</dd>
+<dt>def forward(</dt><dd><p>self,
+continuous_features: torch.Tensor,
+binary_features: torch.Tensor,
+discrete_features: Optional[torch.Tensor] = None,
+sparse_features=None,  # Optional[KeyedJaggedTensor]
+user_embedding: Optional[torch.Tensor] = None,
+user_eng_embedding: Optional[torch.Tensor] = None,
+author_embedding: Optional[torch.Tensor] = None,
+labels: Optional[torch.Tensor] = None,
+weights: Optional[torch.Tensor] = None,</p>
+</dd>
+<dt>):</dt><dd><dl class="simple">
+<dt>concat_dense_features = [</dt><dd><p>self._preprocessor(continuous_features=continuous_features, binary_features=binary_features)</p>
+</dd>
+</dl>
+<p>]</p>
+<dl class="simple">
+<dt>if self.embeddings:</dt><dd><p>concat_dense_features.append(self.embeddings(sparse_features))</p>
+</dd>
+</dl>
+<p># Twhin embedding layer norms
+if self.small_embeddings:</p>
+<blockquote>
+<div><dl>
+<dt>if discrete_features is None:</dt><dd><dl class="simple">
+<dt>raise ValueError(</dt><dd><p>“Forward arg discrete_features is None, but since small_embeddings are used, a Tensor is expected.”</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>concat_dense_features.append(self.small_embeddings(discrete_features))</p>
+</div></blockquote>
+<dl>
+<dt>if self._user_embedding_layer_norm:</dt><dd><dl>
+<dt>if user_embedding is None:</dt><dd><dl class="simple">
+<dt>raise ValueError(</dt><dd><p>“Forward arg user_embedding is None, but since Twhin user_embeddings are used by the model, a Tensor is expected.”</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>concat_dense_features.append(self._user_embedding_layer_norm(user_embedding))</p>
+</dd>
+<dt>if self._user_eng_embedding_layer_norm:</dt><dd><dl>
+<dt>if user_eng_embedding is None:</dt><dd><dl class="simple">
+<dt>raise ValueError(</dt><dd><p>“Forward arg user_eng_embedding is None, but since Twhin user_eng_embeddings are used by the model, a Tensor is expected.”</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>concat_dense_features.append(self._user_eng_embedding_layer_norm(user_eng_embedding))</p>
+</dd>
+<dt>if self._author_embedding_layer_norm:</dt><dd><dl>
+<dt>if author_embedding is None:</dt><dd><dl class="simple">
+<dt>raise ValueError(</dt><dd><p>“Forward arg author_embedding is None, but since Twhin author_embeddings are used by the model, a Tensor is expected.”</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>concat_dense_features.append(self._author_embedding_layer_norm(author_embedding))</p>
+</dd>
+<dt>if self.position_debias_model:</dt><dd><dl>
+<dt>if discrete_features is None:</dt><dd><dl class="simple">
+<dt>raise ValueError(</dt><dd><p>“Forward arg discrete_features is None, but since position_debias_model is used, a Tensor is expected.”</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>concat_dense_features.append(self.position_debias_model(discrete_features))</p>
+</dd>
+<dt>if discrete_features is not None and not (self.position_debias_model or self.small_embeddings):</dt><dd><p>logging.warning(“Forward arg discrete_features is passed, but never used.”)</p>
+</dd>
+</dl>
+<p>concat_dense_features = torch.cat(concat_dense_features, dim=1)</p>
+<dl>
+<dt>if self._backbone:</dt><dd><dl>
+<dt>if self._config.multi_task_type == model_config_mod.MultiTaskType.SHARE_ALL:</dt><dd><p>net = self._backbone(concat_dense_features)[“output”]</p>
+</dd>
+<dt>elif self._config.multi_task_type == model_config_mod.MultiTaskType.SHARE_PARTIAL:</dt><dd><dl class="simple">
+<dt>net = torch.cat(</dt><dd><p>[concat_dense_features, self._backbone(concat_dense_features)[“output”]], dim=1</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+<dt>else:</dt><dd><p>net = concat_dense_features</p>
+</dd>
+</dl>
+<p>backbone_result = net</p>
+<p>all_logits = []
+all_probabilities = []
+all_calibrated_probabilities = []</p>
+<dl>
+<dt>for task_name in self._task_names:</dt><dd><p>safe_name = sanitize(task_name)
+tower_outputs = self._towers[safe_name](net)
+logits = tower_outputs[“output”]
+scaled_logits = self._affine_maps[safe_name](logits)
+probabilities = torch.sigmoid(scaled_logits)
+calibrated_probabilities = self._calibrators[safe_name](probabilities)</p>
+<p>all_logits.append(scaled_logits)
+all_probabilities.append(probabilities)
+all_calibrated_probabilities.append(calibrated_probabilities)</p>
+</dd>
+<dt>results = {</dt><dd><p>“logits”: torch.squeeze(torch.stack(all_logits, dim=1), dim=-1),
+“probabilities”: torch.squeeze(torch.stack(all_probabilities, dim=1), dim=-1),
+“calibrated_probabilities”: torch.squeeze(</p>
+<blockquote>
+<div><p>torch.stack(all_calibrated_probabilities, dim=1), dim=-1</p>
+</div></blockquote>
+<p>),</p>
+</dd>
+</dl>
+<p>}</p>
+<p># Returning the backbone is intended for stitching post-tf conversion
+# Leaving this on will ~200x the size of the output
+# and could slow things down
+if self.return_backbone:</p>
+<blockquote>
+<div><p>results[“backbone”] = backbone_result</p>
+</div></blockquote>
+<p>return results</p>
+</dd>
+</dl>
+</dd>
+<dt>def create_ranking_model(</dt><dd><p>data_spec,
+# Used for planner to be batch size aware.
+config: config_mod.RecapConfig,
+device: torch.device,
+loss_fn: Optional[Callable] = None,
+data_config=None,
+return_backbone=False,</p>
+</dd>
+</dl>
+<p>):</p>
+<blockquote>
+<div><dl>
+<dt>if list(config.model.tasks.values())[0].dlrm_config:</dt><dd><p>raise NotImplementedError()
+model = EmbeddingRankingModel(</p>
+<blockquote>
+<div><p>input_shapes=data_spec,
+config=all_config.model,
+data_config=all_config.train_data,</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+<dt>else:</dt><dd><dl class="simple">
+<dt>model = MultiTaskRankingModel(</dt><dd><p>input_shapes=data_spec,
+config=config.model,
+data_config=data_config if data_config is not None else config.train_data,
+return_backbone=return_backbone,</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>logging.info(”<strong>*</strong> Model Architecture <strong>*</strong>”)
+logging.info(model)</p>
+<p>logging.info(”<strong>*</strong> Named Parameters <strong>*</strong>”)
+for elem in model.named_parameters():</p>
+<blockquote>
+<div><p>logging.info(elem[0])</p>
+</div></blockquote>
+<dl>
+<dt>if loss_fn:</dt><dd><p>logging.info(”<strong>*</strong> Wrapping in loss <strong>*</strong>”)
+model = ModelAndLoss(</p>
+<blockquote>
+<div><p>model=model,
+loss_fn=loss_fn,
+stratifiers=config.model.stratifiers,</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>return model</p>
+</div></blockquote>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../_sources/projects/home/recap/model/entrypoint.py.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

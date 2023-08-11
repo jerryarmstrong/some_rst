@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../" id="documentation_options" src="../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.earlybird.search.queries;</p>
+<p>import java.io.IOException;
+import javax.annotation.Nullable;</p>
+<p>import com.google.common.annotations.VisibleForTesting;</p>
+<p>import org.apache.lucene.search.DocIdSetIterator;</p>
+<p>import com.twitter.common.util.Clock;
+import com.twitter.search.common.metrics.SearchCounter;
+import com.twitter.search.common.search.EarlyTerminationState;
+import com.twitter.search.common.search.TerminationTracker;
+import com.twitter.search.earlybird.common.config.EarlybirdConfig;</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>DocIdSetIterator whose nextDoc() and advance() will early terminate by returning NO_MORE_DOCS</p></li>
+<li><p>after the given deadline.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>public class TimedDocIdSetIterator extends DocIdSetIterator {</dt><dd><p>// check deadline every NEXT_CALL_TIMEOUT_CHECK_PERIOD calls to nextDoc()
+&#64;VisibleForTesting
+protected static final int NEXT_CALL_TIMEOUT_CHECK_PERIOD =</p>
+<blockquote>
+<div><p>EarlybirdConfig.getInt(“timed_doc_id_set_next_doc_deadline_check_period”, 1000);</p>
+</div></blockquote>
+<p>// check deadline every ADVANCE_CALL_TIMEOUT_CHECK_PERIOD calls to advance()
+private static final int ADVANCE_CALL_TIMEOUT_CHECK_PERIOD =</p>
+<blockquote>
+<div><p>EarlybirdConfig.getInt(“timed_doc_id_set_advance_deadline_check_period”, 100);</p>
+</div></blockquote>
+<p>private final Clock clock;
+private final DocIdSetIterator innerIterator;
+private final SearchCounter timeoutCountStat;</p>
+<p>&#64;Nullable
+private final TerminationTracker terminationTracker;
+private final long deadlineMillisFromEpoch;</p>
+<p>private int docId = -1;
+private int nextCounter = 0;
+private int advanceCounter = 0;</p>
+<dl>
+<dt>public TimedDocIdSetIterator(DocIdSetIterator innerIterator,</dt><dd><blockquote>
+<div><p>&#64;Nullable TerminationTracker terminationTracker,
+final long timeoutOverride,
+&#64;Nullable SearchCounter timeoutCountStat) {</p>
+</div></blockquote>
+<p>this(innerIterator, terminationTracker, timeoutOverride, timeoutCountStat, Clock.SYSTEM_CLOCK);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>protected TimedDocIdSetIterator(DocIdSetIterator innerIterator,</dt><dd><blockquote>
+<div><p>&#64;Nullable TerminationTracker terminationTracker,
+final long timeoutOverride,
+&#64;Nullable SearchCounter timeoutCountStat,
+Clock clock) {</p>
+</div></blockquote>
+<p>this.clock = clock;
+this.innerIterator = innerIterator;
+this.timeoutCountStat = timeoutCountStat;
+this.terminationTracker = terminationTracker;</p>
+<dl>
+<dt>if (terminationTracker == null) {</dt><dd><p>deadlineMillisFromEpoch = -1;</p>
+</dd>
+<dt>} else {</dt><dd><dl class="simple">
+<dt>if (timeoutOverride &gt; 0) {</dt><dd><p>deadlineMillisFromEpoch = terminationTracker.getClientStartTimeMillis() + timeoutOverride;</p>
+</dd>
+<dt>} else {</dt><dd><p>deadlineMillisFromEpoch = terminationTracker.getTimeoutEndTimeWithReservation();</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;VisibleForTesting
+protected TimedDocIdSetIterator(DocIdSetIterator innerIterator,</p>
+<blockquote>
+<div><blockquote>
+<div><p>final long deadline,
+&#64;Nullable SearchCounter timeoutCountStat,
+Clock clock) {</p>
+</div></blockquote>
+<p>this.clock = clock;
+this.innerIterator = innerIterator;
+this.timeoutCountStat = timeoutCountStat;
+this.terminationTracker = null;</p>
+<p>this.deadlineMillisFromEpoch = deadline;</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public int docID() {</p>
+<blockquote>
+<div><p>return docId;</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public int nextDoc() throws IOException {</p>
+<blockquote>
+<div><dl>
+<dt>if (++nextCounter % NEXT_CALL_TIMEOUT_CHECK_PERIOD == 0</dt><dd><blockquote>
+<div><p>&amp;&amp; clock.nowMillis() &gt; deadlineMillisFromEpoch) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>if (timeoutCountStat != null) {</dt><dd><p>timeoutCountStat.increment();</p>
+</dd>
+</dl>
+<p>}
+if (terminationTracker != null) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>terminationTracker.setEarlyTerminationState(</dt><dd><p>EarlyTerminationState.TERMINATED_TIME_OUT_EXCEEDED);</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<p>return docId = NO_MORE_DOCS;</p>
+</dd>
+</dl>
+<p>}
+return docId = innerIterator.nextDoc();</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public int advance(int target) throws IOException {</p>
+<blockquote>
+<div><dl>
+<dt>if (++advanceCounter % ADVANCE_CALL_TIMEOUT_CHECK_PERIOD == 0</dt><dd><blockquote>
+<div><p>&amp;&amp; clock.nowMillis() &gt; deadlineMillisFromEpoch) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>if (timeoutCountStat != null) {</dt><dd><p>timeoutCountStat.increment();</p>
+</dd>
+</dl>
+<p>}
+if (terminationTracker != null) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>terminationTracker.setEarlyTerminationState(</dt><dd><p>EarlyTerminationState.TERMINATED_TIME_OUT_EXCEEDED);</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+return docId = NO_MORE_DOCS;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>return docId = innerIterator.advance(target);</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public long cost() {</p>
+<blockquote>
+<div><p>return innerIterator.cost();</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../_sources/src/java/com/twitter/search/earlybird/search/queries/TimedDocIdSetIterator.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

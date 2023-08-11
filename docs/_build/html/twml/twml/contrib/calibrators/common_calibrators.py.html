@@ -1,0 +1,911 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../" id="documentation_options" src="../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p># pylint: disable=invalid-name, no-member, unused-argument
+“””
+This module contains common calibrate and export functions for calibrators.
+“””</p>
+<p># These 3 TODO are encapsulated by CX-11446
+# TODO: many of these functions hardcode datarecords yet don’t allow passing a parse_fn.
+# TODO: provide more generic (non DataRecord specific) functions
+# TODO: many of these functions aren’t common at all.
+#       For example, Discretizer functions should be moved to PercentileDiscretizer.</p>
+<p>import copy
+import os
+import time</p>
+<p>from absl import logging
+import tensorflow.compat.v1 as tf
+import tensorflow_hub as hub
+import twml
+from twml.argument_parser import SortingHelpFormatter
+from twml.input_fns import data_record_input_fn
+from twml.util import list_files_by_datetime, sanitize_hdfs_path
+from twml.contrib.calibrators.isotonic import IsotonicCalibrator</p>
+<dl>
+<dt>def calibrator_arguments(parser):</dt><dd><p>“””
+Calibrator Parameters to add to relevant parameters to the DataRecordTrainerParser.
+Otherwise, if alone in a file, it just creates its own default parser.
+Arguments:</p>
+<blockquote>
+<div><dl class="simple">
+<dt>parser:</dt><dd><p>Parser with the options to the model</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>“””
+parser.add_argument(”–calibrator.save_dir”, type=str,</p>
+<blockquote>
+<div><p>dest=”calibrator_save_dir”,
+help=”Path to save or load calibrator calibration”)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>parser.add_argument(”–calibrator_batch_size”, type=int, default=128,</dt><dd><p>dest=”calibrator_batch_size”,
+help=”calibrator batch size”)</p>
+</dd>
+<dt>parser.add_argument(”–calibrator_parts_downsampling_rate”, type=float, default=1,</dt><dd><p>dest=”calibrator_parts_downsampling_rate”,
+help=”Parts downsampling rate”)</p>
+</dd>
+<dt>parser.add_argument(”–calibrator_max_steps”, type=int, default=None,</dt><dd><p>dest=”calibrator_max_steps”,
+help=”Max Steps taken by calibrator to accumulate samples”)</p>
+</dd>
+<dt>parser.add_argument(”–calibrator_num_bins”, type=int, default=22,</dt><dd><p>dest=”calibrator_num_bins”,
+help=”Num bins of calibrator”)</p>
+</dd>
+<dt>parser.add_argument(”–isotonic_calibrator”, dest=’isotonic_calibrator’, action=’store_true’,</dt><dd><p>help=”Isotonic Calibrator present”)</p>
+</dd>
+<dt>parser.add_argument(”–calibrator_keep_rate”, type=float, default=1.0,</dt><dd><p>dest=”calibrator_keep_rate”,
+help=”Keep rate”)</p>
+</dd>
+</dl>
+<p>return parser</p>
+</dd>
+</dl>
+<p>def _generate_files_by_datetime(params):</p>
+<blockquote>
+<div><dl class="simple">
+<dt>files = list_files_by_datetime(</dt><dd><p>base_path=sanitize_hdfs_path(params.train_data_dir),
+start_datetime=params.train_start_datetime,
+end_datetime=params.train_end_datetime,
+datetime_prefix_format=params.datetime_format,
+extension=”lzo”,
+parallelism=1,
+hour_resolution=params.hour_resolution,
+sort=True)</p>
+</dd>
+</dl>
+<p>return files</p>
+</div></blockquote>
+<dl>
+<dt>def get_calibrate_input_fn(parse_fn, params):</dt><dd><p>“””
+Default input function used for the calibrator.
+Arguments:</p>
+<blockquote>
+<div><dl class="simple">
+<dt>parse_fn:</dt><dd><p>Parse_fn</p>
+</dd>
+<dt>params:</dt><dd><p>Parameters</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl class="simple">
+<dt>Returns:</dt><dd><p>input_fn</p>
+</dd>
+</dl>
+<p>“””</p>
+<dl class="simple">
+<dt>return lambda: data_record_input_fn(</dt><dd><p>files=_generate_files_by_datetime(params),
+batch_size=params.calibrator_batch_size,
+parse_fn=parse_fn,
+num_threads=1,
+repeat=False,
+keep_rate=params.calibrator_keep_rate,
+parts_downsampling_rate=params.calibrator_parts_downsampling_rate,
+shards=None,
+shard_index=None,
+shuffle=True,
+shuffle_files=True,
+interleave=True)</p>
+</dd>
+</dl>
+</dd>
+<dt>def get_discretize_input_fn(parse_fn, params):</dt><dd><p>“””
+Default input function used for the calibrator.
+Arguments:</p>
+<blockquote>
+<div><dl class="simple">
+<dt>parse_fn:</dt><dd><p>Parse_fn</p>
+</dd>
+<dt>params:</dt><dd><p>Parameters</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl class="simple">
+<dt>Returns:</dt><dd><p>input_fn</p>
+</dd>
+</dl>
+<p>“””</p>
+<dl class="simple">
+<dt>return lambda: data_record_input_fn(</dt><dd><p>files=_generate_files_by_datetime(params),
+batch_size=params.discretizer_batch_size,
+parse_fn=parse_fn,
+num_threads=1,
+repeat=False,
+keep_rate=params.discretizer_keep_rate,
+parts_downsampling_rate=params.discretizer_parts_downsampling_rate,
+shards=None,
+shard_index=None,
+shuffle=True,
+shuffle_files=True,
+interleave=True)</p>
+</dd>
+</dl>
+</dd>
+<dt>def discretizer_arguments(parser=None):</dt><dd><p>“””
+Discretizer Parameters to add to relevant parameters to the DataRecordTrainerParser.
+Otherwise, if alone in a file, it just creates its own default parser.
+Arguments:</p>
+<blockquote>
+<div><dl class="simple">
+<dt>parser:</dt><dd><p>Parser with the options to the model. Defaults to None</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>“””</p>
+<dl>
+<dt>if parser is None:</dt><dd><p>parser = twml.DefaultSubcommandArgParse(formatter_class=SortingHelpFormatter)
+parser.add_argument(</p>
+<blockquote>
+<div><p>“–overwrite_save_dir”, dest=”overwrite_save_dir”, action=”store_true”,
+help=”Delete the contents of the current save_dir if it exists”)</p>
+</div></blockquote>
+<dl>
+<dt>parser.add_argument(</dt><dd><p>“–train.data_dir”, “–train_data_dir”, type=str, default=None,
+dest=”train_data_dir”,
+help=”Path to the training data directory.”</p>
+<blockquote>
+<div><p>“Supports local and HDFS (hdfs://default/&lt;path&gt; ) paths.”)</p>
+</div></blockquote>
+</dd>
+<dt>parser.add_argument(</dt><dd><p>“–train.start_date”, “–train_start_datetime”,
+type=str, default=None,
+dest=”train_start_datetime”,
+help=”Starting date for training inside the train data dir.”</p>
+<blockquote>
+<div><p>“The start datetime is inclusive.”
+“e.g. 2019/01/15”)</p>
+</div></blockquote>
+</dd>
+<dt>parser.add_argument(</dt><dd><p>“–train.end_date”, “–train_end_datetime”, type=str, default=None,
+dest=”train_end_datetime”,
+help=”Ending date for training inside the train data dir.”</p>
+<blockquote>
+<div><p>“The end datetime is inclusive.”
+“e.g. 2019/01/15”)</p>
+</div></blockquote>
+</dd>
+<dt>parser.add_argument(</dt><dd><p>“–datetime_format”, type=str, default=”%Y/%m/%d”,
+help=”Date format for training and evaluation datasets.”</p>
+<blockquote>
+<div><p>“Has to be a format that is understood by python datetime.”
+“e.g. %Y/%m/%d for 2019/01/15.”
+“Used only if {train/eval}.{start/end}_date are provided.”)</p>
+</div></blockquote>
+</dd>
+<dt>parser.add_argument(</dt><dd><p>“–hour_resolution”, type=int, default=None,
+help=”Specify the hourly resolution of the stored data.”)</p>
+</dd>
+<dt>parser.add_argument(</dt><dd><p>“–tensorboard_port”, type=int, default=None,
+help=”Port for tensorboard to run on.”)</p>
+</dd>
+<dt>parser.add_argument(</dt><dd><p>“–stats_port”, type=int, default=None,
+help=”Port for stats server to run on.”)</p>
+</dd>
+<dt>parser.add_argument(</dt><dd><p>“–health_port”, type=int, default=None,
+help=”Port to listen on for health-related endpoints (e.g. graceful shutdown).”</p>
+<blockquote>
+<div><p>“Not user-facing as it is set automatically by the twml_cli.”</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>)
+parser.add_argument(</p>
+<blockquote>
+<div><p>“–data_spec”, type=str, default=None,
+help=”Path to data specification JSON file. This file is used to decode DataRecords”)</p>
+</div></blockquote>
+</dd>
+<dt>parser.add_argument(”–discretizer.save_dir”, type=str,</dt><dd><p>dest=”discretizer_save_dir”,
+help=”Path to save or load discretizer calibration”)</p>
+</dd>
+<dt>parser.add_argument(”–discretizer_batch_size”, type=int, default=128,</dt><dd><p>dest=”discretizer_batch_size”,
+help=”Discretizer batch size”)</p>
+</dd>
+<dt>parser.add_argument(”–discretizer_keep_rate”, type=float, default=0.0008,</dt><dd><p>dest=”discretizer_keep_rate”,
+help=”Keep rate”)</p>
+</dd>
+<dt>parser.add_argument(”–discretizer_parts_downsampling_rate”, type=float, default=0.2,</dt><dd><p>dest=”discretizer_parts_downsampling_rate”,
+help=”Parts downsampling rate”)</p>
+</dd>
+<dt>parser.add_argument(”–discretizer_max_steps”, type=int, default=None,</dt><dd><p>dest=”discretizer_max_steps”,
+help=”Max Steps taken by discretizer to accumulate samples”)</p>
+</dd>
+</dl>
+<p>return parser</p>
+</dd>
+<dt>def calibrate(trainer, params, build_graph, input_fn, debug=False):</dt><dd><p>“””
+Calibrate Isotonic Calibration
+Arguments:</p>
+<blockquote>
+<div><dl class="simple">
+<dt>trainer:</dt><dd><p>Trainer</p>
+</dd>
+<dt>params:</dt><dd><p>Parameters</p>
+</dd>
+<dt>build_graph:</dt><dd><p>Build Graph used to be the input to the calibrator</p>
+</dd>
+<dt>input_fn:</dt><dd><p>Input Function specified by the user</p>
+</dd>
+<dt>debug:</dt><dd><p>Defaults to False. Returns the calibrator</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>“””</p>
+<p>if trainer._estimator.config.is_chief:</p>
+<blockquote>
+<div><p># overwrite the current save_dir
+if params.overwrite_save_dir and tf.io.gfile.exists(params.calibrator_save_dir):</p>
+<blockquote>
+<div><dl class="simple">
+<dt>logging.info(“Trainer overwriting existing save directory: %s (params.overwrite_save_dir)”</dt><dd><p>% params.calibrator_save_dir)</p>
+</dd>
+</dl>
+<p>tf.io.gfile.rmtree(params.calibrator_save_dir)</p>
+</div></blockquote>
+<p>calibrator = IsotonicCalibrator(params.calibrator_num_bins)</p>
+<p># chief trains discretizer
+logging.info(“Chief training calibrator”)</p>
+<p># Accumulate the features for each calibrator
+features, labels = input_fn()
+if ‘weights’ not in features:</p>
+<blockquote>
+<div><p>raise ValueError(“Weights need to be returned as part of the parse_fn”)</p>
+</div></blockquote>
+<p>weights = features.pop(‘weights’)</p>
+<p>preds = build_graph(features=features, label=None, mode=’infer’, params=params, config=None)
+init = tf.global_variables_initializer()
+table_init = tf.tables_initializer()
+with tf.Session() as sess:</p>
+<blockquote>
+<div><p>sess.run(init)
+sess.run(table_init)
+count = 0
+max_steps = params.calibrator_max_steps or -1
+while max_steps &lt;= 0 or count &lt;= max_steps:</p>
+<blockquote>
+<div><dl class="simple">
+<dt>try:</dt><dd><p>weights_vals, labels_vals, preds_vals = sess.run([weights, labels, preds[‘output’]])
+calibrator.accumulate(preds_vals, labels_vals, weights_vals.flatten())</p>
+</dd>
+<dt>except tf.errors.OutOfRangeError:</dt><dd><p>break</p>
+</dd>
+</dl>
+<p>count += 1</p>
+</div></blockquote>
+</div></blockquote>
+<p>calibrator.calibrate()
+calibrator.save(params.calibrator_save_dir)
+trainer.estimator._params.isotonic_calibrator = True</p>
+<dl class="simple">
+<dt>if debug:</dt><dd><p>return calibrator</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl>
+<dt>else:</dt><dd><p>calibrator_save_dir = twml.util.sanitize_hdfs_path(params.calibrator_save_dir)
+# workers wait for calibration to be ready
+while not tf.io.gfile.exists(calibrator_save_dir + os.path.sep + “tfhub_module.pb”):</p>
+<blockquote>
+<div><p>logging.info(“Worker waiting for calibration at %s” % calibrator_save_dir)
+time.sleep(60)</p>
+</div></blockquote>
+</dd>
+</dl>
+</dd>
+<dt>def discretize(params, feature_config, input_fn, debug=False):</dt><dd><p>“””
+Discretizes continuous features
+Arguments:</p>
+<blockquote>
+<div><dl class="simple">
+<dt>params:</dt><dd><p>Parameters</p>
+</dd>
+<dt>input_fn:</dt><dd><p>Input Function specified by the user</p>
+</dd>
+<dt>debug:</dt><dd><p>Defaults to False. Returns the calibrator</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>“””</p>
+<dl>
+<dt>if (os.environ.get(“TWML_HOGWILD_TASK_TYPE”) == “chief” or “num_workers” not in params or</dt><dd><p>params.num_workers is None):</p>
+<p># overwrite the current save_dir
+if params.overwrite_save_dir and tf.io.gfile.exists(params.discretizer_save_dir):</p>
+<blockquote>
+<div><dl class="simple">
+<dt>logging.info(“Trainer overwriting existing save directory: %s (params.overwrite_save_dir)”</dt><dd><p>% params.discretizer_save_dir)</p>
+</dd>
+</dl>
+<p>tf.io.gfile.rmtree(params.discretizer_save_dir)</p>
+</div></blockquote>
+<p>config_map = feature_config()
+discretize_dict = config_map[‘discretize_config’]</p>
+<p># chief trains discretizer
+logging.info(“Chief training discretizer”)</p>
+<p>batch = input_fn()
+# Accumulate the features for each calibrator
+with tf.Session() as sess:</p>
+<blockquote>
+<div><p>count = 0
+max_steps = params.discretizer_max_steps or -1
+while max_steps &lt;= 0 or count &lt;= max_steps:</p>
+<blockquote>
+<div><dl>
+<dt>try:</dt><dd><p>inputs = sess.run(batch)
+for name, clbrt in discretize_dict.items():</p>
+<blockquote>
+<div><p>clbrt.accumulate_features(inputs[0], name)</p>
+</div></blockquote>
+</dd>
+<dt>except tf.errors.OutOfRangeError:</dt><dd><p>break</p>
+</dd>
+</dl>
+<p>count += 1</p>
+</div></blockquote>
+</div></blockquote>
+<p># This module allows for the calibrator to save be saved as part of
+# Tensorflow Hub (this will allow it to be used in further steps)
+def calibrator_module():</p>
+<blockquote>
+<div><p># Note that this is usually expecting a sparse_placeholder
+for name, clbrt in discretize_dict.items():</p>
+<blockquote>
+<div><p>clbrt.calibrate()
+clbrt.add_hub_signatures(name)</p>
+</div></blockquote>
+</div></blockquote>
+<p># exports the module to the save_dir
+spec = hub.create_module_spec(calibrator_module)
+with tf.Graph().as_default():</p>
+<blockquote>
+<div><p>module = hub.Module(spec)
+with tf.Session() as session:</p>
+<blockquote>
+<div><p>module.export(params.discretizer_save_dir, session)</p>
+</div></blockquote>
+</div></blockquote>
+<dl class="simple">
+<dt>for name, clbrt in discretize_dict.items():</dt><dd><p>clbrt.write_summary_json(params.discretizer_save_dir, name)</p>
+</dd>
+<dt>if debug:</dt><dd><p>return discretize_dict</p>
+</dd>
+</dl>
+</dd>
+<dt>else:</dt><dd><p># wait for the file to be removed (if necessary)
+# should be removed after an actual fix applied
+time.sleep(60)
+discretizer_save_dir = twml.util.sanitize_hdfs_path(params.discretizer_save_dir)
+# workers wait for calibration to be ready
+while not tf.io.gfile.exists(discretizer_save_dir + os.path.sep + “tfhub_module.pb”):</p>
+<blockquote>
+<div><p>logging.info(“Worker waiting for calibration at %s” % discretizer_save_dir)
+time.sleep(60)</p>
+</div></blockquote>
+</dd>
+</dl>
+</dd>
+<dt>def add_discretizer_arguments(parser):</dt><dd><p>“””
+Add discretizer-specific command-line arguments to a Trainer parser.</p>
+<dl class="simple">
+<dt>Arguments:</dt><dd><p>parser: argparse.ArgumentParser instance obtained from Trainer.get_trainer_parser</p>
+</dd>
+<dt>Returns:</dt><dd><p>argparse.ArgumentParser instance with discretizer-specific arguments added</p>
+</dd>
+</dl>
+<p>“””</p>
+<dl class="simple">
+<dt>parser.add_argument(”–discretizer.save_dir”, type=str,</dt><dd><p>dest=”discretizer_save_dir”,
+help=”Path to save or load discretizer calibration”)</p>
+</dd>
+<dt>parser.add_argument(”–discretizer.batch_size”, type=int, default=128,</dt><dd><p>dest=”discretizer_batch_size”,
+help=”Discretizer batch size”)</p>
+</dd>
+<dt>parser.add_argument(”–discretizer.keep_rate”, type=float, default=0.0008,</dt><dd><p>dest=”discretizer_keep_rate”,
+help=”Keep rate”)</p>
+</dd>
+<dt>parser.add_argument(”–discretizer.parts_downsampling_rate”, type=float, default=0.2,</dt><dd><p>dest=”discretizer_parts_downsampling_rate”,
+help=”Parts downsampling rate”)</p>
+</dd>
+<dt>parser.add_argument(”–discretizer.num_bins”, type=int, default=20,</dt><dd><p>dest=”discretizer_num_bins”,
+help=”Number of bins per feature”)</p>
+</dd>
+<dt>parser.add_argument(”–discretizer.output_size_bits”, type=int, default=22,</dt><dd><p>dest=”discretizer_output_size_bits”,
+help=”Number of bits allocated to the output size”)</p>
+</dd>
+</dl>
+<p>return parser</p>
+</dd>
+<dt>def add_isotonic_calibrator_arguments(parser):</dt><dd><p>“””
+Add discretizer-specific command-line arguments to a Trainer parser.</p>
+<dl class="simple">
+<dt>Arguments:</dt><dd><p>parser: argparse.ArgumentParser instance obtained from Trainer.get_trainer_parser</p>
+</dd>
+<dt>Returns:</dt><dd><p>argparse.ArgumentParser instance with discretizer-specific arguments added</p>
+</dd>
+</dl>
+<p>“””
+parser.add_argument(”–calibrator.num_bins”, type=int,</p>
+<blockquote>
+<div><p>default=25000, dest=”calibrator_num_bins”,
+help=”number of bins for isotonic calibration”)</p>
+</div></blockquote>
+<dl>
+<dt>parser.add_argument(”–calibrator.parts_downsampling_rate”, type=float, default=0.1,</dt><dd><p>dest=”calibrator_parts_downsampling_rate”, help=”Parts downsampling rate”)</p>
+</dd>
+<dt>parser.add_argument(”–calibrator.save_dir”, type=str,</dt><dd><p>dest=”calibrator_save_dir”, help=”Path to save or load calibrator output”)</p>
+</dd>
+<dt>parser.add_argument(”–calibrator.load_tensorflow_module”, type=str, default=None,</dt><dd><p>dest=”calibrator_load_tensorflow_module”,
+help=”Location from where to load a pretrained graph from. </p>
+<blockquote>
+<div><p>Typically, this is where the MLP graph is saved”)</p>
+</div></blockquote>
+</dd>
+<dt>parser.add_argument(”–calibrator.export_mlp_module_name”, type=str, default=’tf_hub_mlp’,</dt><dd><p>help=”Name for loaded hub signature”,
+dest=”export_mlp_module_name”)</p>
+</dd>
+<dt>parser.add_argument(”–calibrator.export_isotonic_module_name”,</dt><dd><p>type=str, default=”tf_hub_isotonic”,
+dest=”calibrator_export_module_name”,
+help=”export module name”)</p>
+</dd>
+<dt>parser.add_argument(”–calibrator.final_evaluation_steps”, type=int,</dt><dd><p>dest=”calibrator_final_evaluation_steps”, default=None,
+help=”number of steps for final evaluation”)</p>
+</dd>
+<dt>parser.add_argument(”–calibrator.train_steps”, type=int, default=-1,</dt><dd><p>dest=”calibrator_train_steps”,
+help=”number of steps for calibration”)</p>
+</dd>
+<dt>parser.add_argument(”–calibrator.batch_size”, type=int, default=1024,</dt><dd><p>dest=”calibrator_batch_size”,
+help=”Calibrator batch size”)</p>
+</dd>
+<dt>parser.add_argument(”–calibrator.is_calibrating”, action=’store_true’,</dt><dd><p>dest=”is_calibrating”,
+help=”Dummy argument to allow running in chief worker”)</p>
+</dd>
+</dl>
+<p>return parser</p>
+</dd>
+<dt>def calibrate_calibrator_and_export(name, calibrator, build_graph_fn, params, feature_config,</dt><dd><blockquote>
+<div><p>run_eval=True, input_fn=None, metric_fn=None,
+export_task_type_overrider=None):</p>
+</div></blockquote>
+<p>“””
+Pre-set <cite>isotonic calibrator</cite> calibrator.
+Args:</p>
+<blockquote>
+<div><dl class="simple">
+<dt>name:</dt><dd><p>scope name used for the calibrator</p>
+</dd>
+<dt>calibrator:</dt><dd><p>calibrator that will be calibrated and exported.</p>
+</dd>
+<dt>build_graph_fn:</dt><dd><p>build graph function for the calibrator</p>
+</dd>
+<dt>params:</dt><dd><p>params passed to the calibrator</p>
+</dd>
+<dt>feature_config:</dt><dd><p>feature config which will be passed to the trainer</p>
+</dd>
+<dt>export_task_type_overrider:</dt><dd><p>the task type for exporting the calibrator
+if specified, this will override the default export task type in trainer.hub_export(..)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>“””</p>
+<p># create calibrator params
+params_c = copy.deepcopy(params)
+params_c.data_threads = 1
+params_c.num_workers = 1
+params_c.continue_from_checkpoint = True
+params_c.overwrite_save_dir = False
+params_c.stats_port = None</p>
+<p># Automatically load from the saved Tensorflow Hub module if not specified.
+if params_c.calibrator_load_tensorflow_module is None:</p>
+<blockquote>
+<div><p>path_saved_tensorflow_model = os.path.join(params.save_dir, params.export_mlp_module_name)
+params_c.calibrator_load_tensorflow_module = path_saved_tensorflow_model</p>
+</div></blockquote>
+<dl class="simple">
+<dt>if “calibrator_parts_downsampling_rate” in params_c:</dt><dd><p>params_c.train_parts_downsampling_rate = params_c.calibrator_parts_downsampling_rate</p>
+</dd>
+<dt>if “calibrator_save_dir” in params_c:</dt><dd><p>params_c.save_dir = params_c.calibrator_save_dir</p>
+</dd>
+<dt>if “calibrator_batch_size” in params_c:</dt><dd><p>params_c.train_batch_size = params_c.calibrator_batch_size
+params_c.eval_batch_size = params_c.calibrator_batch_size</p>
+</dd>
+</dl>
+<p># TODO: Deprecate this option. It is not actually used. Calibrator
+#       simply iterates until the end of input_fn.
+if “calibrator_train_steps” in params_c:</p>
+<blockquote>
+<div><p>params_c.train_steps = params_c.calibrator_train_steps</p>
+</div></blockquote>
+<dl class="simple">
+<dt>if metric_fn is None:</dt><dd><p>metric_fn = twml.metrics.get_multi_binary_class_metric_fn(None)</p>
+</dd>
+</dl>
+<p># Common Trainer which will also be used by all workers
+trainer = twml.trainers.DataRecordTrainer(</p>
+<blockquote>
+<div><p>name=name,
+params=params_c,
+feature_config=feature_config,
+build_graph_fn=build_graph_fn,
+save_dir=params_c.save_dir,
+metric_fn=metric_fn</p>
+</div></blockquote>
+<p>)</p>
+<p>if trainer._estimator.config.is_chief:</p>
+<blockquote>
+<div><p># Chief trains calibrator
+logging.info(“Chief training calibrator”)</p>
+<p># Disregard hogwild config
+os_twml_hogwild_ports = os.environ.get(“TWML_HOGWILD_PORTS”)
+os.environ[“TWML_HOGWILD_PORTS”] = “”</p>
+<p>hooks = None
+if params_c.calibrator_train_steps &gt; 0:</p>
+<blockquote>
+<div><p>hooks = [twml.hooks.StepProgressHook(params_c.calibrator_train_steps)]</p>
+</div></blockquote>
+<dl class="simple">
+<dt>def parse_fn(input_x):</dt><dd><p>fc_parse_fn = feature_config.get_parse_fn()
+features, labels = fc_parse_fn(input_x)
+features[‘labels’] = labels
+return features, labels</p>
+</dd>
+<dt>if input_fn is None:</dt><dd><p>input_fn = trainer.get_train_input_fn(parse_fn=parse_fn, repeat=False)</p>
+</dd>
+</dl>
+<p># Calibrate stage
+trainer.estimator._params.mode = ‘calibrate’
+trainer.calibrate(calibrator=calibrator,</p>
+<blockquote>
+<div><p>input_fn=input_fn,
+steps=params_c.calibrator_train_steps,
+hooks=hooks)</p>
+</div></blockquote>
+<p># Save Checkpoint
+# We need to train for 1 step, to save the graph to checkpoint.
+# This is done just by the chief.
+# We need to set the mode to evaluate to save the graph that will be consumed
+# In the final evaluation
+trainer.estimator._params.mode = ‘evaluate’
+trainer.train(input_fn=input_fn, steps=1)</p>
+<p># Restore hogwild setup
+if os_twml_hogwild_ports is not None:</p>
+<blockquote>
+<div><p>os.environ[“TWML_HOGWILD_PORTS”] = os_twml_hogwild_ports</p>
+</div></blockquote>
+</div></blockquote>
+<dl>
+<dt>else:</dt><dd><p># Workers wait for calibration to be ready
+final_calibrator_path = os.path.join(params_c.calibrator_save_dir,</p>
+<blockquote>
+<div><p>params_c.calibrator_export_module_name)</p>
+</div></blockquote>
+<p>final_calibrator_path = twml.util.sanitize_hdfs_path(final_calibrator_path)</p>
+<dl class="simple">
+<dt>while not tf.io.gfile.exists(final_calibrator_path + os.path.sep + “tfhub_module.pb”):</dt><dd><p>logging.info(“Worker waiting for calibration at %s” % final_calibrator_path)
+time.sleep(60)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p># Evaluate stage
+if run_eval:</p>
+<blockquote>
+<div><p>trainer.estimator._params.mode = ‘evaluate’
+# This will allow the Evaluate method to be run in Hogwild
+# trainer.estimator._params.continue_from_checkpoint = True
+trainer.evaluate(name=’test’, input_fn=input_fn, steps=params_c.calibrator_final_evaluation_steps)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>trainer.hub_export(name=params_c.calibrator_export_module_name,</dt><dd><p>export_task_type_overrider=export_task_type_overrider,
+serving_input_receiver_fn=feature_config.get_serving_input_receiver_fn())</p>
+</dd>
+</dl>
+<p>return trainer</p>
+</dd>
+<dt>def calibrate_discretizer_and_export(name, calibrator, build_graph_fn, params, feature_config):</dt><dd><p>“””
+Pre-set percentile discretizer calibrator.
+Args:</p>
+<blockquote>
+<div><dl class="simple">
+<dt>name:</dt><dd><p>scope name used for the calibrator</p>
+</dd>
+<dt>calibrator:</dt><dd><p>calibrator that will be calibrated and exported.</p>
+</dd>
+<dt>build_graph_fn:</dt><dd><p>build graph function for the calibrator</p>
+</dd>
+<dt>params:</dt><dd><p>params passed to the calibrator</p>
+</dd>
+<dt>feature_config:</dt><dd><p>feature config or input_fn which will be passed to the trainer.</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>“””</p>
+<dl>
+<dt>if (os.environ.get(“TWML_HOGWILD_TASK_TYPE”) == “chief” or “num_workers” not in params or</dt><dd><blockquote>
+<div><p>params.num_workers is None):</p>
+</div></blockquote>
+<p># chief trains discretizer
+logging.info(“Chief training discretizer”)</p>
+<p># disregard hogwild config
+os_twml_hogwild_ports = os.environ.get(“TWML_HOGWILD_PORTS”)
+os.environ[“TWML_HOGWILD_PORTS”] = “”</p>
+<p># create discretizer params
+params_c = copy.deepcopy(params)
+params_c.data_threads = 1
+params_c.train_steps = -1
+params_c.train_max_steps = None
+params_c.eval_steps = -1
+params_c.num_workers = 1
+params_c.tensorboard_port = None
+params_c.stats_port = None</p>
+<dl class="simple">
+<dt>if “discretizer_batch_size” in params_c:</dt><dd><p>params_c.train_batch_size = params_c.discretizer_batch_size
+params_c.eval_batch_size = params_c.discretizer_batch_size</p>
+</dd>
+<dt>if “discretizer_keep_rate” in params_c:</dt><dd><p>params_c.train_keep_rate = params_c.discretizer_keep_rate</p>
+</dd>
+<dt>if “discretizer_parts_downsampling_rate” in params_c:</dt><dd><p>params_c.train_parts_downsampling_rate = params_c.discretizer_parts_downsampling_rate</p>
+</dd>
+<dt>if “discretizer_save_dir” in params_c:</dt><dd><p>params_c.save_dir = params_c.discretizer_save_dir</p>
+</dd>
+</dl>
+<p># train discretizer
+trainer = twml.trainers.DataRecordTrainer(</p>
+<blockquote>
+<div><p>name=name,
+params=params_c,
+build_graph_fn=build_graph_fn,
+save_dir=params_c.save_dir,</p>
+</div></blockquote>
+<p>)</p>
+<dl>
+<dt>if isinstance(feature_config, twml.feature_config.FeatureConfig):</dt><dd><p>parse_fn = twml.parsers.get_continuous_parse_fn(feature_config)
+input_fn = trainer.get_train_input_fn(parse_fn=parse_fn, repeat=False)</p>
+</dd>
+<dt>elif callable(feature_config):</dt><dd><p>input_fn = feature_config</p>
+</dd>
+<dt>else:</dt><dd><p>got_type = type(feature_config).__name__
+raise ValueError(</p>
+<blockquote>
+<div><p>“Expecting feature_config to be FeatureConfig or function got %s” % got_type)</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>hooks = None
+if params_c.train_steps &gt; 0:</p>
+<blockquote>
+<div><p>hooks = [twml.hooks.StepProgressHook(params_c.train_steps)]</p>
+</div></blockquote>
+<dl class="simple">
+<dt>trainer.calibrate(calibrator=calibrator, input_fn=input_fn,</dt><dd><p>steps=params_c.train_steps, hooks=hooks)</p>
+</dd>
+</dl>
+<p># restore hogwild setup
+if os_twml_hogwild_ports is not None:</p>
+<blockquote>
+<div><p>os.environ[“TWML_HOGWILD_PORTS”] = os_twml_hogwild_ports</p>
+</div></blockquote>
+</dd>
+<dt>else:</dt><dd><p>discretizer_save_dir = twml.util.sanitize_hdfs_path(params.discretizer_save_dir)
+# workers wait for calibration to be ready
+while not tf.io.gfile.exists(discretizer_save_dir + os.path.sep + “tfhub_module.pb”):</p>
+<blockquote>
+<div><p>logging.info(“Worker waiting for calibration at %s” % discretizer_save_dir)
+time.sleep(60)</p>
+</div></blockquote>
+</dd>
+</dl>
+</dd>
+<dt>def build_percentile_discretizer_graph(features, label, mode, params, config=None):</dt><dd><p>“””
+Pre-set Percentile Discretizer Build Graph
+Follows the same signature as build_graph
+“””
+sparse_tf = twml.util.convert_to_sparse(features, params.input_size_bits)
+weights = tf.reshape(features[‘weights’], tf.reshape(features[‘batch_size’], [1]))
+if isinstance(sparse_tf, tf.SparseTensor):</p>
+<blockquote>
+<div><p>indices = sparse_tf.indices[:, 1]
+ids = sparse_tf.indices[:, 0]</p>
+</div></blockquote>
+<dl class="simple">
+<dt>elif isinstance(sparse_tf, twml.SparseTensor):</dt><dd><p>indices = sparse_tf.indices
+ids = sparse_tf.ids</p>
+</dd>
+</dl>
+<p># Return weights, feature_ids, feature_values
+weights = tf.gather(params=weights, indices=ids)
+feature_ids = indices
+feature_values = sparse_tf.values
+# Update train_op and assign dummy_loss
+train_op = tf.assign_add(tf.train.get_global_step(), 1)
+loss = tf.constant(1)
+if mode == ‘train’:</p>
+<blockquote>
+<div><p>return {‘train_op’: train_op, ‘loss’: loss}</p>
+</div></blockquote>
+<p>return {‘feature_ids’: feature_ids, ‘feature_values’: feature_values, ‘weights’: weights}</p>
+</dd>
+<dt>def isotonic_module(mode, params):</dt><dd><p>“””
+Common Isotonic Calibrator module for Hub Export
+“””
+inputs = tf.sparse_placeholder(tf.float32, name=”sparse_input”)
+mlp = hub.Module(params.calibrator_load_tensorflow_module)
+logits = mlp(inputs, signature=params.export_mlp_module_name)
+isotonic_calibrator = hub.Module(params.save_dir)
+output = isotonic_calibrator(logits, signature=”isotonic_calibrator”)
+hub.add_signature(inputs={“sparse_input”: inputs},</p>
+<blockquote>
+<div><p>outputs={“default”: output},
+name=params.calibrator_export_module_name)</p>
+</div></blockquote>
+</dd>
+<dt>def build_isotonic_graph_from_inputs(inputs, features, label, mode, params, config=None, isotonic_fn=None):</dt><dd><p>“””
+Helper function to build_isotonic_graph
+Pre-set Isotonic Calibrator Build Graph
+Follows the same signature as build_graph
+“””
+if params.mode == ‘calibrate’:</p>
+<blockquote>
+<div><p>mlp = hub.Module(params.calibrator_load_tensorflow_module)
+logits = mlp(inputs, signature=params.export_mlp_module_name)
+weights = tf.reshape(features[‘weights’], tf.reshape(features[‘batch_size’], [1]))
+# Update train_op and assign dummy_loss
+train_op = tf.assign_add(tf.train.get_global_step(), 1)
+loss = tf.constant(1)
+if mode == ‘train’:</p>
+<blockquote>
+<div><p>return {‘train_op’: train_op, ‘loss’: loss}</p>
+</div></blockquote>
+<p>return {‘predictions’: logits, ‘targets’: features[‘labels’], ‘weights’: weights}</p>
+</div></blockquote>
+<dl>
+<dt>else:</dt><dd><dl class="simple">
+<dt>if isotonic_fn is None:</dt><dd><p>isotonic_spec = twml.util.create_module_spec(mlp_fn=isotonic_module, mode=mode, params=params)</p>
+</dd>
+<dt>else:</dt><dd><p>isotonic_spec = twml.util.create_module_spec(mlp_fn=isotonic_fn, mode=mode, params=params)</p>
+</dd>
+<dt>output_hub = hub.Module(isotonic_spec,</dt><dd><p>name=params.calibrator_export_module_name)</p>
+</dd>
+</dl>
+<p>hub.register_module_for_export(output_hub, params.calibrator_export_module_name)
+output = output_hub(inputs, signature=params.calibrator_export_module_name)
+output = tf.clip_by_value(output, 0, 1)
+loss = tf.reduce_sum(tf.stop_gradient(output))
+train_op = tf.assign_add(tf.train.get_global_step(), 1)
+return {‘train_op’: train_op, ‘loss’: loss, ‘output’: output}</p>
+</dd>
+</dl>
+</dd>
+<dt>def build_isotonic_graph(features, label, mode, params, config=None, export_discretizer=True):</dt><dd><p>“””
+Pre-set Isotonic Calibrator Build Graph
+Follows the same signature as build_graph
+This assumes that MLP already contains all modules (include percentile
+discretizer); if export_discretizer is set
+then it does not export the MDL phase.
+“””
+sparse_tf = twml.util.convert_to_sparse(features, params.input_size_bits)
+if export_discretizer:</p>
+<blockquote>
+<div><p>return build_isotonic_graph_from_inputs(sparse_tf, features, label, mode, params, config)</p>
+</div></blockquote>
+<p>discretizer = hub.Module(params.discretizer_path)</p>
+<dl class="simple">
+<dt>if params.discretizer_signature is None:</dt><dd><p>discretizer_signature = “percentile_discretizer_calibrator”</p>
+</dd>
+<dt>else:</dt><dd><p>discretizer_signature = params.discretizer_signature</p>
+</dd>
+</dl>
+<p>input_sparse = discretizer(sparse_tf, signature=discretizer_signature)
+return build_isotonic_graph_from_inputs(input_sparse, features, label, mode, params, config)</p>
+</dd>
+</dl>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../_sources/twml/twml/contrib/calibrators/common_calibrators.py.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

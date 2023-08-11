@@ -1,0 +1,530 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../" id="documentation_options" src="../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.earlybird.querycache;</p>
+<p>import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;</p>
+<p>import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Preconditions;
+import com.google.common.base.Stopwatch;
+import com.google.common.collect.Lists;
+import com.google.common.primitives.Longs;</p>
+<p>import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;</p>
+<p>import com.twitter.common.quantity.Amount;
+import com.twitter.common.quantity.Time;
+import com.twitter.common.util.Clock;
+import com.twitter.decider.Decider;
+import com.twitter.search.common.concurrent.ScheduledExecutorServiceFactory;
+import com.twitter.search.common.metrics.SearchCounter;
+import com.twitter.search.common.metrics.SearchLongGauge;
+import com.twitter.search.common.metrics.SearchStatsReceiver;
+import com.twitter.search.common.schema.earlybird.EarlybirdCluster;
+import com.twitter.search.earlybird.EarlybirdIndexConfig;
+import com.twitter.search.earlybird.EarlybirdStatus;
+import com.twitter.search.earlybird.common.config.EarlybirdConfig;
+import com.twitter.search.earlybird.common.userupdates.UserScrubGeoMap;
+import com.twitter.search.earlybird.common.userupdates.UserTable;
+import com.twitter.search.earlybird.exception.CriticalExceptionHandler;
+import com.twitter.search.earlybird.partition.SegmentInfo;
+import com.twitter.search.earlybird.partition.SegmentManager;
+import com.twitter.search.earlybird.partition.SegmentManager.Filter;
+import com.twitter.search.earlybird.partition.SegmentManager.Order;
+import com.twitter.search.earlybird.partition.SegmentManager.SegmentUpdateListener;
+import com.twitter.search.earlybird.stats.EarlybirdSearcherStats;
+import com.twitter.search.earlybird.thrift.EarlybirdStatusCode;
+import com.twitter.search.queryparser.query.QueryParserException;</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Main class to manage Earlybird’s QueryCache.</p></li>
+<li></li>
+<li><p>Initialize the QueryCache and new segments are notified to the QueryCache subsystem</p></li>
+<li><p>through this class.</p></li>
+<li></li>
+<li><p>This class is thread-safe when calling methods that modify the list of tasks that</p></li>
+<li><p>we’re executing or when we need to traverse all tasks and check something. The way</p></li>
+<li><p>thread-safety is achieved here right now is through making methods synchronized.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>public class QueryCacheManager implements SegmentUpdateListener {</dt><dd><p>private static final Logger LOG = LoggerFactory.getLogger(QueryCacheManager.class);</p>
+<p>private static final Amount&lt;Long, Time&gt; ZERO_SECONDS = Amount.of(0L, Time.SECONDS);</p>
+<p>private final boolean enabled = EarlybirdConfig.getBool(“querycache”, false);</p>
+<p>// segments are removed from SegmentInfoMap lazily, and there may be a wait time.
+// So, beware that there’s short period of time where there’s more segments than
+// maxEnabledSegments.
+private final int maxEnabledSegments;</p>
+<p>private final UserTable userTable;
+private final UserScrubGeoMap userScrubGeoMap;
+private final EarlybirdIndexConfig indexConfig;
+private QueryCacheUpdater updater;
+private final Map&lt;String, QueryCacheFilter&gt; filters;
+private final ScheduledExecutorServiceFactory updaterScheduledExecutorServiceFactory;</p>
+<p>private final SearchStatsReceiver searchStatsReceiver;</p>
+<dl class="simple">
+<dt>private static final SearchLongGauge NUM_CACHE_ENTRY_STAT =</dt><dd><p>SearchLongGauge.export(“querycache_num_entries”);</p>
+</dd>
+<dt>private static final SearchCounter NUM_UPDATE_SEGMENTS_CALLS =</dt><dd><p>SearchCounter.export(“querycache_num_update_segments_calls”);</p>
+</dd>
+</dl>
+<p>private volatile boolean didSetup = false;</p>
+<p>private final EarlybirdSearcherStats searcherStats;
+private final Decider decider;
+private final CriticalExceptionHandler criticalExceptionHandler;
+private final Clock clock;</p>
+<dl>
+<dt>public QueryCacheManager(</dt><dd><blockquote>
+<div><p>QueryCacheConfig config,
+EarlybirdIndexConfig indexConfig,
+int maxEnabledSegments,
+UserTable userTable,
+UserScrubGeoMap userScrubGeoMap,
+ScheduledExecutorServiceFactory updaterScheduledExecutorServiceFactory,
+SearchStatsReceiver searchStatsReceiver,
+EarlybirdSearcherStats searcherStats,
+Decider decider,
+CriticalExceptionHandler criticalExceptionHandler,
+Clock clock) {</p>
+</div></blockquote>
+<p>Preconditions.checkArgument(maxEnabledSegments &gt; 0);</p>
+<p>QueryCacheConfig queryCacheConfig = config;
+if (queryCacheConfig == null) {</p>
+<blockquote>
+<div><p>queryCacheConfig = new QueryCacheConfig(searchStatsReceiver);</p>
+</div></blockquote>
+<p>}
+this.indexConfig = indexConfig;
+this.maxEnabledSegments = maxEnabledSegments;
+this.userTable = userTable;
+this.userScrubGeoMap = userScrubGeoMap;
+this.updaterScheduledExecutorServiceFactory = updaterScheduledExecutorServiceFactory;
+this.searchStatsReceiver = searchStatsReceiver;
+this.searcherStats = searcherStats;
+this.filters = new HashMap&lt;&gt;();
+this.decider = decider;
+this.criticalExceptionHandler = criticalExceptionHandler;
+this.clock = clock;
+for (QueryCacheFilter filter : queryCacheConfig.filters()) {</p>
+<blockquote>
+<div><p>filters.put(filter.getFilterName(), filter);</p>
+</div></blockquote>
+<p>}
+NUM_CACHE_ENTRY_STAT.set(filters.size());</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public EarlybirdIndexConfig getIndexConfig() {</dt><dd><p>return indexConfig;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public UserScrubGeoMap getUserScrubGeoMap() {</dt><dd><p>return userScrubGeoMap;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/** Setup all update tasks at once, should only be called after Earlybird has loaded/indexed all</dt><dd><ul class="simple">
+<li><p>segments during start-up</p></li>
+<li></li>
+<li><p>Only the first call to the function has effect, subsequent calls are no-ops</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>public void setupTasksIfNeeded(SegmentManager segmentManager)</dt><dd><blockquote>
+<div><p>throws QueryParserException {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>setupTasks(</dt><dd><p>segmentManager.getSegmentInfos(Filter.All, Order.OLD_TO_NEW),
+segmentManager.getEarlybirdIndexConfig().getCluster());</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;VisibleForTesting
+synchronized void setupTasks(</p>
+<blockquote>
+<div><blockquote>
+<div><p>Iterable&lt;SegmentInfo&gt; newSegments,
+EarlybirdCluster earlybirdCluster) throws QueryParserException {</p>
+</div></blockquote>
+<p>// Setup needs to be done only once after all index caught up.
+if (didSetup) {</p>
+<blockquote>
+<div><p>return;</p>
+</div></blockquote>
+<p>}</p>
+<p>LOG.info(“Setting up {} query cache tasks”, filters.values().size());</p>
+<dl class="simple">
+<dt>for (QueryCacheFilter filter<span class="classifier">filters.values()) {</span></dt><dd><p>filter.setup(this, userTable, earlybirdCluster);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>if (!enabled()) {</dt><dd><p>// Note that the definition of disabling the query caches here is “don’t compute the caches”.
+// We still load the queries from the .yml, we still rewrite search queries to use
+// cached queries. The reason we are choosing this definition is that it’s somewhat simpler
+// to implement (no need to turn off rewriting) and because we might get external queries that
+// contain cached filters (they’re listed in go/searchsyntax).
+//
+// If we need a stricter definition of turning off query caches, we can implement it too, or
+// just tighten this one.
+return;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>Preconditions.checkState(updater == null);
+updater = new QueryCacheUpdater(</p>
+<blockquote>
+<div><p>filters.values(),
+updaterScheduledExecutorServiceFactory,
+userTable,
+searchStatsReceiver,
+searcherStats,
+decider,
+criticalExceptionHandler,
+clock);</p>
+</div></blockquote>
+<p>LOG.info(“Finished setting up query cache updater.”);</p>
+<p>scheduleTasks(newSegments, false);</p>
+<p>didSetup = true;</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>private void scheduleTasks(Iterable&lt;SegmentInfo&gt; segments, boolean isCurrent) {</dt><dd><p>List&lt;SegmentInfo&gt; sortedSegments = Lists.newArrayList(segments);
+Collections.sort(sortedSegments, (o1, o2) -&gt; {</p>
+<blockquote>
+<div><p>// sort new to old (o2 and o1 are reversed here)
+return Longs.compare(o2.getTimeSliceID(), o1.getTimeSliceID());</p>
+</div></blockquote>
+<p>});</p>
+<p>LOG.info(“Scheduling tasks for {} segments.”, sortedSegments.size());</p>
+<dl>
+<dt>for (int segmentIndex = 0; segmentIndex &lt; sortedSegments.size(); ++segmentIndex) {</dt><dd><p>SegmentInfo segmentInfo = sortedSegments.get(segmentIndex);
+if (segmentIndex == maxEnabledSegments) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>LOG.warn(“Tried to add more segments than MaxEnabledSegments (” + maxEnabledSegments</dt><dd><ul class="simple">
+<li><p>“). Removed oldest segment “ + segmentInfo.getTimeSliceID());</p></li>
+</ul>
+</dd>
+</dl>
+<p>continue;</p>
+</div></blockquote>
+<p>}
+addQueryCacheTasksForSegment(segmentInfo, segmentIndex, !isCurrent);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Rebuilds the query cache for the given segment after it was optimized.</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>public synchronized void rebuildQueryCachesAfterSegmentOptimization(</dt><dd><blockquote>
+<div><p>SegmentInfo optimizedSegment) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>Preconditions.checkState(optimizedSegment.getIndexSegment().isOptimized(),</dt><dd><p>“Segment “ + optimizedSegment.getSegmentName() + “ is not optimized.”);</p>
+</dd>
+<dt>if (!didSetup) {</dt><dd><p>// Once our indexing is current, we’ll just start tasks for all segments, optimized or not.
+// Before that event, we don’t do anything query cache related.
+LOG.info(“Haven’t done initial setup, returning.”);
+return;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>LOG.info(“Rebuilding query caches for optimized segment {}”,</dt><dd><p>optimizedSegment.getSegmentName());</p>
+</dd>
+</dl>
+<p>// The optimized segment should always be the 1st segment (the current segment has index 0).
+Stopwatch stopwatch = Stopwatch.createStarted();
+updater.removeAllTasksForSegment(optimizedSegment);
+addQueryCacheTasksForSegment(optimizedSegment, 1, true);</p>
+<dl>
+<dt>while (!updater.allTasksRanForSegment(optimizedSegment)) {</dt><dd><dl class="simple">
+<dt>try {</dt><dd><p>Thread.sleep(1000);</p>
+</dd>
+<dt>} catch (InterruptedException e) {</dt><dd><p>// Ignore</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>LOG.info(“Rebuilding all query caches for the optimized segment {} took {}.”,</dt><dd><p>optimizedSegment.getSegmentName(), stopwatch);</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Block until all the tasks inside this manager have ran at least once.</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+<dt>public void waitUntilAllQueryCachesAreBuilt() {</dt><dd><p>LOG.info(“Waiting until all query caches are built…”);</p>
+<p>Stopwatch stopwatch = Stopwatch.createStarted();
+while (!allTasksRan()) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>try {</dt><dd><p>Thread.sleep(1000);</p>
+</dd>
+<dt>} catch (InterruptedException ex) {</dt><dd><p>Thread.currentThread().interrupt();</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>LOG.info(“Ran query cache tasks in: {}”, stopwatch);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private void addQueryCacheTasksForSegment(</dt><dd><blockquote>
+<div><p>SegmentInfo segmentInfo, int segmentIndex, boolean scheduleImmediately) {</p>
+</div></blockquote>
+<p>LOG.info(“Adding query cache tasks for segment {}.”, segmentInfo.getTimeSliceID());
+double updateIntervalMultiplier =</p>
+<blockquote>
+<div><p>EarlybirdConfig.getDouble(“query_cache_update_interval_multiplier”, 1.0);</p>
+</div></blockquote>
+<dl>
+<dt>for (QueryCacheFilter filter<span class="classifier">filters.values()) {</span></dt><dd><p>Amount&lt;Long, Time&gt; updateIntervalFromConfig = filter.getUpdateInterval(segmentIndex);
+Amount&lt;Long, Time&gt; updateInterval = Amount.of(</p>
+<blockquote>
+<div><p>(long) (updateIntervalFromConfig.getValue() * updateIntervalMultiplier),
+updateIntervalFromConfig.getUnit());</p>
+</div></blockquote>
+<p>Amount&lt;Long, Time&gt; initialDelay = scheduleImmediately ? ZERO_SECONDS : updateInterval;
+updater.addTask(filter, segmentInfo, updateInterval, initialDelay);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Notify QueryCacheManager of a new list of segments we currently have, so that cache tasks</p></li>
+<li><p>can be updated.</p></li>
+<li></li>
+<li><p>&#64;param segments fresh list of all segments</p></li>
+<li></li>
+<li><p>All existing tasks will be canceled/removed/destroyed, new tasks will be created for all</p></li>
+<li><p>segments.</p></li>
+</ul>
+<p><a href="#id9"><span class="problematic" id="id10">*</span></a>/</p>
+</dd>
+</dl>
+<p>&#64;Override
+public synchronized void update(Collection&lt;SegmentInfo&gt; segments, String message) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (!enabled()) {</dt><dd><p>return;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// This manager is created right at the beginning of a startup. Before we set it up,
+// we’ll read tweets and create segments and therefore this method will be called.
+// We don’t want to start computing query caches during that time, so we just return.
+if (!didSetup) {</p>
+<blockquote>
+<div><p>return;</p>
+</div></blockquote>
+<p>}</p>
+<p>NUM_UPDATE_SEGMENTS_CALLS.increment();</p>
+<dl class="simple">
+<dt>LOG.info(“Rescheduling all query cache tasks ({}). Number of segments received = {}.”,</dt><dd><p>message, segments.size());</p>
+</dd>
+</dl>
+<p>updater.clearTasks(); // cancel and remove all scheduled tasks</p>
+<p>// If Earlybird is still starting up, and we get a partition roll, don’t delay rebuilding
+// the query cache.
+boolean isCurrent = EarlybirdStatus.getStatusCode() == EarlybirdStatusCode.CURRENT;
+scheduleTasks(segments, isCurrent);</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Determines if all query cache tasks ran at least once (even if they failed).</p></li>
+</ul>
+<p><a href="#id11"><span class="problematic" id="id12">*</span></a>/</p>
+</dd>
+<dt>public synchronized boolean allTasksRan() {</dt><dd><p>return (!(enabled() &amp;&amp; didSetup)) || updater.allTasksRan();</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Determines if the query cache manager is enabled.</p></li>
+</ul>
+<p><a href="#id13"><span class="problematic" id="id14">*</span></a>/</p>
+</dd>
+<dt>public boolean enabled() {</dt><dd><p>return enabled;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Returns the query cache filter with the given name.</p></li>
+</ul>
+<p><a href="#id15"><span class="problematic" id="id16">*</span></a>/</p>
+</dd>
+<dt>public QueryCacheFilter getFilter(String filterName) {</dt><dd><p>return filters.get(filterName);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Shuts down the query cache manager.</p></li>
+</ul>
+<p><a href="#id17"><span class="problematic" id="id18">*</span></a>/</p>
+</dd>
+<dt>public synchronized void shutdown() throws InterruptedException {</dt><dd><p>LOG.info(“Shutting down QueryCacheManager”);
+if (updater != null) {</p>
+<blockquote>
+<div><p>updater.shutdown();
+updater = null;</p>
+</div></blockquote>
+<p>}
+didSetup = false; // needed for unit test</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>After startup, we want only one thread to update the query cache.</p></li>
+</ul>
+<p><a href="#id19"><span class="problematic" id="id20">*</span></a>/</p>
+</dd>
+<dt>public void setWorkerPoolSizeAfterStartup() {</dt><dd><dl class="simple">
+<dt>if (this.updater != null) {</dt><dd><p>this.updater.setWorkerPoolSizeAfterStartup();</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public Decider getDecider() {</dt><dd><p>return this.decider;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>QueryCacheUpdater getUpdaterForTest() {</dt><dd><p>return updater;</p>
+</dd>
+</dl>
+<p>}
+Map&lt;String, QueryCacheFilter&gt; getCacheMapForTest() {</p>
+<blockquote>
+<div><p>return filters;</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../_sources/src/java/com/twitter/search/earlybird/querycache/QueryCacheManager.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p># checkstyle: noqa
+import tensorflow.compat.v1 as tf
+from tensorflow.python.estimator.export.export import build_raw_serving_input_receiver_fn
+from tensorflow.python.framework import dtypes
+from tensorflow.python.ops import array_ops
+import tensorflow_hub as hub</p>
+<p>from datetime import datetime
+from tensorflow.compat.v1 import logging
+from twitter.deepbird.projects.timelines.configs import all_configs
+from twml.trainers import DataRecordTrainer
+from twml.contrib.calibrators.common_calibrators import build_percentile_discretizer_graph
+from twml.contrib.calibrators.common_calibrators import calibrate_discretizer_and_export
+from .metrics import get_multi_binary_class_metric_fn
+from .constants import TARGET_LABEL_IDX, PREDICTED_CLASSES
+from .example_weights import add_weight_arguments, make_weights_tensor
+from .lolly.data_helpers import get_lolly_logits
+from .lolly.tf_model_initializer_builder import TFModelInitializerBuilder
+from .lolly.reader import LollyModelReader
+from .tf_model.discretizer_builder import TFModelDiscretizerBuilder
+from .tf_model.weights_initializer_builder import TFModelWeightsInitializerBuilder</p>
+<p>import twml</p>
+<dl>
+<dt>def get_feature_values(features_values, params):</dt><dd><dl class="simple">
+<dt>if params.lolly_model_tsv:</dt><dd><p># The default DBv2 HashingDiscretizer bin membership interval is (a, b]
+#
+# The Earlybird Lolly prediction engine discretizer bin membership interval is [a, b)
+#
+# TFModelInitializerBuilder converts (a, b] to [a, b) by inverting the bin boundaries.
+#
+# Thus, invert the feature values, so that HashingDiscretizer can to find the correct bucket.
+return tf.multiply(features_values, -1.0)</p>
+</dd>
+<dt>else:</dt><dd><p>return features_values</p>
+</dd>
+</dl>
+</dd>
+<dt>def build_graph(features, label, mode, params, config=None):</dt><dd><p>weights = None
+if “weights” in features:</p>
+<blockquote>
+<div><p>weights = make_weights_tensor(features[“weights”], label, params)</p>
+</div></blockquote>
+<p>num_bits = params.input_size_bits</p>
+<dl>
+<dt>if mode == “infer”:</dt><dd><p>indices = twml.limit_bits(features[“input_sparse_tensor_indices”], num_bits)
+dense_shape = tf.stack([features[“input_sparse_tensor_shape”][0], 1 &lt;&lt; num_bits])
+sparse_tf = tf.SparseTensor(</p>
+<blockquote>
+<div><p>indices=indices,
+values=get_feature_values(features[“input_sparse_tensor_values”], params),
+dense_shape=dense_shape</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+<dt>else:</dt><dd><p>features[“values”] = get_feature_values(features[“values”], params)
+sparse_tf = twml.util.convert_to_sparse(features, num_bits)</p>
+</dd>
+<dt>if params.lolly_model_tsv:</dt><dd><p>tf_model_initializer = TFModelInitializerBuilder().build(LollyModelReader(params.lolly_model_tsv))
+bias_initializer, weight_initializer = TFModelWeightsInitializerBuilder(num_bits).build(tf_model_initializer)
+discretizer = TFModelDiscretizerBuilder(num_bits).build(tf_model_initializer)</p>
+</dd>
+<dt>else:</dt><dd><p>discretizer = hub.Module(params.discretizer_save_dir)
+bias_initializer, weight_initializer = None, None</p>
+</dd>
+</dl>
+<p>input_sparse = discretizer(sparse_tf, signature=”hashing_discretizer_calibrator”)</p>
+<dl class="simple">
+<dt>logits = twml.layers.full_sparse(</dt><dd><p>inputs=input_sparse,
+output_size=1,
+bias_initializer=bias_initializer,
+weight_initializer=weight_initializer,
+use_sparse_grads=(mode == “train”),
+use_binary_values=True,
+name=”full_sparse_1”</p>
+</dd>
+</dl>
+<p>)</p>
+<p>loss = None</p>
+<dl>
+<dt>if mode != “infer”:</dt><dd><p>lolly_activations = get_lolly_logits(label)</p>
+<dl class="simple">
+<dt>if opt.print_data_examples:</dt><dd><p>logits = print_data_example(logits, lolly_activations, features)</p>
+</dd>
+<dt>if params.replicate_lolly:</dt><dd><p>loss = tf.reduce_mean(tf.math.squared_difference(logits, lolly_activations))</p>
+</dd>
+<dt>else:</dt><dd><p>batch_size = tf.shape(label)[0]
+target_label = tf.reshape(tensor=label[:, TARGET_LABEL_IDX], shape=(batch_size, 1))
+loss = tf.nn.sigmoid_cross_entropy_with_logits(labels=target_label, logits=logits)
+loss = twml.util.weighted_average(loss, weights)</p>
+</dd>
+</dl>
+<p>num_labels = tf.shape(label)[1]
+eb_scores = tf.tile(lolly_activations, [1, num_labels])
+logits = tf.tile(logits, [1, num_labels])
+logits = tf.concat([logits, eb_scores], axis=1)</p>
+</dd>
+</dl>
+<p>output = tf.nn.sigmoid(logits)</p>
+<p>return {“output”: output, “loss”: loss, “weights”: weights}</p>
+</dd>
+<dt>def print_data_example(logits, lolly_activations, features):</dt><dd><dl class="simple">
+<dt>return tf.Print(</dt><dd><p>logits,
+[logits, lolly_activations, tf.reshape(features[‘keys’], (1, -1)), tf.reshape(tf.multiply(features[‘values’], -1.0), (1, -1))],
+message=”DATA EXAMPLE = “,
+summarize=10000</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>def earlybird_output_fn(graph_output):</dt><dd><dl>
+<dt>export_outputs = {</dt><dd><dl>
+<dt>tf.saved_model.signature_constants.DEFAULT_SERVING_SIGNATURE_DEF_KEY:</dt><dd><dl class="simple">
+<dt>tf.estimator.export.PredictOutput(</dt><dd><p>{“prediction”: tf.identity(graph_output[“output”], name=”output_scores”)}</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+return export_outputs</p>
+</dd>
+<dt>if __name__ == “__main__”:</dt><dd><p>parser = DataRecordTrainer.add_parser_arguments()</p>
+<p>parser = twml.contrib.calibrators.add_discretizer_arguments(parser)</p>
+<p>parser.add_argument(”–label”, type=str, help=”label for the engagement”)
+parser.add_argument(”–model.use_existing_discretizer”, action=”store_true”,</p>
+<blockquote>
+<div><p>dest=”model_use_existing_discretizer”,
+help=”Load a pre-trained calibration or train a new one”)</p>
+</div></blockquote>
+<p>parser.add_argument(”–input_size_bits”, type=int)
+parser.add_argument(”–export_module_name”, type=str, default=”base_mlp”, dest=”export_module_name”)
+parser.add_argument(”–feature_config”, type=str)
+parser.add_argument(”–replicate_lolly”, type=bool, default=False, dest=”replicate_lolly”,</p>
+<blockquote>
+<div><p>help=”Train a regression model with MSE loss and the logged Earlybird score as a label”)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>parser.add_argument(”–lolly_model_tsv”, type=str, required=False, dest=”lolly_model_tsv”,</dt><dd><p>help=”Initialize with weights and discretizer bins available in the given Lolly model tsv file”
+“No discretizer gets trained or loaded if set.”)</p>
+</dd>
+<dt>parser.add_argument(”–print_data_examples”, type=bool, default=False, dest=”print_data_examples”,</dt><dd><p>help=”Prints ‘DATA EXAMPLE = [[tf logit]][[logged lolly logit]][[feature ids][feature values]]’”)</p>
+</dd>
+</dl>
+<p>add_weight_arguments(parser)</p>
+<p>opt = parser.parse_args()</p>
+<p>feature_config_module = all_configs.select_feature_config(opt.feature_config)</p>
+<p>feature_config = feature_config_module.get_feature_config(data_spec_path=opt.data_spec, label=opt.label)</p>
+<dl>
+<dt>parse_fn = twml.parsers.get_sparse_parse_fn(</dt><dd><p>feature_config,
+keep_fields=(“ids”, “keys”, “values”, “batch_size”, “total_size”, “codes”))</p>
+</dd>
+<dt>if not opt.lolly_model_tsv:</dt><dd><dl>
+<dt>if opt.model_use_existing_discretizer:</dt><dd><p>logging.info(“Skipping discretizer calibration [model.use_existing_discretizer=True]”)
+logging.info(f”Using calibration at {opt.discretizer_save_dir}”)</p>
+</dd>
+<dt>else:</dt><dd><p>logging.info(“Calibrating new discretizer [model.use_existing_discretizer=False]”)
+calibrator = twml.contrib.calibrators.HashingDiscretizerCalibrator(</p>
+<blockquote>
+<div><p>opt.discretizer_num_bins,
+opt.discretizer_output_size_bits</p>
+</div></blockquote>
+<p>)
+calibrate_discretizer_and_export(name=”recap_earlybird_hashing_discretizer”,</p>
+<blockquote>
+<div><p>params=opt,
+calibrator=calibrator,
+build_graph_fn=build_percentile_discretizer_graph,
+feature_config=feature_config)</p>
+</div></blockquote>
+</dd>
+</dl>
+</dd>
+<dt>trainer = DataRecordTrainer(</dt><dd><p>name=”earlybird”,
+params=opt,
+build_graph_fn=build_graph,
+save_dir=opt.save_dir,
+feature_config=feature_config,
+metric_fn=get_multi_binary_class_metric_fn(</p>
+<blockquote>
+<div><p>metrics=[“roc_auc”],
+classes=PREDICTED_CLASSES</p>
+</div></blockquote>
+<p>),
+warm_start_from=None</p>
+</dd>
+</dl>
+<p>)</p>
+<p>train_input_fn = trainer.get_train_input_fn(parse_fn=parse_fn)
+eval_input_fn = trainer.get_eval_input_fn(parse_fn=parse_fn)</p>
+<p>logging.info(“Training and Evaluation …”)
+trainingStartTime = datetime.now()
+trainer.train_and_evaluate(train_input_fn=train_input_fn, eval_input_fn=eval_input_fn)
+trainingEndTime = datetime.now()
+logging.info(“Training and Evaluation time: “ + str(trainingEndTime - trainingStartTime))</p>
+<dl>
+<dt>if trainer._estimator.config.is_chief:</dt><dd><dl class="simple">
+<dt>serving_input_in_earlybird = {</dt><dd><dl class="simple">
+<dt>“input_sparse_tensor_indices”: array_ops.placeholder(</dt><dd><p>name=”input_sparse_tensor_indices”,
+shape=[None, 2],
+dtype=dtypes.int64),</p>
+</dd>
+<dt>“input_sparse_tensor_values”: array_ops.placeholder(</dt><dd><p>name=”input_sparse_tensor_values”,
+shape=[None],
+dtype=dtypes.float32),</p>
+</dd>
+<dt>“input_sparse_tensor_shape”: array_ops.placeholder(</dt><dd><p>name=”input_sparse_tensor_shape”,
+shape=[2],
+dtype=dtypes.int64)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+serving_input_receiver_fn = build_raw_serving_input_receiver_fn(serving_input_in_earlybird)
+twml.contrib.export.export_fn.export_all_models(</p>
+<blockquote>
+<div><p>trainer=trainer,
+export_dir=opt.export_dir,
+parse_fn=parse_fn,
+serving_input_receiver_fn=serving_input_receiver_fn,
+export_output_fn=earlybird_output_fn,
+feature_spec=feature_config.get_feature_spec()</p>
+</div></blockquote>
+<p>)
+logging.info(“The export model path is: “ + opt.export_dir)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/src/python/twitter/deepbird/projects/timelines/scripts/models/earlybird/train.py.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

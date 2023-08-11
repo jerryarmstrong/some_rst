@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../" id="documentation_options" src="../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p># pylint: disable=no-member, attribute-defined-outside-init, too-many-instance-attributes
+“””
+Implementing MDL Layer
+“””</p>
+<p>from .layer import Layer
+from .partition import Partition
+from .stitch import Stitch</p>
+<p>import libtwml
+import numpy as np
+import tensorflow.compat.v1 as tf
+import twml</p>
+<dl>
+<dt>class MDL(Layer):  # noqa: T000</dt><dd><p>“””
+MDL layer is constructed by MDLCalibrator after accumulating data
+and performing minimum description length (MDL) calibration.</p>
+<p>MDL takes sparse continuous features and converts then to sparse
+binary features. Each binary output feature is associated to an MDL bin.
+Each MDL input feature is converted to n_bin bins.
+Each MDL calibration tries to find bin delimiters such that the number of features values
+per bin is roughly equal (for each given MDL feature).
+Note that if an input feature is rarely used, so will its associated output bin/features.
+“””</p>
+<dl>
+<dt>def __init__(</dt><dd><blockquote>
+<div><p>self,
+n_feature, n_bin, out_bits,
+bin_values=None, hash_keys=None, hash_values=None,
+bin_ids=None, feature_offsets=None, <a href="#id1"><span class="problematic" id="id2">**</span></a>kwargs):</p>
+</div></blockquote>
+<p>“””
+Creates a non-initialized <cite>MDL</cite> object.
+Before using the table you will have to initialize it. After initialization
+the table will be immutable.</p>
+<dl>
+<dt>Parent class args:</dt><dd><p>see [tf.layers.Layer](<a class="reference external" href="https://www.tensorflow.org/api_docs/python/tf/layers/Layer">https://www.tensorflow.org/api_docs/python/tf/layers/Layer</a>)
+for documentation of parent class arguments.</p>
+</dd>
+<dt>Required args:</dt><dd><dl class="simple">
+<dt>n_feature:</dt><dd><p>number of unique features accumulated during MDL calibration.
+This is the number of features in the hash map.
+Used to initialize bin_values, hash_keys, hash_values,
+bin_ids, bin_values and feature_offsets.</p>
+</dd>
+<dt>n_bin:</dt><dd><p>number of MDL bins used for MDL calibration.
+Used to initialize bin_values, hash_keys, hash_values,
+bin_ids, bin_values and feature_offsets.</p>
+</dd>
+<dt>out_bits:</dt><dd><p>Determines the maximum value for output feature IDs.
+The dense_shape of the SparseTensor returned by lookup(x)
+will be [x.shape[0], 1 &lt;&lt; output_bits].</p>
+</dd>
+</dl>
+</dd>
+<dt>Optional args:</dt><dd><dl>
+<dt>hash_keys:</dt><dd><p>contains the features ID that MDL discretizes and knows about.
+The hash map (hash_keys-&gt;hash_values) is used for two reasons:</p>
+<blockquote>
+<div><ol class="arabic simple">
+<li><p>divide inputs into two feature spaces: MDL vs non-MDL</p></li>
+<li><p>transate the MDL features into a hash_feature ID that MDL understands.</p></li>
+</ol>
+</div></blockquote>
+<p>The hash_map is expected to contain n_feature items.</p>
+</dd>
+<dt>hash_values:</dt><dd><p>translates the feature IDs into hash_feature IDs for MDL.</p>
+</dd>
+<dt>bin_ids:</dt><dd><p>a 1D Tensor of size n_feature * n_bin + 1 which contains
+unique IDs to which the MDL features will be translated to.
+For example, tf.Tensor(np.arange(n_feature * n_bin)) would produce
+the most efficient output space.</p>
+</dd>
+<dt>bin_values:</dt><dd><p>a 1D Tensor aligned with bin_ids.
+For a given hash_feature ID j, it’s value bin’s are indexed between
+<cite>j*n_bin</cite> and <cite>j*n_bin + n_bin-1</cite>.
+As such, bin_ids[j*n_bin+i] is translated from a hash_feature ID of j
+and a inputs value between
+<cite>bin_values[j*n_bin + i]</cite> and <cite>bin_values[j*n_bin+i+1]</cite>.</p>
+</dd>
+<dt>feature_offsets:</dt><dd><p>a 1D Tensor specifying the starting location of bins for a given feature id.
+For example, tf.Tensor(np.arange(0, bin_values.size, n_bin, dtype=’int64’)).</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>“””
+super(MDL, self).__init__(<a href="#id3"><span class="problematic" id="id4">**</span></a>kwargs)
+tf.logging.warning(“MDL will be deprecated. Please use PercentileDiscretizer instead”)</p>
+<p>max_mdl_feature = n_feature * (n_bin + 1)
+self._n_feature = n_feature
+self._n_bin = n_bin</p>
+<dl class="simple">
+<dt>self._hash_keys_initializer = tf.constant_initializer(</dt><dd><p>hash_keys if hash_keys is not None
+else np.empty(n_feature, dtype=np.int64),
+dtype=np.int64</p>
+</dd>
+</dl>
+<p>)
+self._hash_values_initializer = tf.constant_initializer(</p>
+<blockquote>
+<div><p>hash_values if hash_values is not None
+else np.empty(n_feature, dtype=np.int64),
+dtype=np.int64</p>
+</div></blockquote>
+<p>)
+self._bin_ids_initializer = tf.constant_initializer(</p>
+<blockquote>
+<div><p>bin_ids if bin_ids is not None
+else np.empty(max_mdl_feature, dtype=np.int64),
+dtype=np.int64</p>
+</div></blockquote>
+<p>)
+self._bin_values_initializer = tf.constant_initializer(</p>
+<blockquote>
+<div><p>bin_values if bin_values is not None
+else np.empty(max_mdl_feature, dtype=np.float32),
+dtype=np.float32</p>
+</div></blockquote>
+<p>)
+self._feature_offsets_initializer = tf.constant_initializer(</p>
+<blockquote>
+<div><p>feature_offsets if feature_offsets is not None
+else np.empty(n_feature, dtype=np.int64),
+dtype=np.int64</p>
+</div></blockquote>
+<p>)</p>
+<p># note that calling build here is an exception as typically __call__ would call build().
+# We call it here because we need to initialize hash_map.
+# Also note that the variable_scope is set by add_variable in build()
+if not self.built:</p>
+<blockquote>
+<div><p>self.build(input_shape=None)</p>
+</div></blockquote>
+<p>self.output_size = tf.convert_to_tensor(1 &lt;&lt; out_bits, tf.int64)</p>
+</dd>
+<dt>def build(self, input_shape):  # pylint: disable=unused-argument</dt><dd><p>“””
+Creates the variables of the layer:
+hash_keys, hash_values, bin_ids, bin_values, feature_offsets and self.output_size.
+“””</p>
+<p># build layers
+self.partition = Partition()
+self.stitch = Stitch()</p>
+<p># build variables</p>
+<dl class="simple">
+<dt>hash_keys = self.add_variable(</dt><dd><p>‘hash_keys’,
+initializer=self._hash_keys_initializer,
+shape=[self._n_feature],
+dtype=tf.int64,
+trainable=False)</p>
+</dd>
+<dt>hash_values = self.add_variable(</dt><dd><p>‘hash_values’,
+initializer=self._hash_values_initializer,
+shape=[self._n_feature],
+dtype=tf.int64,
+trainable=False)</p>
+</dd>
+</dl>
+<p># hashmap converts known features into range [0, n_feature)
+initializer = tf.lookup.KeyValueTensorInitializer(hash_keys, hash_values)
+self.hash_map = tf.lookup.StaticHashTable(initializer, -1)</p>
+<dl class="simple">
+<dt>self.bin_ids = self.add_variable(</dt><dd><p>‘bin_ids’,
+initializer=self._bin_ids_initializer,
+shape=[self._n_feature * (self._n_bin + 1)],
+dtype=tf.int64,
+trainable=False)</p>
+</dd>
+<dt>self.bin_values = self.add_variable(</dt><dd><p>‘bin_values’,
+initializer=self._bin_values_initializer,
+shape=[self._n_feature * (self._n_bin + 1)],
+dtype=tf.float32,
+trainable=False)</p>
+</dd>
+<dt>self.feature_offsets = self.add_variable(</dt><dd><p>‘feature_offsets’,
+initializer=self._feature_offsets_initializer,
+shape=[self._n_feature],
+dtype=tf.int64,
+trainable=False)</p>
+</dd>
+</dl>
+<p># make sure this is last
+self.built = True</p>
+</dd>
+<dt>def call(self, inputs, <a href="#id5"><span class="problematic" id="id6">**</span></a>kwargs):</dt><dd><p>“””Looks up <cite>keys</cite> in a table, outputs the corresponding values.</p>
+<p>Implements MDL inference where inputs are intersected with a hash_map.
+Part of the inputs are discretized using twml.mdl to produce a mdl_output SparseTensor.
+This SparseTensor is then joined with the original inputs SparseTensor,
+but only for the inputs keys that did not get discretized.</p>
+<dl>
+<dt>Args:</dt><dd><dl class="simple">
+<dt>inputs: A 2D SparseTensor that is input to MDL for discretization.</dt><dd><p>It has a dense_shape of [batch_size, input_size]</p>
+</dd>
+</dl>
+<p>name: A name for the operation (optional).</p>
+</dd>
+<dt>Returns:</dt><dd><p>A <cite>SparseTensor</cite> of the same type as <cite>inputs</cite>.
+Its dense_shape is [shape_input.dense_shape[0], 1 &lt;&lt; output_bits].</p>
+</dd>
+</dl>
+<p>“””
+if isinstance(inputs, tf.SparseTensor):</p>
+<blockquote>
+<div><p>inputs = twml.SparseTensor.from_tf(inputs)</p>
+</div></blockquote>
+<p>assert(isinstance(inputs, twml.SparseTensor))</p>
+<p># sparse column indices
+ids = inputs.ids
+# sparse row indices
+keys = inputs.indices
+# sparse values
+vals = inputs.values</p>
+<p># get intersect(keys, hash_map)
+hashed_keys = self.hash_map.lookup(keys)</p>
+<p>found = tf.not_equal(hashed_keys, tf.constant(-1, tf.int64))
+partition_ids = tf.cast(found, tf.int32)</p>
+<p>vals, key, indices = self.partition(partition_ids, vals, tf.where(found, hashed_keys, keys))
+non_mdl_keys, mdl_in_keys = key
+non_mdl_vals, mdl_in_vals = vals</p>
+<p>self.non_mdl_keys = non_mdl_keys</p>
+<p># run MDL on the keys/values it knows about
+mdl_keys, mdl_vals = libtwml.ops.mdl(mdl_in_keys, mdl_in_vals, self.bin_ids, self.bin_values,</p>
+<blockquote>
+<div><p>self.feature_offsets)</p>
+</div></blockquote>
+<p># handle output ID conflicts
+mdl_size = tf.size(self.bin_ids, out_type=tf.int64)
+non_mdl_size = tf.subtract(self.output_size, mdl_size)
+non_mdl_keys = tf.add(tf.floormod(non_mdl_keys, non_mdl_size), mdl_size)</p>
+<p># Stitch the keys and values from mdl and non mdl indices back, with help
+# of the Stitch Layer</p>
+<p># out for inference checking
+self.mdl_out_keys = mdl_keys</p>
+<dl class="simple">
+<dt>concat_data = self.stitch([non_mdl_vals, mdl_vals],</dt><dd><p>[non_mdl_keys, mdl_keys],
+indices)</p>
+</dd>
+</dl>
+<p>concat_vals, concat_keys = concat_data</p>
+<p># Generate output shape using _compute_output_shape</p>
+<p>batch_size = tf.to_int64(inputs.dense_shape[0])
+output_shape = [batch_size, self.output_size]
+return twml.SparseTensor(ids, concat_keys, concat_vals, output_shape).to_tf()</p>
+</dd>
+<dt>def compute_output_shape(self, input_shape):</dt><dd><p>“””Computes the output shape of the layer given the input shape.</p>
+<dl class="simple">
+<dt>Args:</dt><dd><dl class="simple">
+<dt>input_shape: A (possibly nested tuple of) <cite>TensorShape</cite>.  It need not</dt><dd><p>be fully defined (e.g. the batch size may be unknown).</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>Raises NotImplementedError.</p>
+<p>“””
+raise NotImplementedError</p>
+</dd>
+</dl>
+</dd>
+</dl>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../_sources/twml/twml/layers/mdl.py.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

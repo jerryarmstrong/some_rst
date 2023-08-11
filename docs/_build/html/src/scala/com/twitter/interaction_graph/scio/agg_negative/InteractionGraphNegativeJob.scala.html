@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../" id="documentation_options" src="../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.interaction_graph.scio.agg_negative</p>
+<p>import com.google.api.services.bigquery.model.TimePartitioning
+import com.spotify.scio.ScioContext
+import com.spotify.scio.values.SCollection
+import com.twitter.algebird.mutable.PriorityQueueMonoid
+import com.twitter.beam.io.dal.DAL
+import com.twitter.beam.io.fs.multiformat.PathLayout
+import com.twitter.beam.io.fs.multiformat.WriteOptions
+import com.twitter.conversions.DurationOps._
+import com.twitter.dal.client.dataset.SnapshotDALDataset
+import com.twitter.interaction_graph.scio.common.ConversionUtil.hasNegativeFeatures
+import com.twitter.interaction_graph.scio.common.ConversionUtil.toRealGraphEdgeFeatures
+import com.twitter.interaction_graph.scio.common.FeatureGeneratorUtil.getEdgeFeature
+import com.twitter.interaction_graph.scio.common.GraphUtil
+import com.twitter.interaction_graph.scio.common.InteractionGraphRawInput
+import com.twitter.interaction_graph.thriftscala.Edge
+import com.twitter.interaction_graph.thriftscala.FeatureName
+import com.twitter.scalding_internal.multiformat.format.keyval.KeyVal
+import com.twitter.scio_internal.job.ScioBeamJob
+import com.twitter.scrooge.ThriftStruct
+import com.twitter.socialgraph.hadoop.SocialgraphUnfollowsScalaDataset
+import com.twitter.tcdc.bqblaster.beam.syntax._
+import com.twitter.tcdc.bqblaster.core.avro.TypedProjection
+import com.twitter.tcdc.bqblaster.core.transform.RootTransform
+import com.twitter.timelines.real_graph.thriftscala.RealGraphFeaturesTest
+import com.twitter.timelines.real_graph.v1.thriftscala.{RealGraphFeatures =&gt; RealGraphFeaturesV1}
+import com.twitter.user_session_store.thriftscala.UserSession
+import flockdb_tools.datasets.flock.FlockBlocksEdgesScalaDataset
+import flockdb_tools.datasets.flock.FlockMutesEdgesScalaDataset
+import flockdb_tools.datasets.flock.FlockReportAsAbuseEdgesScalaDataset
+import flockdb_tools.datasets.flock.FlockReportAsSpamEdgesScalaDataset
+import java.time.Instant
+import org.apache.beam.sdk.io.gcp.bigquery.BigQueryIO</p>
+<dl>
+<dt>object InteractionGraphNegativeJob extends ScioBeamJob[InteractionGraphNegativeOption] {</dt><dd><p>val maxDestinationIds = 500 // p99 is about 500
+def getFeatureCounts(e: Edge): Int = e.features.size
+val negativeEdgeOrdering = Ordering.by[Edge, Int](getFeatureCounts)
+val negativeEdgeReverseOrdering = negativeEdgeOrdering.reverse
+implicit val pqMonoid: PriorityQueueMonoid[Edge] =</p>
+<blockquote>
+<div><p>new PriorityQueueMonoid[Edge](maxDestinationIds)(negativeEdgeOrdering)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>override protected def configurePipeline(</dt><dd><p>sc: ScioContext,
+opts: InteractionGraphNegativeOption</p>
+</dd>
+</dl>
+<p>): Unit = {</p>
+<blockquote>
+<div><p>val endTs = opts.interval.getEndMillis</p>
+<p>// read input datasets
+val blocks: SCollection[InteractionGraphRawInput] =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>GraphUtil.getFlockFeatures(</dt><dd><p>readSnapshot(FlockBlocksEdgesScalaDataset, sc),
+FeatureName.NumBlocks,
+endTs)</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl class="simple">
+<dt>val mutes: SCollection[InteractionGraphRawInput] =</dt><dd><dl class="simple">
+<dt>GraphUtil.getFlockFeatures(</dt><dd><p>readSnapshot(FlockMutesEdgesScalaDataset, sc),
+FeatureName.NumMutes,
+endTs)</p>
+</dd>
+</dl>
+</dd>
+<dt>val abuseReports: SCollection[InteractionGraphRawInput] =</dt><dd><dl class="simple">
+<dt>GraphUtil.getFlockFeatures(</dt><dd><p>readSnapshot(FlockReportAsAbuseEdgesScalaDataset, sc),
+FeatureName.NumReportAsAbuses,
+endTs)</p>
+</dd>
+</dl>
+</dd>
+<dt>val spamReports: SCollection[InteractionGraphRawInput] =</dt><dd><dl class="simple">
+<dt>GraphUtil.getFlockFeatures(</dt><dd><p>readSnapshot(FlockReportAsSpamEdgesScalaDataset, sc),
+FeatureName.NumReportAsSpams,
+endTs)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>// we only keep unfollows in the past 90 days due to the huge size of this dataset,
+// and to prevent permanent “shadow-banning” in the event of accidental unfollows.
+// we treat unfollows as less critical than above 4 negative signals, since it deals more with
+// interest than health typically, which might change over time.
+val unfollows: SCollection[InteractionGraphRawInput] =</p>
+<blockquote>
+<div><dl>
+<dt>GraphUtil</dt><dd><dl class="simple">
+<dt>.getSocialGraphFeatures(</dt><dd><p>readSnapshot(SocialgraphUnfollowsScalaDataset, sc),
+FeatureName.NumUnfollows,
+endTs)</p>
+</dd>
+</dl>
+<p>.filter(_.age &lt; 90)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>// group all features by (src, dest)
+val allEdgeFeatures: SCollection[Edge] =</p>
+<blockquote>
+<div><p>getEdgeFeature(SCollection.unionAll(Seq(blocks, mutes, abuseReports, spamReports, unfollows)))</p>
+</div></blockquote>
+<dl>
+<dt>val negativeFeatures: SCollection[KeyVal[Long, UserSession]] =</dt><dd><dl>
+<dt>allEdgeFeatures</dt><dd><p>.keyBy(_.sourceId)
+.topByKey(maxDestinationIds)(Ordering.by(_.features.size))
+.map {</p>
+<blockquote>
+<div><dl>
+<dt>case (srcId, pqEdges) =&gt;</dt><dd><dl>
+<dt>val topKNeg =</dt><dd><p>pqEdges.toSeq.flatMap(toRealGraphEdgeFeatures(hasNegativeFeatures))</p>
+</dd>
+<dt>KeyVal(</dt><dd><p>srcId,
+UserSession(</p>
+<blockquote>
+<div><p>userId = Some(srcId),
+realGraphFeaturesTest =</p>
+<blockquote>
+<div><p>Some(RealGraphFeaturesTest.V1(RealGraphFeaturesV1(topKNeg)))))</p>
+</div></blockquote>
+</div></blockquote>
+</dd>
+</dl>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>// save to GCS (via DAL)
+negativeFeatures.saveAsCustomOutput(</p>
+<blockquote>
+<div><p>“Write Negative Edge Label”,
+DAL.writeVersionedKeyVal(</p>
+<blockquote>
+<div><p>dataset = RealGraphNegativeFeaturesScalaDataset,
+pathLayout = PathLayout.VersionedPath(opts.getOutputPath),
+instant = Instant.ofEpochMilli(opts.interval.getEndMillis),
+writeOption = WriteOptions(numOfShards = Some(3000))</p>
+</div></blockquote>
+<p>)</p>
+</div></blockquote>
+<p>)</p>
+<p>// save to BQ
+val ingestionDate = opts.getDate().value.getStart.toDate
+val bqDataset = opts.getBqDataset
+val bqFieldsTransform = RootTransform</p>
+<blockquote>
+<div><p>.Builder()
+.withPrependedFields(“dateHour” -&gt; TypedProjection.fromConstant(ingestionDate))</p>
+</div></blockquote>
+<dl>
+<dt>val timePartitioning = new TimePartitioning()</dt><dd><p>.setType(“DAY”).setField(“dateHour”).setExpirationMs(21.days.inMilliseconds)</p>
+</dd>
+<dt>val bqWriter = BigQueryIO</dt><dd><p>.write[Edge]
+.to(s”${bqDataset}.interaction_graph_agg_negative_edge_snapshot”)
+.withExtendedErrorInfo()
+.withTimePartitioning(timePartitioning)
+.withLoadJobProjectId(“twttr-recos-ml-prod”)
+.withThriftSupport(bqFieldsTransform.build(), AvroConverter.Legacy)
+.withCreateDisposition(BigQueryIO.Write.CreateDisposition.CREATE_IF_NEEDED)
+.withWriteDisposition(</p>
+<blockquote>
+<div><p>BigQueryIO.Write.WriteDisposition.WRITE_TRUNCATE</p>
+</div></blockquote>
+<p>) // we only want the latest snapshot</p>
+</dd>
+<dt>allEdgeFeatures</dt><dd><dl class="simple">
+<dt>.saveAsCustomOutput(</dt><dd><p>s”Save Recommendations to BQ interaction_graph_agg_negative_edge_snapshot”,
+bqWriter</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>def readSnapshot[T &lt;: ThriftStruct](</dt><dd><p>dataset: SnapshotDALDataset[T],
+sc: ScioContext</p>
+</dd>
+<dt>): SCollection[T] = {</dt><dd><dl class="simple">
+<dt>sc.customInput(</dt><dd><p>s”Reading most recent snaphost ${dataset.role.name}.${dataset.logicalName}”,
+DAL.readMostRecentSnapshotNoOlderThan[T](dataset, 7.days)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../_sources/src/scala/com/twitter/interaction_graph/scio/agg_negative/InteractionGraphNegativeJob.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>
