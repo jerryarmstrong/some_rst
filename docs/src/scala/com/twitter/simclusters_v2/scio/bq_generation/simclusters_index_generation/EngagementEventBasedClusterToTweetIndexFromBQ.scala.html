@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../" id="documentation_options" src="../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.simclusters_v2.scio.bq_generation
+package simclusters_index_generation</p>
+<p>import com.spotify.scio.ScioContext
+import com.spotify.scio.values.SCollection
+import com.twitter.simclusters_v2.scio.bq_generation.common.BQGenerationUtil.getNSFWTweetIdDenylistSQL
+import com.twitter.simclusters_v2.scio.bq_generation.common.BQGenerationUtil.getTweetIdWithFavCountSQL
+import com.twitter.simclusters_v2.scio.bq_generation.common.BQGenerationUtil.getTweetIdWithMediaAndNSFWAuthorFilterSQL
+import com.twitter.simclusters_v2.scio.bq_generation.common.BQGenerationUtil.getUserTweetEngagementEventPairSQL
+import com.twitter.simclusters_v2.scio.bq_generation.common.BQGenerationUtil.generateClusterTopTweetIntersectionWithFavBasedIndexSQL
+import com.twitter.simclusters_v2.scio.bq_generation.simclusters_index_generation.Config.simclustersEngagementBasedIndexGenerationSQLPath
+import com.twitter.simclusters_v2.scio.bq_generation.common.IndexGenerationUtil.TopKTweetsForClusterKey
+import com.twitter.simclusters_v2.scio.bq_generation.common.IndexGenerationUtil.parseClusterTopKTweetsFn
+import com.twitter.wtf.beam.bq_embedding_export.BQQueryUtils
+import org.apache.beam.sdk.io.gcp.bigquery.BigQueryIO
+import org.joda.time.DateTime</p>
+<p>object EngagementEventBasedClusterToTweetIndexFromBQ {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>/*</dt><dd><ul class="simple">
+<li><p>Reads the user-tweet-interaction table and apply tweet fav count filter</p></li>
+<li><p>Returns the post processed table results in SQL string format</p></li>
+<li></li>
+</ul>
+</dd>
+</dl>
+</div></blockquote>
+<ul>
+<li><dl class="simple">
+<dt>Input:</dt><dd><ul class="simple">
+<li><ul>
+<li><p>startTime: DateTime</p></li>
+</ul>
+</li>
+<li><p>The earliest timestamp from the user-tweet-interaction table</p></li>
+<li><ul>
+<li><p>endTime: DateTime</p></li>
+</ul>
+</li>
+<li><p>The latest timestamp from the user-tweet-interaction table</p></li>
+<li><ul>
+<li><p>minFavCount: Int</p></li>
+</ul>
+</li>
+<li><p>Whether we want to enable tweet fav count filters</p></li>
+<li></li>
+</ul>
+</dd>
+</dl>
+</li>
+<li><dl>
+<dt>Return:</dt><dd><ul class="simple">
+<li><p>String - Post processed table results in SQL string format</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>def getTweetInteractionTableWithFavCountFilter(</dt><dd><p>startTime: DateTime,
+endTime: DateTime,
+minFavCount: Int</p>
+</dd>
+<dt>): String = {</dt><dd><dl>
+<dt>if (minFavCount &gt; 0) {</dt><dd><p>val tweetFavCountSQL = getTweetIdWithFavCountSQL(startTime, endTime)
+s”””</p>
+<blockquote>
+<div><div class="line-block">
+<div class="line">WITH tweet_fav_count AS (${tweetFavCountSQL})</div>
+<div class="line">SELECT userId, tweetId, tsMillis</div>
+<div class="line">FROM user_tweet_interaction_with_min_interaction_count_filter</div>
+<div class="line">JOIN tweet_fav_count</div>
+<div class="line">USING(tweetId)</div>
+<div class="line">WHERE tweet_fav_count.favCount &gt;= ${minFavCount}</div>
+</div>
+<p><a href="#id3"><span class="problematic" id="id4">|</span></a>”””.stripMargin</p>
+</div></blockquote>
+</dd>
+<dt>} else {</dt><dd><p>// Directly read from the table without applying any filters
+s”SELECT userId, tweetId, tsMillis FROM user_tweet_interaction_with_min_interaction_count_filter”</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>/*</dt><dd><ul class="simple">
+<li><p>Reads the user-tweet-interaction table and apply health and video filters if specified.</p></li>
+<li><p>Returns the post processed table results in SQL string format</p></li>
+<li></li>
+</ul>
+</dd>
+</dl>
+<ul class="simple">
+<li><p>Input:</p></li>
+</ul>
+<blockquote>
+<div><ul class="simple">
+<li><ul>
+<li><p>tableName: String</p></li>
+</ul>
+</li>
+<li><p>Schema of the table</p></li>
+<li><p>userId: Long</p></li>
+<li><p>tweetId: Long</p></li>
+<li><p>tsMillis: Long</p></li>
+<li><ul>
+<li><p>startTime: DateTime</p></li>
+</ul>
+</li>
+<li><p>The earliest timestamp from the user-tweet-interaction table</p></li>
+<li><ul>
+<li><p>endTime: DateTime</p></li>
+</ul>
+</li>
+<li><p>The latest timestamp from the user-tweet-interaction table</p></li>
+<li><ul>
+<li><p>enableHealthAndVideoFilters: Boolean</p></li>
+</ul>
+</li>
+<li><p>Whether we want to enable health filters and video only filters</p></li>
+<li></li>
+</ul>
+</div></blockquote>
+<ul class="simple">
+<li><p>Return:</p></li>
+</ul>
+<blockquote>
+<div><ul class="simple">
+<li><p>String - Post processed table results in SQL string format</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</div></blockquote>
+<dl>
+<dt>def getTweetInteractionTableWithHealthFilter(</dt><dd><p>startTime: DateTime,
+endTime: DateTime,
+enableHealthAndVideoFilters: Boolean,</p>
+</dd>
+<dt>): String = {</dt><dd><dl>
+<dt>if (enableHealthAndVideoFilters) {</dt><dd><p>// Get SQL for tweets with media and NSFW filter
+val tweetWithMediaAndNSFWAuthorFilterSQL = getTweetIdWithMediaAndNSFWAuthorFilterSQL(</p>
+<blockquote>
+<div><p>startTime,
+endTime,
+filterMediaType = Some(3), // VideoTweets MediaType = 3
+filterNSFWAuthor = true</p>
+</div></blockquote>
+<p>)
+// Get SQL for NSFW tweet id deny list
+val nsfwTweetDenylistSQL = getNSFWTweetIdDenylistSQL(startTime, endTime)
+// Combine the health filter SQLs
+s”””</p>
+<blockquote>
+<div><p><a href="#id7"><span class="problematic" id="id8">|</span></a>SELECT userId, tweetId, tsMillis FROM user_tweet_interaction_with_fav_count_filter JOIN (
+|  ${tweetWithMediaAndNSFWAuthorFilterSQL}
+|    AND tweetId NOT IN (${nsfwTweetDenylistSQL})
+<a href="#id9"><span class="problematic" id="id10">|</span></a>) USING(tweetId)
+<a href="#id11"><span class="problematic" id="id12">|</span></a>”””.stripMargin</p>
+</div></blockquote>
+</dd>
+<dt>} else {</dt><dd><p>// Directly read from the table without applying any filters
+s”SELECT userId, tweetId, tsMillis FROM user_tweet_interaction_with_fav_count_filter”</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def getTopKTweetsForClusterKeyBQ(</dt><dd><p>sc: ScioContext,
+queryTimestamp: DateTime,
+maxTweetAgeHours: Int,
+consumerEmbeddingsSQL: String,
+userTweetEngagementEventPairSqlPath: String,
+userTweetEngagementEventPairTemplateVariable: Map[String, String],
+enableHealthAndVideoFilters: Boolean,
+enableFavClusterTopKTweetsIntersection: Boolean,
+minInteractionCount: Int,
+minFavCount: Int,
+tweetEmbeddingsLength: Int,
+tweetEmbeddingsHalfLife: Int,
+minEngagementPerCluster: Int,
+clusterTopKTweets: Int</p>
+</dd>
+<dt>): SCollection[TopKTweetsForClusterKey] = {</dt><dd><p>// Define template variables which we would like to be replaced in the corresponding sql file
+val startTime = queryTimestamp.minusHours(maxTweetAgeHours)
+val endTime = queryTimestamp</p>
+<dl>
+<dt>val indexGenerationTemplateVariables =</dt><dd><dl>
+<dt>Map(</dt><dd><p>“HALF_LIFE” -&gt; tweetEmbeddingsHalfLife.toString,
+“CURRENT_TS” -&gt; queryTimestamp.toString(),
+“START_TIME” -&gt; startTime.toString(),
+“END_TIME” -&gt; endTime.toString(),
+“USER_TWEET_ENGAGEMENT_TABLE_SQL” -&gt;</p>
+<blockquote>
+<div><dl class="simple">
+<dt>getUserTweetEngagementEventPairSQL(</dt><dd><p>startTime,
+endTime,
+userTweetEngagementEventPairSqlPath,
+userTweetEngagementEventPairTemplateVariable</p>
+</dd>
+</dl>
+<p>),</p>
+</div></blockquote>
+<p>// Min interaction count filter
+“MIN_INTERACTION_COUNT” -&gt; minInteractionCount.toString,
+// Min fav count filter
+“TWEET_INTERACTION_WITH_FAV_COUNT_FILTER_SQL” -&gt; getTweetInteractionTableWithFavCountFilter(</p>
+<blockquote>
+<div><p>startTime,
+endTime,
+minFavCount</p>
+</div></blockquote>
+<p>),
+// Health filter
+“TWEET_INTERACTION_WITH_HEALTH_FILTER_SQL” -&gt; getTweetInteractionTableWithHealthFilter(</p>
+<blockquote>
+<div><p>startTime,
+endTime,
+enableHealthAndVideoFilters),</p>
+</div></blockquote>
+<p>“CONSUMER_EMBEDDINGS_SQL” -&gt; consumerEmbeddingsSQL,
+“TWEET_EMBEDDING_LENGTH” -&gt; tweetEmbeddingsLength.toString,
+“MIN_ENGAGEMENT_PER_CLUSTER” -&gt; minEngagementPerCluster.toString,
+“CLUSTER_TOP_K_TWEETS” -&gt; clusterTopKTweets.toString</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>val query = BQQueryUtils.getBQQueryFromSqlFile(</dt><dd><p>simclustersEngagementBasedIndexGenerationSQLPath,
+indexGenerationTemplateVariables)</p>
+</dd>
+<dt>val postFilterQuery = if (enableFavClusterTopKTweetsIntersection) {</dt><dd><dl class="simple">
+<dt>generateClusterTopTweetIntersectionWithFavBasedIndexSQL(</dt><dd><p>startTime,
+endTime,
+clusterTopKTweets,
+query)</p>
+</dd>
+</dl>
+</dd>
+<dt>} else {</dt><dd><p>query</p>
+</dd>
+</dl>
+<p>}
+// Generate SimClusters cluster-to-tweet index
+sc.customInput(</p>
+<blockquote>
+<div><p>s”SimClusters cluster-to-tweet index generation BQ job”,
+BigQueryIO</p>
+<blockquote>
+<div><p>.read(parseClusterTopKTweetsFn(tweetEmbeddingsHalfLife))
+.fromQuery(postFilterQuery)
+.usingStandardSql()</p>
+</div></blockquote>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</li>
+</ul>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../_sources/src/scala/com/twitter/simclusters_v2/scio/bq_generation/simclusters_index_generation/EngagementEventBasedClusterToTweetIndexFromBQ.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

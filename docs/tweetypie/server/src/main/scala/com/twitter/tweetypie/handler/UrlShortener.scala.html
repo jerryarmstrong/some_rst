@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.tweetypie
+package handler</p>
+<p>import com.twitter.service.talon.thriftscala._
+import com.twitter.servo.util.FutureArrow
+import com.twitter.tco_util.DisplayUrl
+import com.twitter.tco_util.TcoUrl
+import com.twitter.tweetypie.backends.Talon
+import com.twitter.tweetypie.core.OverCapacity
+import com.twitter.tweetypie.store.Guano
+import com.twitter.tweetypie.thriftscala.ShortenedUrl
+import scala.util.control.NoStackTrace</p>
+<dl>
+<dt>object UrlShortener {</dt><dd><p>type Type = FutureArrow[(String, Context), ShortenedUrl]</p>
+<dl class="simple">
+<dt>case class Context(</dt><dd><p>tweetId: TweetId,
+userId: UserId,
+createdAt: Time,
+userProtected: Boolean,
+clientAppId: Option[Long] = None,
+remoteHost: Option[String] = None,
+dark: Boolean = false)</p>
+</dd>
+</dl>
+<p>object MalwareUrlError extends Exception with NoStackTrace
+object InvalidUrlError extends Exception with NoStackTrace</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Returns a new UrlShortener that checks the response from the underlying shortner</p></li>
+<li><p>and, if the request is not dark but fails with a MalwareUrlError, scribes request</p></li>
+<li><p>info to guano.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>def scribeMalware(guano: Guano)(underlying: Type): Type =</dt><dd><dl>
+<dt>FutureArrow {</dt><dd><dl>
+<dt>case (longUrl, ctx) =&gt;</dt><dd><dl>
+<dt>underlying((longUrl, ctx)).onFailure {</dt><dd><dl>
+<dt>case MalwareUrlError if !ctx.dark =&gt;</dt><dd><dl>
+<dt>guano.scribeMalwareAttempt(</dt><dd><dl class="simple">
+<dt>Guano.MalwareAttempt(</dt><dd><p>longUrl,
+ctx.userId,
+ctx.clientAppId,
+ctx.remoteHost</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>case _ =&gt;</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>def fromTalon(talonShorten: Talon.Shorten): Type = {</dt><dd><p>val log = Logger(getClass)</p>
+<dl>
+<dt>FutureArrow {</dt><dd><dl>
+<dt>case (longUrl, ctx) =&gt;</dt><dd><dl>
+<dt>val request =</dt><dd><dl>
+<dt>ShortenRequest(</dt><dd><p>userId = ctx.userId,
+longUrl = longUrl,
+auditMsg = “tweetypie”,
+directMessage = Some(false),
+protectedAccount = Some(ctx.userProtected),
+maxShortUrlLength = None,
+tweetData = Some(TweetData(ctx.tweetId, ctx.createdAt.inMilliseconds)),
+trafficType =</p>
+<blockquote>
+<div><p>if (ctx.dark) ShortenTrafficType.Testing
+else ShortenTrafficType.Production</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>talonShorten(request).flatMap { res =&gt;</dt><dd><dl>
+<dt>res.responseCode match {</dt><dd><dl>
+<dt>case ResponseCode.Ok =&gt;</dt><dd><dl>
+<dt>if (res.malwareStatus == MalwareStatus.UrlBlocked) {</dt><dd><p>Future.exception(MalwareUrlError)</p>
+</dd>
+<dt>} else {</dt><dd><dl>
+<dt>val shortUrl =</dt><dd><dl class="simple">
+<dt>res.fullShortUrl.getOrElse {</dt><dd><p>// fall back to fromSlug if talon response does not have the full short url
+// Could be replaced with an exception once the initial integration on production
+// is done
+TcoUrl.fromSlug(res.shortUrl, TcoUrl.isHttps(res.longUrl))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>Future.value(</dt><dd><dl class="simple">
+<dt>ShortenedUrl(</dt><dd><p>shortUrl = shortUrl,
+longUrl = res.longUrl,
+displayText = DisplayUrl(shortUrl, Some(res.longUrl), true)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>case ResponseCode.BadInput =&gt;</dt><dd><p>log.warn(s”Talon rejected URL that Extractor thought was fine: $longUrl”)
+Future.exception(InvalidUrlError)</p>
+</dd>
+</dl>
+<p>// we shouldn’t see other ResponseCodes, because Talon.Shorten translates them to
+// exceptions, but we have this catch-all just in case.
+case resCode =&gt;</p>
+<blockquote>
+<div><p>log.warn(s”Unexpected response code $resCode for ‘$longUrl’”)
+Future.exception(OverCapacity(“talon”))</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/tweetypie/server/src/main/scala/com/twitter/tweetypie/handler/UrlShortener.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

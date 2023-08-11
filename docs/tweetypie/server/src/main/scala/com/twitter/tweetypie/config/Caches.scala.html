@@ -1,0 +1,459 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.tweetypie
+package config</p>
+<p>import com.twitter.conversions.DurationOps._
+import com.twitter.finagle.Backoff
+import com.twitter.finagle.memcached
+import com.twitter.finagle.stats.Stat
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.servo.cache.{Serializer =&gt; CacheSerializer, _}
+import com.twitter.tweetypie.client_id.ClientIdHelper
+import com.twitter.tweetypie.core._
+import com.twitter.tweetypie.handler.CacheBasedTweetCreationLock
+import com.twitter.tweetypie.repository._
+import com.twitter.tweetypie.serverutil._
+import com.twitter.tweetypie.thriftscala._
+import com.twitter.tweetypie.util._
+import com.twitter.util.Timer</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Provides configured caches (most backed by memcached) wrapped with appropriate metrics and locks.</p></li>
+<li></li>
+<li><p>All memcached-backed caches share:</p></li>
+<li><ul>
+<li><p>one Finagle memcached client from backends.memcacheClient</p></li>
+</ul>
+</li>
+<li><ul>
+<li><p>one in memory caffeine cache</p></li>
+</ul>
+</li>
+<li><ul>
+<li><p>one Twemcache pool</p></li>
+</ul>
+</li>
+<li></li>
+<li><p>Each memcached-backed cache specialization provides its own:</p></li>
+<li><ul>
+<li><p>key prefix or “namespace”</p></li>
+</ul>
+</li>
+<li><ul>
+<li><p>value serializer/deserializer</p></li>
+</ul>
+</li>
+<li><ul>
+<li><p>stats scope</p></li>
+</ul>
+</li>
+<li><ul>
+<li><p>log name</p></li>
+</ul>
+</li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>trait Caches {</dt><dd><p>val memcachedClientWithInProcessCaching: memcached.Client
+val tweetCache: LockingCache[TweetKey, Cached[CachedTweet]]
+val tweetResultCache: LockingCache[TweetId, Cached[TweetResult]]
+val tweetDataCache: LockingCache[TweetId, Cached[TweetData]]
+val tweetCreateLockerCache: Cache[TweetCreationLock.Key, TweetCreationLock.State]
+val tweetCountsCache: LockingCache[TweetCountKey, Cached[Count]]
+val deviceSourceInProcessCache: LockingCache[String, Cached[DeviceSource]]
+val geoScrubCache: LockingCache[UserId, Cached[Time]]</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>object Caches {</dt><dd><dl>
+<dt>object NoCache extends Caches {</dt><dd><p>override val memcachedClientWithInProcessCaching: memcached.Client = new NullMemcacheClient()
+private val toLockingCache: LockingCacheFactory = NonLockingCacheFactory
+val tweetCache: LockingCache[TweetKey, Cached[CachedTweet]] =</p>
+<blockquote>
+<div><p>toLockingCache(new NullCache)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>val tweetResultCache: LockingCache[TweetId, Cached[TweetResult]] =</dt><dd><p>toLockingCache(new NullCache)</p>
+</dd>
+<dt>val tweetDataCache: LockingCache[TweetId, Cached[TweetData]] =</dt><dd><p>toLockingCache(new NullCache)</p>
+</dd>
+<dt>val tweetCreateLockerCache: Cache[TweetCreationLock.Key, TweetCreationLock.State] =</dt><dd><p>new NullCache</p>
+</dd>
+<dt>val tweetCountsCache: LockingCache[TweetCountKey, Cached[Count]] =</dt><dd><p>toLockingCache(new NullCache)</p>
+</dd>
+<dt>val deviceSourceInProcessCache: LockingCache[String, Cached[DeviceSource]] =</dt><dd><p>toLockingCache(new NullCache)</p>
+</dd>
+<dt>val geoScrubCache: LockingCache[UserId, Cached[Time]] =</dt><dd><p>toLockingCache(new NullCache)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def apply(</dt><dd><p>settings: TweetServiceSettings,
+stats: StatsReceiver,
+timer: Timer,
+clients: BackendClients,
+tweetKeyFactory: TweetKeyFactory,
+deciderGates: TweetypieDeciderGates,
+clientIdHelper: ClientIdHelper,</p>
+</dd>
+<dt>): Caches = {</dt><dd><p>val cachesStats = stats.scope(“caches”)
+val cachesInprocessStats = cachesStats.scope(“inprocess”)
+val cachesMemcacheStats = cachesStats.scope(“memcache”)
+val cachesMemcacheObserver = new StatsReceiverCacheObserver(cachesStats, 10000, “memcache”)
+val cachesMemcacheTweetStats = cachesMemcacheStats.scope(“tweet”)
+val cachesInprocessDeviceSourceStats = cachesInprocessStats.scope(“device_source”)
+val cachesMemcacheCountStats = cachesMemcacheStats.scope(“count”)
+val cachesMemcacheTweetCreateStats = cachesMemcacheStats.scope(“tweet_create”)
+val cachesMemcacheGeoScrubStats = cachesMemcacheStats.scope(“geo_scrub”)
+val memcacheClient = clients.memcacheClient</p>
+<dl>
+<dt>val caffieneMemcachedClient = settings.inProcessCacheConfigOpt match {</dt><dd><dl>
+<dt>case Some(inProcessCacheConfig) =&gt;</dt><dd><dl class="simple">
+<dt>new CaffeineMemcacheClient(</dt><dd><p>proxyClient = memcacheClient,
+inProcessCacheConfig.maximumSize,
+inProcessCacheConfig.ttl,
+cachesMemcacheStats.scope(“caffeine”)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>case None =&gt;</dt><dd><p>memcacheClient</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>val observedMemcacheWithCaffeineClient =</dt><dd><dl>
+<dt>new ObservableMemcache(</dt><dd><dl class="simple">
+<dt>new FinagleMemcache(</dt><dd><p>caffieneMemcachedClient</p>
+</dd>
+</dl>
+<p>),
+cachesMemcacheObserver</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>def observeCache[K, V](</dt><dd><p>cache: Cache[K, V],
+stats: StatsReceiver,
+logName: String,
+windowSize: Int = 10000</p>
+</dd>
+<dt>) =</dt><dd><dl class="simple">
+<dt>ObservableCache(</dt><dd><p>cache,
+stats,
+windowSize,
+// Need to use an old-school c.t.logging.Logger because that’s what servo needs
+com.twitter.logging.Logger(s”com.twitter.tweetypie.cache.$logName”)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>def mkCache[K, V](</dt><dd><p>ttl: Duration,
+serializer: CacheSerializer[V],
+perCacheStats: StatsReceiver,
+logName: String,
+windowSize: Int = 10000</p>
+</dd>
+<dt>): Cache[K, V] = {</dt><dd><dl>
+<dt>observeCache(</dt><dd><dl class="simple">
+<dt>new MemcacheCache[K, V](</dt><dd><p>observedMemcacheWithCaffeineClient,
+ttl,
+serializer</p>
+</dd>
+</dl>
+<p>),
+perCacheStats,
+logName,
+windowSize</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def toLockingCache[K, V](</dt><dd><p>cache: Cache[K, V],
+stats: StatsReceiver,
+backoffs: Stream[Duration] = settings.lockingCacheBackoffs</p>
+</dd>
+<dt>): LockingCache[K, V] =</dt><dd><dl class="simple">
+<dt>new OptimisticLockingCache(</dt><dd><p>underlyingCache = cache,
+backoffs = Backoff.fromStream(backoffs),
+observer = new OptimisticLockingCacheObserver(stats),
+timer = timer</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>def mkLockingCache[K, V](</dt><dd><p>ttl: Duration,
+serializer: CacheSerializer[V],
+stats: StatsReceiver,
+logName: String,
+windowSize: Int = 10000,
+backoffs: Stream[Duration] = settings.lockingCacheBackoffs</p>
+</dd>
+<dt>): LockingCache[K, V] =</dt><dd><dl class="simple">
+<dt>toLockingCache(</dt><dd><p>mkCache(ttl, serializer, stats, logName, windowSize),
+stats,
+backoffs</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>def trackTimeInCache[K, V](</dt><dd><p>cache: Cache[K, Cached[V]],
+stats: StatsReceiver</p>
+</dd>
+<dt>): Cache[K, Cached[V]] =</dt><dd><dl>
+<dt>new CacheWrapper[K, Cached[V]] {</dt><dd><p>val ageStat: Stat = stats.stat(“time_in_cache_ms”)
+val underlyingCache: Cache[K, Cached[V]] = cache</p>
+<dl>
+<dt>override def get(keys: Seq[K]): Future[KeyValueResult[K, Cached[V]]] =</dt><dd><p>underlyingCache.get(keys).onSuccess(record)</p>
+</dd>
+<dt>private def record(res: KeyValueResult[K, Cached[V]]): Unit = {</dt><dd><p>val now = Time.now
+for (c &lt;- res.found.values) {</p>
+<blockquote>
+<div><p>ageStat.add(c.cachedAt.until(now).inMilliseconds)</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>new Caches {</dt><dd><p>override val memcachedClientWithInProcessCaching: memcached.Client = caffieneMemcachedClient</p>
+<dl>
+<dt>private val observingTweetCache: Cache[TweetKey, Cached[CachedTweet]] =</dt><dd><dl>
+<dt>trackTimeInCache(</dt><dd><dl class="simple">
+<dt>mkCache(</dt><dd><p>ttl = settings.tweetMemcacheTtl,
+serializer = Serializer.CachedTweet.CachedCompact,
+perCacheStats = cachesMemcacheTweetStats,
+logName = “MemcacheTweetCache”</p>
+</dd>
+</dl>
+<p>),
+cachesMemcacheTweetStats</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>// Wrap the tweet cache with a wrapper that will scribe the cache writes
+// that happen to a fraction of tweets. This was added as part of the
+// investigation into missing place ids and cache inconsistencies that
+// were discovered by the additional fields hydrator.
+private[this] val writeLoggingTweetCache =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>new ScribeTweetCacheWrites(</dt><dd><p>underlyingCache = observingTweetCache,
+logYoungTweetCacheWrites = deciderGates.logYoungTweetCacheWrites,
+logTweetCacheWrites = deciderGates.logTweetCacheWrites</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<dl>
+<dt>val tweetCache: LockingCache[TweetKey, Cached[CachedTweet]] =</dt><dd><dl class="simple">
+<dt>toLockingCache(</dt><dd><p>cache = writeLoggingTweetCache,
+stats = cachesMemcacheTweetStats</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>val tweetDataCache: LockingCache[TweetId, Cached[TweetData]] =</dt><dd><dl class="simple">
+<dt>toLockingCache(</dt><dd><p>cache = TweetDataCache(tweetCache, tweetKeyFactory.fromId),
+stats = cachesMemcacheTweetStats</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>val tweetResultCache: LockingCache[TweetId, Cached[TweetResult]] =</dt><dd><dl class="simple">
+<dt>toLockingCache(</dt><dd><p>cache = TweetResultCache(tweetDataCache),
+stats = cachesMemcacheTweetStats</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>val tweetCountsCache: LockingCache[TweetCountKey, Cached[Count]] =</dt><dd><dl class="simple">
+<dt>mkLockingCache(</dt><dd><p>ttl = settings.tweetCountsMemcacheTtl,
+serializer = Serializers.CachedLong.Compact,
+stats = cachesMemcacheCountStats,
+logName = “MemcacheTweetCountCache”,
+windowSize = 1000,
+backoffs = Backoff.linear(0.millis, 2.millis).take(2).toStream</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>val tweetCreateLockerCache: Cache[TweetCreationLock.Key, TweetCreationLock.State] =</dt><dd><dl>
+<dt>observeCache(</dt><dd><dl>
+<dt>new TtlCacheToCache(</dt><dd><dl class="simple">
+<dt>underlyingCache = new KeyValueTransformingTtlCache(</dt><dd><p>underlyingCache = observedMemcacheWithCaffeineClient,
+transformer = TweetCreationLock.State.Serializer,
+underlyingKey = (_: TweetCreationLock.Key).toString</p>
+</dd>
+</dl>
+<p>),
+ttl = CacheBasedTweetCreationLock.ttlChooser(</p>
+<blockquote>
+<div><p>shortTtl = settings.tweetCreateLockingMemcacheTtl,
+longTtl = settings.tweetCreateLockingMemcacheLongTtl</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>),
+stats = cachesMemcacheTweetCreateStats,
+logName = “MemcacheTweetCreateLockingCache”,
+windowSize = 1000</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>val deviceSourceInProcessCache: LockingCache[String, Cached[DeviceSource]] =</dt><dd><dl>
+<dt>toLockingCache(</dt><dd><dl>
+<dt>observeCache(</dt><dd><dl class="simple">
+<dt>new ExpiringLruCache(</dt><dd><p>ttl = settings.deviceSourceInProcessTtl,
+maximumSize = settings.deviceSourceInProcessCacheMaxSize</p>
+</dd>
+</dl>
+<p>),
+stats = cachesInprocessDeviceSourceStats,
+logName = “InprocessDeviceSourceCache”</p>
+</dd>
+</dl>
+<p>),
+stats = cachesInprocessDeviceSourceStats</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>val geoScrubCache: LockingCache[UserId, Cached[Time]] =</dt><dd><dl>
+<dt>toLockingCache[UserId, Cached[Time]](</dt><dd><dl>
+<dt>new KeyTransformingCache(</dt><dd><dl class="simple">
+<dt>mkCache[GeoScrubTimestampKey, Cached[Time]](</dt><dd><p>ttl = settings.geoScrubMemcacheTtl,
+serializer = Serializer.toCached(CacheSerializer.Time),
+perCacheStats = cachesMemcacheGeoScrubStats,
+logName = “MemcacheGeoScrubCache”</p>
+</dd>
+</dl>
+<p>),
+(userId: UserId) =&gt; GeoScrubTimestampKey(userId)</p>
+</dd>
+</dl>
+<p>),
+cachesMemcacheGeoScrubStats</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/tweetypie/server/src/main/scala/com/twitter/tweetypie/config/Caches.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

@@ -1,0 +1,636 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../" id="documentation_options" src="../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.simclusters_v2.scalding.common.matrix</p>
+<p>import com.twitter.algebird.Semigroup
+import com.twitter.bijection.Injection
+import com.twitter.scalding.TypedPipe
+import com.twitter.scalding.ValuePipe
+import org.apache.avro.SchemaBuilder.ArrayBuilder
+import scala.util.Random</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>A class that represents a row-indexed matrix, backed by a TypedPipe[(R, Map(C, V)].</p></li>
+<li><p>For each row of the TypedPipe, we save the rowId and a map consisting of colIds and their values.</p></li>
+<li><p>Only use this class when the max number of non-zero values per row is small (say, &lt;100K).</p></li>
+<li><ul>
+<li><p>Compared to SparseMatrix, this class has some optimizations to efficiently perform some row-wise</p></li>
+</ul>
+</li>
+<li><p>operations.</p></li>
+<li><ul>
+<li><p>Also, if the matrix is skinny (i.e., number of unique colIds is small), we have optimized solutions</p></li>
+</ul>
+</li>
+<li><p>for col-wise normalization as well as matrix multiplication (see SparseMatrix.multiplySkinnySparseRowMatrix).</p></li>
+<li><ul>
+<li><p>&#64;param pipe underlying pipe</p></li>
+</ul>
+</li>
+<li><p>&#64;param isSkinnyMatrix if the matrix is skinny (i.e., number of unique colIds is small)</p></li>
+<li><p>Note the difference between <cite>number of unique colIds</cite> and <cite>max number of non-zero values per row</cite>.</p></li>
+<li><p>&#64;param rowOrd ordering function for row type</p></li>
+<li><p>&#64;param colOrd ordering function for col type</p></li>
+<li><p>&#64;param numericV numeric operations for value type</p></li>
+<li><p>&#64;param semigroupV semigroup for the value type</p></li>
+<li><p>&#64;param rowInj injection function for the row type</p></li>
+<li><p>&#64;param colInj injection function for the col type</p></li>
+<li><p>&#64;tparam R Type for rows</p></li>
+<li><p>&#64;tparam C Type for columns</p></li>
+<li><p>&#64;tparam V Type for elements of the matrix</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>case class SparseRowMatrix[R, C, V](</dt><dd><p>pipe: TypedPipe[(R, Map[C, V])],
+isSkinnyMatrix: Boolean</p>
+</dd>
+<dt>)(</dt><dd><p>implicit override val rowOrd: Ordering[R],
+override val colOrd: Ordering[C],
+override val numericV: Numeric[V],
+override val semigroupV: Semigroup[V],
+override val rowInj: Injection[R, Array[Byte]],
+override val colInj: Injection[C, Array[Byte]])</p>
+<blockquote>
+<div><p>extends TypedPipeMatrix[R, C, V] {</p>
+</div></blockquote>
+<p>// number of non-zero values in the matrix
+override lazy val nnz: ValuePipe[Long] = {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>this</dt><dd><p>.filter((_, _, v) =&gt; v != numericV.zero)
+.pipe
+.values
+.map(_.size.toLong)
+.sum</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>override def get(rowId: R, colId: C): ValuePipe[V] = {</dt><dd><dl>
+<dt>this.pipe</dt><dd><dl>
+<dt>.collect {</dt><dd><dl>
+<dt>case (i, values) if i == rowId =&gt;</dt><dd><dl class="simple">
+<dt>values.collect {</dt><dd><p>case (j, value) if j == colId =&gt; value</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+.flatten
+.sum</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>override def getRow(rowId: R): TypedPipe[(C, V)] = {</dt><dd><dl class="simple">
+<dt>this.pipe.flatMap {</dt><dd><dl class="simple">
+<dt>case (i, values) if i == rowId =&gt;</dt><dd><p>values.toSeq</p>
+</dd>
+<dt>case _ =&gt;</dt><dd><p>Nil</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>override def getCol(colId: C): TypedPipe[(R, V)] = {</dt><dd><dl>
+<dt>this.pipe.flatMap {</dt><dd><dl>
+<dt>case (i, values) =&gt;</dt><dd><dl class="simple">
+<dt>values.collect {</dt><dd><dl class="simple">
+<dt>case (j, value) if j == colId =&gt;</dt><dd><p>i -&gt; value</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>override lazy val uniqueRowIds: TypedPipe[R] = {</dt><dd><p>this.pipe.map(_._1).distinct</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>override lazy val uniqueColIds: TypedPipe[C] = {</dt><dd><p>this.pipe.flatMapValues(_.keys).values.distinct</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// convert to a SparseMatrix
+lazy val toSparseMatrix: SparseMatrix[R, C, V] = {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>SparseMatrix(this.pipe.flatMap {</dt><dd><dl class="simple">
+<dt>case (i, values) =&gt;</dt><dd><p>values.map { case (j, value) =&gt; (i, j, value) }</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>})</p>
+</div></blockquote>
+<p>}</p>
+<p>// convert to a TypedPipe
+lazy val toTypedPipe: TypedPipe[(R, Map[C, V])] = {</p>
+<blockquote>
+<div><p>this.pipe</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>def filter(fn: (R, C, V) =&gt; Boolean): SparseRowMatrix[R, C, V] = {</dt><dd><dl>
+<dt>SparseRowMatrix(</dt><dd><dl>
+<dt>this.pipe</dt><dd><dl class="simple">
+<dt>.map {</dt><dd><dl class="simple">
+<dt>case (i, values) =&gt;</dt><dd><p>i -&gt; values.filter { case (j, v) =&gt; fn(i, j, v) }</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+.filter(_._2.nonEmpty),</p>
+</dd>
+</dl>
+<p>isSkinnyMatrix = this.isSkinnyMatrix</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// sample the rows in the matrix as defined by samplingRatio
+def sampleRows(samplingRatio: Double): SparseRowMatrix[R, C, V] = {</p>
+<blockquote>
+<div><p>SparseRowMatrix(this.pipe.filter(_ =&gt; Random.nextDouble &lt; samplingRatio), this.isSkinnyMatrix)</p>
+</div></blockquote>
+<p>}</p>
+<p>// filter the matrix based on a subset of rows
+def filterRows(rows: TypedPipe[R]): SparseRowMatrix[R, C, V] = {</p>
+<blockquote>
+<div><p>SparseRowMatrix(this.pipe.join(rows.asKeys).mapValues(_._1), this.isSkinnyMatrix)</p>
+</div></blockquote>
+<p>}</p>
+<p>// filter the matrix based on a subset of cols
+def filterCols(cols: TypedPipe[C]): SparseRowMatrix[R, C, V] = {</p>
+<blockquote>
+<div><p>this.toSparseMatrix.filterCols(cols).toSparseRowMatrix(this.isSkinnyMatrix)</p>
+</div></blockquote>
+<p>}</p>
+<p>// convert the triplet (row, col, value) to a new (row1, col1, value1)
+def tripleApply[R1, C1, V1](</p>
+<blockquote>
+<div><p>fn: (R, C, V) =&gt; (R1, C1, V1)</p>
+</div></blockquote>
+<dl>
+<dt>)(</dt><dd><p>implicit rowOrd1: Ordering[R1],
+colOrd1: Ordering[C1],
+numericV1: Numeric[V1],
+semigroupV1: Semigroup[V1],
+rowInj: Injection[R1, Array[Byte]],
+colInj: Injection[C1, Array[Byte]]</p>
+</dd>
+<dt>): SparseRowMatrix[R1, C1, V1] = {</dt><dd><dl>
+<dt>SparseRowMatrix(</dt><dd><dl>
+<dt>this.pipe.flatMap {</dt><dd><dl>
+<dt>case (i, values) =&gt;</dt><dd><dl>
+<dt>values</dt><dd><dl class="simple">
+<dt>.map {</dt><dd><p>case (j, v) =&gt; fn(i, j, v)</p>
+</dd>
+</dl>
+<p>}
+.groupBy(_._1)
+.mapValues { _.map { case (_, j1, v1) =&gt; (j1, v1) }.toMap }</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>},
+isSkinnyMatrix = this.isSkinnyMatrix</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// get the l2 norms for all rows. this does not trigger a shuffle.
+lazy val rowL2Norms: TypedPipe[(R, Double)] = {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>this.pipe.map {</dt><dd><dl class="simple">
+<dt>case (row, values) =&gt;</dt><dd><dl class="simple">
+<dt>row -&gt; math.sqrt(</dt><dd><dl class="simple">
+<dt>values.values</dt><dd><p>.map(a =&gt; numericV.toDouble(a) * numericV.toDouble(a))
+.sum)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>// normalize the matrix to make sure each row has unit norm
+lazy val rowL2Normalize: SparseRowMatrix[R, C, Double] = {</p>
+<blockquote>
+<div><dl>
+<dt>val result = this.pipe.flatMap {</dt><dd><dl>
+<dt>case (row, values) =&gt;</dt><dd><dl class="simple">
+<dt>val norm =</dt><dd><dl class="simple">
+<dt>math.sqrt(</dt><dd><dl class="simple">
+<dt>values.values</dt><dd><p>.map(v =&gt; numericV.toDouble(v) * numericV.toDouble(v))
+.sum)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+<dt>if (norm == 0.0) {</dt><dd><p>None</p>
+</dd>
+<dt>} else {</dt><dd><p>Some(row -&gt; values.mapValues(v =&gt; numericV.toDouble(v) / norm))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>SparseRowMatrix(result, isSkinnyMatrix = this.isSkinnyMatrix)</p>
+</div></blockquote>
+<p>}</p>
+<p>// get the l2 norms for all cols
+lazy val colL2Norms: TypedPipe[(C, Double)] = {</p>
+<blockquote>
+<div><dl>
+<dt>this.pipe</dt><dd><dl>
+<dt>.flatMap {</dt><dd><dl>
+<dt>case (_, values) =&gt;</dt><dd><dl class="simple">
+<dt>values.map {</dt><dd><dl class="simple">
+<dt>case (col, v) =&gt;</dt><dd><p>col -&gt; numericV.toDouble(v) * numericV.toDouble(v)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+.sumByKey
+.mapValues(math.sqrt)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<p>// normalize the matrix to make sure each column has unit norm
+lazy val colL2Normalize: SparseRowMatrix[R, C, Double] = {</p>
+<blockquote>
+<div><dl>
+<dt>val result = if (this.isSkinnyMatrix) {</dt><dd><p>// if this is a skinny matrix, we first put the norm of all columns into a Map, and then use
+// this Map inside the mappers without shuffling the whole matrix (which is expensive, see the
+// <cite>else</cite> part of this function).
+val colL2NormsValuePipe = this.colL2Norms.map {</p>
+<blockquote>
+<div><p>case (col, norm) =&gt; Map(col -&gt; norm)</p>
+</div></blockquote>
+<p>}.sum</p>
+<dl>
+<dt>this.pipe.flatMapWithValue(colL2NormsValuePipe) {</dt><dd><dl>
+<dt>case ((row, values), Some(colNorms)) =&gt;</dt><dd><dl>
+<dt>Some(row -&gt; values.flatMap {</dt><dd><dl>
+<dt>case (col, value) =&gt;</dt><dd><p>val colNorm = colNorms.getOrElse(col, 0.0)
+if (colNorm == 0.0) {</p>
+<blockquote>
+<div><p>None</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>Some(col -&gt; numericV.toDouble(value) / colNorm)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>})</p>
+</dd>
+<dt>case _ =&gt;</dt><dd><p>None</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>} else {</dt><dd><dl>
+<dt>this.toSparseMatrix.transpose.rowAsKeys</dt><dd><p>.join(this.colL2Norms)
+.collect {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case (col, ((row, value), colNorm)) if colNorm &gt; 0.0 =&gt;</dt><dd><p>row -&gt; Map(col -&gt; numericV.toDouble(value) / colNorm)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+.sumByKey
+.toTypedPipe</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>SparseRowMatrix(result, isSkinnyMatrix = this.isSkinnyMatrix)</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Take topK non-zero elements from each row. Cols are ordered by the <cite>ordering</cite> function</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>def sortWithTakePerRow(</dt><dd><p>k: Int</p>
+</dd>
+<dt>)(</dt><dd><p>ordering: Ordering[(C, V)]</p>
+</dd>
+<dt>): TypedPipe[(R, Seq[(C, V)])] = {</dt><dd><dl class="simple">
+<dt>this.pipe.map {</dt><dd><dl class="simple">
+<dt>case (row, values) =&gt;</dt><dd><p>row -&gt; values.toSeq.sorted(ordering).take(k)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Take topK non-zero elements from each column. Rows are ordered by the <cite>ordering</cite> function.</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>def sortWithTakePerCol(</dt><dd><p>k: Int</p>
+</dd>
+<dt>)(</dt><dd><p>ordering: Ordering[(R, V)]</p>
+</dd>
+<dt>): TypedPipe[(C, Seq[(R, V)])] = {</dt><dd><p>this.toSparseMatrix.sortWithTakePerCol(k)(ordering)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Similar to .forceToDisk function in TypedPipe, but with an option to specify how many partitions</p></li>
+<li><p>to save, which is useful if you want to consolidate the data set or want to tune the number</p></li>
+<li><p>of mappers for the next step.</p></li>
+<li><ul>
+<li><p>&#64;param numShardsOpt number of shards to save the data.</p></li>
+</ul>
+</li>
+<li><ul>
+<li><p>&#64;return</p></li>
+</ul>
+</li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+<dt>def forceToDisk(</dt><dd><p>numShardsOpt: Option[Int] = None</p>
+</dd>
+<dt>): SparseRowMatrix[R, C, V] = {</dt><dd><dl>
+<dt>numShardsOpt</dt><dd><dl class="simple">
+<dt>.map { numShards =&gt;</dt><dd><p>SparseRowMatrix(this.pipe.shard(numShards), this.isSkinnyMatrix)</p>
+</dd>
+</dl>
+<p>}
+.getOrElse {</p>
+<blockquote>
+<div><p>SparseRowMatrix(this.pipe.forceToDisk, this.isSkinnyMatrix)</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>transpose current matrix and multiple another Skinny SparseRowMatrix.</p></li>
+<li><p>The difference between this and .transpose.multiplySkinnySparseRowMatrix(anotherSparseRowMatrix),</p></li>
+<li><p>is that we do not need to do flatten and group again.</p></li>
+<li><ul>
+<li><p>One use case is to when we need to compute the column-wise covariance matrix, then we only need</p></li>
+</ul>
+</li>
+<li><p>a.transposeAndMultiplySkinnySparseRowMatrix(a) to get it.</p></li>
+<li></li>
+<li><p>&#64;param anotherSparseRowMatrix it needs to be a skinny SparseRowMatrix</p></li>
+<li><p>&#64;numReducersOpt Number of reducers.</p></li>
+</ul>
+<p><a href="#id9"><span class="problematic" id="id10">*</span></a>/</p>
+</dd>
+<dt>def transposeAndMultiplySkinnySparseRowMatrix[C2](</dt><dd><p>anotherSparseRowMatrix: SparseRowMatrix[R, C2, V],
+numReducersOpt: Option[Int] = None</p>
+</dd>
+<dt>)(</dt><dd><p>implicit ordering2: Ordering[C2],
+injection2: Injection[C2, Array[Byte]]</p>
+</dd>
+</dl>
+<p>): SparseRowMatrix[C, C2, V] = {</p>
+<blockquote>
+<div><p>// it needs to be a skinny SparseRowMatrix, otherwise we will have out-of-memory issue
+require(anotherSparseRowMatrix.isSkinnyMatrix)</p>
+<dl>
+<dt>SparseRowMatrix(</dt><dd><dl>
+<dt>numReducersOpt</dt><dd><dl>
+<dt>.map { numReducers =&gt;</dt><dd><dl class="simple">
+<dt>this.pipe</dt><dd><p>.join(anotherSparseRowMatrix.pipe).withReducers(numReducers)</p>
+</dd>
+</dl>
+</dd>
+<dt>}.getOrElse(this.pipe</dt><dd><p>.join(anotherSparseRowMatrix.pipe))</p>
+</dd>
+<dt>.flatMap {</dt><dd><dl>
+<dt>case (_, (row1, row2)) =&gt;</dt><dd><dl class="simple">
+<dt>row1.map {</dt><dd><dl class="simple">
+<dt>case (col1, val1) =&gt;</dt><dd><p>col1 -&gt; row2.mapValues(val2 =&gt; numericV.times(val1, val2))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+.sumByKey,</p>
+</dd>
+</dl>
+<p>isSkinnyMatrix = true</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/<a href="#id11"><span class="problematic" id="id12">**</span></a><a href="#id13"><span class="problematic" id="id14">*</span></a></dt><dd><ul class="simple">
+<li><p>Multiply a DenseRowMatrix. The result will be also a DenseRowMatrix.</p></li>
+<li></li>
+<li><p>&#64;param denseRowMatrix matrix to multiply</p></li>
+<li><p>&#64;param numReducersOpt optional parameter to set number of reducers. It uses 1000 by default.</p></li>
+<li><p>you can change it based on your applications</p></li>
+<li><p>&#64;return</p></li>
+</ul>
+<p><a href="#id15"><span class="problematic" id="id16">*</span></a>/</p>
+</dd>
+<dt>def multiplyDenseRowMatrix(</dt><dd><p>denseRowMatrix: DenseRowMatrix[C],
+numReducersOpt: Option[Int] = None</p>
+</dd>
+<dt>): DenseRowMatrix[R] = {</dt><dd><p>this.toSparseMatrix.multiplyDenseRowMatrix(denseRowMatrix, numReducersOpt)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Convert the matrix to a DenseRowMatrix</p></li>
+<li></li>
+<li><p>&#64;param numCols the number of columns in the DenseRowMatrix.</p></li>
+<li><p>&#64;param colToIndexFunction the function to convert colId to the column index in the dense matrix</p></li>
+<li><p>&#64;return</p></li>
+</ul>
+<p><a href="#id17"><span class="problematic" id="id18">*</span></a>/</p>
+</dd>
+<dt>def toDenseRowMatrix(numCols: Int, colToIndexFunction: C =&gt; Int): DenseRowMatrix[R] = {</dt><dd><dl>
+<dt>DenseRowMatrix(this.pipe.map {</dt><dd><dl>
+<dt>case (row, colMap) =&gt;</dt><dd><p>val array = new Array[Double](numCols)
+colMap.foreach {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case (col, value) =&gt;</dt><dd><p>val index = colToIndexFunction(col)
+assert(index &lt; numCols &amp;&amp; index &gt;= 0, “The converted index is out of range!”)
+array(index) = numericV.toDouble(value)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+row -&gt; array</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>})</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../_sources/src/scala/com/twitter/simclusters_v2/scalding/common/matrix/SparseRowMatrix.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

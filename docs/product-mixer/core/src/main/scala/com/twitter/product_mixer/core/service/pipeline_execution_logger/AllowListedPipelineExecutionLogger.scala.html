@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../../../" id="documentation_options" src="../../../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.product_mixer.core.service.pipeline_execution_logger</p>
+<p>import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.inject.annotations.Flag
+import com.twitter.product_mixer.core.module.product_mixer_flags.ProductMixerFlagModule.PipelineExecutionLoggerAllowList
+import com.twitter.product_mixer.core.module.product_mixer_flags.ProductMixerFlagModule.ServiceLocal
+import com.twitter.product_mixer.core.pipeline.PipelineQuery
+import com.twitter.product_mixer.core.util.FuturePools
+import com.twitter.product_mixer.shared_library.observer.Observer.FutureObserver
+import com.twitter.util.Try
+import com.twitter.util.logging.Logging
+import pprint.PPrinter
+import pprint.Tree
+import pprint.Util
+import pprint.tuplePrefix
+import javax.inject.Inject
+import javax.inject.Singleton</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Initial implementation from:</p></li>
+<li><p><a class="reference external" href="https://stackoverflow.com/questions/15718506/scala-how-to-print-case-classes-like-pretty-printed-tree/57080463#57080463">https://stackoverflow.com/questions/15718506/scala-how-to-print-case-classes-like-pretty-printed-tree/57080463#57080463</a></p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+</dl>
+<p>object AllowListedPipelineExecutionLogger {</p>
+<blockquote>
+<div><dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Given a case class who’s arguments are all declared fields on the class,</p></li>
+<li><p>returns an iterator of the field name and values</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>private[pipeline_execution_logger] def caseClassFields(</dt><dd><p>caseClass: Product</p>
+</dd>
+<dt>): Iterator[(String, Any)] = {</dt><dd><p>val fieldValues = caseClass.productIterator.toSet
+val fields = caseClass.getClass.getDeclaredFields.toSeq</p>
+<blockquote>
+<div><p>.filterNot(f =&gt; f.isSynthetic || java.lang.reflect.Modifier.isStatic(f.getModifiers))</p>
+</div></blockquote>
+<dl>
+<dt>fields.iterator</dt><dd><dl class="simple">
+<dt>.map { f =&gt;</dt><dd><p>f.setAccessible(true)
+f.getName -&gt; f.get(caseClass)</p>
+</dd>
+</dl>
+<p>}.filter { case (_, v) =&gt; fieldValues.contains(v) }</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Returns whether a given [[Product]] is a case class which we can render nicely which:</p></li>
+<li><ul>
+<li><p>has a [[Product.productArity]] &lt;= the number of declared fields</p></li>
+</ul>
+</li>
+<li><ul>
+<li><p>isn’t a built in binary operator</p></li>
+</ul>
+</li>
+<li><ul>
+<li><p>isn’t a tuple</p></li>
+</ul>
+</li>
+<li><ul>
+<li><p>who’s arguments are fields (not methods)</p></li>
+</ul>
+</li>
+<li><ul>
+<li><p>every [[Product.productElement]] has a corresponding field</p></li>
+</ul>
+</li>
+<li></li>
+<li><p>This will return false for some case classes where we can not reliably determine which field names correspond to</p></li>
+<li><p>each value in the case class (this can happen if a case class implements an abstract class resulting in val fields</p></li>
+<li><p>becoming methods.</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>private[pipeline_execution_logger] def isRenderableCaseClass(caseClass: Product): Boolean = {</dt><dd><dl class="simple">
+<dt>val possibleToBeRenderableCaseClass =</dt><dd><p>caseClass.getClass.getDeclaredFields.length &gt;= caseClass.productArity</p>
+</dd>
+<dt>val isntBuiltInOperator =</dt><dd><p>!(caseClass.productArity == 2 &amp;&amp; Util.isOperator(caseClass.productPrefix))</p>
+</dd>
+</dl>
+<p>val isntTuple = !caseClass.getClass.getName.startsWith(tuplePrefix)
+val declaredFieldsMatchesCaseClassFields = {</p>
+<blockquote>
+<div><p>val caseClassFields = caseClass.productIterator.toSet
+caseClass.getClass.getDeclaredFields.iterator</p>
+<blockquote>
+<div><p>.filterNot(f =&gt; f.isSynthetic || java.lang.reflect.Modifier.isStatic(f.getModifiers))
+.count { f =&gt;</p>
+<blockquote>
+<div><p>f.setAccessible(true)
+caseClassFields.contains(f.get(caseClass))</p>
+</div></blockquote>
+<p>} &gt;= caseClass.productArity</p>
+</div></blockquote>
+</div></blockquote>
+<p>}</p>
+<p>possibleToBeRenderableCaseClass &amp;&amp; isntBuiltInOperator &amp;&amp; isntTuple &amp;&amp; declaredFieldsMatchesCaseClassFields</p>
+</dd>
+</dl>
+<p>}</p>
+<p>/** Makes a [[Tree]] which will render as <cite>key = value</cite> <a href="#id7"><span class="problematic" id="id8">*</span></a>/
+private def keyValuePair(key: String, value: Tree): Tree = {</p>
+<blockquote>
+<div><p>Tree.Infix(Tree.Literal(key), “=”, value)</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Special handling for case classes who’s field names can be easily paired with their values.</p></li>
+<li><p>This will make the [[PPrinter]] render them as</p></li>
+<li><p>{{{</p></li>
+<li><p>CaseClassName(</p></li>
+<li><p>field1 = value1,</p></li>
+<li><p>field2 = value2</p></li>
+<li><p>)</p></li>
+<li><p>}}}</p></li>
+<li><p>instead of</p></li>
+<li><p>{{{</p></li>
+<li><p>CaseClassName(</p></li>
+<li><p>value1,</p></li>
+<li><p>value2</p></li>
+<li><p>)</p></li>
+<li><p>}}}</p></li>
+<li></li>
+<li><p>For case classes who’s fields end up being compiled as methods, this will fall back</p></li>
+<li><p>to the built in handling of case classes without their field names.</p></li>
+</ul>
+<p><a href="#id9"><span class="problematic" id="id10">*</span></a>/</p>
+</dd>
+<dt>private[pipeline_execution_logger] def additionalHandlers: PartialFunction[Any, Tree] = {</dt><dd><dl>
+<dt>case caseClass: Product if isRenderableCaseClass(caseClass) =&gt;</dt><dd><dl>
+<dt>Tree.Apply(</dt><dd><p>caseClass.productPrefix,
+caseClassFields(caseClass).flatMap {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case (key, value) =&gt;</dt><dd><p>val valueTree = printer.treeify(value, false, true)
+Seq(keyValuePair(key, valueTree))</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>[[PPrinter]] instance to use when rendering scala objects</p></li>
+<li><p>uses BlackAndWhite because colors mangle the output when looking at the logs in plain text</p></li>
+</ul>
+<p><a href="#id11"><span class="problematic" id="id12">*</span></a>/</p>
+</dd>
+<dt>private val printer: PPrinter = PPrinter.BlackWhite.copy(</dt><dd><p>// arbitrary high value to turn off truncation
+defaultHeight = Int.MaxValue,
+// the relatively high width will cause some wrapping but many of the pretty printed objects
+// will be sparse (e.g. None,n None,n, None,n)
+defaultWidth = 300,
+// use reflection to print field names (can be deleted in Scala 2.13)
+additionalHandlers = additionalHandlers</p>
+</dd>
+</dl>
+<p>)</p>
+<p>/** Given any scala object, return a String representation of it <a href="#id13"><span class="problematic" id="id14">*</span></a>/
+private[pipeline_execution_logger] def objectAsString(o: Any): String =</p>
+<blockquote>
+<div><p>printer.tokenize(o).mkString</p>
+</div></blockquote>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Singleton
+class AllowListedPipelineExecutionLogger &#64;Inject() (</p>
+<blockquote>
+<div><p>&#64;Flag(ServiceLocal) isServiceLocal: Boolean,
+&#64;Flag(PipelineExecutionLoggerAllowList) allowList: Seq[String],
+statsReceiver: StatsReceiver)</p>
+<blockquote>
+<div><p>extends PipelineExecutionLogger
+with Logging {</p>
+</div></blockquote>
+<p>private val scopedStats = statsReceiver.scope(“AllowListedPipelineExecutionLogger”)</p>
+<p>val allowListRoles: Set[String] = allowList.toSet</p>
+<dl>
+<dt>private val futurePool =</dt><dd><dl class="simple">
+<dt>FuturePools.boundedFixedThreadPool(</dt><dd><p>“AllowListedPipelineExecutionLogger”,
+// single thread, may need to be adjusted higher if it cant keep up with the work queue
+fixedThreadCount = 1,
+// arbitrarily large enough to handle spikes without causing large allocations or retaining past multiple GC cycles
+workQueueSize = 100,
+scopedStats</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>private val futureObserver = new FutureObserver[Unit](scopedStats, Seq.empty)</p>
+<p>private val loggerOutputPath = Try(System.getProperty(“log.allow_listed_execution_logger.output”))</p>
+<p>override def apply(pipelineQuery: PipelineQuery, message: Any): Unit = {</p>
+<blockquote>
+<div><p>val userRoles: Set[String] = pipelineQuery.clientContext.userRoles.getOrElse(Set.empty)</p>
+<p>// Check if this request is in the allowlist via a cleverly optimized set intersection
+val allowListed =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (allowListRoles.size &gt; userRoles.size)</dt><dd><p>userRoles.exists(allowListRoles.contains)</p>
+</dd>
+<dt>else</dt><dd><p>allowListRoles.exists(userRoles.contains)</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl>
+<dt>if (isServiceLocal || allowListed) {</dt><dd><dl>
+<dt>futureObserver(</dt><dd><dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>failure to enqueue the work will result with a failed [[com.twitter.util.Future]]</p></li>
+<li><p>containing a [[java.util.concurrent.RejectedExecutionException]] which the wrapping [[futureObserver]]</p></li>
+<li><p>will record metrics for.</p></li>
+</ul>
+<p><a href="#id15"><span class="problematic" id="id16">*</span></a>/</p>
+</dd>
+<dt>futurePool {</dt><dd><p>logger.info(AllowListedPipelineExecutionLogger.objectAsString(message))</p>
+<dl class="simple">
+<dt>if (isServiceLocal &amp;&amp; loggerOutputPath.isReturn) {</dt><dd><p>println(s”Logged request to: ${loggerOutputPath.get()}”)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../../../_sources/product-mixer/core/src/main/scala/com/twitter/product_mixer/core/service/pipeline_execution_logger/AllowListedPipelineExecutionLogger.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

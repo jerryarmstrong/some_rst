@@ -1,0 +1,437 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.visibility.interfaces.conversations</p>
+<p>import com.twitter.decider.Decider
+import com.twitter.finagle.stats.NullStatsReceiver
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.gizmoduck.thriftscala.Label
+import com.twitter.servo.repository.KeyValueResult
+import com.twitter.servo.util.Gate
+import com.twitter.spam.rtf.thriftscala.SafetyLabel
+import com.twitter.spam.rtf.thriftscala.SafetyLabelType
+import com.twitter.spam.rtf.thriftscala.SafetyLabelValue
+import com.twitter.stitch.Stitch
+import com.twitter.util.Future
+import com.twitter.util.Return
+import com.twitter.util.Stopwatch
+import com.twitter.util.Try
+import com.twitter.visibility.VisibilityLibrary
+import com.twitter.visibility.builder.tweets.TweetIdFeatures
+import com.twitter.visibility.builder.FeatureMapBuilder
+import com.twitter.visibility.builder.VerdictLogger
+import com.twitter.visibility.builder.VisibilityResult
+import com.twitter.visibility.builder.tweets.FosnrPefetchedLabelsRelationshipFeatures
+import com.twitter.visibility.builder.users.AuthorFeatures
+import com.twitter.visibility.common.UserRelationshipSource
+import com.twitter.visibility.common.UserSource
+import com.twitter.visibility.configapi.configs.VisibilityDeciderGates
+import com.twitter.visibility.features.AuthorUserLabels
+import com.twitter.visibility.features.ConversationRootAuthorIsVerified
+import com.twitter.visibility.features.FeatureMap
+import com.twitter.visibility.features.HasInnerCircleOfFriendsRelationship
+import com.twitter.visibility.features.TweetConversationId
+import com.twitter.visibility.features.TweetParentId
+import com.twitter.visibility.logging.thriftscala.VFLibType
+import com.twitter.visibility.models.ContentId.TweetId
+import com.twitter.visibility.models.SafetyLevel.TimelineConversationsDownranking
+import com.twitter.visibility.models.SafetyLevel.TimelineConversationsDownrankingMinimal
+import com.twitter.visibility.models.SafetyLevel.toThrift
+import com.twitter.visibility.models.ContentId
+import com.twitter.visibility.models.SafetyLevel
+import com.twitter.visibility.models.TweetSafetyLabel
+import com.twitter.visibility.models.UnitOfDiversion</p>
+<dl>
+<dt>object TimelineConversationsVisibilityLibrary {</dt><dd><dl>
+<dt>type Type =</dt><dd><p>TimelineConversationsVisibilityRequest =&gt; Stitch[TimelineConversationsVisibilityResponse]</p>
+</dd>
+<dt>def apply(</dt><dd><p>visibilityLibrary: VisibilityLibrary,
+batchSafetyLabelRepository: BatchSafetyLabelRepository,
+decider: Decider,
+userRelationshipSource: UserRelationshipSource = UserRelationshipSource.empty,
+userSource: UserSource = UserSource.empty</p>
+</dd>
+<dt>): Type = {</dt><dd><p>val libraryStatsReceiver = visibilityLibrary.statsReceiver
+val tweetIdFeatures = new TweetIdFeatures(</p>
+<blockquote>
+<div><p>statsReceiver = libraryStatsReceiver,
+enableStitchProfiling = Gate.False</p>
+</div></blockquote>
+<p>)
+val tweetIdFeaturesMinimal = new TweetIdFeatures(</p>
+<blockquote>
+<div><p>statsReceiver = libraryStatsReceiver,
+enableStitchProfiling = Gate.False</p>
+</div></blockquote>
+<p>)
+val vfLatencyOverallStat = libraryStatsReceiver.stat(“vf_latency_overall”)
+val vfLatencyStitchBuildStat = libraryStatsReceiver.stat(“vf_latency_stitch_build”)
+val vfLatencyStitchRunStat = libraryStatsReceiver.stat(“vf_latency_stitch_run”)</p>
+<p>val visibilityDeciderGates = VisibilityDeciderGates(decider)
+val verdictLogger =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>createVerdictLogger(</dt><dd><p>visibilityDeciderGates.enableVerdictLoggerTCVL,
+decider,
+libraryStatsReceiver)</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl>
+<dt>request: TimelineConversationsVisibilityRequest =&gt;</dt><dd><p>val elapsed = Stopwatch.start()
+var runStitchStartMs = 0L</p>
+<dl>
+<dt>val future = request.prefetchedSafetyLabels match {</dt><dd><p>case Some(labels) =&gt; Future.value(labels)
+case _ =&gt;</p>
+<blockquote>
+<div><p>batchSafetyLabelRepository((request.conversationId, request.tweetIds))</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>val fosnrPefetchedLabelsRelationshipFeatures =</dt><dd><dl class="simple">
+<dt>new FosnrPefetchedLabelsRelationshipFeatures(</dt><dd><p>userRelationshipSource = userRelationshipSource,
+statsReceiver = libraryStatsReceiver)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>val authorFeatures = new AuthorFeatures(userSource, libraryStatsReceiver)</p>
+<dl>
+<dt>Stitch.callFuture(future).flatMap {</dt><dd><dl>
+<dt>kvr: KeyValueResult[Long, scala.collection.Map[SafetyLabelType, SafetyLabel]] =&gt;</dt><dd><dl>
+<dt>val featureMapProvider: (ContentId, SafetyLevel) =&gt; FeatureMap = {</dt><dd><dl>
+<dt>case (TweetId(tweetId), safetyLevel) =&gt;</dt><dd><dl>
+<dt>val constantTweetSafetyLabels: Seq[TweetSafetyLabel] =</dt><dd><dl class="simple">
+<dt>kvr.found.getOrElse(tweetId, Map.empty).toSeq.map {</dt><dd><dl class="simple">
+<dt>case (safetyLabelType, safetyLabel) =&gt;</dt><dd><p>TweetSafetyLabel.fromThrift(SafetyLabelValue(safetyLabelType, safetyLabel))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>val replyAuthor = request.tweetAuthors.flatMap {</dt><dd><dl class="simple">
+<dt>_(tweetId) match {</dt><dd><p>case Return(Some(userId)) =&gt; Some(userId)
+case _ =&gt; None</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>val fosnrPefetchedLabelsRelationshipFeatureConf = replyAuthor match {</dt><dd><dl class="simple">
+<dt>case Some(authorId) if visibilityLibrary.isReleaseCandidateEnabled =&gt;</dt><dd><dl class="simple">
+<dt>fosnrPefetchedLabelsRelationshipFeatures</dt><dd><dl class="simple">
+<dt>.forTweetWithSafetyLabelsAndAuthorId(</dt><dd><p>safetyLabels = constantTweetSafetyLabels,
+authorId = authorId,
+viewerId = request.viewerContext.userId)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>case _ =&gt; fosnrPefetchedLabelsRelationshipFeatures.forNonFosnr()</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>val authorFeatureConf = replyAuthor match {</dt><dd><dl class="simple">
+<dt>case Some(authorId) if visibilityLibrary.isReleaseCandidateEnabled =&gt;</dt><dd><p>authorFeatures.forAuthorId(authorId)</p>
+</dd>
+</dl>
+<p>case _ =&gt; authorFeatures.forNoAuthor()</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>val baseBuilderArguments = (safetyLevel match {</dt><dd><dl class="simple">
+<dt>case TimelineConversationsDownranking =&gt;</dt><dd><p>Seq(tweetIdFeatures.forTweetId(tweetId, constantTweetSafetyLabels))</p>
+</dd>
+<dt>case TimelineConversationsDownrankingMinimal =&gt;</dt><dd><p>Seq(tweetIdFeaturesMinimal.forTweetId(tweetId, constantTweetSafetyLabels))</p>
+</dd>
+</dl>
+<p>case _ =&gt; Nil</p>
+</dd>
+</dl>
+<p>}) :+ fosnrPefetchedLabelsRelationshipFeatureConf :+ authorFeatureConf</p>
+<dl>
+<dt>val tweetAuthorUserLabels: Option[Seq[Label]] =</dt><dd><dl>
+<dt>request.prefetchedTweetAuthorUserLabels.flatMap {</dt><dd><dl class="simple">
+<dt>_.apply(tweetId) match {</dt><dd><dl class="simple">
+<dt>case Return(Some(labelMap)) =&gt;</dt><dd><p>Some(labelMap.values.toSeq)</p>
+</dd>
+<dt>case _ =&gt;</dt><dd><p>None</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>val hasInnerCircleOfFriendsRelationship: Boolean =</dt><dd><dl>
+<dt>request.innerCircleOfFriendsRelationships match {</dt><dd><dl>
+<dt>case Some(keyValueResult) =&gt;</dt><dd><dl class="simple">
+<dt>keyValueResult(tweetId) match {</dt><dd><p>case Return(Some(true)) =&gt; true
+case _ =&gt; false</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>case None =&gt; false</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>val builderArguments: Seq[FeatureMapBuilder =&gt; FeatureMapBuilder] =</dt><dd><dl>
+<dt>tweetAuthorUserLabels match {</dt><dd><dl>
+<dt>case Some(labels) =&gt;</dt><dd><dl class="simple">
+<dt>baseBuilderArguments :+ { (fmb: FeatureMapBuilder) =&gt;</dt><dd><p>fmb.withConstantFeature(AuthorUserLabels, labels)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>case None =&gt;</dt><dd><dl class="simple">
+<dt>baseBuilderArguments :+ { (fmb: FeatureMapBuilder) =&gt;</dt><dd><p>fmb.withConstantFeature(AuthorUserLabels, Seq.empty)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>case _ =&gt;</dt><dd><p>baseBuilderArguments</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>val tweetParentIdOpt: Option[Long] =</dt><dd><p>request.tweetParentIdMap.flatMap(tweetParentIdMap =&gt; tweetParentIdMap(tweetId))</p>
+</dd>
+<dt>visibilityLibrary.featureMapBuilder(builderArguments :+ { (fmb: FeatureMapBuilder) =&gt;</dt><dd><dl class="simple">
+<dt>fmb.withConstantFeature(</dt><dd><p>HasInnerCircleOfFriendsRelationship,
+hasInnerCircleOfFriendsRelationship)</p>
+</dd>
+</dl>
+<p>fmb.withConstantFeature(TweetConversationId, request.conversationId)
+fmb.withConstantFeature(TweetParentId, tweetParentIdOpt)
+fmb.withConstantFeature(</p>
+<blockquote>
+<div><p>ConversationRootAuthorIsVerified,
+request.rootAuthorIsVerified)</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>})</p>
+</dd>
+<dt>case _ =&gt;</dt><dd><p>visibilityLibrary.featureMapBuilder(Nil)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+val safetyLevel =</p>
+<blockquote>
+<div><p>if (request.minimalSectioningOnly) TimelineConversationsDownrankingMinimal
+else TimelineConversationsDownranking</p>
+</div></blockquote>
+<dl>
+<dt>val evaluationContextBuilder = visibilityLibrary</dt><dd><p>.evaluationContextBuilder(request.viewerContext)
+.withUnitOfDiversion(UnitOfDiversion.ConversationId(request.conversationId))</p>
+</dd>
+<dt>visibilityLibrary</dt><dd><dl class="simple">
+<dt>.runRuleEngineBatch(</dt><dd><p>request.tweetIds.map(TweetId),
+featureMapProvider,
+evaluationContextBuilder,
+safetyLevel</p>
+</dd>
+</dl>
+<p>)
+.map { results: Seq[Try[VisibilityResult]] =&gt;</p>
+<blockquote>
+<div><p>val (succeededRequests, _) = results.partition(_.exists(_.finished))
+val visibilityResultMap = succeededRequests.flatMap {</p>
+<blockquote>
+<div><dl>
+<dt>case Return(result) =&gt;</dt><dd><dl class="simple">
+<dt>scribeVisibilityVerdict(</dt><dd><p>result,
+visibilityDeciderGates.enableVerdictScribingTCVL,
+verdictLogger,
+request.viewerContext.userId,
+safetyLevel)</p>
+</dd>
+<dt>result.contentId match {</dt><dd><p>case TweetId(id) =&gt; Some((id, result))
+case _ =&gt; None</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>case _ =&gt; None</p>
+</div></blockquote>
+<p>}.toMap
+val failedTweetIds = request.tweetIds diff visibilityResultMap.keys.toSeq
+val response = TimelineConversationsVisibilityResponse(</p>
+<blockquote>
+<div><p>visibilityResults = visibilityResultMap,
+failedTweetIds = failedTweetIds</p>
+</div></blockquote>
+<p>)</p>
+<p>runStitchStartMs = elapsed().inMilliseconds
+val buildStitchStatMs = elapsed().inMilliseconds
+vfLatencyStitchBuildStat.add(buildStitchStatMs)</p>
+<p>response</p>
+</div></blockquote>
+<p>}
+.onSuccess(_ =&gt; {</p>
+<blockquote>
+<div><p>val overallStatMs = elapsed().inMilliseconds
+vfLatencyOverallStat.add(overallStatMs)
+val runStitchEndMs = elapsed().inMilliseconds
+vfLatencyStitchRunStat.add(runStitchEndMs - runStitchStartMs)</p>
+</div></blockquote>
+<p>})</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>def scribeVisibilityVerdict(</dt><dd><p>visibilityResult: VisibilityResult,
+enableVerdictScribing: Gate[Unit],
+verdictLogger: VerdictLogger,
+viewerId: Option[Long],
+safetyLevel: SafetyLevel</p>
+</dd>
+<dt>): Unit = if (enableVerdictScribing()) {</dt><dd><dl class="simple">
+<dt>verdictLogger.scribeVerdict(</dt><dd><p>visibilityResult = visibilityResult,
+viewerId = viewerId,
+safetyLevel = toThrift(safetyLevel),
+vfLibType = VFLibType.TimelineConversationsVisibilityLibrary)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def createVerdictLogger(</dt><dd><p>enableVerdictLogger: Gate[Unit],
+decider: Decider,
+statsReceiver: StatsReceiver</p>
+</dd>
+<dt>): VerdictLogger = {</dt><dd><dl class="simple">
+<dt>if (enableVerdictLogger()) {</dt><dd><p>VerdictLogger(statsReceiver, decider)</p>
+</dd>
+<dt>} else {</dt><dd><p>VerdictLogger.Empty</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/visibilitylib/src/main/scala/com/twitter/visibility/interfaces/conversations/TimelineConversationsVisibilityLibrary.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

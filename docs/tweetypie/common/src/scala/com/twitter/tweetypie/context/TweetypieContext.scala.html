@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../" id="documentation_options" src="../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.tweetypie.context</p>
+<p>import com.twitter.context.TwitterContext
+import com.twitter.finagle.Filter
+import com.twitter.finagle.Service
+import com.twitter.finagle.SimpleFilter
+import com.twitter.finagle.context.Contexts
+import com.twitter.io.Buf
+import com.twitter.io.Buf.ByteArray.Owned
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.graphql.common.core.GraphQlClientApplication
+import com.twitter.util.Try
+import java.nio.charset.StandardCharsets.UTF_8
+import scala.util.matching.Regex</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Context and filters to help track callers of Tweetypie’s endpoints. This context and its</p></li>
+<li><p>filters were originally added to provide visibility into callers of Tweetypie who are</p></li>
+<li><p>using the birdherd library to access tweets.</p></li>
+<li></li>
+<li><p>This context data is intended to be marshalled by callers to Tweetypie, but then the</p></li>
+<li><p>context data is stripped (moved from broadcast to local). This happens so that the</p></li>
+<li><p>context data is not forwarded down tweetypie’s backend rpc chains, which often result</p></li>
+<li><p>in transitive calls back into tweetypie. This effectively creates single-hop marshalling.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>object TweetypieContext {</dt><dd><p>// Bring Tweetypie permitted TwitterContext into scope
+val TwitterContext: TwitterContext =</p>
+<blockquote>
+<div><p>com.twitter.context.TwitterContext(com.twitter.tweetypie.TwitterContextPermit)</p>
+</div></blockquote>
+<p>case class Ctx(via: String)
+val Empty = Ctx(“”)</p>
+<dl>
+<dt>object Broadcast {</dt><dd><p>private[this] object Key extends Contexts.broadcast.Key[Ctx](id = Ctx.getClass.getName) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>override def marshal(value: Ctx): Buf =</dt><dd><p>Owned(value.via.getBytes(UTF_8))</p>
+</dd>
+<dt>override def tryUnmarshal(buf: Buf): Try[Ctx] =</dt><dd><p>Try(Ctx(new String(Owned.extract(buf), UTF_8)))</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>private[TweetypieContext] def current(): Option[Ctx] =</dt><dd><p>Contexts.broadcast.get(Key)</p>
+</dd>
+<dt>def currentOrElse(default: Ctx): Ctx =</dt><dd><p>current().getOrElse(default)</p>
+</dd>
+<dt>def letClear[T](f: =&gt; T): T =</dt><dd><p>Contexts.broadcast.letClear(Key)(f)</p>
+</dd>
+<dt>def let[T](ctx: Ctx)(f: =&gt; T): T =</dt><dd><dl class="simple">
+<dt>if (Empty == ctx) {</dt><dd><p>letClear(f)</p>
+</dd>
+<dt>} else {</dt><dd><p>Contexts.broadcast.let(Key, ctx)(f)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>// ctx has to be by name so we can re-evaluate it for every request (for usage in ServiceTwitter.scala)
+def filter(ctx: =&gt; Ctx): Filter.TypeAgnostic =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>new Filter.TypeAgnostic {</dt><dd><dl class="simple">
+<dt>override def toFilter[Req, Rep]: Filter[Req, Rep, Req, Rep] =</dt><dd><p>(request: Req, service: Service[Req, Rep]) =&gt; Broadcast.let(ctx)(service(request))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>object Local {</dt><dd><dl>
+<dt>private[this] val Key =</dt><dd><p>new Contexts.local.Key[Ctx]</p>
+</dd>
+<dt>private[TweetypieContext] def let[T](ctx: Option[Ctx])(f: =&gt; T): T =</dt><dd><dl class="simple">
+<dt>ctx match {</dt><dd><p>case Some(ctx) if ctx != Empty =&gt; Contexts.local.let(Key, ctx)(f)
+case None =&gt; Contexts.local.letClear(Key)(f)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>def current(): Option[Ctx] =</dt><dd><p>Contexts.local.get(Key)</p>
+</dd>
+<dt>def filter[Req, Rep]: SimpleFilter[Req, Rep] =</dt><dd><dl class="simple">
+<dt>(request: Req, service: Service[Req, Rep]) =&gt; {</dt><dd><p>val ctx = Broadcast.current()
+Broadcast.letClear(Local.let(ctx)(service(request)))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>private[this] def clientAppIdToName(clientAppId: Long) =</dt><dd><p>GraphQlClientApplication.AllById.get(clientAppId).map(_.name).getOrElse(“nonTOO”)</p>
+</dd>
+<dt>private[this] val pathRegexes: Seq[(Regex, String)] = Seq(</dt><dd><p>(”<a href="#id3"><span class="problematic" id="id4">timeline_conversation_</span></a>.*_json”.r, “timeline_conversation__slug__json”),
+(”<a href="#id5"><span class="problematic" id="id6">user_timeline_</span></a>.*_json”.r, “user_timeline__user__json”),
+(“[0-9]{2,}”.r, “_id_”)</p>
+</dd>
+</dl>
+<p>)</p>
+<p>// <cite>context.via</cite> will either be a string like: “birdherd” or “birdherd:/1.1/statuses/show/123.json,
+// depending on whether birdherd code was able to determine the path of the request.
+private[this] def getViaAndPath(via: String): (String, Option[String]) =</p>
+<blockquote>
+<div><dl>
+<dt>via.split(“:”, 2) match {</dt><dd><dl>
+<dt>case Array(via, path) =&gt;</dt><dd><dl class="simple">
+<dt>val sanitizedPath = path</dt><dd><p>.replace(‘/’, ‘_’)
+.replace(‘.’, ‘_’)</p>
+</dd>
+</dl>
+<p>// Apply each regex in turn
+val normalizedPath = pathRegexes.foldLeft(sanitizedPath) {</p>
+<blockquote>
+<div><p>case (path, (regex, replacement)) =&gt; regex.replaceAllIn(path, replacement)</p>
+</div></blockquote>
+<p>}</p>
+<p>(via, Some(normalizedPath))</p>
+</dd>
+</dl>
+<p>case Array(via) =&gt; (via, None)</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<dl>
+<dt>def trackStats[U](scopes: StatsReceiver*): Unit =</dt><dd><dl>
+<dt>for {</dt><dd><p>tweetypieCtx &lt;- TweetypieContext.Local.current()
+(via, pathOpt) = getViaAndPath(tweetypieCtx.via)
+twitterCtx &lt;- TwitterContext()
+clientAppId &lt;- twitterCtx.clientApplicationId</p>
+</dd>
+<dt>} yield {</dt><dd><p>val clientAppName = clientAppIdToName(clientAppId)
+scopes.foreach { stats =&gt;</p>
+<blockquote>
+<div><p>val ctxStats = stats.scope(“context”)
+val viaStats = ctxStats.scope(“via”, via)
+viaStats.scope(“all”).counter(“requests”).incr()
+val viaClientStats = viaStats.scope(“by_client”, clientAppName)
+viaClientStats.counter(“requests”).incr()
+pathOpt.foreach { path =&gt;</p>
+<blockquote>
+<div><p>val viaPathStats = viaStats.scope(“by_path”, path)
+viaPathStats.counter(“requests”).incr()</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../_sources/tweetypie/common/src/scala/com/twitter/tweetypie/context/TweetypieContext.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

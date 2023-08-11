@@ -1,0 +1,507 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../" id="documentation_options" src="../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p># pylint: disable=no-member, arguments-differ, attribute-defined-outside-init, unused-argument
+“””
+Implementing Full Sparse Layer
+“””</p>
+<p>import math</p>
+<p>from twitter.deepbird.sparse import sparse_dense_matmul</p>
+<p>from .layer import Layer</p>
+<p>import tensorflow.compat.v1 as tf
+import twml</p>
+<dl>
+<dt>class FullSparse(Layer):</dt><dd><p>“””Fully-sparse layer class.
+This layer implements the operation:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">outputs</span> <span class="o">=</span> <span class="n">activation</span><span class="p">(</span><span class="n">inputs</span><span class="o">.</span><span class="n">weight</span> <span class="o">+</span> <span class="n">bias</span><span class="p">)</span>
+</pre></div>
+</div>
+<dl class="simple">
+<dt>Arguments:</dt><dd><dl class="simple">
+<dt>output_size:</dt><dd><p>Long or Integer, dimensionality of the output space.</p>
+</dd>
+<dt>input_size:</dt><dd><p>The number of input units. (Deprecated)</p>
+</dd>
+<dt>weight_initializer:</dt><dd><p>Initializer function for the weight matrix.
+This argument defaults to zeros_initializer().
+This is valid when the FullSparse is the first layer of
+parameters but should be changed otherwise.</p>
+</dd>
+<dt>weight_regularizer:</dt><dd><p>Regularizer function for the weight matrix.
+Ensure to add tf.losses.get_regularization_loss() to your loss for this to take effect.</p>
+</dd>
+<dt>bias_regularizer:</dt><dd><p>Regularizer function for the bias.
+Ensure to add tf.losses.get_regularization_loss() to your loss for this to take effect</p>
+</dd>
+<dt>activation:</dt><dd><p>Activation function (callable). Set it to None to maintain a linear activation.</p>
+</dd>
+<dt>bias_initializer:</dt><dd><p>Initializer function for the bias.
+This argument defaults to tf.constant_initializer(1/output_size)</p>
+</dd>
+<dt>trainable:</dt><dd><p>Boolean, if <cite>True</cite> also add variables to the graph collection
+<code class="docutils literal notranslate"><span class="pre">GraphKeys.TRAINABLE_VARIABLES</span></code> (see <a class="reference external" href="https://www.tensorflow.org/versions/master/api_docs/python/tf/Variable">tf.Variable</a>).</p>
+</dd>
+<dt>name:</dt><dd><p>String, the name of the layer. Layers with the same name will
+share weights, but to avoid mistakes we require <code class="docutils literal notranslate"><span class="pre">reuse=True</span></code> in such cases.</p>
+</dd>
+<dt>use_sparse_grads:</dt><dd><p>Boolean, if <cite>True</cite> do sparse mat mul with <cite>embedding_lookup_sparse</cite>, which will
+make gradients to weight matrix also sparse in backward pass. This can lead to non-trivial
+speed up at training time when input_size is large and optimizer handles sparse gradients
+correctly (eg. with SGD or LazyAdamOptimizer). If weight matrix is small, it’s recommended
+to set this flag to <cite>False</cite>; for most use cases of FullSparse, however, weight matrix will
+be large, so it’s better to set it to <cite>True</cite></p>
+</dd>
+<dt>num_partitions:</dt><dd><p>Number of partitions to use for the weight variable. Defaults to 1.</p>
+</dd>
+<dt>partition_axis:</dt><dd><p>If num_partitions is specified, the partition axis for the weight variable
+Defaults to 0 (partition by row).
+Must be 0 (row) or 1 (column)</p>
+</dd>
+<dt>use_binary_values:</dt><dd><p>Assume all non zero values are 1. Defaults to False.
+This can improve training if used in conjunction with MDL.
+This parameter can also be a list of binary values if <cite>inputs</cite> passed to <cite>call</cite> a list.</p>
+</dd>
+<dt>use_compression:</dt><dd><p>Default False. Set True to enable data compression techniques for
+optimization of network traffic for distributed training.</p>
+</dd>
+<dt>use_binary_sparse_dense_matmul:</dt><dd><p>If binary sparse dense matmul op is to be used. It will only be enabled if
+<cite>use_binary_values</cite> is set true. It only should be used for inference, best practice is
+to set <cite>use_binary_sparse_dense_matmul = not is_training</cite>.</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>“””</p>
+<dl>
+<dt>def __init__(self,</dt><dd><blockquote>
+<div><p>output_size,
+input_size=None,
+weight_initializer=None,
+activation=None,
+bias_initializer=None,
+trainable=True,
+name=None,
+use_sparse_grads=True,
+num_partitions=None,
+partition_axis=0,
+use_binary_values=False,
+bias_regularizer=None,
+weight_regularizer=None,
+use_compression=False,
+use_binary_sparse_dense_matmul=False,
+<a href="#id1"><span class="problematic" id="id2">**</span></a>kwargs):</p>
+</div></blockquote>
+<p>super(FullSparse, self).__init__(trainable=trainable, name=name, <a href="#id3"><span class="problematic" id="id4">**</span></a>kwargs)
+# TODO - remove input_size warning.
+if input_size:</p>
+<blockquote>
+<div><dl class="simple">
+<dt>raise ValueError(‘input_size is deprecated - it is now automatically </dt><dd><p>inferred from your input.’)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p># The bias initialization and weights initialization is set to match v1’s implementation.
+if bias_initializer is None:</p>
+<blockquote>
+<div><p>bias_initializer = tf.constant_initializer(1 / output_size)</p>
+</div></blockquote>
+<p># Weights initialization is set to 0s. This is safe for full sparse layers because
+# you are supposed to learn your embedding from the label.
+if weight_initializer is None:</p>
+<blockquote>
+<div><p>weight_initializer = tf.zeros_initializer()</p>
+</div></blockquote>
+<p>self.weight_initializer = weight_initializer
+self.bias_initializer = bias_initializer
+self.output_size = output_size
+self.activation = activation
+self.use_sparse_grads = use_sparse_grads
+self.num_partitions = num_partitions
+if partition_axis != 0 and partition_axis != 1:</p>
+<blockquote>
+<div><p>raise ValueError(‘partition_axis must be 0 or 1’)</p>
+</div></blockquote>
+<p>self.partition_axis = partition_axis
+self.use_binary_values = use_binary_values
+self.weight_regularizer = weight_regularizer
+self.bias_regularizer = bias_regularizer
+self._use_compression = use_compression
+self._cast_indices_dtype = tf.int32 if self._use_compression else None
+self.use_binary_sparse_dense_matmul = use_binary_sparse_dense_matmul</p>
+</dd>
+<dt>def _make_weight_var(self, shape, partitioner):</dt><dd><dl class="simple">
+<dt>self.weight = self.add_variable(</dt><dd><p>‘weight’,
+initializer=self.weight_initializer,
+regularizer=self.weight_regularizer,
+shape=shape,
+dtype=self.dtype,
+trainable=True,
+partitioner=partitioner,</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>def build(self, input_shapes):</dt><dd><p>“””
+creates the <code class="docutils literal notranslate"><span class="pre">bias</span></code> and <code class="docutils literal notranslate"><span class="pre">weight</span></code> Variables
+of shape <code class="docutils literal notranslate"><span class="pre">[output_size]</span></code> and <code class="docutils literal notranslate"><span class="pre">[input_size,</span> <span class="pre">output_size]</span></code> respectively.
+“””</p>
+<dl>
+<dt>if isinstance(input_shapes, (list, tuple)):</dt><dd><p>input_shape = input_shapes[0]
+is_compatible = True
+for other_shape in input_shapes[1:]:</p>
+<blockquote>
+<div><p>is_compatible &amp;= input_shape.is_compatible_with(other_shape)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>if not is_compatible:</dt><dd><p>raise ValueError(“Input shapes %s are not compatible.” % input_shapes)</p>
+</dd>
+</dl>
+</dd>
+<dt>else:</dt><dd><p>input_shape = input_shapes</p>
+</dd>
+<dt>self.bias = self.add_variable(</dt><dd><p>‘bias’,
+initializer=self.bias_initializer,
+regularizer=self.bias_regularizer,
+shape=[self.output_size, ],
+dtype=self.dtype,
+trainable=True</p>
+</dd>
+</dl>
+<p>)</p>
+<p>partitioner = None
+shape = [input_shape[1], self.output_size]</p>
+<p># There is a 2gb limitation for each tensor because of protobuf.
+# 2**30 is 1GB. 2 * (2**30) is 2GB.
+dtype = tf.as_dtype(self.dtype)
+num_partitions = 1 if self.num_partitions is None else self.num_partitions
+in_shape = input_shape[1]
+out_shape = self.output_size</p>
+<p># when v2 behavior is disabled, in_shape is tf.Dimension. otherwise it is int.
+if isinstance(in_shape, tf.Dimension):</p>
+<blockquote>
+<div><p>in_shape = in_shape.value</p>
+</div></blockquote>
+<dl class="simple">
+<dt>if in_shape is None:</dt><dd><dl class="simple">
+<dt>raise ValueError(“Input tensor should have shape.”</dt><dd><p>“ You can set it using twml.util.limit_sparse_tensor_size”)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>(split_dim, other_dim) = (in_shape, out_shape) if self.partition_axis == 0 else (out_shape, in_shape)
+requested_size = math.ceil(float(split_dim) / num_partitions) * other_dim * dtype.size
+if (requested_size &gt;= 2**31):</p>
+<blockquote>
+<div><dl class="simple">
+<dt>raise ValueError(“Weight tensor partitions cannot be larger than 2GB.n”</dt><dd><p>“Requested Dimensions(%d, %d) of type %s (%d bytes total) over %d partitions.n”
+“Possible solutions:n”
+“- reduce the params.output_size_bitsn”
+“- reduce the output_size of the sparse_layern”
+“- specify a larger num_partitions argumentn”
+“- reduce input_size_bits” %
+(in_shape, self.output_size, dtype.name, requested_size, num_partitions))</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl>
+<dt>if self.num_partitions:</dt><dd><p>partition_axis = int(self.partition_axis)
+partitioner = tf.fixed_size_partitioner(self.num_partitions, axis=partition_axis)</p>
+</dd>
+<dt>else:</dt><dd><p># Regular variables do not like it when you pass both constant tensors and shape
+if not callable(self.weight_initializer):</p>
+<blockquote>
+<div><p>shape = None</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>self._make_weight_var(shape, partitioner)</p>
+<p>self.built = True</p>
+</dd>
+<dt>def compute_output_shape(self, input_shape):</dt><dd><p>“””Computes the output shape of the layer given the input shape.</p>
+<dl class="simple">
+<dt>Args:</dt><dd><dl class="simple">
+<dt>input_shape: A (possibly nested tuple of) <cite>TensorShape</cite>.  It need not</dt><dd><p>be fully defined (e.g. the batch size may be unknown).</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>Raises NotImplementedError.</p>
+<p>“””
+raise NotImplementedError</p>
+</dd>
+<dt>def call(self, inputs, <a href="#id5"><span class="problematic" id="id6">**</span></a>kwargs):  # pylint: disable=unused-argument</dt><dd><p>“””The logic of the layer lives here.</p>
+<dl class="simple">
+<dt>Arguments:</dt><dd><dl class="simple">
+<dt>inputs:</dt><dd><p>A SparseTensor or a list of SparseTensors.
+If <cite>inputs</cite> is a list, all tensors must have same <cite>dense_shape</cite>.</p>
+</dd>
+</dl>
+</dd>
+<dt>Returns:</dt><dd><ul class="simple">
+<li><p>If <cite>inputs</cite> is <cite>SparseTensor</cite>, then returns <cite>bias + inputs * dense_b</cite>.</p></li>
+<li><p>If <cite>inputs</cite> is a <cite>list[SparseTensor</cite>, then returns
+<cite>bias + add_n([sp_a * dense_b for sp_a in inputs])</cite>.</p></li>
+</ul>
+</dd>
+</dl>
+<p>“””
+if isinstance(inputs, (list, tuple)):</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if isinstance(self.use_binary_values, (list, tuple)):</dt><dd><p>use_binary_values = self.use_binary_values</p>
+</dd>
+<dt>else:</dt><dd><p>use_binary_values = [self.use_binary_values] * len(inputs)</p>
+</dd>
+</dl>
+<p>num_inputs = len(inputs)
+if num_inputs != len(use_binary_values):</p>
+<blockquote>
+<div><dl class="simple">
+<dt>raise ValueError(“#inputs is %d while #use_binary_values is %d”</dt><dd><p>% (num_inputs, len(use_binary_values)))</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>outputs = []
+for n in range(num_inputs):</p>
+<blockquote>
+<div><dl class="simple">
+<dt>outputs.append(sparse_dense_matmul(inputs[n], self.weight,</dt><dd><p>self.use_sparse_grads,
+use_binary_values[n],
+name=’<a href="#id8"><span class="problematic" id="id9">sparse_mm_</span></a>’ + str(n),
+partition_axis=self.partition_axis,
+num_partitions=self.num_partitions,
+compress_ids=self._use_compression,
+cast_indices_dtype=self._cast_indices_dtype,
+use_binary_sparse_dense_matmul=self.use_binary_sparse_dense_matmul))</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>outputs = tf.accumulate_n(outputs)</p>
+</div></blockquote>
+<p>else:</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if isinstance(self.use_binary_values, (list, tuple)):</dt><dd><dl class="simple">
+<dt>raise ValueError(“use_binary_values can not be %s when inputs is %s” %</dt><dd><p>(type(self.use_binary_values), type(inputs)))</p>
+</dd>
+</dl>
+</dd>
+<dt>outputs = sparse_dense_matmul(inputs, self.weight,</dt><dd><p>self.use_sparse_grads,
+self.use_binary_values,
+name=’sparse_mm’,
+partition_axis=self.partition_axis,
+num_partitions=self.num_partitions,
+compress_ids=self._use_compression,
+cast_indices_dtype=self._cast_indices_dtype,
+use_binary_sparse_dense_matmul=self.use_binary_sparse_dense_matmul)</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl class="simple">
+<dt>if self.bias is not None:</dt><dd><p>outputs = tf.nn.bias_add(outputs, self.bias)</p>
+</dd>
+<dt>if self.activation is not None:</dt><dd><p>return self.activation(outputs)  # pylint: disable=not-callable</p>
+</dd>
+</dl>
+<p>return outputs</p>
+</dd>
+</dl>
+</dd>
+<dt>def full_sparse(</dt><dd><blockquote>
+<div><p>inputs, output_size,
+input_size=None,
+activation=None,
+bias_regularizer=None,
+weight_regularizer=None,
+bias_initializer=None,
+weight_initializer=None,
+trainable=True,
+name=None,
+reuse=None,
+use_sparse_grads=True,
+num_partitions=None,
+partition_axis=0,
+use_binary_values=False,
+use_compression=False):</p>
+</div></blockquote>
+<p>“””Functional interface for the sparsely-connected layer.</p>
+<dl class="simple">
+<dt>Arguments:</dt><dd><dl class="simple">
+<dt>inputs:</dt><dd><p>A sparse tensor (can be twml.SparseTensor or tf.SparseTensor)</p>
+</dd>
+<dt>output_size:</dt><dd><p>Long or Integer, dimensionality of the output space.</p>
+</dd>
+<dt>weight_initializer:</dt><dd><p>Initializer function for the weight matrix.</p>
+</dd>
+<dt>activation:</dt><dd><p>Activation function (callable). Set it to None to maintain a linear activation.</p>
+</dd>
+<dt>bias_initializer:</dt><dd><p>Initializer function for the bias.</p>
+</dd>
+<dt>weight_regularizer:</dt><dd><p>Regularizer function for the weight matrix.
+Ensure to add tf.losses.get_regularization_loss() to your loss for this to take effect.</p>
+</dd>
+<dt>bias_regularizer:</dt><dd><p>Regularizer function for the bias.
+Ensure to add tf.losses.get_regularization_loss() to your loss for this to take effect.</p>
+</dd>
+<dt>trainable:</dt><dd><p>Boolean, if <cite>True</cite> also add variables to the graph collection
+<code class="docutils literal notranslate"><span class="pre">GraphKeys.TRAINABLE_VARIABLES</span></code> (see <a class="reference external" href="https://www.tensorflow.org/versions/master/api_docs/python/tf/Variable">tf.Variable</a>).</p>
+</dd>
+<dt>name:</dt><dd><p>String, the name of the layer. Layers with the same name will
+share weights, but to avoid mistakes we require <code class="docutils literal notranslate"><span class="pre">reuse=True</span></code> in such cases.</p>
+</dd>
+<dt>use_sparse_grads:</dt><dd><p>Boolean, if <cite>True</cite> do sparse mat mul with <cite>embedding_lookup_sparse</cite>, which will
+make gradients to weight matrix also sparse in backward pass. This can lead to non-trivial
+speed up at training time when input_size is large and optimizer handles sparse gradients
+correctly (eg. with SGD or LazyAdamOptimizer). If weight matrix is small, it’s recommended
+to set this flag to <cite>False</cite>; for most use cases of FullSparse, however, weight matrix will
+be large, so it’s better to set it to <cite>True</cite></p>
+</dd>
+<dt>num_partitions:</dt><dd><p>Number of partitions to use for the weight variable. Defaults to 1.</p>
+</dd>
+<dt>partition_axis:</dt><dd><p>If num_partitions is specified, the partition axis for the weight variable
+Defaults to 0 (partition by row).
+Must be 0 (row) or 1 (column)</p>
+</dd>
+<dt>use_binary_values:</dt><dd><p>Assume all non zero values are 1. Defaults to False.
+This can improve training if used in conjunction with MDL.</p>
+</dd>
+<dt>use_compression:</dt><dd><p>Default False. Set True to enable data compression techniques for
+optimization of network traffic for distributed training.</p>
+</dd>
+</dl>
+</dd>
+<dt>Returns:</dt><dd><p>Outputs a <code class="docutils literal notranslate"><span class="pre">tf.Tensor</span></code> of size <code class="docutils literal notranslate"><span class="pre">[batch_size</span> <span class="pre">x</span> <span class="pre">output_size]</span></code>.</p>
+</dd>
+</dl>
+<p>“””
+# TODO - remove input_size warning.
+if input_size:</p>
+<blockquote>
+<div><dl class="simple">
+<dt>raise ValueError(‘input_size is deprecated - it is now </dt><dd><p>automatically inferred from your input.’)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>dtype = None
+if isinstance(inputs, twml.SparseTensor):</p>
+<blockquote>
+<div><p>inputs = inputs.to_tf()
+dtype = inputs.dtype.base_dtype</p>
+</div></blockquote>
+<dl class="simple">
+<dt>if isinstance(inputs, (list, tuple)):</dt><dd><p>inputs = [inp.to_tf() if isinstance(inp, twml.SparseTensor) else inp for inp in inputs]
+dtype = inputs[0].dtype.base_dtype</p>
+</dd>
+<dt>layer = FullSparse(output_size=output_size,</dt><dd><p>activation=activation,
+trainable=trainable,
+name=name,
+weight_initializer=weight_initializer,
+bias_initializer=bias_initializer,
+weight_regularizer=weight_regularizer,
+bias_regularizer=bias_regularizer,
+dtype=dtype,
+_scope=name,
+_reuse=reuse,
+use_sparse_grads=use_sparse_grads,
+num_partitions=num_partitions,
+partition_axis=partition_axis,
+use_compression=use_compression,
+use_binary_values=use_binary_values)</p>
+</dd>
+</dl>
+<p>return layer(inputs)</p>
+</dd>
+</dl>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../_sources/twml/twml/layers/full_sparse.py.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

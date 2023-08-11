@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../../" id="documentation_options" src="../../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.servo.util</p>
+<p>import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.util.Future
+import scala.collection.mutable</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Categorizes an exception according to some criteria.</p></li>
+<li><p>n.b. Implemented in terms of lift rather than apply to avoid extra allocations when</p></li>
+<li><p>used when lifting the effect.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>trait ExceptionCategorizer {</dt><dd><p>import ExceptionCategorizer._</p>
+<p>def lift(effect: Effect[Category]): Effect[Throwable]</p>
+<dl class="simple">
+<dt>def apply(t: Throwable): Set[Category] = {</dt><dd><p>val s = mutable.Set.empty[Category]
+lift(Effect(s += _))(t)
+s.toSet</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>construct a new categorizer that prepends scope to all categories returned by this categorizer</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>def scoped(scope: Seq[String]): ExceptionCategorizer =</dt><dd><dl class="simple">
+<dt>if (scope.isEmpty) {</dt><dd><p>this</p>
+</dd>
+<dt>} else {</dt><dd><p>val scopeIt: Category =&gt; Category = Memoize(scope ++ _)
+fromLift(effect =&gt; lift(effect.contramap(scopeIt)))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>construct a new categorizer that returns the union of the categories returned by this and that</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>def ++(that: ExceptionCategorizer): ExceptionCategorizer =</dt><dd><p>fromLift(effect =&gt; this.lift(effect).also(that.lift(effect)))</p>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>construct a new categorizer that only returns categories for throwables matching pred</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+<dt>def onlyIf(pred: Throwable =&gt; Boolean): ExceptionCategorizer =</dt><dd><p>fromLift(lift(_).onlyIf(pred))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>object ExceptionCategorizer {</dt><dd><p>type Category = Seq[String]</p>
+<p>def const(categories: Set[Category]): ExceptionCategorizer = ExceptionCategorizer(_ =&gt; categories)
+def const(c: Category): ExceptionCategorizer = const(Set(c))
+def const(s: String): ExceptionCategorizer = const(Seq(s))</p>
+<dl>
+<dt>def apply(fn: Throwable =&gt; Set[Category]): ExceptionCategorizer =</dt><dd><dl class="simple">
+<dt>new ExceptionCategorizer {</dt><dd><p>def lift(effect: Effect[Category]) = Effect[Throwable](t =&gt; fn(t).foreach(effect))
+override def apply(t: Throwable) = fn(t)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>def fromLift(fn: Effect[Category] =&gt; Effect[Throwable]): ExceptionCategorizer =</dt><dd><dl class="simple">
+<dt>new ExceptionCategorizer {</dt><dd><p>def lift(effect: Effect[Category]) = fn(effect)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>def singular(fn: Throwable =&gt; Category): ExceptionCategorizer =</dt><dd><p>fromLift(_.contramap(fn))</p>
+</dd>
+<dt>def simple(fn: Throwable =&gt; String): ExceptionCategorizer =</dt><dd><p>singular(fn.andThen(Seq(_)))</p>
+</dd>
+<dt>def default(</dt><dd><p>name: Category = Seq(“exceptions”),
+sanitizeClassnameChain: Throwable =&gt; Seq[String] = ThrowableHelper.sanitizeClassnameChain</p>
+</dd>
+<dt>): ExceptionCategorizer =</dt><dd><dl class="simple">
+<dt>ExceptionCategorizer.const(name) ++</dt><dd><p>ExceptionCategorizer.singular(sanitizeClassnameChain).scoped(name)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Increments a counter for each category returned by the exception categorizer</p></li>
+<li></li>
+<li><p>&#64;param statsReceiver</p></li>
+<li><p>the unscoped statsReceiver on which to hang the counters</p></li>
+<li><p>&#64;param categorizer</p></li>
+<li><p>A function that returns a list of category names that a throwable should be counted under.</p></li>
+</ul>
+<p><a href="#id9"><span class="problematic" id="id10">*</span></a>/</p>
+</dd>
+</dl>
+<p>class ExceptionCounter(statsReceiver: StatsReceiver, categorizer: ExceptionCategorizer) {</p>
+<blockquote>
+<div><dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>alternative constructor for backwards compatibility</p></li>
+<li></li>
+<li><p>&#64;param statsReceiver</p></li>
+<li><p>the unscoped statsReceiver on which to hang the counters</p></li>
+<li><p>&#64;param name</p></li>
+<li><p>the counter name for total exceptions, and scope for individual</p></li>
+<li><p>exception counters. default value is <cite>exceptions</cite></p></li>
+<li><p>&#64;param sanitizeClassnameChain</p></li>
+<li><p>A function that can be used to cleanup classnames before passing them to the StatsReceiver.</p></li>
+</ul>
+<p><a href="#id11"><span class="problematic" id="id12">*</span></a>/</p>
+</dd>
+<dt>def this(</dt><dd><p>statsReceiver: StatsReceiver,
+name: String,
+sanitizeClassnameChain: Throwable =&gt; Seq[String]</p>
+</dd>
+<dt>) =</dt><dd><p>this(statsReceiver, ExceptionCategorizer.default(List(name), sanitizeClassnameChain))</p>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>provided for backwards compatibility</p></li>
+</ul>
+<p><a href="#id13"><span class="problematic" id="id14">*</span></a>/</p>
+</dd>
+<dt>def this(statsReceiver: StatsReceiver) =</dt><dd><p>this(statsReceiver, ExceptionCategorizer.default())</p>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>provided for backwards compatibility</p></li>
+</ul>
+<p><a href="#id15"><span class="problematic" id="id16">*</span></a>/</p>
+</dd>
+<dt>def this(statsReceiver: StatsReceiver, name: String) =</dt><dd><p>this(statsReceiver, ExceptionCategorizer.default(List(name)))</p>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>provided for backwards compatibility</p></li>
+</ul>
+<p><a href="#id17"><span class="problematic" id="id18">*</span></a>/</p>
+</dd>
+<dt>def this(statsReceiver: StatsReceiver, sanitizeClassnameChain: Throwable =&gt; Seq[String]) =</dt><dd><dl class="simple">
+<dt>this(</dt><dd><p>statsReceiver,
+ExceptionCategorizer.default(sanitizeClassnameChain = sanitizeClassnameChain)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>private[this] val counter = categorizer.lift(Effect(statsReceiver.counter(_: _*).incr()))</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>count one or more throwables</p></li>
+</ul>
+<p><a href="#id19"><span class="problematic" id="id20">*</span></a>/</p>
+</dd>
+<dt>def apply(t: Throwable, throwables: Throwable*): Unit = {</dt><dd><p>counter(t)
+if (throwables.nonEmpty) apply(throwables)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>count n throwables</p></li>
+</ul>
+<p><a href="#id21"><span class="problematic" id="id22">*</span></a>/</p>
+</dd>
+<dt>def apply(throwables: Iterable[Throwable]): Unit = {</dt><dd><p>throwables.foreach(counter)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>wrap around a Future to capture exceptions</p></li>
+</ul>
+<p><a href="#id23"><span class="problematic" id="id24">*</span></a>/</p>
+</dd>
+<dt>def apply[T](f: =&gt; Future[T]): Future[T] = {</dt><dd><p>f onFailure { case t =&gt; apply(t) }</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>A memoized exception counter factory.</p></li>
+<li></li>
+<li><p>&#64;param stats</p></li>
+<li><p>the unscoped statsReceiver on which to hang the counters</p></li>
+<li><p>&#64;param categorizer</p></li>
+<li><p>A function that returns a list of category names that a throwable should be counted under.</p></li>
+</ul>
+<p><a href="#id25"><span class="problematic" id="id26">*</span></a>/</p>
+</dd>
+</dl>
+<p>class MemoizedExceptionCounterFactory(stats: StatsReceiver, categorizer: ExceptionCategorizer) {</p>
+<blockquote>
+<div><dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>A memoized exception counter factory using the default categorizer.</p></li>
+<li></li>
+<li><p>&#64;param stats</p></li>
+<li><p>the unscoped statsReceiver on which to hang the counters</p></li>
+</ul>
+<p><a href="#id27"><span class="problematic" id="id28">*</span></a>/</p>
+</dd>
+<dt>def this(stats: StatsReceiver) =</dt><dd><p>this(stats, ExceptionCategorizer.default())</p>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>A memoized exception counter factory using a categorizer with the given suffix.</p></li>
+<li></li>
+<li><p>&#64;param stats</p></li>
+<li><p>the unscoped statsReceiver on which to hang the counters</p></li>
+<li><p>&#64;param suffix</p></li>
+<li><p>All created exception counters will have the</p></li>
+<li><p>specified suffix added. This allows compatibility with</p></li>
+<li><p>Servo’s ExceptionCounter’s name param (allows creating</p></li>
+<li><p>exception counters that default to the “exceptions” namespace</p></li>
+<li><p>as well as those with an otherwise-specified scope).</p></li>
+</ul>
+<p><a href="#id29"><span class="problematic" id="id30">*</span></a>/</p>
+</dd>
+<dt>def this(stats: StatsReceiver, suffix: Seq[String]) =</dt><dd><p>this(stats, ExceptionCategorizer.default(suffix))</p>
+</dd>
+<dt>private[this] val getCounter =</dt><dd><dl class="simple">
+<dt>Memoize { (path: Seq[String]) =&gt;</dt><dd><p>new ExceptionCounter(stats, categorizer.scoped(path))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>def apply(path: String*): ExceptionCounter = getCounter(path)</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../../_sources/tweetypie/servo/util/src/main/scala/com/twitter/servo/util/ExceptionCounter.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

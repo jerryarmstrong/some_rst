@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../../../" id="documentation_options" src="../../../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.home_mixer.product.scored_tweets.scorer</p>
+<p>import com.twitter.finagle.stats.Stat
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.home_mixer.model.HomeFeatures.ScoreFeature
+import com.twitter.home_mixer.model.HomeFeatures.WeightedModelScoreFeature
+import com.twitter.home_mixer.product.scored_tweets.model.ScoredTweetsQuery
+import com.twitter.home_mixer.product.scored_tweets.scorer.PredictedScoreFeature.PredictedScoreFeatures
+import com.twitter.ml.api.DataRecord
+import com.twitter.product_mixer.component_library.model.candidate.TweetCandidate
+import com.twitter.product_mixer.core.feature.Feature
+import com.twitter.product_mixer.core.feature.FeatureWithDefaultOnFailure
+import com.twitter.product_mixer.core.feature.datarecord.DataRecordInAFeature
+import com.twitter.product_mixer.core.feature.featuremap.FeatureMap
+import com.twitter.product_mixer.core.feature.featuremap.datarecord.AllFeatures
+import com.twitter.product_mixer.core.feature.featuremap.datarecord.DataRecordConverter
+import com.twitter.product_mixer.core.feature.featuremap.datarecord.DataRecordExtractor
+import com.twitter.product_mixer.core.functional_component.scorer.Scorer
+import com.twitter.product_mixer.core.model.common.CandidateWithFeatures
+import com.twitter.product_mixer.core.model.common.identifier.ScorerIdentifier
+import com.twitter.product_mixer.core.pipeline.PipelineQuery
+import com.twitter.product_mixer.core.pipeline.pipeline_failure.IllegalStateFailure
+import com.twitter.product_mixer.core.pipeline.pipeline_failure.PipelineFailure
+import com.twitter.product_mixer.core.util.OffloadFuturePools
+import com.twitter.stitch.Stitch
+import com.twitter.timelines.clients.predictionservice.PredictionGRPCService
+import com.twitter.timelines.clients.predictionservice.PredictionServiceGRPCClient
+import com.twitter.util.Future
+import com.twitter.util.Return
+import javax.inject.Inject
+import javax.inject.Singleton</p>
+<dl>
+<dt>object CommonFeaturesDataRecordFeature</dt><dd><blockquote>
+<div><p>extends DataRecordInAFeature[PipelineQuery]
+with FeatureWithDefaultOnFailure[PipelineQuery, DataRecord] {</p>
+</div></blockquote>
+<p>override def defaultValue: DataRecord = new DataRecord()</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>object CandidateFeaturesDataRecordFeature</dt><dd><blockquote>
+<div><p>extends DataRecordInAFeature[TweetCandidate]
+with FeatureWithDefaultOnFailure[TweetCandidate, DataRecord] {</p>
+</div></blockquote>
+<p>override def defaultValue: DataRecord = new DataRecord()</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;Singleton
+case class NaviModelScorer &#64;Inject() (</p>
+<blockquote>
+<div><p>predictionGRPCService: PredictionGRPCService,
+statsReceiver: StatsReceiver)</p>
+<blockquote>
+<div><p>extends Scorer[ScoredTweetsQuery, TweetCandidate] {</p>
+</div></blockquote>
+<p>override val identifier: ScorerIdentifier = ScorerIdentifier(“NaviModel”)</p>
+<dl class="simple">
+<dt>override val features: Set[Feature[_, _]] = Set(</dt><dd><p>CommonFeaturesDataRecordFeature,
+CandidateFeaturesDataRecordFeature,
+WeightedModelScoreFeature,
+ScoreFeature</p>
+</dd>
+</dl>
+<p>) ++ PredictedScoreFeatures.asInstanceOf[Set[Feature[_, _]]]</p>
+<p>private val queryDataRecordAdapter = new DataRecordConverter(AllFeatures())
+private val candidatesDataRecordAdapter = new DataRecordConverter(AllFeatures())
+private val resultDataRecordExtractor = new DataRecordExtractor(PredictedScoreFeatures)</p>
+<p>private val scopedStatsReceiver = statsReceiver.scope(getClass.getSimpleName)
+private val failuresStat = scopedStatsReceiver.stat(“failures”)
+private val responsesStat = scopedStatsReceiver.stat(“responses”)
+private val invalidResponsesCounter = scopedStatsReceiver.counter(“invalidResponses”)
+private val candidatesDataRecordAdapterLatencyStat =</p>
+<blockquote>
+<div><p>scopedStatsReceiver.scope(“candidatesDataRecordAdapter”).stat(“latency_ms”)</p>
+</div></blockquote>
+<p>private val StatsReadabilityMultiplier = 1000
+private val Epsilon = 0.001
+private val PredictedScoreStatName = f”predictedScore${StatsReadabilityMultiplier}x”
+private val MissingScoreStatName = “missingScore”
+private val scoreStat = scopedStatsReceiver.stat(f”score${StatsReadabilityMultiplier}x”)</p>
+<p>private val RequestBatchSize = 64
+private val DataRecordConstructionParallelism = 32
+private val ModelId = “Home”</p>
+<dl class="simple">
+<dt>private val modelClient = new PredictionServiceGRPCClient(</dt><dd><p>service = predictionGRPCService,
+statsReceiver = statsReceiver,
+requestBatchSize = RequestBatchSize,
+useCompact = false</p>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>override def apply(</dt><dd><p>query: ScoredTweetsQuery,
+candidates: Seq[CandidateWithFeatures[TweetCandidate]]</p>
+</dd>
+<dt>): Stitch[Seq[FeatureMap]] = {</dt><dd><p>val commonRecord = query.features.map(queryDataRecordAdapter.toDataRecord)
+val candidateRecords: Future[Seq[DataRecord]] =</p>
+<blockquote>
+<div><dl>
+<dt>Stat.time(candidatesDataRecordAdapterLatencyStat) {</dt><dd><dl class="simple">
+<dt>OffloadFuturePools.parallelize[FeatureMap, DataRecord](</dt><dd><p>inputSeq = candidates.map(_.features),
+transformer = candidatesDataRecordAdapter.toDataRecord(_),
+parallelism = DataRecordConstructionParallelism,
+default = new DataRecord</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<dl>
+<dt>val scoreFeatureMaps = candidateRecords.flatMap { records =&gt;</dt><dd><dl>
+<dt>val predictionResponses =</dt><dd><p>modelClient.getPredictions(records, commonRecord, modelId = Some(ModelId))</p>
+</dd>
+<dt>predictionResponses.map { responses =&gt;</dt><dd><p>failuresStat.add(responses.count(_.isThrow))
+responsesStat.add(responses.size)</p>
+<dl>
+<dt>if (responses.size == candidates.size) {</dt><dd><dl class="simple">
+<dt>val predictedScoreFeatureMaps = responses.map {</dt><dd><p>case Return(dataRecord) =&gt; resultDataRecordExtractor.fromDataRecord(dataRecord)
+case _ =&gt; resultDataRecordExtractor.fromDataRecord(new DataRecord())</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// Add Data Record to candidate Feature Map for logging in later stages
+predictedScoreFeatureMaps.zip(records).map {</p>
+<blockquote>
+<div><dl>
+<dt>case (predictedScoreFeatureMap, candidateRecord) =&gt;</dt><dd><p>val weightedModelScore = computeWeightedModelScore(query, predictedScoreFeatureMap)
+scoreStat.add((weightedModelScore * StatsReadabilityMultiplier).toFloat)</p>
+<dl class="simple">
+<dt>predictedScoreFeatureMap +</dt><dd><p>(CandidateFeaturesDataRecordFeature, candidateRecord) +
+(CommonFeaturesDataRecordFeature, commonRecord.getOrElse(new DataRecord())) +
+(ScoreFeature, Some(weightedModelScore)) +
+(WeightedModelScoreFeature, Some(weightedModelScore))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+<dt>} else {</dt><dd><p>invalidResponsesCounter.incr()
+throw PipelineFailure(IllegalStateFailure, “Result size mismatched candidates size”)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>Stitch.callFuture(scoreFeatureMaps)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Compute the weighted sum of predicted scores of all engagements</p></li>
+<li><p>Convert negative score to positive, if needed</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>private def computeWeightedModelScore(</dt><dd><p>query: PipelineQuery,
+features: FeatureMap</p>
+</dd>
+<dt>): Double = {</dt><dd><dl>
+<dt>val weightedScoreAndModelWeightSeq = PredictedScoreFeatures.toSeq.map { predictedScoreFeature =&gt;</dt><dd><p>val predictedScoreOpt = predictedScoreFeature.extractScore(features)</p>
+<dl class="simple">
+<dt>predictedScoreOpt match {</dt><dd><dl class="simple">
+<dt>case Some(predictedScore) =&gt;</dt><dd><dl class="simple">
+<dt>scopedStatsReceiver</dt><dd><p>.stat(predictedScoreFeature.statName, PredictedScoreStatName)
+.add((predictedScore * StatsReadabilityMultiplier).toFloat)</p>
+</dd>
+</dl>
+</dd>
+<dt>case None =&gt;</dt><dd><p>scopedStatsReceiver.counter(predictedScoreFeature.statName, MissingScoreStatName).incr()</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>val weight = query.params(predictedScoreFeature.modelWeightParam)
+val weightedScore = predictedScoreOpt.getOrElse(0.0) * weight
+(weightedScore, weight)</p>
+</dd>
+</dl>
+<p>}</p>
+<p>val (weightedScores, modelWeights) = weightedScoreAndModelWeightSeq.unzip
+val combinedScoreSum = weightedScores.sum</p>
+<p>val positiveModelWeightsSum = modelWeights.filter(_ &gt; 0.0).sum
+val negativeModelWeightsSum = modelWeights.filter(_ &lt; 0).sum.abs
+val modelWeightsSum = positiveModelWeightsSum + negativeModelWeightsSum</p>
+<dl>
+<dt>val weightedScoresSum =</dt><dd><p>if (modelWeightsSum == 0) combinedScoreSum.max(0.0)
+else if (combinedScoreSum &lt; 0)</p>
+<blockquote>
+<div><p>(combinedScoreSum + negativeModelWeightsSum) / modelWeightsSum * Epsilon</p>
+</div></blockquote>
+<p>else combinedScoreSum + Epsilon</p>
+</dd>
+</dl>
+<p>weightedScoresSum</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../../../_sources/home-mixer/server/src/main/scala/com/twitter/home_mixer/product/scored_tweets/scorer/NaviModelScorer.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

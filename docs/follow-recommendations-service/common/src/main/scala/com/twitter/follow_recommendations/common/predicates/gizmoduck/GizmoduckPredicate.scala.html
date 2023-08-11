@@ -1,0 +1,480 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../../../" id="documentation_options" src="../../../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.follow_recommendations.common.predicates.gizmoduck</p>
+<p>import com.twitter.decider.Decider
+import com.twitter.decider.RandomRecipient
+import com.twitter.escherbird.util.stitchcache.StitchCache
+import com.twitter.finagle.Memcached.Client
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.finagle.util.DefaultTimer
+import com.twitter.follow_recommendations.common.base.StatsUtil
+import com.twitter.follow_recommendations.common.base.Predicate
+import com.twitter.follow_recommendations.common.base.PredicateResult
+import com.twitter.follow_recommendations.common.clients.cache.MemcacheClient
+import com.twitter.follow_recommendations.common.clients.cache.ThriftBijection
+import com.twitter.follow_recommendations.common.models.FilterReason._
+import com.twitter.follow_recommendations.common.models.AddressBookMetadata
+import com.twitter.follow_recommendations.common.models.CandidateUser
+import com.twitter.follow_recommendations.common.models.FilterReason
+import com.twitter.follow_recommendations.common.predicates.gizmoduck.GizmoduckPredicate._
+import com.twitter.follow_recommendations.common.predicates.gizmoduck.GizmoduckPredicateParams._
+import com.twitter.follow_recommendations.configapi.deciders.DeciderKey
+import com.twitter.gizmoduck.thriftscala.LabelValue.BlinkBad
+import com.twitter.gizmoduck.thriftscala.LabelValue.BlinkWorst
+import com.twitter.gizmoduck.thriftscala.LabelValue
+import com.twitter.gizmoduck.thriftscala.LookupContext
+import com.twitter.gizmoduck.thriftscala.QueryFields
+import com.twitter.gizmoduck.thriftscala.User
+import com.twitter.gizmoduck.thriftscala.UserResult
+import com.twitter.product_mixer.core.model.marshalling.request.HasClientContext
+import com.twitter.scrooge.CompactThriftSerializer
+import com.twitter.spam.rtf.thriftscala.SafetyLevel
+import com.twitter.stitch.Stitch
+import com.twitter.stitch.gizmoduck.Gizmoduck
+import com.twitter.timelines.configapi.HasParams
+import com.twitter.util.Duration
+import com.twitter.util.logging.Logging
+import java.lang.{Long =&gt; JLong}
+import javax.inject.Inject
+import javax.inject.Singleton</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>In this filter, we want to check 4 categories of conditions:</p></li>
+<li><ul>
+<li><p>if candidate is discoverable given that it’s from an address-book/phone-book based source</p></li>
+</ul>
+</li>
+<li><ul>
+<li><p>if candidate is unsuitable based on it’s safety sub-fields in gizmoduck</p></li>
+</ul>
+</li>
+<li><ul>
+<li><p>if candidate is withheld because of country-specific take-down policies</p></li>
+</ul>
+</li>
+<li><ul>
+<li><p>if candidate is marked as bad/worst based on blink labels</p></li>
+</ul>
+</li>
+<li><p>We fail close on the query as this is a product-critical filter</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+</dl>
+<p>&#64;Singleton
+case class GizmoduckPredicate &#64;Inject() (</p>
+<blockquote>
+<div><p>gizmoduck: Gizmoduck,
+client: Client,
+statsReceiver: StatsReceiver,
+decider: Decider = Decider.False)</p>
+<blockquote>
+<div><p>extends Predicate[(HasClientContext with HasParams, CandidateUser)]
+with Logging {</p>
+</div></blockquote>
+<p>private val stats: StatsReceiver = statsReceiver.scope(this.getClass.getName)</p>
+<p>// track # of Gizmoduck predicate queries that yielded valid &amp; invalid predicate results
+private val validPredicateResultCounter = stats.counter(“predicate_valid”)
+private val invalidPredicateResultCounter = stats.counter(“predicate_invalid”)</p>
+<p>// track # of cases where no Gizmoduck user was found
+private val noGizmoduckUserCounter = stats.counter(“no_gizmoduck_user_found”)</p>
+<dl class="simple">
+<dt>private val gizmoduckCache = StitchCache[JLong, UserResult](</dt><dd><p>maxCacheSize = MaxCacheSize,
+ttl = CacheTTL,
+statsReceiver = stats.scope(“cache”),
+underlyingCall = getByUserId</p>
+</dd>
+</dl>
+<p>)</p>
+<p>// Distributed Twemcache to store UserResult objects keyed on user IDs
+val bijection = new ThriftBijection[UserResult] {</p>
+<blockquote>
+<div><p>override val serializer = CompactThriftSerializer(UserResult)</p>
+</div></blockquote>
+<p>}
+val memcacheClient = MemcacheClient[UserResult](</p>
+<blockquote>
+<div><p>client = client,
+dest = “/s/cache/frs:twemcaches”,
+valueBijection = bijection,
+ttl = CacheTTL,
+statsReceiver = stats.scope(“twemcache”)</p>
+</div></blockquote>
+<p>)</p>
+<p>// main method used to apply GizmoduckPredicate to a candidate user
+override def apply(</p>
+<blockquote>
+<div><p>pair: (HasClientContext with HasParams, CandidateUser)</p>
+</div></blockquote>
+<dl>
+<dt>): Stitch[PredicateResult] = {</dt><dd><p>val (request, candidate) = pair
+// measure the latency of the getGizmoduckPredicateResult, since this predicate
+// check is product-critical and relies on querying a core service (Gizmoduck)
+StatsUtil.profileStitch(</p>
+<blockquote>
+<div><p>getGizmoduckPredicateResult(request, candidate),
+stats.scope(“getGizmoduckPredicateResult”)</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def getGizmoduckPredicateResult(</dt><dd><p>request: HasClientContext with HasParams,
+candidate: CandidateUser</p>
+</dd>
+<dt>): Stitch[PredicateResult] = {</dt><dd><p>val timeout: Duration = request.params(GizmoduckGetTimeout)</p>
+<p>val deciderKey: String = DeciderKey.EnableGizmoduckCaching.toString
+val enableDistributedCaching: Boolean = decider.isAvailable(deciderKey, Some(RandomRecipient))</p>
+<p>// try getting an existing UserResult from cache if possible
+val userResultStitch: Stitch[UserResult] =</p>
+<blockquote>
+<div><dl>
+<dt>enableDistributedCaching match {</dt><dd><p>// read from memcache
+case true =&gt; memcacheClient.readThrough(</p>
+<blockquote>
+<div><p>// add a key prefix to address cache key collisions
+key = “GizmoduckPredicate” + candidate.id.toString,
+underlyingCall = () =&gt; getByUserId(candidate.id)</p>
+</div></blockquote>
+<p>)
+// read from local cache
+case false =&gt; gizmoduckCache.readThrough(candidate.id)</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<dl>
+<dt>val predicateResultStitch = userResultStitch.map {</dt><dd><dl>
+<dt>userResult =&gt; {</dt><dd><p>val predicateResult = getPredicateResult(request, candidate, userResult)
+if (enableDistributedCaching) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>predicateResult match {</dt><dd><dl class="simple">
+<dt>case PredicateResult.Valid =&gt;</dt><dd><p>stats.scope(“twemcache”).counter(“predicate_valid”).incr()</p>
+</dd>
+<dt>case PredicateResult.Invalid(reasons) =&gt;</dt><dd><p>stats.scope(“twemcache”).counter(“predicate_invalid”).incr()</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+// log metrics to check if local cache value matches distributed cache value
+logPredicateResultEquality(</p>
+<blockquote>
+<div><p>request,
+candidate,
+predicateResult</p>
+</div></blockquote>
+<p>)</p>
+</div></blockquote>
+<dl>
+<dt>} else {</dt><dd><dl class="simple">
+<dt>predicateResult match {</dt><dd><dl class="simple">
+<dt>case PredicateResult.Valid =&gt;</dt><dd><p>stats.scope(“cache”).counter(“predicate_valid”).incr()</p>
+</dd>
+<dt>case PredicateResult.Invalid(reasons) =&gt;</dt><dd><p>stats.scope(“cache”).counter(“predicate_invalid”).incr()</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}
+predicateResult</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}
+predicateResultStitch</p>
+<blockquote>
+<div><p>.within(timeout)(DefaultTimer)
+.rescue { // fail-open when timeout or exception</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case e: Exception =&gt;</dt><dd><p>stats.scope(“rescued”).counter(e.getClass.getSimpleName).incr()
+invalidPredicateResultCounter.incr()
+Stitch(PredicateResult.Invalid(Set(FailOpen)))</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def logPredicateResultEquality(</dt><dd><p>request: HasClientContext with HasParams,
+candidate: CandidateUser,
+predicateResult: PredicateResult</p>
+</dd>
+<dt>): Unit = {</dt><dd><p>val localCachedUserResult = Option(gizmoduckCache.cache.getIfPresent(candidate.id))
+if (localCachedUserResult.isDefined) {</p>
+<blockquote>
+<div><p>val localPredicateResult = getPredicateResult(request, candidate, localCachedUserResult.get)
+localPredicateResult.equals(predicateResult) match {</p>
+<blockquote>
+<div><p>case true =&gt; stats.scope(“has_equal_predicate_value”).counter(“true”).incr()
+case false =&gt; stats.scope(“has_equal_predicate_value”).counter(“false”).incr()</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>stats.scope(“has_equal_predicate_value”).counter(“undefined”).incr()</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// method to get PredicateResult from UserResult
+def getPredicateResult(</p>
+<blockquote>
+<div><p>request: HasClientContext with HasParams,
+candidate: CandidateUser,
+userResult: UserResult,</p>
+</div></blockquote>
+<dl>
+<dt>): PredicateResult = {</dt><dd><dl>
+<dt>userResult.user match {</dt><dd><dl>
+<dt>case Some(user) =&gt;</dt><dd><p>val abPbReasons = getAbPbReason(user, candidate.getAddressBookMetadata)
+val safetyReasons = getSafetyReasons(user)
+val countryTakedownReasons = getCountryTakedownReasons(user, request.getCountryCode)
+val blinkReasons = getBlinkReasons(user)
+val allReasons =</p>
+<blockquote>
+<div><p>abPbReasons ++ safetyReasons ++ countryTakedownReasons ++ blinkReasons</p>
+</div></blockquote>
+<dl class="simple">
+<dt>if (allReasons.nonEmpty) {</dt><dd><p>invalidPredicateResultCounter.incr()
+PredicateResult.Invalid(allReasons)</p>
+</dd>
+<dt>} else {</dt><dd><p>validPredicateResultCounter.incr()
+PredicateResult.Valid</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>case None =&gt;</dt><dd><p>noGizmoduckUserCounter.incr()
+invalidPredicateResultCounter.incr()
+PredicateResult.Invalid(Set(NoUser))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def getByUserId(userId: JLong): Stitch[UserResult] = {</dt><dd><dl class="simple">
+<dt>StatsUtil.profileStitch(</dt><dd><p>gizmoduck.getById(userId = userId, queryFields = queryFields, context = lookupContext),
+stats.scope(“getByUserId”)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>object GizmoduckPredicate {</p>
+<blockquote>
+<div><dl>
+<dt>private[gizmoduck] val lookupContext: LookupContext =</dt><dd><p>LookupContext(<cite>includeDeactivated</cite> = true, <cite>safetyLevel</cite> = Some(SafetyLevel.Recommendations))</p>
+</dd>
+<dt>private[gizmoduck] val queryFields: Set[QueryFields] =</dt><dd><dl class="simple">
+<dt>Set(</dt><dd><p>QueryFields.Discoverability, // needed for Address Book / Phone Book discoverability checks in getAbPbReason
+QueryFields.Safety, // needed for user state safety checks in getSafetyReasons, getCountryTakedownReasons
+QueryFields.Labels, // needed for user label checks in getBlinkReasons
+QueryFields.Takedowns // needed for checking takedown labels for a user in getCountryTakedownReasons</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>private[gizmoduck] val BlinkLabels: Set[LabelValue] = Set(BlinkBad, BlinkWorst)</p>
+<dl>
+<dt>private[gizmoduck] def getAbPbReason(</dt><dd><p>user: User,
+abMetadataOpt: Option[AddressBookMetadata]</p>
+</dd>
+<dt>): Set[FilterReason] = {</dt><dd><dl>
+<dt>(for {</dt><dd><p>discoverability &lt;- user.discoverability
+abMetadata &lt;- abMetadataOpt</p>
+</dd>
+<dt>} yield {</dt><dd><p>val AddressBookMetadata(fwdPb, rvPb, fwdAb, rvAb) = abMetadata
+val abReason: Set[FilterReason] =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if ((!discoverability.discoverableByEmail) &amp;&amp; (fwdAb || rvAb))</dt><dd><p>Set(AddressBookUndiscoverable)</p>
+</dd>
+</dl>
+<p>else Set.empty</p>
+</div></blockquote>
+<dl>
+<dt>val pbReason: Set[FilterReason] =</dt><dd><dl class="simple">
+<dt>if ((!discoverability.discoverableByMobilePhone) &amp;&amp; (fwdPb || rvPb))</dt><dd><p>Set(PhoneBookUndiscoverable)</p>
+</dd>
+</dl>
+<p>else Set.empty</p>
+</dd>
+</dl>
+<p>abReason ++ pbReason</p>
+</dd>
+</dl>
+<p>}).getOrElse(Set.empty)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private[gizmoduck] def getSafetyReasons(user: User): Set[FilterReason] = {</dt><dd><dl>
+<dt>user.safety</dt><dd><dl>
+<dt>.map { s =&gt;</dt><dd><dl class="simple">
+<dt>val deactivatedReason: Set[FilterReason] =</dt><dd><p>if (s.deactivated) Set(Deactivated) else Set.empty</p>
+</dd>
+</dl>
+<p>val suspendedReason: Set[FilterReason] = if (s.suspended) Set(Suspended) else Set.empty
+val restrictedReason: Set[FilterReason] = if (s.restricted) Set(Restricted) else Set.empty
+val nsfwUserReason: Set[FilterReason] = if (s.nsfwUser) Set(NsfwUser) else Set.empty
+val nsfwAdminReason: Set[FilterReason] = if (s.nsfwAdmin) Set(NsfwAdmin) else Set.empty
+val isProtectedReason: Set[FilterReason] = if (s.isProtected) Set(IsProtected) else Set.empty
+deactivatedReason ++ suspendedReason ++ restrictedReason ++ nsfwUserReason ++ nsfwAdminReason ++ isProtectedReason</p>
+</dd>
+</dl>
+<p>}.getOrElse(Set.empty)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private[gizmoduck] def getCountryTakedownReasons(</dt><dd><p>user: User,
+countryCodeOpt: Option[String]</p>
+</dd>
+<dt>): Set[FilterReason] = {</dt><dd><dl class="simple">
+<dt>(for {</dt><dd><p>safety &lt;- user.safety.toSeq
+if safety.hasTakedown
+takedowns &lt;- user.takedowns.toSeq
+takedownCountry &lt;- takedowns.countryCodes
+requestingCountry &lt;- countryCodeOpt
+if takedownCountry.toLowerCase == requestingCountry.toLowerCase</p>
+</dd>
+</dl>
+<p>} yield Set(CountryTakedown(takedownCountry.toLowerCase))).flatten.toSet</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private[gizmoduck] def getBlinkReasons(user: User): Set[FilterReason] = {</dt><dd><dl class="simple">
+<dt>user.labels</dt><dd><p>.map(_.labels.map(_.labelValue))
+.getOrElse(Nil)
+.exists(BlinkLabels.contains)</p>
+</dd>
+<dt>for {</dt><dd><p>labels &lt;- user.labels.toSeq
+label &lt;- labels.labels
+if (BlinkLabels.contains(label.labelValue))</p>
+</dd>
+</dl>
+<p>} yield Set(Blink)</p>
+</dd>
+</dl>
+<p>}.flatten.toSet</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../../../_sources/follow-recommendations-service/common/src/main/scala/com/twitter/follow_recommendations/common/predicates/gizmoduck/GizmoduckPredicate.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

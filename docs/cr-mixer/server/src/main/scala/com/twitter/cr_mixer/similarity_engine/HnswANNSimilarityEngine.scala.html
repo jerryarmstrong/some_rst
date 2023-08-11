@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.cr_mixer.similarity_engine</p>
+<p>import com.twitter.ann.common.thriftscala.AnnQueryService
+import com.twitter.ann.common.thriftscala.Distance
+import com.twitter.ann.common.thriftscala.NearestNeighborQuery
+import com.twitter.ann.hnsw.HnswCommon
+import com.twitter.ann.hnsw.HnswParams
+import com.twitter.bijection.Injection
+import com.twitter.cortex.ml.embeddings.common.TweetKind
+import com.twitter.cr_mixer.model.SimilarityEngineInfo
+import com.twitter.cr_mixer.model.TweetWithScore
+import com.twitter.cr_mixer.similarity_engine.SimilarityEngine.MemCacheConfig
+import com.twitter.cr_mixer.similarity_engine.SimilarityEngine.SimilarityEngineConfig
+import com.twitter.cr_mixer.thriftscala.SimilarityEngineType
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.frigate.common.util.StatsUtil
+import com.twitter.mediaservices.commons.codec.ArrayByteBufferCodec
+import com.twitter.ml.api.thriftscala.{Embedding =&gt; ThriftEmbedding}
+import com.twitter.ml.featurestore.lib
+import com.twitter.simclusters_v2.thriftscala.InternalId
+import com.twitter.storehaus.ReadableStore
+import com.twitter.timelines.configapi.Params
+import com.twitter.util.Future</p>
+<dl class="simple">
+<dt>case class HnswANNEngineQuery(</dt><dd><p>modelId: String,
+sourceId: InternalId,
+params: Params,</p>
+</dd>
+<dt>) {</dt><dd><p>val cacheKey: String = s”${modelId}_${sourceId.toString}”</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>This Engine looks for tweets whose similarity is close to a Source Dense Embedding.</p></li>
+<li><p>Only support Long based embedding lookup. UserId or TweetId.</p></li>
+<li></li>
+<li><p>It provides HNSW specific implementations</p></li>
+<li></li>
+<li><p>&#64;param memCacheConfigOpt   If specified, it will wrap the underlying store with a MemCache layer</p></li>
+<li><p>You should only enable this for cacheable queries, e.x. TweetIds.</p></li>
+<li><p>consumer based UserIds are generally not possible to cache.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>class HnswANNSimilarityEngine(</dt><dd><p>embeddingStoreLookUpMap: Map[String, ReadableStore[InternalId, ThriftEmbedding]],
+annServiceLookUpMap: Map[String, AnnQueryService.MethodPerEndpoint],
+globalStats: StatsReceiver,
+override val identifier: SimilarityEngineType,
+engineConfig: SimilarityEngineConfig,
+memCacheConfigOpt: Option[MemCacheConfig[HnswANNEngineQuery]] = None)</p>
+<blockquote>
+<div><p>extends SimilarityEngine[HnswANNEngineQuery, TweetWithScore] {</p>
+</div></blockquote>
+<p>private val MaxNumResults: Int = 200
+private val ef: Int = 800
+private val TweetIdByteInjection: Injection[lib.TweetId, Array[Byte]] = TweetKind.byteInjection</p>
+<p>private val scopedStats = globalStats.scope(“similarityEngine”, identifier.toString)</p>
+<p>def getScopedStats: StatsReceiver = scopedStats</p>
+<dl>
+<dt>private def fetchEmbedding(</dt><dd><p>query: HnswANNEngineQuery,</p>
+</dd>
+<dt>): Future[Option[ThriftEmbedding]] = {</dt><dd><dl>
+<dt>val embeddingStore = embeddingStoreLookUpMap.getOrElse(</dt><dd><p>query.modelId,
+throw new IllegalArgumentException(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>s”${this.getClass.getSimpleName} ${identifier.toString}: “ +</dt><dd><p>s”ModelId ${query.modelId} does not exist for embeddingStore”</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>)</p>
+<p>embeddingStore.get(query.sourceId)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def fetchCandidates(</dt><dd><p>query: HnswANNEngineQuery,
+embedding: ThriftEmbedding</p>
+</dd>
+<dt>): Future[Seq[TweetWithScore]] = {</dt><dd><dl>
+<dt>val annService = annServiceLookUpMap.getOrElse(</dt><dd><p>query.modelId,
+throw new IllegalArgumentException(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>s”${this.getClass.getSimpleName} ${identifier.toString}: “ +</dt><dd><p>s”ModelId ${query.modelId} does not exist for annStore”</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>)</p>
+<p>val hnswParams = HnswCommon.RuntimeParamsInjection.apply(HnswParams(ef))</p>
+<dl>
+<dt>val annQuery =</dt><dd><p>NearestNeighborQuery(embedding, withDistance = true, hnswParams, MaxNumResults)</p>
+</dd>
+<dt>annService</dt><dd><p>.query(annQuery)
+.map(</p>
+<blockquote>
+<div><dl>
+<dt>_.nearestNeighbors</dt><dd><dl>
+<dt>.map { nearestNeighbor =&gt;</dt><dd><dl class="simple">
+<dt>val candidateId = TweetIdByteInjection</dt><dd><p>.invert(ArrayByteBufferCodec.decode(nearestNeighbor.id))
+.toOption
+.map(_.tweetId)</p>
+</dd>
+</dl>
+<p>(candidateId, nearestNeighbor.distance)</p>
+</dd>
+<dt>}.collect {</dt><dd><dl class="simple">
+<dt>case (Some(candidateId), Some(distance)) =&gt;</dt><dd><p>TweetWithScore(candidateId, toScore(distance))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>})</p>
+</dd>
+</dl>
+</div></blockquote>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>// Convert Distance to a score such that higher scores mean more similar.
+def toScore(distance: Distance): Double = {</p>
+<blockquote>
+<div><dl>
+<dt>distance match {</dt><dd><dl>
+<dt>case Distance.EditDistance(editDistance) =&gt;</dt><dd><p>// (-Infinite, 0.0]
+0.0 - editDistance.distance</p>
+</dd>
+<dt>case Distance.L2Distance(l2Distance) =&gt;</dt><dd><p>// (-Infinite, 0.0]
+0.0 - l2Distance.distance</p>
+</dd>
+<dt>case Distance.CosineDistance(cosineDistance) =&gt;</dt><dd><p>// [0.0 - 1.0]
+1.0 - cosineDistance.distance</p>
+</dd>
+<dt>case Distance.InnerProductDistance(innerProductDistance) =&gt;</dt><dd><p>// (-Infinite, Infinite)
+1.0 - innerProductDistance.distance</p>
+</dd>
+<dt>case Distance.UnknownUnionField(_) =&gt;</dt><dd><dl class="simple">
+<dt>throw new IllegalStateException(</dt><dd><p>s”${this.getClass.getSimpleName} does not recognize $distance.toString”</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>private[similarity_engine] def getEmbeddingAndCandidates(</dt><dd><p>query: HnswANNEngineQuery</p>
+</dd>
+</dl>
+<p>): Future[Option[Seq[TweetWithScore]]] = {</p>
+<blockquote>
+<div><p>val fetchEmbeddingStat = scopedStats.scope(query.modelId).scope(“fetchEmbedding”)
+val fetchCandidatesStat = scopedStats.scope(query.modelId).scope(“fetchCandidates”)</p>
+<dl>
+<dt>for {</dt><dd><p>embeddingOpt &lt;- StatsUtil.trackOptionStats(fetchEmbeddingStat) { fetchEmbedding(query) }
+candidates &lt;- StatsUtil.trackItemsStats(fetchCandidatesStat) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>embeddingOpt match {</dt><dd><p>case Some(embedding) =&gt; fetchCandidates(query, embedding)
+case None =&gt; Future.Nil</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+<dt>} yield {</dt><dd><p>Some(candidates)</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>// Add memcache wrapper, if specified
+private val store = {</p>
+<blockquote>
+<div><p>val uncachedStore = ReadableStore.fromFnFuture(getEmbeddingAndCandidates)</p>
+<dl>
+<dt>memCacheConfigOpt match {</dt><dd><dl>
+<dt>case Some(config) =&gt;</dt><dd><dl class="simple">
+<dt>SimilarityEngine.addMemCache(</dt><dd><p>underlyingStore = uncachedStore,
+memCacheConfig = config,
+statsReceiver = scopedStats</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>case _ =&gt; uncachedStore</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>def toSimilarityEngineInfo(</dt><dd><p>query: HnswANNEngineQuery,
+score: Double</p>
+</dd>
+<dt>): SimilarityEngineInfo = {</dt><dd><dl class="simple">
+<dt>SimilarityEngineInfo(</dt><dd><p>similarityEngineType = this.identifier,
+modelId = Some(query.modelId),
+score = Some(score))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>override def getCandidates(</dt><dd><p>engineQuery: HnswANNEngineQuery</p>
+</dd>
+<dt>): Future[Option[Seq[TweetWithScore]]] = {</dt><dd><p>val versionedStats = globalStats.scope(engineQuery.modelId)
+SimilarityEngine.getFromFn(</p>
+<blockquote>
+<div><p>store.get,
+engineQuery,
+engineConfig,
+engineQuery.params,
+versionedStats</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/cr-mixer/server/src/main/scala/com/twitter/cr_mixer/similarity_engine/HnswANNSimilarityEngine.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

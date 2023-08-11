@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.graph_feature_service.worker.handlers</p>
+<p>import com.twitter.finagle.stats.{Stat, StatsReceiver}
+import com.twitter.graph_feature_service.thriftscala.{</p>
+<blockquote>
+<div><p>WorkerIntersectionRequest,
+WorkerIntersectionResponse,
+WorkerIntersectionValue</p>
+</div></blockquote>
+<p>}
+import com.twitter.graph_feature_service.util.{FeatureTypesCalculator, IntersectionValueCalculator}
+import com.twitter.graph_feature_service.util.IntersectionValueCalculator._
+import com.twitter.graph_feature_service.worker.util.GraphContainer
+import com.twitter.servo.request.RequestHandler
+import com.twitter.util.Future
+import java.nio.ByteBuffer
+import javax.inject.{Inject, Singleton}</p>
+<p>&#64;Singleton
+class WorkerGetIntersectionHandler &#64;Inject() (</p>
+<blockquote>
+<div><p>graphContainer: GraphContainer,
+statsReceiver: StatsReceiver)</p>
+<blockquote>
+<div><p>extends RequestHandler[WorkerIntersectionRequest, WorkerIntersectionResponse] {</p>
+</div></blockquote>
+<p>import WorkerGetIntersectionHandler._</p>
+<p>private val stats: StatsReceiver = statsReceiver.scope(“srv/get_intersection”)
+private val numCandidatesCount = stats.counter(“total_num_candidates”)
+private val toPartialGraphQueryStat = stats.stat(“to_partial_graph_query_latency”)
+private val fromPartialGraphQueryStat = stats.stat(“from_partial_graph_query_latency”)
+private val intersectionCalculationStat = stats.stat(“computation_latency”)</p>
+<p>override def apply(request: WorkerIntersectionRequest): Future[WorkerIntersectionResponse] = {</p>
+<blockquote>
+<div><p>numCandidatesCount.incr(request.candidateUserIds.length)</p>
+<p>val userId = request.userId</p>
+<p>// NOTE: do not change the order of candidates
+val candidateIds = request.candidateUserIds</p>
+<p>// NOTE: do not change the order of features
+val featureTypes =</p>
+<blockquote>
+<div><p>FeatureTypesCalculator.getFeatureTypes(request.presetFeatureTypes, request.featureTypes)</p>
+</div></blockquote>
+<p>val leftEdges = featureTypes.map(_.leftEdgeType).distinct
+val rightEdges = featureTypes.map(_.rightEdgeType).distinct</p>
+<dl>
+<dt>val rightEdgeMap = Stat.time(toPartialGraphQueryStat) {</dt><dd><dl>
+<dt>rightEdges.map { rightEdge =&gt;</dt><dd><dl>
+<dt>val map = graphContainer.toPartialMap.get(rightEdge) match {</dt><dd><dl>
+<dt>case Some(graph) =&gt;</dt><dd><dl class="simple">
+<dt>candidateIds.flatMap { candidateId =&gt;</dt><dd><p>graph.apply(candidateId).map(candidateId -&gt; _)</p>
+</dd>
+</dl>
+<p>}.toMap</p>
+</dd>
+<dt>case None =&gt;</dt><dd><p>Map.empty[Long, ByteBuffer]</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+rightEdge -&gt; map</p>
+</dd>
+</dl>
+<p>}.toMap</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>val leftEdgeMap = Stat.time(fromPartialGraphQueryStat) {</dt><dd><dl class="simple">
+<dt>leftEdges.flatMap { leftEdge =&gt;</dt><dd><p>graphContainer.toPartialMap.get(leftEdge).flatMap(_.apply(userId)).map(leftEdge -&gt; _)</p>
+</dd>
+</dl>
+<p>}.toMap</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>val res = Stat.time(intersectionCalculationStat) {</dt><dd><dl>
+<dt>WorkerIntersectionResponse(</dt><dd><p>// NOTE that candidate ordering is important
+candidateIds.map { candidateId =&gt;</p>
+<blockquote>
+<div><p>// NOTE that the featureTypes ordering is important
+featureTypes.map {</p>
+<blockquote>
+<div><dl>
+<dt>featureType =&gt;</dt><dd><p>val leftNeighborsOpt = leftEdgeMap.get(featureType.leftEdgeType)
+val rightNeighborsOpt =</p>
+<blockquote>
+<div><p>rightEdgeMap.get(featureType.rightEdgeType).flatMap(_.get(candidateId))</p>
+</div></blockquote>
+<dl>
+<dt>if (leftNeighborsOpt.isEmpty &amp;&amp; rightNeighborsOpt.isEmpty) {</dt><dd><p>EmptyWorkerIntersectionValue</p>
+</dd>
+<dt>} else if (rightNeighborsOpt.isEmpty) {</dt><dd><dl class="simple">
+<dt>EmptyWorkerIntersectionValue.copy(</dt><dd><p>leftNodeDegree = computeArraySize(leftNeighborsOpt.get)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>} else if (leftNeighborsOpt.isEmpty) {</dt><dd><dl class="simple">
+<dt>EmptyWorkerIntersectionValue.copy(</dt><dd><p>rightNodeDegree = computeArraySize(rightNeighborsOpt.get)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>} else {</dt><dd><dl class="simple">
+<dt>IntersectionValueCalculator(</dt><dd><p>leftNeighborsOpt.get,
+rightNeighborsOpt.get,
+request.intersectionIdLimit)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<p>Future.value(res)</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>object WorkerGetIntersectionHandler {</dt><dd><p>val EmptyWorkerIntersectionValue: WorkerIntersectionValue = WorkerIntersectionValue(0, 0, 0, Nil)</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/graph-feature-service/src/main/scala/com/twitter/graph_feature_service/worker/handlers/WorkerGetIntersectionHandler.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

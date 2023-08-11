@@ -1,0 +1,668 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../" id="documentation_options" src="../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.earlybird.partition.freshstartup;</p>
+<p>import java.io.IOException;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Optional;</p>
+<p>import com.google.common.base.Preconditions;
+import com.google.common.base.Stopwatch;
+import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;</p>
+<p>import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.clients.consumer.ConsumerRecords;
+import org.apache.kafka.clients.consumer.KafkaConsumer;
+import org.apache.kafka.clients.consumer.OffsetAndTimestamp;
+import org.apache.kafka.common.TopicPartition;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;</p>
+<p>import com.twitter.search.common.indexing.thriftjava.ThriftVersionedEvents;
+import com.twitter.search.earlybird.factory.EarlybirdKafkaConsumersFactory;
+import com.twitter.search.earlybird.partition.IndexingResultCounts;
+import com.twitter.search.earlybird.partition.SegmentInfo;
+import com.twitter.search.earlybird.partition.SegmentManager;
+import com.twitter.search.earlybird.partition.SegmentWriter;</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Responsible for indexing the tweets and updates that need to be applied to a single segment</p></li>
+<li><p>before it gets optimized and then optimizing the segment (except if it’s the last one).</p></li>
+<li></li>
+<li><p>After that, no more tweets are added to the segment and the rest of the updates are added</p></li>
+<li><p>in PostOptimizationUpdatesIndexer.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>class PreOptimizationSegmentIndexer {</dt><dd><p>private static final Logger LOG = LoggerFactory.getLogger(PreOptimizationSegmentIndexer.class);</p>
+<p>private SegmentBuildInfo segmentBuildInfo;
+private final ArrayList&lt;SegmentBuildInfo&gt; segmentBuildInfos;
+private SegmentManager segmentManager;
+private final TopicPartition tweetTopic;
+private final TopicPartition updateTopic;
+private final EarlybirdKafkaConsumersFactory earlybirdKafkaConsumersFactory;
+private final long lateTweetBuffer;</p>
+<dl>
+<dt>public PreOptimizationSegmentIndexer(</dt><dd><blockquote>
+<div><p>SegmentBuildInfo segmentBuildInfo,
+ArrayList&lt;SegmentBuildInfo&gt; segmentBuildInfos,
+SegmentManager segmentManager,
+TopicPartition tweetTopic,
+TopicPartition updateTopic,
+EarlybirdKafkaConsumersFactory earlybirdKafkaConsumersFactory,
+long lateTweetBuffer) {</p>
+</div></blockquote>
+<p>this.segmentBuildInfo = segmentBuildInfo;
+this.segmentBuildInfos = segmentBuildInfos;
+this.segmentManager = segmentManager;
+this.tweetTopic = tweetTopic;
+this.updateTopic = updateTopic;
+this.earlybirdKafkaConsumersFactory = earlybirdKafkaConsumersFactory;
+this.lateTweetBuffer = lateTweetBuffer;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>SegmentInfo runIndexing() throws IOException {</dt><dd><dl>
+<dt>LOG.info(String.format(“Starting segment building for segment %d. “</dt><dd><blockquote>
+<div><ul class="simple">
+<li><p>“Tweet offset range [ %,d, %,d ]”,</p></li>
+</ul>
+</div></blockquote>
+<p>segmentBuildInfo.getIndex(),
+segmentBuildInfo.getTweetStartOffset(),
+segmentBuildInfo.getTweetEndOffset()));</p>
+</dd>
+</dl>
+<p>Optional&lt;Long&gt; firstTweetIdInNextSegment = Optional.empty();
+int index = segmentBuildInfo.getIndex();
+if (index + 1 &lt; segmentBuildInfos.size()) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>firstTweetIdInNextSegment = Optional.of(</dt><dd><p>segmentBuildInfos.get(index + 1).getStartTweetId());</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<p>// Index tweets.
+SegmentTweetsIndexingResult tweetIndexingResult = indexSegmentTweetsFromStream(</p>
+<blockquote>
+<div><p>tweetTopic,
+String.format(“tweet_consumer_for_segment_%d”, segmentBuildInfo.getIndex()),
+firstTweetIdInNextSegment</p>
+</div></blockquote>
+<p>);</p>
+<p>// Index updates.
+KafkaOffsetPair updatesIndexingOffsets = findUpdateStreamOffsetRange(tweetIndexingResult);</p>
+<dl>
+<dt>String updatesConsumerClientId =</dt><dd><p>String.format(“update_consumer_for_segment_%d”, segmentBuildInfo.getIndex());</p>
+</dd>
+<dt>LOG.info(String.format(“Consumer: %s :: Tweets start time: %d, end time: %d ==&gt; “</dt><dd><blockquote>
+<div><ul class="simple">
+<li><p>“Updates start offset: %,d, end offset: %,d”,</p></li>
+</ul>
+</div></blockquote>
+<p>updatesConsumerClientId,
+tweetIndexingResult.getMinRecordTimestampMs(),
+tweetIndexingResult.getMaxRecordTimestampMs(),
+updatesIndexingOffsets.getBeginOffset(),
+updatesIndexingOffsets.getEndOffset()));</p>
+</dd>
+<dt>indexUpdatesFromStream(</dt><dd><p>updateTopic,
+updatesConsumerClientId,
+updatesIndexingOffsets.getBeginOffset(),
+updatesIndexingOffsets.getEndOffset(),
+tweetIndexingResult.getSegmentWriter()</p>
+</dd>
+</dl>
+<p>);</p>
+<dl>
+<dt>if (segmentBuildInfo.isLastSegment()) {</dt><dd><dl>
+<dt>/*</dt><dd><ul class="simple">
+<li><p>We don’t optimize the last segment for a few reasons:</p></li>
+<li></li>
+<li><ol class="arabic simple">
+<li><p>We might have tweets coming next in the stream, which are supposed to end</p></li>
+</ol>
+</li>
+<li><p>up in this segment.</p></li>
+<li></li>
+<li><ol class="arabic simple" start="2">
+<li><p>We might have updates coming next in the stream, which need to be applied to</p></li>
+</ol>
+</li>
+<li><p>this segment before it’s optimized.</p></li>
+<li></li>
+<li><p>So the segment is kept unoptimized and later we take care of setting up things</p></li>
+<li><p>so that PartitionWriter and the tweet create/update handlers can start correctly.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+</dl>
+<p>LOG.info(“Not optimizing the last segment ({})”, segmentBuildInfo.getIndex());</p>
+</dd>
+<dt>} else {</dt><dd><p>Stopwatch optimizationStopwatch = Stopwatch.createStarted();
+try {</p>
+<blockquote>
+<div><p>LOG.info(“Starting to optimize segment: {}”, segmentBuildInfo.getIndex());
+tweetIndexingResult.getSegmentWriter().getSegmentInfo()</p>
+<blockquote>
+<div><p>.getIndexSegment().optimizeIndexes();</p>
+</div></blockquote>
+</div></blockquote>
+<dl class="simple">
+<dt>} finally {</dt><dd><dl class="simple">
+<dt>LOG.info(“Optimization of segment {} finished in {}.”,</dt><dd><p>segmentBuildInfo.getIndex(), optimizationStopwatch);</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>segmentBuildInfo.setUpdateKafkaOffsetPair(updatesIndexingOffsets);
+segmentBuildInfo.setMaxIndexedTweetId(tweetIndexingResult.getMaxIndexedTweetId());
+segmentBuildInfo.setSegmentWriter(tweetIndexingResult.getSegmentWriter());</p>
+<p>return tweetIndexingResult.getSegmentWriter().getSegmentInfo();</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private SegmentTweetsIndexingResult indexSegmentTweetsFromStream(</dt><dd><blockquote>
+<div><p>TopicPartition topicPartition,
+String consumerClientId,
+Optional&lt;Long&gt; firstTweetIdInNextSegment) throws IOException {</p>
+</div></blockquote>
+<p>long startOffset = segmentBuildInfo.getTweetStartOffset();
+long endOffset = segmentBuildInfo.getTweetEndOffset();
+long marginSize = lateTweetBuffer / 2;</p>
+<p>boolean isFirstSegment = segmentBuildInfo.getIndex() == 0;</p>
+<p>long startReadingAtOffset = startOffset;
+if (!isFirstSegment) {</p>
+<blockquote>
+<div><p>startReadingAtOffset -= marginSize;</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>LOG.info(“Not moving start offset backwards for segment {}.”, segmentBuildInfo.getIndex());</p>
+</dd>
+</dl>
+<p>}</p>
+<p>long endReadingAtOffset = endOffset;
+if (firstTweetIdInNextSegment.isPresent()) {</p>
+<blockquote>
+<div><p>endReadingAtOffset += marginSize;</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>LOG.info(“Not moving end offset forwards for segment {}.”, segmentBuildInfo.getIndex());</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>KafkaConsumer&lt;Long, ThriftVersionedEvents&gt; tweetsKafkaConsumer =</dt><dd><dl class="simple">
+<dt>makeKafkaConsumerForIndexing(consumerClientId,</dt><dd><p>topicPartition, startReadingAtOffset);</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>boolean done = false;
+long minIndexedTimestampMs = Long.MAX_VALUE;
+long maxIndexedTimestampMs = Long.MIN_VALUE;
+int indexedEvents = 0;</p>
+<p>Stopwatch stopwatch = Stopwatch.createStarted();</p>
+<p>LOG.info(“Creating segment writer for timeslice ID {}.”, segmentBuildInfo.getStartTweetId());
+SegmentWriter segmentWriter = segmentManager.createSegmentWriter(</p>
+<blockquote>
+<div><p>segmentBuildInfo.getStartTweetId());</p>
+</div></blockquote>
+<dl>
+<dt>/*</dt><dd><ul>
+<li><p>We don’t have a guarantee that tweets come in sorted order, so when we’re building segment</p></li>
+<li><p>X’, we try to pick some tweets from the previous and next ranges we’re going to index.</p></li>
+<li></li>
+<li><p>We also ignore tweets in the beginning and the end of our tweets range, which are picked</p></li>
+<li><p>by the previous or following segment.</p></li>
+<li></li>
+<li><p>Segment X        Segment X’                              Segment X’’</p></li>
+<li><p>————– o —————————————– o —————</p></li>
+<li><p>[~~~~~] ^ [~~~~~]                           [~~~~~] | [~~~~~]</p></li>
+<li><div class="line-block">
+<div class="line">|    |                                 |    |    |</div>
+</div>
+</li>
+<li><p>front margin  |    front padding (size K)   back padding  |   back margin</p></li>
+<li><div class="line-block">
+<div class="line"><a href="#id5"><span class="problematic" id="id6">|</span></a></div>
+</div>
+</li>
+<li><p>segment boundary at offset B’ (1)           B’’</p></li>
+<li></li>
+<li><ol class="arabic simple">
+<li><p>This is at a predetermined tweet offset / tweet id.</p></li>
+</ol>
+</li>
+<li></li>
+<li><p>For segment X’, we start to read tweets at offset B’-K and finish reading</p></li>
+<li><p>tweets at offset B’’+K. K is a constant.</p></li>
+<li></li>
+<li><p>For middle segments X’</p></li>
+<li></li>
+<li><p>We move some tweets from the front margin and back margin into segment X’.</p></li>
+<li><p>Some tweets from the front and back padding are ignored, as they are moved</p></li>
+<li><p>into the previous and next segments.</p></li>
+<li></li>
+<li><p>For the first segment</p></li>
+<li></li>
+<li><p>No front margin, no front padding. We just read from the beginning offset</p></li>
+<li><p>and insert everything.</p></li>
+<li></li>
+<li><p>For the last segment</p></li>
+<li></li>
+<li><p>No back margin, no back padding. We just read until the end.</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+</dl>
+<p>SkippedPickedCounter frontMargin = new SkippedPickedCounter(“front margin”);
+SkippedPickedCounter backMargin = new SkippedPickedCounter(“back margin”);
+SkippedPickedCounter frontPadding = new SkippedPickedCounter(“front padding”);
+SkippedPickedCounter backPadding = new SkippedPickedCounter(“back padding”);
+SkippedPickedCounter regular = new SkippedPickedCounter(“regular”);
+int totalRead = 0;
+long maxIndexedTweetId = -1;</p>
+<p>Stopwatch pollTimer = Stopwatch.createUnstarted();
+Stopwatch indexTimer = Stopwatch.createUnstarted();</p>
+<dl>
+<dt>do {</dt><dd><p>// This can cause an exception, See P33896
+pollTimer.start();
+ConsumerRecords&lt;Long, ThriftVersionedEvents&gt; records =</p>
+<blockquote>
+<div><p>tweetsKafkaConsumer.poll(Duration.ofSeconds(1));</p>
+</div></blockquote>
+<p>pollTimer.stop();</p>
+<p>indexTimer.start();
+for (ConsumerRecord&lt;Long, ThriftVersionedEvents&gt; record : records) {</p>
+<blockquote>
+<div><p>// Done reading?
+if (record.offset() &gt;= endReadingAtOffset) {</p>
+<blockquote>
+<div><p>done = true;</p>
+</div></blockquote>
+<p>}</p>
+<p>ThriftVersionedEvents tve = record.value();
+boolean indexTweet = false;
+SkippedPickedCounter skippedPickedCounter;</p>
+<dl>
+<dt>if (record.offset() &lt; segmentBuildInfo.getTweetStartOffset()) {</dt><dd><p>// Front margin.
+skippedPickedCounter = frontMargin;
+if (tve.getId() &gt; segmentBuildInfo.getStartTweetId()) {</p>
+<blockquote>
+<div><p>indexTweet = true;</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+<dt>} else if (record.offset() &gt; segmentBuildInfo.getTweetEndOffset()) {</dt><dd><p>// Back margin.
+skippedPickedCounter = backMargin;
+if (firstTweetIdInNextSegment.isPresent()</p>
+<blockquote>
+<div><blockquote>
+<div><p>&amp;&amp; tve.getId() &lt; firstTweetIdInNextSegment.get()) {</p>
+</div></blockquote>
+<p>indexTweet = true;</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+<dt>} else if (record.offset() &lt; segmentBuildInfo.getTweetStartOffset() + marginSize) {</dt><dd><p>// Front padding.
+skippedPickedCounter = frontPadding;
+if (tve.getId() &gt;= segmentBuildInfo.getStartTweetId()) {</p>
+<blockquote>
+<div><p>indexTweet = true;</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+<dt>} else if (firstTweetIdInNextSegment.isPresent()</dt><dd><blockquote>
+<div><p>&amp;&amp; record.offset() &gt; segmentBuildInfo.getTweetEndOffset() - marginSize) {</p>
+</div></blockquote>
+<p>// Back padding.
+skippedPickedCounter = backPadding;
+if (tve.getId() &lt; firstTweetIdInNextSegment.get()) {</p>
+<blockquote>
+<div><p>indexTweet = true;</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+<dt>} else {</dt><dd><p>skippedPickedCounter = regular;
+// These we just pick. A tweet that came very late can end up in the wrong
+// segment, but it’s better for it to be present in a segment than dropped.
+indexTweet = true;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>if (indexTweet) {</dt><dd><p>skippedPickedCounter.incrementPicked();
+segmentWriter.indexThriftVersionedEvents(tve);
+maxIndexedTweetId = Math.max(maxIndexedTweetId, tve.getId());
+indexedEvents++;</p>
+<p>// Note that records don’t necessarily have increasing timestamps.
+// Why? The timestamps whatever timestamp we picked when creating the record
+// in ingesters and there are many ingesters.
+minIndexedTimestampMs = Math.min(minIndexedTimestampMs, record.timestamp());
+maxIndexedTimestampMs = Math.max(maxIndexedTimestampMs, record.timestamp());</p>
+</dd>
+<dt>} else {</dt><dd><p>skippedPickedCounter.incrementSkipped();</p>
+</dd>
+</dl>
+<p>}
+totalRead++;</p>
+<dl class="simple">
+<dt>if (record.offset() &gt;= endReadingAtOffset) {</dt><dd><p>break;</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}
+indexTimer.stop();</p>
+</dd>
+</dl>
+<p>} while (!done);</p>
+<p>tweetsKafkaConsumer.close();</p>
+<dl>
+<dt>SegmentTweetsIndexingResult result = new SegmentTweetsIndexingResult(</dt><dd><p>minIndexedTimestampMs, maxIndexedTimestampMs, maxIndexedTweetId, segmentWriter);</p>
+</dd>
+<dt>LOG.info(“Finished indexing {} tweets for {} in {}. Read {} tweets. Result: {}.”</dt><dd><blockquote>
+<div><ul class="simple">
+<li><p>“ Time polling: {}, Time indexing: {}.”,</p></li>
+</ul>
+</div></blockquote>
+<p>indexedEvents, consumerClientId, stopwatch, totalRead, result,
+pollTimer, indexTimer);</p>
+</dd>
+</dl>
+<p>// In normal conditions, expect to pick just a few in front and in the back.
+LOG.info(“SkippedPicked ({}) – {}, {}, {}, {}, {}”,</p>
+<blockquote>
+<div><p>consumerClientId, frontMargin, frontPadding, backPadding, backMargin, regular);</p>
+</div></blockquote>
+<p>return result;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>After indexing all the tweets for a segment, index updates that need to be applied before</p></li>
+<li><p>the segment is optimized.</p></li>
+<li></li>
+<li><p>This is required because some updates (URL updates, cards and Named Entities) can only be</p></li>
+<li><p>applied to an unoptimized segment. Luckily, all of these updates should arrive close to when</p></li>
+<li><p>the Tweet is created.</p></li>
+</ul>
+<p><a href="#id9"><span class="problematic" id="id10">*</span></a>/</p>
+</dd>
+<dt>private KafkaOffsetPair findUpdateStreamOffsetRange(</dt><dd><blockquote>
+<div><p>SegmentTweetsIndexingResult tweetsIndexingResult) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>KafkaConsumer&lt;Long, ThriftVersionedEvents&gt; offsetsConsumer =</dt><dd><dl class="simple">
+<dt>earlybirdKafkaConsumersFactory.createKafkaConsumer(</dt><dd><p>“<a href="#id15"><span class="problematic" id="id16">consumer_for_update_offsets_</span></a>” + segmentBuildInfo.getIndex());</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>// Start one minute before the first indexed tweet. One minute is excessive, but
+// we need to start a bit earlier in case the first tweet we indexed came in
+// later than some of its updates.
+long updatesStartOffset = offsetForTime(offsetsConsumer, updateTopic,</p>
+<blockquote>
+<div><p>tweetsIndexingResult.getMinRecordTimestampMs() - Duration.ofMinutes(1).toMillis());</p>
+</div></blockquote>
+<p>// Two cases:
+//
+// 1. If we’re not indexing the last segment, end 10 minutes after the last tweet. So for
+//    example if we resolve an url in a tweet 3 minutes after the tweet is published,
+//    we’ll apply that update before the segment is optimized. 10 minutes is a bit too
+//    much, but that doesn’t matter a whole lot, since we’re indexing about ~10 hours of
+//    updates.
+//
+// 2. If we’re indexing the last segment, end a bit before the last indexed tweet. We might
+//    have incoming tweets that are a bit late. In fresh startup, we don’t have a mechanism
+//    to store these tweets to be applied when the tweet arrives, as in TweetUpdateHandler,
+//    so just stop a bit earlier and let TweetCreateHandler and TweetUpdateHandler deal with
+//    that.
+long millisAdjust;
+if (segmentBuildInfo.getIndex() == segmentBuildInfos.size() - 1) {</p>
+<blockquote>
+<div><p>millisAdjust = -Duration.ofMinutes(1).toMillis();</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>millisAdjust = Duration.ofMinutes(10).toMillis();</p>
+</dd>
+</dl>
+<p>}
+long updatesEndOffset = offsetForTime(offsetsConsumer, updateTopic,</p>
+<blockquote>
+<div><p>tweetsIndexingResult.getMaxRecordTimestampMs() + millisAdjust);</p>
+</div></blockquote>
+<p>offsetsConsumer.close();</p>
+<p>return new KafkaOffsetPair(updatesStartOffset, updatesEndOffset);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Get the earliest offset with a timestamp &gt;= $timestamp.</p></li>
+<li></li>
+<li><p>The guarantee we get is that if we start reading from here on, we will get</p></li>
+<li><p>every single message that came in with a timestamp &gt;= $timestamp.</p></li>
+</ul>
+<p><a href="#id11"><span class="problematic" id="id12">*</span></a>/</p>
+</dd>
+<dt>private long offsetForTime(KafkaConsumer&lt;Long, ThriftVersionedEvents&gt; kafkaConsumer,</dt><dd><blockquote>
+<div><p>TopicPartition partition,
+long timestamp) {</p>
+</div></blockquote>
+<p>Preconditions.checkNotNull(kafkaConsumer);
+Preconditions.checkNotNull(partition);</p>
+<dl class="simple">
+<dt>OffsetAndTimestamp offsetAndTimestamp = kafkaConsumer</dt><dd><p>.offsetsForTimes(ImmutableMap.of(partition, timestamp))
+.get(partition);</p>
+</dd>
+<dt>if (offsetAndTimestamp == null) {</dt><dd><p>return -1;</p>
+</dd>
+<dt>} else {</dt><dd><p>return offsetAndTimestamp.offset();</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private void indexUpdatesFromStream(</dt><dd><blockquote>
+<div><p>TopicPartition topicPartition,
+String consumerClientId,
+long startOffset,
+long endOffset,
+SegmentWriter segmentWriter) throws IOException {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>KafkaConsumer&lt;Long, ThriftVersionedEvents&gt; kafkaConsumer =</dt><dd><p>makeKafkaConsumerForIndexing(consumerClientId, topicPartition, startOffset);</p>
+</dd>
+</dl>
+<p>// Index TVEs.
+boolean done = false;</p>
+<p>Stopwatch pollTimer = Stopwatch.createUnstarted();
+Stopwatch indexTimer = Stopwatch.createUnstarted();</p>
+<p>SkippedPickedCounter updatesSkippedPicked = new SkippedPickedCounter(“streamed_updates”);
+IndexingResultCounts indexingResultCounts = new IndexingResultCounts();</p>
+<p>long segmentTimesliceId = segmentWriter.getSegmentInfo().getTimeSliceID();</p>
+<p>Stopwatch totalTime = Stopwatch.createStarted();</p>
+<dl>
+<dt>do {</dt><dd><p>pollTimer.start();
+ConsumerRecords&lt;Long, ThriftVersionedEvents&gt; records =</p>
+<blockquote>
+<div><p>kafkaConsumer.poll(Duration.ofSeconds(1));</p>
+</div></blockquote>
+<p>pollTimer.stop();</p>
+<p>indexTimer.start();
+for (ConsumerRecord&lt;Long, ThriftVersionedEvents&gt; record : records) {</p>
+<blockquote>
+<div><dl>
+<dt>if (record.value().getId() &lt; segmentTimesliceId) {</dt><dd><p>// Doesn’t apply to this segment, can be skipped instead of skipping it
+// inside the more costly segmentWriter.indexThriftVersionedEvents call.
+updatesSkippedPicked.incrementSkipped();</p>
+</dd>
+<dt>} else {</dt><dd><dl class="simple">
+<dt>if (record.offset() &gt;= endOffset) {</dt><dd><p>done = true;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>updatesSkippedPicked.incrementPicked();
+indexingResultCounts.countResult(</p>
+<blockquote>
+<div><p>segmentWriter.indexThriftVersionedEvents(record.value()));</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>if (record.offset() &gt;= endOffset) {</dt><dd><p>break;</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}
+indexTimer.stop();</p>
+</dd>
+</dl>
+<p>} while (!done);</p>
+<p>// Note that there’ll be a decent amount of failed retryable updates. Since we index
+// updates in a range that’s a bit wider, they can’t be applied here.
+LOG.info(“Client: {}, Finished indexing updates: {}. “</p>
+<blockquote>
+<div><blockquote>
+<div><ul class="simple">
+<li><p>“Times – total: {}. polling: {}, indexing: {}. Indexing result counts: {}”,</p></li>
+</ul>
+</div></blockquote>
+<p>consumerClientId, updatesSkippedPicked,
+totalTime, pollTimer, indexTimer, indexingResultCounts);</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Make a consumer that reads from a single partition, starting at some offset.</p></li>
+</ul>
+<p><a href="#id13"><span class="problematic" id="id14">*</span></a>/</p>
+</dd>
+<dt>private KafkaConsumer&lt;Long, ThriftVersionedEvents&gt; makeKafkaConsumerForIndexing(</dt><dd><blockquote>
+<div><p>String consumerClientId,
+TopicPartition topicPartition,
+long offset) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>KafkaConsumer&lt;Long, ThriftVersionedEvents&gt; kafkaConsumer =</dt><dd><p>earlybirdKafkaConsumersFactory.createKafkaConsumer(consumerClientId);</p>
+</dd>
+</dl>
+<p>kafkaConsumer.assign(ImmutableList.of(topicPartition));
+kafkaConsumer.seek(topicPartition, offset);
+LOG.info(“Indexing TVEs. Kafka consumer: {}”, consumerClientId);
+return kafkaConsumer;</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../_sources/src/java/com/twitter/search/earlybird/partition/freshstartup/PreOptimizationSegmentIndexer.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

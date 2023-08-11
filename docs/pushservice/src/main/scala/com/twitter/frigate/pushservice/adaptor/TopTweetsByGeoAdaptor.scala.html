@@ -1,0 +1,699 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.frigate.pushservice.adaptor</p>
+<p>import com.twitter.finagle.stats.Counter
+import com.twitter.finagle.stats.Stat
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.frigate.common.base.CandidateSource
+import com.twitter.frigate.common.base.CandidateSourceEligible
+import com.twitter.frigate.common.base.TweetCandidate
+import com.twitter.frigate.common.predicate.CommonOutNetworkTweetCandidatesSourcePredicates.filterOutReplyTweet
+import com.twitter.frigate.pushservice.model.PushTypes.RawCandidate
+import com.twitter.frigate.pushservice.model.PushTypes.Target
+import com.twitter.frigate.pushservice.model.PushTypes
+import com.twitter.frigate.pushservice.params.PopGeoTweetVersion
+import com.twitter.frigate.pushservice.params.PushParams
+import com.twitter.frigate.pushservice.params.TopTweetsForGeoCombination
+import com.twitter.frigate.pushservice.params.TopTweetsForGeoRankingFunction
+import com.twitter.frigate.pushservice.params.{PushFeatureSwitchParams =&gt; FS}
+import com.twitter.frigate.pushservice.predicate.DiscoverTwitterPredicate
+import com.twitter.frigate.pushservice.predicate.TargetPredicates
+import com.twitter.frigate.pushservice.util.MediaCRT
+import com.twitter.frigate.pushservice.util.PushAdaptorUtil
+import com.twitter.frigate.pushservice.util.PushDeviceUtil
+import com.twitter.frigate.thriftscala.CommonRecommendationType
+import com.twitter.geoduck.common.thriftscala.{Location =&gt; GeoLocation}
+import com.twitter.geoduck.service.thriftscala.LocationResponse
+import com.twitter.gizmoduck.thriftscala.UserType
+import com.twitter.hermit.pop_geo.thriftscala.PopTweetsInPlace
+import com.twitter.recommendation.interests.discovery.core.model.InterestDomain
+import com.twitter.stitch.tweetypie.TweetyPie.TweetyPieResult
+import com.twitter.storehaus.FutureOps
+import com.twitter.storehaus.ReadableStore
+import com.twitter.util.Future
+import com.twitter.util.Time
+import scala.collection.Map</p>
+<dl class="simple">
+<dt>case class PlaceTweetScore(place: String, tweetId: Long, score: Double) {</dt><dd><p>def toTweetScore: (Long, Double) = (tweetId, score)</p>
+</dd>
+</dl>
+<p>}
+case class TopTweetsByGeoAdaptor(</p>
+<blockquote>
+<div><p>geoduckStoreV2: ReadableStore[Long, LocationResponse],
+softUserGeoLocationStore: ReadableStore[Long, GeoLocation],
+topTweetsByGeoStore: ReadableStore[InterestDomain[String], Map[String, List[(Long, Double)]]],
+topTweetsByGeoStoreV2: ReadableStore[String, PopTweetsInPlace],
+tweetyPieStore: ReadableStore[Long, TweetyPieResult],
+tweetyPieStoreNoVF: ReadableStore[Long, TweetyPieResult],
+globalStats: StatsReceiver)</p>
+<blockquote>
+<div><p>extends CandidateSource[Target, RawCandidate]
+with CandidateSourceEligible[Target, RawCandidate] {</p>
+</div></blockquote>
+<p>override def name: String = this.getClass.getSimpleName</p>
+<p>private[this] val stats = globalStats.scope(“TopTweetsByGeoAdaptor”)
+private[this] val noGeohashUserCounter: Counter = stats.counter(“users_with_no_geohash_counter”)
+private[this] val incomingRequestCounter: Counter = stats.counter(“incoming_request_counter”)
+private[this] val incomingLoggedOutRequestCounter: Counter =</p>
+<blockquote>
+<div><p>stats.counter(“incoming_logged_out_request_counter”)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>private[this] val loggedOutRawCandidatesCounter =</dt><dd><p>stats.counter(“logged_out_raw_candidates_counter”)</p>
+</dd>
+<dt>private[this] val emptyLoggedOutRawCandidatesCounter =</dt><dd><p>stats.counter(“logged_out_empty_raw_candidates”)</p>
+</dd>
+<dt>private[this] val outputTopTweetsByGeoCounter: Stat =</dt><dd><p>stats.stat(“output_top_tweets_by_geo_counter”)</p>
+</dd>
+<dt>private[this] val loggedOutPopByGeoV2CandidatesCounter: Counter =</dt><dd><p>stats.counter(“logged_out_pop_by_geo_candidates”)</p>
+</dd>
+<dt>private[this] val dormantUsersSince14DaysCounter: Counter =</dt><dd><p>stats.counter(“dormant_user_since_14_days_counter”)</p>
+</dd>
+<dt>private[this] val dormantUsersSince30DaysCounter: Counter =</dt><dd><p>stats.counter(“dormant_user_since_30_days_counter”)</p>
+</dd>
+<dt>private[this] val nonDormantUsersSince14DaysCounter: Counter =</dt><dd><p>stats.counter(“non_dormant_user_since_14_days_counter”)</p>
+</dd>
+<dt>private[this] val topTweetsByGeoTake100Counter: Counter =</dt><dd><p>stats.counter(“top_tweets_by_geo_take_100_counter”)</p>
+</dd>
+<dt>private[this] val combinationRequestsCounter =</dt><dd><p>stats.scope(“combination_method_request_counter”)</p>
+</dd>
+<dt>private[this] val popGeoTweetVersionCounter =</dt><dd><p>stats.scope(“popgeo_tweet_version_counter”)</p>
+</dd>
+</dl>
+<p>private[this] val nonReplyTweetsCounter = stats.counter(“non_reply_tweets”)</p>
+<p>val MaxGeoHashSize = 4</p>
+<dl>
+<dt>private def constructKeys(</dt><dd><p>geohash: Option[String],
+accountCountryCode: Option[String],
+keyLengths: Seq[Int],
+version: PopGeoTweetVersion.Value</p>
+</dd>
+<dt>): Set[String] = {</dt><dd><dl class="simple">
+<dt>val geohashKeys = geohash match {</dt><dd><p>case Some(hash) =&gt; keyLengths.map { version + “_geohash_” + hash.take(_) }
+case _ =&gt; Seq.empty</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>val accountCountryCodeKeys =</dt><dd><p>accountCountryCode.toSeq.map(version + “_country_” + _.toUpperCase)</p>
+</dd>
+</dl>
+<p>(geohashKeys ++ accountCountryCodeKeys).toSet</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def convertToPlaceTweetScore(</dt><dd><p>popTweetsInPlace: Seq[PopTweetsInPlace]</p>
+</dd>
+<dt>): Seq[PlaceTweetScore] = {</dt><dd><dl>
+<dt>popTweetsInPlace.flatMap {</dt><dd><dl>
+<dt>case p =&gt;</dt><dd><dl class="simple">
+<dt>p.popTweets.map {</dt><dd><p>case popTweet =&gt; PlaceTweetScore(p.place, popTweet.tweetId, popTweet.score)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def sortGeoHashTweets(</dt><dd><p>placeTweetScores: Seq[PlaceTweetScore],
+rankingFunction: TopTweetsForGeoRankingFunction.Value</p>
+</dd>
+<dt>): Seq[PlaceTweetScore] = {</dt><dd><dl class="simple">
+<dt>rankingFunction match {</dt><dd><dl class="simple">
+<dt>case TopTweetsForGeoRankingFunction.Score =&gt;</dt><dd><p>placeTweetScores.sortBy(_.score)(Ordering[Double].reverse)</p>
+</dd>
+<dt>case TopTweetsForGeoRankingFunction.GeohashLengthAndThenScore =&gt;</dt><dd><dl class="simple">
+<dt>placeTweetScores</dt><dd><p>.sortBy(row =&gt; (row.place.length, row.score))(Ordering[(Int, Double)].reverse)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def getResultsForLambdaStore(</dt><dd><p>inputTarget: Target,
+geohash: Option[String],
+store: ReadableStore[String, PopTweetsInPlace],
+topk: Int,
+version: PopGeoTweetVersion.Value</p>
+</dd>
+<dt>): Future[Seq[(Long, Double)]] = {</dt><dd><dl>
+<dt>inputTarget.accountCountryCode.flatMap { countryCode =&gt;</dt><dd><dl class="simple">
+<dt>val keys = {</dt><dd><dl class="simple">
+<dt>if (inputTarget.params(FS.EnableCountryCodeBackoffTopTweetsByGeo))</dt><dd><p>constructKeys(geohash, countryCode, inputTarget.params(FS.GeoHashLengthList), version)</p>
+</dd>
+<dt>else</dt><dd><p>constructKeys(geohash, None, inputTarget.params(FS.GeoHashLengthList), version)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+FutureOps</p>
+<blockquote>
+<div><dl>
+<dt>.mapCollect(store.multiGet(keys)).map {</dt><dd><dl>
+<dt>case geohashTweetMap =&gt;</dt><dd><dl class="simple">
+<dt>val popTweets =</dt><dd><p>geohashTweetMap.values.flatten.toSeq</p>
+</dd>
+<dt>val results = sortGeoHashTweets(</dt><dd><p>convertToPlaceTweetScore(popTweets),
+inputTarget.params(FS.RankingFunctionForTopTweetsByGeo))
+.map(_.toTweetScore).take(topk)</p>
+</dd>
+</dl>
+<p>results</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def getPopGeoTweetsForLoggedOutUsers(</dt><dd><p>inputTarget: Target,
+store: ReadableStore[String, PopTweetsInPlace]</p>
+</dd>
+<dt>): Future[Seq[(Long, Double)]] = {</dt><dd><dl>
+<dt>inputTarget.countryCode.flatMap { countryCode =&gt;</dt><dd><p>val keys = constructKeys(None, countryCode, Seq(4), PopGeoTweetVersion.Prod)
+FutureOps.mapCollect(store.multiGet(keys)).map {</p>
+<blockquote>
+<div><dl>
+<dt>case tweetMap =&gt;</dt><dd><p>val tweets = tweetMap.values.flatten.toSeq
+loggedOutPopByGeoV2CandidatesCounter.incr(tweets.size)
+val popTweets = sortGeoHashTweets(</p>
+<blockquote>
+<div><p>convertToPlaceTweetScore(tweets),
+TopTweetsForGeoRankingFunction.Score).map(_.toTweetScore)</p>
+</div></blockquote>
+<p>popTweets</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def getRankedTweets(</dt><dd><p>inputTarget: Target,
+geohash: Option[String]</p>
+</dd>
+<dt>): Future[Seq[(Long, Double)]] = {</dt><dd><dl class="simple">
+<dt>val MaxTopTweetsByGeoCandidatesToTake =</dt><dd><p>inputTarget.params(FS.MaxTopTweetsByGeoCandidatesToTake)</p>
+</dd>
+</dl>
+<p>val scoringFn: String = inputTarget.params(FS.ScoringFuncForTopTweetsByGeo)
+val combinationMethod = inputTarget.params(FS.TopTweetsByGeoCombinationParam)
+val popGeoTweetVersion = inputTarget.params(FS.PopGeoTweetVersionParam)</p>
+<dl class="simple">
+<dt>inputTarget.isHeavyUserState.map { isHeavyUser =&gt;</dt><dd><dl class="simple">
+<dt>stats</dt><dd><dl class="simple">
+<dt>.scope(combinationMethod.toString).scope(popGeoTweetVersion.toString).scope(</dt><dd><p>“<a href="#id1"><span class="problematic" id="id2">IsHeavyUser_</span></a>” + isHeavyUser.toString).counter().incr()</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+combinationRequestsCounter.scope(combinationMethod.toString).counter().incr()
+popGeoTweetVersionCounter.scope(popGeoTweetVersion.toString).counter().incr()
+lazy val geoStoreResults = if (geohash.isDefined) {</p>
+<blockquote>
+<div><p>val hash = geohash.get.take(MaxGeoHashSize)
+topTweetsByGeoStore</p>
+<blockquote>
+<div><dl class="simple">
+<dt>.get(</dt><dd><p>InterestDomain[String](hash)</p>
+</dd>
+</dl>
+<p>)
+.map {</p>
+<blockquote>
+<div><dl>
+<dt>case Some(scoringFnToTweetsMapOpt) =&gt;</dt><dd><dl>
+<dt>val tweetsWithScore = scoringFnToTweetsMapOpt</dt><dd><p>.getOrElse(scoringFn, List.empty)</p>
+</dd>
+<dt>val sortedResults = sortGeoHashTweets(</dt><dd><dl class="simple">
+<dt>tweetsWithScore.map {</dt><dd><p>case (tweetId, score) =&gt; PlaceTweetScore(hash, tweetId, score)</p>
+</dd>
+</dl>
+<p>},
+TopTweetsForGeoRankingFunction.Score</p>
+</dd>
+<dt>).map(_.toTweetScore).take(</dt><dd><blockquote>
+<div><p>MaxTopTweetsByGeoCandidatesToTake</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>sortedResults</p>
+</dd>
+</dl>
+<p>case _ =&gt; Seq.empty</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+</div></blockquote>
+<p>} else Future.value(Seq.empty)
+lazy val versionPopGeoTweetResults =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>getResultsForLambdaStore(</dt><dd><p>inputTarget,
+geohash,
+topTweetsByGeoStoreV2,
+MaxTopTweetsByGeoCandidatesToTake,
+popGeoTweetVersion</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<dl>
+<dt>combinationMethod match {</dt><dd><p>case TopTweetsForGeoCombination.Default =&gt; geoStoreResults
+case TopTweetsForGeoCombination.AccountsTweetFavAsBackfill =&gt;</p>
+<blockquote>
+<div><dl class="simple">
+<dt>Future.join(geoStoreResults, versionPopGeoTweetResults).map {</dt><dd><dl class="simple">
+<dt>case (geoStoreTweets, versionPopGeoTweets) =&gt;</dt><dd><p>(geoStoreTweets ++ versionPopGeoTweets).take(MaxTopTweetsByGeoCandidatesToTake)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<dl>
+<dt>case TopTweetsForGeoCombination.AccountsTweetFavIntermixed =&gt;</dt><dd><dl class="simple">
+<dt>Future.join(geoStoreResults, versionPopGeoTweetResults).map {</dt><dd><dl class="simple">
+<dt>case (geoStoreTweets, versionPopGeoTweets) =&gt;</dt><dd><p>CandidateSource.interleaveSeqs(Seq(geoStoreTweets, versionPopGeoTweets))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>override def get(inputTarget: Target): Future[Option[Seq[RawCandidate]]] = {</dt><dd><dl>
+<dt>if (inputTarget.isLoggedOutUser) {</dt><dd><p>incomingLoggedOutRequestCounter.incr()
+val rankedTweets = getPopGeoTweetsForLoggedOutUsers(inputTarget, topTweetsByGeoStoreV2)
+val rawCandidates = {</p>
+<blockquote>
+<div><dl>
+<dt>rankedTweets.map { rt =&gt;</dt><dd><dl>
+<dt>FutureOps</dt><dd><dl>
+<dt>.mapCollect(</dt><dd><dl class="simple">
+<dt>tweetyPieStore</dt><dd><p>.multiGet(rt.map { case (tweetId, _) =&gt; tweetId }.toSet))</p>
+</dd>
+</dl>
+</dd>
+<dt>.map { tweetyPieResultMap =&gt;</dt><dd><dl class="simple">
+<dt>val results = buildTopTweetsByGeoRawCandidates(</dt><dd><p>inputTarget,
+None,
+tweetyPieResultMap</p>
+</dd>
+</dl>
+<p>)
+if (results.isEmpty) {</p>
+<blockquote>
+<div><p>emptyLoggedOutRawCandidatesCounter.incr()</p>
+</div></blockquote>
+<p>}
+loggedOutRawCandidatesCounter.incr(results.size)
+Some(results)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}.flatten</p>
+</div></blockquote>
+<p>}
+rawCandidates</p>
+</dd>
+<dt>} else {</dt><dd><p>incomingRequestCounter.incr()
+getGeoHashForUsers(inputTarget).flatMap { geohash =&gt;</p>
+<blockquote>
+<div><p>if (geohash.isEmpty) noGeohashUserCounter.incr()
+getRankedTweets(inputTarget, geohash).map { rt =&gt;</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (rt.size == 100) {</dt><dd><p>topTweetsByGeoTake100Counter.incr(1)</p>
+</dd>
+</dl>
+<p>}
+FutureOps</p>
+<blockquote>
+<div><dl class="simple">
+<dt>.mapCollect((inputTarget.params(FS.EnableVFInTweetypie) match {</dt><dd><p>case true =&gt; tweetyPieStore
+case false =&gt; tweetyPieStoreNoVF</p>
+</dd>
+</dl>
+<p>}).multiGet(rt.map { case (tweetId, _) =&gt; tweetId }.toSet))
+.map { tweetyPieResultMap =&gt;</p>
+<blockquote>
+<div><dl>
+<dt>Some(</dt><dd><dl>
+<dt>buildTopTweetsByGeoRawCandidates(</dt><dd><p>inputTarget,
+None,
+filterOutReplyTweet(</p>
+<blockquote>
+<div><p>tweetyPieResultMap,
+nonReplyTweetsCounter</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+</div></blockquote>
+<p>}.flatten</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private def getGeoHashForUsers(</dt><dd><p>inputTarget: Target</p>
+</dd>
+</dl>
+<p>): Future[Option[String]] = {</p>
+<blockquote>
+<div><dl>
+<dt>inputTarget.targetUser.flatMap {</dt><dd><dl>
+<dt>case Some(user) =&gt;</dt><dd><dl class="simple">
+<dt>user.userType match {</dt><dd><dl class="simple">
+<dt>case UserType.Soft =&gt;</dt><dd><dl class="simple">
+<dt>softUserGeoLocationStore</dt><dd><p>.get(inputTarget.targetId)
+.map(_.flatMap(_.geohash.flatMap(_.stringGeohash)))</p>
+</dd>
+</dl>
+</dd>
+<dt>case _ =&gt;</dt><dd><p>geoduckStoreV2.get(inputTarget.targetId).map(_.flatMap(_.geohash))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>case None =&gt; Future.None</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>private def buildTopTweetsByGeoRawCandidates(</dt><dd><p>target: PushTypes.Target,
+locationName: Option[String],
+topTweets: Map[Long, Option[TweetyPieResult]]</p>
+</dd>
+<dt>): Seq[RawCandidate with TweetCandidate] = {</dt><dd><dl>
+<dt>val candidates = topTweets.map { tweetIdTweetyPieResultMap =&gt;</dt><dd><dl>
+<dt>PushAdaptorUtil.generateOutOfNetworkTweetCandidates(</dt><dd><p>inputTarget = target,
+id = tweetIdTweetyPieResultMap._1,
+mediaCRT = MediaCRT(</p>
+<blockquote>
+<div><p>CommonRecommendationType.GeoPopTweet,
+CommonRecommendationType.GeoPopTweet,
+CommonRecommendationType.GeoPopTweet</p>
+</div></blockquote>
+<p>),
+result = tweetIdTweetyPieResultMap._2,
+localizedEntity = None</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}.toSeq
+outputTopTweetsByGeoCounter.add(candidates.length)
+candidates</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private val topTweetsByGeoFrequencyPredicate = {</dt><dd><dl>
+<dt>TargetPredicates</dt><dd><dl class="simple">
+<dt>.pushRecTypeFatiguePredicate(</dt><dd><p>CommonRecommendationType.GeoPopTweet,
+FS.TopTweetsByGeoPushInterval,
+FS.MaxTopTweetsByGeoPushGivenInterval,
+stats</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def getAvailabilityForDormantUser(target: Target): Future[Boolean] = {</dt><dd><p>lazy val isDormantUserNotFatigued = topTweetsByGeoFrequencyPredicate(Seq(target)).map(_.head)
+lazy val enableTopTweetsByGeoForDormantUsers =</p>
+<blockquote>
+<div><p>target.params(FS.EnableTopTweetsByGeoCandidatesForDormantUsers)</p>
+</div></blockquote>
+<dl>
+<dt>target.lastHTLVisitTimestamp.flatMap {</dt><dd><dl>
+<dt>case Some(lastHTLTimestamp) =&gt;</dt><dd><dl class="simple">
+<dt>val minTimeSinceLastLogin =</dt><dd><p>target.params(FS.MinimumTimeSinceLastLoginForGeoPopTweetPush).ago</p>
+</dd>
+</dl>
+<p>val timeSinceInactive = target.params(FS.TimeSinceLastLoginForGeoPopTweetPush).ago
+val lastActiveTimestamp = Time.fromMilliseconds(lastHTLTimestamp)
+if (lastActiveTimestamp &gt; minTimeSinceLastLogin) {</p>
+<blockquote>
+<div><p>nonDormantUsersSince14DaysCounter.incr()
+Future.False</p>
+</div></blockquote>
+<dl>
+<dt>} else {</dt><dd><p>dormantUsersSince14DaysCounter.incr()
+isDormantUserNotFatigued.map { isUserNotFatigued =&gt;</p>
+<blockquote>
+<div><p>lastActiveTimestamp &lt; timeSinceInactive &amp;&amp;
+enableTopTweetsByGeoForDormantUsers &amp;&amp;
+isUserNotFatigued</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>case _ =&gt;</dt><dd><p>dormantUsersSince30DaysCounter.incr()
+isDormantUserNotFatigued.map { isUserNotFatigued =&gt;</p>
+<blockquote>
+<div><p>enableTopTweetsByGeoForDormantUsers &amp;&amp; isUserNotFatigued</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def getAvailabilityForPlaybookSetUp(target: Target): Future[Boolean] = {</dt><dd><p>lazy val enableTopTweetsByGeoForNewUsers = target.params(FS.EnableTopTweetsByGeoCandidates)
+val isTargetEligibleForMrFatigueCheck = target.isAccountAtleastNDaysOld(</p>
+<blockquote>
+<div><p>target.params(FS.MrMinDurationSincePushForTopTweetsByGeoPushes))</p>
+</div></blockquote>
+<dl>
+<dt>val isMrFatigueCheckEnabled =</dt><dd><p>target.params(FS.EnableMrMinDurationSinceMrPushFatigue)</p>
+</dd>
+<dt>val applyPredicateForTopTweetsByGeo =</dt><dd><dl>
+<dt>if (isMrFatigueCheckEnabled) {</dt><dd><dl>
+<dt>if (isTargetEligibleForMrFatigueCheck) {</dt><dd><dl>
+<dt>DiscoverTwitterPredicate</dt><dd><dl class="simple">
+<dt>.minDurationElapsedSinceLastMrPushPredicate(</dt><dd><p>name,
+FS.MrMinDurationSincePushForTopTweetsByGeoPushes,
+stats</p>
+</dd>
+<dt>).andThen(</dt><dd><p>topTweetsByGeoFrequencyPredicate</p>
+</dd>
+</dl>
+<p>)(Seq(target)).map(_.head)</p>
+</dd>
+</dl>
+</dd>
+<dt>} else {</dt><dd><p>Future.False</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>} else {</dt><dd><p>topTweetsByGeoFrequencyPredicate(Seq(target)).map(_.head)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>applyPredicateForTopTweetsByGeo.map { predicateResult =&gt;</dt><dd><p>predicateResult &amp;&amp; enableTopTweetsByGeoForNewUsers</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>override def isCandidateSourceAvailable(target: Target): Future[Boolean] = {</dt><dd><dl>
+<dt>if (target.isLoggedOutUser) {</dt><dd><p>Future.True</p>
+</dd>
+<dt>} else {</dt><dd><dl>
+<dt>PushDeviceUtil</dt><dd><dl>
+<dt>.isRecommendationsEligible(target).map(</dt><dd><p>_ &amp;&amp; target.params(PushParams.PopGeoCandidatesDecider)).flatMap { isAvailable =&gt;
+if (isAvailable) {</p>
+<blockquote>
+<div><dl>
+<dt>Future</dt><dd><p>.join(getAvailabilityForDormantUser(target), getAvailabilityForPlaybookSetUp(target))
+.map {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case (isAvailableForDormantUser, isAvailableForPlaybook) =&gt;</dt><dd><p>isAvailableForDormantUser || isAvailableForPlaybook</p>
+</dd>
+</dl>
+<p>case _ =&gt; false</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>} else Future.False</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/pushservice/src/main/scala/com/twitter/frigate/pushservice/adaptor/TopTweetsByGeoAdaptor.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../" id="documentation_options" src="../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.recos.user_video_graph</p>
+<p>import com.twitter.finagle.Service
+import com.twitter.finagle.http.Request
+import com.twitter.finagle.http.Response
+import com.twitter.finagle.http.Status
+import com.twitter.finagle.http.Version
+import com.twitter.frigate.common.util.HTMLUtil
+import com.twitter.graphjet.algorithms.TweetIDMask
+import com.twitter.graphjet.bipartite.segment.BipartiteGraphSegment
+import com.twitter.graphjet.bipartite.MultiSegmentIterator
+import com.twitter.graphjet.bipartite.MultiSegmentPowerLawBipartiteGraph
+import com.twitter.logging.Logger
+import com.twitter.util.Future
+import java.util.Random
+import scala.collection.mutable.ListBuffer</p>
+<dl>
+<dt>class UserTweetGraphEdgeHttpHandler(graph: MultiSegmentPowerLawBipartiteGraph)</dt><dd><blockquote>
+<div><p>extends Service[Request, Response] {</p>
+</div></blockquote>
+<p>private val log = Logger(“UserTweetGraphEdgeHttpHandler”)
+private val tweetIDMask = new TweetIDMask()</p>
+<dl>
+<dt>def getCardInfo(rightNode: Long): String = {</dt><dd><p>val bits: Long = rightNode &amp; TweetIDMask.METAMASK
+bits match {</p>
+<blockquote>
+<div><p>case TweetIDMask.PHOTO =&gt; “Photo”
+case TweetIDMask.PLAYER =&gt; “Video”
+case TweetIDMask.SUMMARY =&gt; “Url”
+case TweetIDMask.PROMOTION =&gt; “Promotion”
+case _ =&gt; “Regular”</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def getUserEdges(userId: Long): ListBuffer[Edge] = {</dt><dd><p>val random = new Random()
+val iterator =</p>
+<blockquote>
+<div><dl>
+<dt>graph</dt><dd><dl class="simple">
+<dt>.getRandomLeftNodeEdges(userId, 10, random).asInstanceOf[MultiSegmentIterator[</dt><dd><p>BipartiteGraphSegment</p>
+</dd>
+</dl>
+<p>]]</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>val tweets = new ListBuffer[Edge]()
+if (iterator != null) {</p>
+<blockquote>
+<div><dl>
+<dt>while (iterator.hasNext) {</dt><dd><p>val rightNode = iterator.nextLong()
+val edgeType = iterator.currentEdgeType()
+tweets += Edge(</p>
+<blockquote>
+<div><p>tweetIDMask.restore(rightNode),
+UserVideoEdgeTypeMask(edgeType).toString,
+getCardInfo(rightNode),</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}
+tweets</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def apply(httpRequest: Request): Future[Response] = {</dt><dd><p>log.info(“UserTweetGraphEdgeHttpHandler params: “ + httpRequest.getParams())
+val time0 = System.currentTimeMillis</p>
+<p>val tweetId = httpRequest.getLongParam(“tweetId”)
+val queryTweetDegree = graph.getRightNodeDegree(tweetId)
+val tweetEdges = getTweetEdges(tweetId)</p>
+<p>val userId = httpRequest.getLongParam(“userId”)
+val queryUserDegree = graph.getLeftNodeDegree(userId)</p>
+<p>val response = Response(Version.Http11, Status.Ok)
+val userEdges = getUserEdges(userId)
+val elapsed = System.currentTimeMillis - time0
+val comment = (“Please specify &quot;userId&quot;  or &quot;tweetId&quot; param.” +</p>
+<blockquote>
+<div><p>“n query tweet degree = “ + queryTweetDegree +
+“n query user degree = “ + queryUserDegree +
+“n done in %d ms&lt;br&gt;”).format(elapsed)</p>
+</div></blockquote>
+<dl>
+<dt>val tweetContent = userEdges.toList</dt><dd><dl class="simple">
+<dt>.map { edge =&gt;</dt><dd><dl class="simple">
+<dt>s”&lt;b&gt;TweetId&lt;/b&gt;: ${edge.tweetId},n&lt;b&gt;Action type&lt;/b&gt;: ${edge.actionType},n&lt;b&gt;Card type&lt;/b&gt;: ${edge.cardType}”</dt><dd><p>.replaceAll(”n”, “ “)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}.mkString(”n&lt;br&gt;n”)</p>
+</dd>
+<dt>response.setContentString(</dt><dd><p>HTMLUtil.html.replace(“XXXXX”, comment + tweetContent + “n&lt;hr/&gt;n” + tweetEdges.toString()))</p>
+</dd>
+</dl>
+<p>Future.value(response)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def getTweetEdges(tweetId: Long): ListBuffer[Long] = {</dt><dd><p>val random = new Random()
+val iterator =</p>
+<blockquote>
+<div><dl>
+<dt>graph</dt><dd><dl class="simple">
+<dt>.getRandomRightNodeEdges(tweetId, 500, random).asInstanceOf[MultiSegmentIterator[</dt><dd><p>BipartiteGraphSegment</p>
+</dd>
+</dl>
+<p>]]</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>val terms = new ListBuffer[Long]()
+if (iterator != null) {</p>
+<blockquote>
+<div><p>while (iterator.hasNext) { terms += iterator.nextLong() }</p>
+</div></blockquote>
+<p>}
+terms.distinct</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>case class Edge(tweetId: Long, actionType: String, cardType: String)</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../_sources/src/scala/com/twitter/recos/user_video_graph/UserVideoGraphEdgeHttpHandler.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

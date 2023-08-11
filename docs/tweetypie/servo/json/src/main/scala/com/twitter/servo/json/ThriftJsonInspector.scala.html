@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../../" id="documentation_options" src="../../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.servo.json</p>
+<p>import com.fasterxml.jackson.core.JsonParser
+import com.fasterxml.jackson.databind.JsonNode
+import com.fasterxml.jackson.databind.ObjectMapper
+import com.twitter.scrooge.ThriftStruct
+import com.twitter.scrooge.ThriftStructCodec
+import com.twitter.scrooge.ThriftStructSerializer
+import difflib.DiffUtils
+import java.io.StringWriter
+import org.apache.thrift.protocol.TField
+import org.apache.thrift.protocol.TProtocol
+import org.apache.thrift.protocol.TProtocolFactory
+import org.apache.thrift.protocol.TSimpleJSONProtocol
+import org.apache.thrift.transport.TTransport
+import scala.collection.JavaConverters._
+import scala.language.experimental.macros
+import scala.reflect.macros.blackbox.Context</p>
+<dl>
+<dt>object ThriftJsonInspector {</dt><dd><p>private val mapper = new ObjectMapper()
+mapper.configure(JsonParser.Feature.ALLOW_UNQUOTED_FIELD_NAMES, true)
+private val factory = mapper.getFactory()</p>
+<dl>
+<dt>private def mkSerializer[T &lt;: ThriftStruct](_codec: ThriftStructCodec[T]) =</dt><dd><dl>
+<dt>new ThriftStructSerializer[T] {</dt><dd><p>def codec = _codec</p>
+<dl>
+<dt>def protocolFactory =</dt><dd><p>// Identical to TSimpleJSONProtocol.Factory except the TProtocol
+// returned serializes Thrift pass-through fields with the name
+// “(TField.id)” instead of empty string.
+new TProtocolFactory {</p>
+<blockquote>
+<div><dl>
+<dt>def getProtocol(trans: TTransport): TProtocol =</dt><dd><dl class="simple">
+<dt>new TSimpleJSONProtocol(trans) {</dt><dd><dl class="simple">
+<dt>override def writeFieldBegin(field: TField): Unit =</dt><dd><p>writeString(if (field.name.isEmpty) s”(${field.id})” else field.name)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>def apply[T &lt;: ThriftStruct](codec: ThriftStructCodec[T]) = new ThriftJsonInspector(codec)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Helper for human inspection of Thrift objects.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>class ThriftJsonInspector[T &lt;: ThriftStruct](codec: ThriftStructCodec[T]) {</dt><dd><p>import ThriftJsonInspector._</p>
+<p>private[this] val serializer = mkSerializer(codec)</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Convert the Thrift object to a JSON representation based on this</p></li>
+<li><p>object’s codec, in the manner of TSimpleJSONProtocol. The resulting</p></li>
+<li><p>JSON will have human-readable field names that match the field</p></li>
+<li><p>names that were used in the Thrift definition that the codec was</p></li>
+<li><p>created from, but the conversion is lossy, and the JSON</p></li>
+<li><p>representation cannot be converted back.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>def toSimpleJson(t: T): JsonNode =</dt><dd><p>mapper.readTree(factory.createParser(serializer.toBytes(t)))</p>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Selects requested fields (matching against the JSON fields) from a</p></li>
+<li><p>Thrift-generated class.</p></li>
+<li></li>
+<li><p>Paths are specified as slash-separated strings (e.g.,</p></li>
+<li><p>“key1/key2/key3”). If the path specifies an array or object, it is</p></li>
+<li><p>included in the output in JSON format, otherwise the simple value is</p></li>
+<li><p>converted to a string.</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>def select(item: T, paths: Seq[String]): Seq[String] = {</dt><dd><p>val jsonNode = toSimpleJson(item)
+paths.map {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>_.split(“/”).foldLeft(jsonNode)(_.findPath(_)) match {</dt><dd><p>case node if node.isMissingNode =&gt; “[invalid-path]”
+case node if node.isContainerNode =&gt; node.toString
+case node =&gt; node.asText</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Convert the given Thrift struct to a human-readable pretty-printed</p></li>
+<li><p>JSON representation. This JSON cannot be converted back into a</p></li>
+<li><p>struct. This output is intended for debug logging or interactive</p></li>
+<li><p>inspection of Thrift objects.</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+</dl>
+<p>def prettyPrint(t: T): String = print(t, true)</p>
+<dl>
+<dt>def print(t: T, pretty: Boolean = false): String = {</dt><dd><p>val writer = new StringWriter()
+val generator = factory.createGenerator(writer)
+if (pretty)</p>
+<blockquote>
+<div><p>generator.useDefaultPrettyPrinter()</p>
+</div></blockquote>
+<p>generator.writeTree(toSimpleJson(t))
+writer.toString</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Produce a human-readable unified diff of the json pretty-printed</p></li>
+<li><p>representations of <cite>a</cite> and <cite>b</cite>. If the inputs have the same JSON</p></li>
+<li><p>representation, the result will be the empty string.</p></li>
+</ul>
+<p><a href="#id9"><span class="problematic" id="id10">*</span></a>/</p>
+</dd>
+<dt>def diff(a: T, b: T, contextLines: Int = 1): String = {</dt><dd><p>val linesA = prettyPrint(a).linesIterator.toList.asJava
+val linesB = prettyPrint(b).linesIterator.toList.asJava
+val patch = DiffUtils.diff(linesA, linesB)
+DiffUtils.generateUnifiedDiff(“a”, “b”, linesA, patch, contextLines).asScala.mkString(”n”)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>object syntax {</dt><dd><dl>
+<dt>private[this] object CompanionObjectLoader {</dt><dd><dl>
+<dt>def load[T](c: Context)(implicit t: c.universe.WeakTypeTag[T]) = {</dt><dd><p>val tSym = t.tpe.typeSymbol
+val companion = tSym.asClass.companion
+if (companion == c.universe.NoSymbol) {</p>
+<blockquote>
+<div><p>c.abort(c.enclosingPosition, s”${tSym} has no companion object”)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>c.universe.Ident(companion)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Load the companion object of the named type parameter and require</p></li>
+<li><p>it to be a ThriftStructCodec. Compilation will fail if the</p></li>
+<li><p>companion object is not a ThriftStructCodec.</p></li>
+</ul>
+<p><a href="#id11"><span class="problematic" id="id12">*</span></a>/</p>
+</dd>
+<dt>implicit def thriftStructCodec[T &lt;: ThriftStruct]: ThriftStructCodec[T] =</dt><dd><p>macro CompanionObjectLoader.load[T]</p>
+</dd>
+<dt>implicit class ThriftJsonSyntax[T &lt;: ThriftStruct](t: T)(implicit codec: ThriftStructCodec[T]) {</dt><dd><p>private[this] def inspector = ThriftJsonInspector(codec)
+def toSimpleJson: JsonNode = inspector.toSimpleJson(t)
+def prettyPrint: String = inspector.prettyPrint(t)
+def diff(other: T, contextLines: Int = 1): String =</p>
+<blockquote>
+<div><p>inspector.diff(t, other, contextLines)</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../../_sources/tweetypie/servo/json/src/main/scala/com/twitter/servo/json/ThriftJsonInspector.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

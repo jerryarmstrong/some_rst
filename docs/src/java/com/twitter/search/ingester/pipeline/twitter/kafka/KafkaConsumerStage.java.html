@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.ingester.pipeline.twitter.kafka;</p>
+<p>import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;</p>
+<p>import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Preconditions;</p>
+<p>import org.apache.commons.pipeline.Pipeline;
+import org.apache.commons.pipeline.StageDriver;
+import org.apache.commons.pipeline.StageException;
+import org.apache.kafka.clients.consumer.ConsumerRecords;
+import org.apache.kafka.clients.consumer.KafkaConsumer;
+import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.errors.SaslAuthenticationException;
+import org.apache.kafka.common.errors.SerializationException;
+import org.apache.kafka.common.serialization.Deserializer;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import com.twitter.search.common.decider.DeciderUtil;
+import com.twitter.search.common.metrics.SearchCounter;
+import com.twitter.search.common.metrics.SearchRateCounter;
+import com.twitter.search.ingester.pipeline.twitter.TwitterBaseStage;
+import com.twitter.search.ingester.pipeline.util.PipelineStageException;
+import com.twitter.search.ingester.pipeline.util.PipelineUtil;</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>A stage to read Thrift payloads from a Kafka topic.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>public abstract class KafkaConsumerStage&lt;R&gt; extends TwitterBaseStage&lt;Void, R&gt; {</dt><dd><p>private static final Logger LOG = LoggerFactory.getLogger(KafkaConsumerStage.class);
+private static final String SHUT_DOWN_ON_AUTH_FAIL = “shut_down_on_authentication_fail”;
+private String kafkaClientId;
+private String kafkaTopicName;
+private String kafkaConsumerGroupId;
+private String kafkaClusterPath;
+private int maxPollRecords = 1;
+private int pollTimeoutMs = 1000;
+private boolean partitioned;
+private String deciderKey;
+private final Deserializer&lt;R&gt; deserializer;
+private SearchCounter pollCount;
+private SearchCounter deserializationErrorCount;
+private SearchRateCounter droppedMessages;</p>
+<p>private KafkaConsumer&lt;Long, R&gt; kafkaConsumer;</p>
+<dl>
+<dt>protected KafkaConsumerStage(String kafkaClientId, String kafkaTopicName,</dt><dd><blockquote>
+<div><dl class="simple">
+<dt>String kafkaConsumerGroupId, String kafkaClusterPath,</dt><dd><p>String deciderKey, Deserializer&lt;R&gt; deserializer) {</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>this.kafkaClientId = kafkaClientId;
+this.kafkaTopicName = kafkaTopicName;
+this.kafkaConsumerGroupId = kafkaConsumerGroupId;
+this.kafkaClusterPath = kafkaClusterPath;
+this.deciderKey = deciderKey;
+this.deserializer = deserializer;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>protected KafkaConsumerStage(Deserializer&lt;R&gt; deserializer) {</dt><dd><p>this.deserializer = deserializer;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;Override
+protected void initStats() {</p>
+<blockquote>
+<div><p>super.initStats();
+commonInnerSetupStats();</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>private void commonInnerSetupStats() {</dt><dd><p>pollCount = SearchCounter.export(getStageNamePrefix() + “_poll_count”);
+deserializationErrorCount =</p>
+<blockquote>
+<div><p>SearchCounter.export(getStageNamePrefix() + “_deserialization_error_count”);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>droppedMessages =</dt><dd><p>SearchRateCounter.export(getStageNamePrefix() + “_dropped_messages”);</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;Override
+protected void innerSetupStats() {</p>
+<blockquote>
+<div><p>commonInnerSetupStats();</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+protected void doInnerPreprocess() {</p>
+<blockquote>
+<div><p>commonInnerSetup();
+PipelineUtil.feedStartObjectToStage(this);</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>private void commonInnerSetup() {</dt><dd><p>Preconditions.checkNotNull(kafkaClientId);
+Preconditions.checkNotNull(kafkaClusterPath);
+Preconditions.checkNotNull(kafkaTopicName);</p>
+<dl class="simple">
+<dt>kafkaConsumer = wireModule.newKafkaConsumer(</dt><dd><p>kafkaClusterPath,
+deserializer,
+kafkaClientId,
+kafkaConsumerGroupId,
+maxPollRecords);</p>
+</dd>
+<dt>if (partitioned) {</dt><dd><dl class="simple">
+<dt>kafkaConsumer.assign(Collections.singletonList(</dt><dd><p>new TopicPartition(kafkaTopicName, wireModule.getPartition())));</p>
+</dd>
+</dl>
+</dd>
+<dt>} else {</dt><dd><p>kafkaConsumer.subscribe(Collections.singleton(kafkaTopicName));</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;Override
+protected void innerSetup() {</p>
+<blockquote>
+<div><p>commonInnerSetup();</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public void innerProcess(Object obj) throws StageException {</p>
+<blockquote>
+<div><p>StageDriver driver = ((Pipeline) stageContext).getStageDriver(this);
+while (driver.getState() == StageDriver.State.RUNNING) {</p>
+<blockquote>
+<div><p>pollAndEmit();</p>
+</div></blockquote>
+<p>}</p>
+<p>LOG.info(“StageDriver state is no longer RUNNING, closing Kafka consumer.”);
+closeKafkaConsumer();</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;VisibleForTesting
+void pollAndEmit() throws StageException {</p>
+<blockquote>
+<div><dl>
+<dt>try {</dt><dd><p>List&lt;R&gt; records = poll();
+for (R record : records) {</p>
+<blockquote>
+<div><p>emitAndCount(record);</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+<dt>} catch (PipelineStageException e) {</dt><dd><p>throw new StageException(this, e);</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/<a href="#id3"><span class="problematic" id="id4">**</span></a><a href="#id5"><span class="problematic" id="id6">*</span></a></dt><dd><ul class="simple">
+<li><p>Poll Kafka and get the items from the topic. Record stats.</p></li>
+<li><p>&#64;return</p></li>
+<li><p>&#64;throws PipelineStageException</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+<dt>public List&lt;R&gt; pollFromTopic() throws PipelineStageException {</dt><dd><p>long startingTime = startProcessing();
+List&lt;R&gt; polledItems = poll();
+endProcessing(startingTime);
+return polledItems;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private List&lt;R&gt; poll() throws PipelineStageException  {</dt><dd><p>List&lt;R&gt; recordsFromKafka = new ArrayList&lt;&gt;();
+try {</p>
+<blockquote>
+<div><p>ConsumerRecords&lt;Long, R&gt; records = kafkaConsumer.poll(Duration.ofMillis(pollTimeoutMs));
+pollCount.increment();
+records.iterator().forEachRemaining(record -&gt; {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (deciderKey == null || DeciderUtil.isAvailableForRandomRecipient(decider, deciderKey)) {</dt><dd><p>recordsFromKafka.add(record.value());</p>
+</dd>
+<dt>} else {</dt><dd><p>droppedMessages.increment();</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>});</p>
+</div></blockquote>
+<dl>
+<dt>} catch (SerializationException e) {</dt><dd><p>deserializationErrorCount.increment();
+LOG.error(“Failed to deserialize the value.”, e);</p>
+</dd>
+<dt>} catch (SaslAuthenticationException e) {</dt><dd><dl class="simple">
+<dt>if (DeciderUtil.isAvailableForRandomRecipient(decider, SHUT_DOWN_ON_AUTH_FAIL)) {</dt><dd><dl class="simple">
+<dt>wireModule.getPipelineExceptionHandler()</dt><dd><p>.logAndShutdown(“Authentication error connecting to Kafka broker: “ + e);</p>
+</dd>
+</dl>
+</dd>
+<dt>} else {</dt><dd><p>throw new PipelineStageException(this, “Kafka Authentication Error”, e);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>} catch (Exception e) {</dt><dd><p>throw new PipelineStageException(e);</p>
+</dd>
+</dl>
+<p>}</p>
+<p>return recordsFromKafka;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;VisibleForTesting
+void closeKafkaConsumer() {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>try {</dt><dd><p>kafkaConsumer.close();
+LOG.info(“Kafka kafkaConsumer for {} was closed”, getFullStageName());</p>
+</dd>
+<dt>} catch (Exception e) {</dt><dd><p>log.error(“Failed to close Kafka kafkaConsumer”, e);</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public void release() {</p>
+<blockquote>
+<div><p>closeKafkaConsumer();
+super.release();</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public void cleanupStageV2() {</p>
+<blockquote>
+<div><p>closeKafkaConsumer();</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;SuppressWarnings(“unused”)  // set from pipeline config
+public void setKafkaClientId(String kafkaClientId) {</p>
+<blockquote>
+<div><p>this.kafkaClientId = kafkaClientId;</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;SuppressWarnings(“unused”)  // set from pipeline config
+public void setKafkaTopicName(String kafkaTopicName) {</p>
+<blockquote>
+<div><p>this.kafkaTopicName = kafkaTopicName;</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;SuppressWarnings(“unused”)  // set from pipeline config
+public void setKafkaConsumerGroupId(String kafkaConsumerGroupId) {</p>
+<blockquote>
+<div><p>this.kafkaConsumerGroupId = kafkaConsumerGroupId;</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;SuppressWarnings(“unused”)  // set from pipeline config
+public void setMaxPollRecords(int maxPollRecords) {</p>
+<blockquote>
+<div><p>this.maxPollRecords = maxPollRecords;</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;SuppressWarnings(“unused”)  // set from pipeline config
+public void setPollTimeoutMs(int pollTimeoutMs) {</p>
+<blockquote>
+<div><p>this.pollTimeoutMs = pollTimeoutMs;</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;SuppressWarnings(“unused”)  // set from pipeline config
+public void setPartitioned(boolean partitioned) {</p>
+<blockquote>
+<div><p>this.partitioned = partitioned;</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;SuppressWarnings(“unused”)  // set from pipeline config
+public void setDeciderKey(String deciderKey) {</p>
+<blockquote>
+<div><p>this.deciderKey = deciderKey;</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;VisibleForTesting
+KafkaConsumer&lt;Long, R&gt; getKafkaConsumer() {</p>
+<blockquote>
+<div><p>return kafkaConsumer;</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;SuppressWarnings(“unused”)  // set from pipeline config
+public void setKafkaClusterPath(String kafkaClusterPath) {</p>
+<blockquote>
+<div><p>this.kafkaClusterPath = kafkaClusterPath;</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/src/java/com/twitter/search/ingester/pipeline/twitter/kafka/KafkaConsumerStage.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

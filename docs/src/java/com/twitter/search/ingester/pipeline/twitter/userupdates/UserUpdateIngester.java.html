@@ -1,0 +1,461 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.ingester.pipeline.twitter.userupdates;</p>
+<p>import java.util.AbstractMap;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.EnumSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+import java.util.function.Function;
+import java.util.stream.Collectors;</p>
+<p>import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.Sets;</p>
+<p>import org.apache.commons.text.CaseUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;</p>
+<p>import com.twitter.common.collections.Pair;
+import com.twitter.decider.Decider;
+import com.twitter.finagle.util.DefaultTimer;
+import com.twitter.gizmoduck.thriftjava.LifecycleChangeReason;
+import com.twitter.gizmoduck.thriftjava.LookupContext;
+import com.twitter.gizmoduck.thriftjava.QueryFields;
+import com.twitter.gizmoduck.thriftjava.Safety;
+import com.twitter.gizmoduck.thriftjava.UpdateDiffItem;
+import com.twitter.gizmoduck.thriftjava.User;
+import com.twitter.gizmoduck.thriftjava.UserModification;
+import com.twitter.gizmoduck.thriftjava.UserService;
+import com.twitter.gizmoduck.thriftjava.UserType;
+import com.twitter.search.common.indexing.thriftjava.AntisocialUserUpdate;
+import com.twitter.search.common.indexing.thriftjava.UserUpdateType;
+import com.twitter.search.common.metrics.SearchCounter;
+import com.twitter.search.common.metrics.SearchLongGauge;
+import com.twitter.util.Duration;
+import com.twitter.util.Future;
+import com.twitter.util.TimeoutException;</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>This class ingests <a class="reference external" href="mailto:{&#37;&#52;&#48;link">{<span>&#64;</span>link</a> UserModification} events and transforms them into a possibly empty list</p></li>
+<li><p>of <a class="reference external" href="mailto:{&#37;&#52;&#48;link">{<span>&#64;</span>link</a> AntisocialUserUpdate}s to be indexed by Earlybirds.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>public class UserUpdateIngester {</dt><dd><p>private static final Logger LOG = LoggerFactory.getLogger(UserUpdateIngester.class);
+private static final Duration RESULT_TIMEOUT = Duration.fromSeconds(3);</p>
+<p>private static final List&lt;AntisocialUserUpdate&gt; NO_UPDATE = Collections.emptyList();</p>
+<p>// Map from UserUpdateType to a set of Safety fields to examine.
+private static final Map&lt;UserUpdateType, Set&lt;Safety._Fields&gt;&gt; SAFETY_FIELDS_MAP =</p>
+<blockquote>
+<div><dl>
+<dt>ImmutableMap.of(</dt><dd><p>UserUpdateType.ANTISOCIAL,
+Sets.immutableEnumSet(</p>
+<blockquote>
+<div><p>Safety._Fields.SUSPENDED, Safety._Fields.DEACTIVATED, Safety._Fields.OFFBOARDED),</p>
+</div></blockquote>
+<p>UserUpdateType.NSFW,
+Sets.immutableEnumSet(Safety._Fields.NSFW_USER, Safety._Fields.NSFW_ADMIN),
+UserUpdateType.PROTECTED, Sets.immutableEnumSet(Safety._Fields.IS_PROTECTED));</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl>
+<dt>private static final Function&lt;Safety._Fields, String&gt; FIELD_TO_FIELD_NAME_FUNCTION =</dt><dd><p>field -&gt; “safety.” + CaseUtils.toCamelCase(field.name(), false, ‘_’);</p>
+</dd>
+<dt>private static final Map&lt;String, UserUpdateType&gt; FIELD_NAME_TO_TYPE_MAP =</dt><dd><dl class="simple">
+<dt>SAFETY_FIELDS_MAP.entrySet().stream()</dt><dd><dl class="simple">
+<dt>.flatMap(</dt><dd><dl class="simple">
+<dt>entry -&gt; entry.getValue().stream()</dt><dd><dl class="simple">
+<dt>.map(field -&gt; new AbstractMap.SimpleEntry&lt;&gt;(</dt><dd><p>FIELD_TO_FIELD_NAME_FUNCTION.apply(field),
+entry.getKey())))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+<dt>.collect(Collectors.toMap(</dt><dd><p>AbstractMap.SimpleEntry::getKey,
+AbstractMap.SimpleEntry::getValue));</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+<dt>private static final Map&lt;String, Safety._Fields&gt; FIELD_NAME_TO_FIELD_MAP =</dt><dd><dl>
+<dt>SAFETY_FIELDS_MAP.values().stream()</dt><dd><p>.flatMap(Collection::stream)
+.collect(Collectors.toMap(</p>
+<blockquote>
+<div><p>FIELD_TO_FIELD_NAME_FUNCTION,
+Function.identity()));</p>
+</div></blockquote>
+</dd>
+</dl>
+</dd>
+<dt>private static final LookupContext LOOKUP_CONTEXT = new LookupContext()</dt><dd><p>.setInclude_deactivated(true)
+.setInclude_erased(true)
+.setInclude_suspended(true)
+.setInclude_offboarded(true)
+.setInclude_protected(true);</p>
+</dd>
+</dl>
+<p>private final UserService.ServiceToClient userService;
+private final Decider decider;</p>
+<p>private final SearchLongGauge userModificationLatency;
+private final SearchCounter unsuccessfulUserModificationCount;
+private final SearchCounter byInactiveAccountDeactivationUserModificationCount;
+private final SearchCounter irrelevantUserModificationCount;
+private final SearchCounter notNormalUserCount;
+private final SearchCounter missingSafetyCount;
+private final SearchCounter userServiceRequests;
+private final SearchCounter userServiceSuccesses;
+private final SearchCounter userServiceNoResults;
+private final SearchCounter userServiceFailures;
+private final SearchCounter userServiceTimeouts;
+private final Map&lt;Pair&lt;UserUpdateType, Boolean&gt;, SearchCounter&gt; counterMap;</p>
+<dl>
+<dt>public UserUpdateIngester(</dt><dd><p>String statPrefix,
+UserService.ServiceToClient userService,
+Decider decider</p>
+</dd>
+<dt>) {</dt><dd><p>this.userService = userService;
+this.decider = decider;</p>
+<dl>
+<dt>userModificationLatency =</dt><dd><p>SearchLongGauge.export(statPrefix + “_user_modification_latency_ms”);</p>
+</dd>
+<dt>unsuccessfulUserModificationCount =</dt><dd><p>SearchCounter.export(statPrefix + “_unsuccessful_user_modification_count”);</p>
+</dd>
+<dt>byInactiveAccountDeactivationUserModificationCount =</dt><dd><dl class="simple">
+<dt>SearchCounter.export(statPrefix</dt><dd><ul class="simple">
+<li><p>“_by_inactive_account_deactivation_user_modification_count”);</p></li>
+</ul>
+</dd>
+</dl>
+</dd>
+<dt>irrelevantUserModificationCount =</dt><dd><p>SearchCounter.export(statPrefix + “_irrelevant_user_modification_count”);</p>
+</dd>
+<dt>notNormalUserCount =</dt><dd><p>SearchCounter.export(statPrefix + “_not_normal_user_count”);</p>
+</dd>
+<dt>missingSafetyCount =</dt><dd><p>SearchCounter.export(statPrefix + “_missing_safety_count”);</p>
+</dd>
+<dt>userServiceRequests =</dt><dd><p>SearchCounter.export(statPrefix + “_user_service_requests”);</p>
+</dd>
+<dt>userServiceSuccesses =</dt><dd><p>SearchCounter.export(statPrefix + “_user_service_successes”);</p>
+</dd>
+<dt>userServiceNoResults =</dt><dd><p>SearchCounter.export(statPrefix + “_user_service_no_results”);</p>
+</dd>
+<dt>userServiceFailures =</dt><dd><p>SearchCounter.export(statPrefix + “_user_service_failures”);</p>
+</dd>
+<dt>userServiceTimeouts =</dt><dd><p>SearchCounter.export(statPrefix + “_user_service_timeouts”);</p>
+</dd>
+<dt>counterMap = ImmutableMap.&lt;Pair&lt;UserUpdateType, Boolean&gt;, SearchCounter&gt;builder()</dt><dd><dl class="simple">
+<dt>.put(Pair.of(UserUpdateType.ANTISOCIAL, true),</dt><dd><p>SearchCounter.export(statPrefix + “_antisocial_set_count”))</p>
+</dd>
+<dt>.put(Pair.of(UserUpdateType.ANTISOCIAL, false),</dt><dd><p>SearchCounter.export(statPrefix + “_antisocial_unset_count”))</p>
+</dd>
+<dt>.put(Pair.of(UserUpdateType.NSFW, true),</dt><dd><p>SearchCounter.export(statPrefix + “_nsfw_set_count”))</p>
+</dd>
+<dt>.put(Pair.of(UserUpdateType.NSFW, false),</dt><dd><p>SearchCounter.export(statPrefix + “_nsfw_unset_count”))</p>
+</dd>
+<dt>.put(Pair.of(UserUpdateType.PROTECTED, true),</dt><dd><p>SearchCounter.export(statPrefix + “_protected_set_count”))</p>
+</dd>
+<dt>.put(Pair.of(UserUpdateType.PROTECTED, false),</dt><dd><p>SearchCounter.export(statPrefix + “_protected_unset_count”))</p>
+</dd>
+</dl>
+<p>.build();</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Convert a UserModification event into a (possibly empty) list of antisocial updates for</p></li>
+<li><p>Earlybird.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>public Future&lt;List&lt;AntisocialUserUpdate&gt;&gt; transform(UserModification userModification) {</dt><dd><p>userModificationLatency.set(System.currentTimeMillis() - userModification.getUpdated_at_msec());</p>
+<dl class="simple">
+<dt>if (!userModification.isSuccess()) {</dt><dd><p>unsuccessfulUserModificationCount.increment();
+return Future.value(NO_UPDATE);</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// To avoid UserTable gets overflowed, we exclude traffic from ByInactiveAccountDeactivation
+if (userModification.getUser_audit_data() != null</p>
+<blockquote>
+<div><blockquote>
+<div><p>&amp;&amp; userModification.getUser_audit_data().getReason() != null
+&amp;&amp; userModification.getUser_audit_data().getReason()</p>
+<blockquote>
+<div><p>== LifecycleChangeReason.BY_INACTIVE_ACCOUNT_DEACTIVATION) {</p>
+</div></blockquote>
+</div></blockquote>
+<p>byInactiveAccountDeactivationUserModificationCount.increment();
+return Future.value(NO_UPDATE);</p>
+</div></blockquote>
+<p>}</p>
+<p>long userId = userModification.getUser_id();
+Set&lt;UserUpdateType&gt; userUpdateTypes = getUserUpdateTypes(userModification);
+if (userUpdateTypes.isEmpty()) {</p>
+<blockquote>
+<div><p>irrelevantUserModificationCount.increment();
+return Future.value(NO_UPDATE);</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>Future&lt;User&gt; userFuture = userModification.isSetCreate()</dt><dd><p>? Future.value(userModification.getCreate())
+: getUser(userId);</p>
+</dd>
+<dt>return userFuture</dt><dd><dl>
+<dt>.map(user -&gt; {</dt><dd><dl class="simple">
+<dt>if (user == null) {</dt><dd><p>return NO_UPDATE;</p>
+</dd>
+<dt>} else if (user.getUser_type() != UserType.NORMAL) {</dt><dd><p>LOG.info(“User with id={} is not a normal user.”, userId);
+notNormalUserCount.increment();
+return NO_UPDATE;</p>
+</dd>
+<dt>} else if (!user.isSetSafety()) {</dt><dd><p>LOG.info(“Safety for User with id={} is missing.”, userId);
+missingSafetyCount.increment();
+return NO_UPDATE;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>if (userModification.isSetUpdate()) {</dt><dd><p>// Apply relevant updates from UserModification as User returned from Gizmoduck may not
+// have reflected them yet.
+applyUpdates(user, userModification);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>return userUpdateTypes.stream()</dt><dd><dl class="simple">
+<dt>.map(userUpdateType -&gt;</dt><dd><dl class="simple">
+<dt>convertToAntiSocialUserUpdate(</dt><dd><p>user, userUpdateType, userModification.getUpdated_at_msec()))</p>
+</dd>
+</dl>
+</dd>
+<dt>.peek(update -&gt;</dt><dd><p>counterMap.get(Pair.of(update.getType(), update.isValue())).increment())</p>
+</dd>
+</dl>
+<p>.collect(Collectors.toList());</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>})
+.onFailure(com.twitter.util.Function.cons(exception -&gt; {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (exception instanceof UserNotFoundException) {</dt><dd><p>userServiceNoResults.increment();</p>
+</dd>
+<dt>} else if (exception instanceof TimeoutException) {</dt><dd><p>userServiceTimeouts.increment();
+LOG.error(“UserService.get timed out for user id=” + userId, exception);</p>
+</dd>
+<dt>} else {</dt><dd><p>userServiceFailures.increment();
+LOG.error(“UserService.get failed for user id=” + userId, exception);</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}));</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private static Set&lt;UserUpdateType&gt; getUserUpdateTypes(UserModification userModification) {</dt><dd><p>Set&lt;UserUpdateType&gt; types = EnumSet.noneOf(UserUpdateType.class);</p>
+<dl>
+<dt>if (userModification.isSetUpdate()) {</dt><dd><dl class="simple">
+<dt>userModification.getUpdate().stream()</dt><dd><p>.map(UpdateDiffItem::getField_name)
+.map(FIELD_NAME_TO_TYPE_MAP::get)
+.filter(Objects::nonNull)
+.collect(Collectors.toCollection(() -&gt; types));</p>
+</dd>
+</dl>
+</dd>
+<dt>} else if (userModification.isSetCreate() &amp;&amp; userModification.getCreate().isSetSafety()) {</dt><dd><p>Safety safety = userModification.getCreate().getSafety();
+if (safety.isSuspended()) {</p>
+<blockquote>
+<div><p>types.add(UserUpdateType.ANTISOCIAL);</p>
+</div></blockquote>
+<p>}
+if (safety.isNsfw_admin() || safety.isNsfw_user()) {</p>
+<blockquote>
+<div><p>types.add(UserUpdateType.NSFW);</p>
+</div></blockquote>
+<p>}
+if (safety.isIs_protected()) {</p>
+<blockquote>
+<div><p>types.add(UserUpdateType.PROTECTED);</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>return types;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private Future&lt;User&gt; getUser(long userId) {</dt><dd><p>userServiceRequests.increment();
+return userService.get(</p>
+<blockquote>
+<div><p>LOOKUP_CONTEXT,
+Collections.singletonList(userId),
+Collections.singleton(QueryFields.SAFETY))
+.within(DefaultTimer.getInstance(), RESULT_TIMEOUT)
+.flatMap(userResults -&gt; {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (userResults.size() != 1 || !userResults.get(0).isSetUser()) {</dt><dd><p>return Future.exception(new UserNotFoundException(userId));</p>
+</dd>
+</dl>
+<p>}</p>
+<p>userServiceSuccesses.increment();
+return Future.value(userResults.get(0).getUser());</p>
+</div></blockquote>
+<p>});</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private static void applyUpdates(User user, UserModification userModification) {</dt><dd><dl>
+<dt>userModification.getUpdate().stream()</dt><dd><p>.filter(update -&gt; FIELD_NAME_TO_FIELD_MAP.containsKey(update.getField_name()))
+.filter(UpdateDiffItem::isSetAfter)
+.forEach(update -&gt;</p>
+<blockquote>
+<div><dl class="simple">
+<dt>user.getSafety().setFieldValue(</dt><dd><p>FIELD_NAME_TO_FIELD_MAP.get(update.getField_name()),
+Boolean.valueOf(update.getAfter()))</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>);</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private AntisocialUserUpdate convertToAntiSocialUserUpdate(</dt><dd><blockquote>
+<div><p>User user,
+UserUpdateType userUpdateType,
+long updatedAt) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>boolean value = SAFETY_FIELDS_MAP.get(userUpdateType).stream()</dt><dd><p>.anyMatch(safetyField -&gt; (boolean) user.getSafety().getFieldValue(safetyField));</p>
+</dd>
+</dl>
+<p>return new AntisocialUserUpdate(user.getId(), userUpdateType, value, updatedAt);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>class UserNotFoundException extends Exception {</dt><dd><dl class="simple">
+<dt>UserNotFoundException(long userId) {</dt><dd><p>super(“User “ + userId + “ not found.”);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/src/java/com/twitter/search/ingester/pipeline/twitter/userupdates/UserUpdateIngester.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

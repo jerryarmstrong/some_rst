@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../" id="documentation_options" src="../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" />
+   
+  <link rel="stylesheet" href="../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>from datetime import datetime
+from functools import reduce
+import os
+import pandas as pd
+import re
+from sklearn.metrics import average_precision_score, classification_report, precision_recall_curve, PrecisionRecallDisplay
+from sklearn.model_selection import train_test_split
+import tensorflow as tf
+import matplotlib.pyplot as plt
+import re</p>
+<p>from twitter.cuad.representation.models.optimization import create_optimizer
+from twitter.cuad.representation.models.text_encoder import TextEncoder</p>
+<p>pd.set_option(‘display.max_colwidth’, None)
+pd.set_option(‘display.expand_frame_repr’, False)</p>
+<p>print(tf.__version__)
+print(tf.config.list_physical_devices())</p>
+<p>log_path = os.path.join(‘pnsfwtweettext_model_runs’, datetime.now().strftime(‘%Y-%m-%d_%H.%M.%S’))</p>
+<p>tweet_text_feature = ‘text’</p>
+<dl class="simple">
+<dt>params = {</dt><dd><p>‘batch_size’: 32,
+‘max_seq_lengths’: 256,
+‘model_type’: ‘twitter_bert_base_en_uncased_augmented_mlm’,
+‘trainable_text_encoder’: True,
+‘lr’: 5e-5,
+‘epochs’: 10,</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>REGEX_PATTERNS = [</dt><dd><p>r’^RT &#64;[<a href="#id1"><span class="problematic" id="id2">A-Za-z0-9_</span></a>]+: ‘,
+r”&#64;[<a href="#id3"><span class="problematic" id="id4">A-Za-z0-9_</span></a>]+”,
+r’<a class="reference external" href="https://t.co/[A-Za-z0-9">https://t.co/[A-Za-z0-9</a>]{10}’,
+r’&#64;?????’,</p>
+</dd>
+</dl>
+<p>]</p>
+<dl>
+<dt>EMOJI_PATTERN = re.compile(</dt><dd><blockquote>
+<div><p>“([”
+“U0001F1E0-U0001F1FF”
+“U0001F300-U0001F5FF”
+“U0001F600-U0001F64F”
+“U0001F680-U0001F6FF”
+“U0001F700-U0001F77F”
+“U0001F780-U0001F7FF”
+“U0001F800-U0001F8FF”
+“U0001F900-U0001F9FF”
+“U0001FA00-U0001FA6F”
+“U0001FA70-U0001FAFF”
+“U00002702-U000027B0”
+“])”</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+<dt>def clean_tweet(text):</dt><dd><dl class="simple">
+<dt>for pattern in REGEX_PATTERNS:</dt><dd><p>text = re.sub(pattern, ‘’, text)</p>
+</dd>
+</dl>
+<p>text = re.sub(EMOJI_PATTERN, r’ 1 ‘, text)</p>
+<p>text = re.sub(r’n’, ‘ ‘, text)</p>
+<p>return text.strip().lower()</p>
+</dd>
+</dl>
+<p>df[‘processed_text’] = df[‘text’].astype(str).map(clean_tweet)
+df.sample(10)</p>
+<p>X_train, X_val, y_train, y_val = train_test_split(df[[‘processed_text’]], df[‘is_nsfw’], test_size=0.1, random_state=1)</p>
+<dl>
+<dt>def df_to_ds(X, y, shuffle=False):</dt><dd><dl class="simple">
+<dt>ds = tf.data.Dataset.from_tensor_slices((</dt><dd><p>X.values,
+tf.one_hot(tf.cast(y.values, tf.int32), depth=2, axis=-1)</p>
+</dd>
+</dl>
+<p>))</p>
+<dl class="simple">
+<dt>if shuffle:</dt><dd><p>ds = ds.shuffle(1000, seed=1, reshuffle_each_iteration=True)</p>
+</dd>
+</dl>
+<p>return ds.map(lambda text, label: ({ tweet_text_feature: text }, label)).batch(params[‘batch_size’])</p>
+</dd>
+</dl>
+<p>ds_train = df_to_ds(X_train, y_train, shuffle=True)
+ds_val = df_to_ds(X_val, y_val)
+X_train.values</p>
+<p>inputs = tf.keras.layers.Input(shape=(), dtype=tf.string, name=tweet_text_feature)
+encoder = TextEncoder(</p>
+<blockquote>
+<div><p>max_seq_lengths=params[‘max_seq_lengths’],
+model_type=params[‘model_type’],
+trainable=params[‘trainable_text_encoder’],
+local_preprocessor_path=’demo-preprocessor’</p>
+</div></blockquote>
+<p>)
+embedding = encoder([inputs])[“pooled_output”]
+predictions = tf.keras.layers.Dense(2, activation=’softmax’)(embedding)
+model = tf.keras.models.Model(inputs=inputs, outputs=predictions)</p>
+<p>model.summary()</p>
+<dl class="simple">
+<dt>optimizer = create_optimizer(</dt><dd><p>params[‘lr’],
+params[‘epochs’] * len(ds_train),
+0,
+weight_decay_rate=0.01,
+optimizer_type=’adamw’</p>
+</dd>
+</dl>
+<p>)
+bce = tf.keras.losses.BinaryCrossentropy(from_logits=False)
+pr_auc = tf.keras.metrics.AUC(curve=’PR’, num_thresholds=1000, from_logits=False)
+model.compile(optimizer=optimizer, loss=bce, metrics=[pr_auc])</p>
+<dl>
+<dt>callbacks = [</dt><dd><dl class="simple">
+<dt>tf.keras.callbacks.EarlyStopping(</dt><dd><p>monitor=’val_loss’,
+mode=’min’,
+patience=1,
+restore_best_weights=True</p>
+</dd>
+</dl>
+<p>),
+tf.keras.callbacks.ModelCheckpoint(</p>
+<blockquote>
+<div><p>filepath=os.path.join(log_path, ‘checkpoints’, ‘{epoch:02d}’),
+save_freq=’epoch’</p>
+</div></blockquote>
+<p>),
+tf.keras.callbacks.TensorBoard(</p>
+<blockquote>
+<div><p>log_dir=os.path.join(log_path, ‘scalars’),
+update_freq=’batch’,
+write_graph=False</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>]
+history = model.fit(</p>
+<blockquote>
+<div><p>ds_train,
+epochs=params[‘epochs’],
+callbacks=callbacks,
+validation_data=ds_val,
+steps_per_epoch=len(ds_train)</p>
+</div></blockquote>
+<p>)</p>
+<p>model.predict([“xxx 🍑”])</p>
+<p>preds = X_val.processed_text.apply(apply_model)
+print(classification_report(y_val, preds &gt;= 0.90, digits=4))</p>
+<p>precision, recall, thresholds = precision_recall_curve(y_val, preds)</p>
+<p>fig = plt.figure(figsize=(15, 10))
+plt.plot(precision, recall, lw=2)
+plt.grid()
+plt.xlim(0.2, 1)
+plt.ylim(0.3, 1)
+plt.xlabel(“Recall”, size=20)
+plt.ylabel(“Precision”, size=20)</p>
+<p>average_precision_score(y_val, preds)</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../_sources/trust_and_safety_models/nsfw/nsfw_text.py.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

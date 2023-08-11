@@ -1,0 +1,515 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../" id="documentation_options" src="../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.simclusters_v2.scalding</p>
+<p>import com.twitter.algebird.{Monoid, Semigroup}
+import com.twitter.scalding._</p>
+<p>object UpdateKnownFor {</p>
+<blockquote>
+<div><dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Convenience datastructure that can summarize key stats about a node’s set of</p></li>
+<li><p>immediate neighbors.</p></li>
+<li></li>
+<li><p>&#64;param nodeCount                          number of nodes</p></li>
+<li><p>&#64;param sumOfEdgeWeights                   sum of weights on edges in the neighborhood.</p></li>
+<li><p>&#64;param sumOfMembershipWeightedEdgeWeights sum of { edge weight * membership weight } for each node</p></li>
+<li><p>in the neighborhood. Membership weight to what is not</p></li>
+<li><p>specified in this case class and is instead part of the</p></li>
+<li><p>context.</p></li>
+<li><p>&#64;param sumOfMembershipWeights             sum of membership weight for each node in the</p></li>
+<li><p>neighborhood. Membership weight to what is not</p></li>
+<li><p>specified in this case class and is instead part of</p></li>
+<li><p>the context.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>case class NeighborhoodInformation(</dt><dd><p>nodeCount: Int,
+sumOfEdgeWeights: Float,
+sumOfMembershipWeightedEdgeWeights: Float,
+sumOfMembershipWeights: Float)</p>
+</dd>
+<dt>object NeighborhoodInformationMonoid extends Monoid[NeighborhoodInformation] {</dt><dd><p>override val zero: NeighborhoodInformation = NeighborhoodInformation(0, 0f, 0f, 0f)
+override def plus(l: NeighborhoodInformation, r: NeighborhoodInformation) =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>NeighborhoodInformation(</dt><dd><p>l.nodeCount + r.nodeCount,
+l.sumOfEdgeWeights + r.sumOfEdgeWeights,
+l.sumOfMembershipWeightedEdgeWeights + r.sumOfMembershipWeightedEdgeWeights,
+l.sumOfMembershipWeights + r.sumOfMembershipWeights</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>case class NodeInformation(</dt><dd><p>originalClusters: List[Int],
+overallStats: NeighborhoodInformation,
+statsOfClustersInNeighborhood: Map[Int, NeighborhoodInformation])</p>
+</dd>
+<dt>object NodeInformationSemigroup extends Semigroup[NodeInformation] {</dt><dd><p>implicit val ctsMonoid: Monoid[NeighborhoodInformation] = NeighborhoodInformationMonoid</p>
+<dl>
+<dt>override def plus(l: NodeInformation, r: NodeInformation) =</dt><dd><dl>
+<dt>NodeInformation(</dt><dd><p>l.originalClusters ++ r.originalClusters,
+ctsMonoid.plus(l.overallStats, r.overallStats),
+Monoid</p>
+<blockquote>
+<div><dl class="simple">
+<dt>.mapMonoid[Int, NeighborhoodInformation].plus(</dt><dd><p>l.statsOfClustersInNeighborhood,
+r.statsOfClustersInNeighborhood)</p>
+</dd>
+</dl>
+</div></blockquote>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>case class ClusterScoresForNode(</dt><dd><p>sumScoreIgnoringMembershipScores: Double,
+ratioScoreIgnoringMembershipScores: Double,
+ratioScoreUsingMembershipScores: Double)</p>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Given a user and a cluster:</p></li>
+<li><p>True positive weight = sum of edge weights to neighbors who belong to that cluster.</p></li>
+<li><p>False negative weight = sum of edge weights to neighbors who don’t belong to that cluster.</p></li>
+<li><p>False positive weight = (number of users in the cluster who are not neighbors of the node) * globalAvgEdgeWeight</p></li>
+<li><p>Membership-weighted true positive weight = for neighbors who are also in the cluster, sum of edge weight times user membership score in the cluster.</p></li>
+<li><p>Membership-weighted false negative weight = for neighbors who are not in the cluster, sum of edge weight times avg membership score across the whole knownFor input.</p></li>
+<li><p>Membership-weighted false positive weight = for users in the cluster who are not neighbors of the node, avg global edge weight times user membership score for the cluster.</p></li>
+<li></li>
+<li><p>Ignoring membership scores, sum formula:</p></li>
+<li><p>truePositiveWtFactor*(True positive weight) - false negative weight - false positive weight</p></li>
+<li><p>Ignoring membership scores, ratio formula:</p></li>
+<li><p>True positive weight / (true positive weight + false negative weight + false positive weight)</p></li>
+<li><p>Using membership scores</p></li>
+<li><p>Membership-weighted true positive weight / (Membership-weighted true positive weight + Membership-weighted false negative weight + Membership-weighted false positive weight)</p></li>
+<li></li>
+<li><p>&#64;param overallNeighborhoodStats</p></li>
+<li><p>&#64;param statsForCluster</p></li>
+<li><p>&#64;param clusterSize</p></li>
+<li><p>&#64;param sumOfClusterMembershipScores</p></li>
+<li><p>&#64;param globalAvgEdgeWeight</p></li>
+<li><p>&#64;param truePositiveWtFactor</p></li>
+<li></li>
+<li><p>&#64;return</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>def getScoresForCluster(</dt><dd><p>overallNeighborhoodStats: NeighborhoodInformation,
+statsForCluster: NeighborhoodInformation,
+clusterSize: Int,
+sumOfClusterMembershipScores: Double,
+globalAvgEdgeWeight: Double,
+truePositiveWtFactor: Double</p>
+</dd>
+<dt>): ClusterScoresForNode = {</dt><dd><p>val truePositiveWt = statsForCluster.sumOfEdgeWeights
+val falseNegativeWt = overallNeighborhoodStats.sumOfEdgeWeights - truePositiveWt
+val falsePositiveWt = (clusterSize - statsForCluster.nodeCount) * globalAvgEdgeWeight
+val membershipWeightedTruePositiveWt = statsForCluster.sumOfMembershipWeightedEdgeWeights
+val membershipWeightedFalseNegativeWt =</p>
+<blockquote>
+<div><p>overallNeighborhoodStats.sumOfMembershipWeightedEdgeWeights - membershipWeightedTruePositiveWt</p>
+</div></blockquote>
+<dl class="simple">
+<dt>val membershipWeightedFalsePositiveWt =</dt><dd><p>(sumOfClusterMembershipScores - statsForCluster.sumOfMembershipWeights) * globalAvgEdgeWeight</p>
+</dd>
+<dt>val sumScore =</dt><dd><p>truePositiveWtFactor * statsForCluster.sumOfEdgeWeights - falseNegativeWt - falsePositiveWt</p>
+</dd>
+</dl>
+<p>val ratioScore = truePositiveWt / (truePositiveWt + falseNegativeWt + falsePositiveWt)
+val ratioUsingMemberships =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>membershipWeightedTruePositiveWt / (membershipWeightedTruePositiveWt +</dt><dd><p>membershipWeightedFalsePositiveWt + membershipWeightedFalseNegativeWt)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>ClusterScoresForNode(sumScore, ratioScore, ratioUsingMemberships)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def pickBestCluster(</dt><dd><p>overallNeighborhoodStats: NeighborhoodInformation,
+statsOfClustersInNeighborhood: Map[Int, NeighborhoodInformation],
+clusterOverallStatsMap: Map[Int, NeighborhoodInformation],
+globalAvgEdgeWeight: Double,
+truePositiveWtFactor: Double,
+clusterScoresToFinalScore: ClusterScoresForNode =&gt; Double,
+minNeighborsInCluster: Int</p>
+</dd>
+<dt>): Option[(Int, Double)] = {</dt><dd><dl>
+<dt>val clusterToScores = statsOfClustersInNeighborhood.toList.flatMap {</dt><dd><dl>
+<dt>case (clusterId, statsInNeighborhood) =&gt;</dt><dd><p>val clusterOverallStats = clusterOverallStatsMap(clusterId)
+if (statsInNeighborhood.nodeCount &gt;= minNeighborsInCluster) {</p>
+<blockquote>
+<div><dl>
+<dt>Some(</dt><dd><dl>
+<dt>(</dt><dd><p>clusterId,
+clusterScoresToFinalScore(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>getScoresForCluster(</dt><dd><p>overallNeighborhoodStats,
+statsInNeighborhood,
+clusterOverallStats.nodeCount,
+clusterOverallStats.sumOfMembershipWeights,
+globalAvgEdgeWeight,
+truePositiveWtFactor</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>None</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+if (clusterToScores.nonEmpty) {</p>
+<blockquote>
+<div><p>Some(clusterToScores.maxBy(_._2))</p>
+</div></blockquote>
+<p>} else None</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def updateGeneric(</dt><dd><p>graph: TypedPipe[(Long, Map[Long, Float])],
+inputUserToClusters: TypedPipe[(Long, Array[(Int, Float)])],
+clusterOverallStatsMap: Map[Int, NeighborhoodInformation],
+minNeighborsInCluster: Int,
+globalAvgWeight: Double,
+avgMembershipScore: Double,
+truePositiveWtFactor: Double,
+clusterScoresToFinalScore: ClusterScoresForNode =&gt; Double</p>
+</dd>
+<dt>)(</dt><dd><p>implicit uniqId: UniqueID</p>
+</dd>
+<dt>): TypedPipe[(Long, Array[(Int, Float)])] = {</dt><dd><p>val emptyToSomething = Stat(“no_assignment_to_some”)
+val somethingToEmpty = Stat(“some_assignment_to_none”)
+val emptyToEmpty = Stat(“empty_to_empty”)
+val sameCluster = Stat(“same_cluster”)
+val diffCluster = Stat(“diff_cluster”)
+val nodesWithSmallDegree = Stat(”<a href="#id9"><span class="problematic" id="id10">nodes_with_degree_lt_</span></a>” + minNeighborsInCluster)</p>
+<dl>
+<dt>collectInformationPerNode(graph, inputUserToClusters, avgMembershipScore)</dt><dd><dl>
+<dt>.mapValues {</dt><dd><dl>
+<dt>case NodeInformation(originalClusters, overallStats, statsOfClustersInNeighborhood) =&gt;</dt><dd><dl>
+<dt>val newClusterWithScoreOpt = if (overallStats.nodeCount &lt; minNeighborsInCluster) {</dt><dd><p>nodesWithSmallDegree.inc()
+None</p>
+</dd>
+<dt>} else {</dt><dd><dl class="simple">
+<dt>pickBestCluster(</dt><dd><p>overallStats,
+statsOfClustersInNeighborhood,
+clusterOverallStatsMap,
+globalAvgWeight,
+truePositiveWtFactor,
+clusterScoresToFinalScore,
+minNeighborsInCluster</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}
+newClusterWithScoreOpt match {</p>
+<blockquote>
+<div><dl>
+<dt>case Some((newClusterId, score)) =&gt;</dt><dd><dl class="simple">
+<dt>if (originalClusters.isEmpty) {</dt><dd><p>emptyToSomething.inc()</p>
+</dd>
+<dt>} else if (originalClusters.contains(newClusterId)) {</dt><dd><p>sameCluster.inc()</p>
+</dd>
+<dt>} else {</dt><dd><p>diffCluster.inc()</p>
+</dd>
+</dl>
+<p>}
+Array((newClusterId, score.toFloat))</p>
+</dd>
+<dt>case None =&gt;</dt><dd><dl class="simple">
+<dt>if (originalClusters.isEmpty) {</dt><dd><p>emptyToEmpty.inc()</p>
+</dd>
+<dt>} else {</dt><dd><p>somethingToEmpty.inc()</p>
+</dd>
+</dl>
+<p>}
+Array.empty[(Int, Float)]</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Assembles the information we need at a node in order to decide what the new cluster should be.</p></li>
+<li><p>So this is where we assemble what the overall</p></li>
+<li></li>
+<li><p>This function is where all the crucial steps take place. First get the cluster that each</p></li>
+<li><p>node belongs to, and then broadcast information about this node and cluster membership to each</p></li>
+<li><p>of it’s neighbors. Now bring together all records with the same nodeId as the key and create</p></li>
+<li><p>the NodeInformation dataset.</p></li>
+<li><p>&#64;param graph symmetric graph i.e. if u is in v’s adj list, then v is in u’s adj list.</p></li>
+<li><p>&#64;param userToClusters current knownFor.</p></li>
+<li><p>&#64;param avgMembershipScore avg. membership score of a node in the knownFor we’re updating.</p></li>
+<li><p>Useful to deal with nodes which don’t belong to any knownFor.</p></li>
+<li><p>&#64;return pipe with node information for each node</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>def collectInformationPerNode(</dt><dd><p>graph: TypedPipe[(Long, Map[Long, Float])],
+userToClusters: TypedPipe[(Long, Array[(Int, Float)])],
+avgMembershipScore: Double</p>
+</dd>
+<dt>): TypedPipe[(Long, NodeInformation)] = {</dt><dd><p>implicit val nisg: Semigroup[NodeInformation] = NodeInformationSemigroup
+graph</p>
+<blockquote>
+<div><p>.leftJoin(userToClusters)
+// uncomment for adhoc job
+//.withReducers(200)
+.flatMap {</p>
+<blockquote>
+<div><dl>
+<dt>case (nodeId, (adjList, assignedClustersOpt)) =&gt;</dt><dd><dl>
+<dt>val assignedClusters =</dt><dd><p>assignedClustersOpt.map(_.toList).getOrElse(Nil)</p>
+</dd>
+<dt>val res = adjList.toList.flatMap {</dt><dd><dl>
+<dt>case (neighborId, neighborWeight) =&gt;</dt><dd><dl>
+<dt>if (assignedClusters.nonEmpty) {</dt><dd><dl>
+<dt>assignedClusters.map {</dt><dd><dl>
+<dt>case (clusterId, membershipScore) =&gt;</dt><dd><dl class="simple">
+<dt>val neighborhoodInformationForCluster = NeighborhoodInformation(</dt><dd><p>1,
+neighborWeight,
+membershipScore * neighborWeight,
+membershipScore)</p>
+</dd>
+<dt>val originalClusters =</dt><dd><p>if (neighborId == nodeId) List(clusterId)
+else List.empty[Int]</p>
+</dd>
+</dl>
+<dl>
+<dt>(</dt><dd><p>neighborId,
+NodeInformation(</p>
+<blockquote>
+<div><p>originalClusters,
+neighborhoodInformationForCluster,
+Map(clusterId -&gt; neighborhoodInformationForCluster)))</p>
+</div></blockquote>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>} else {</dt><dd><dl>
+<dt>List(</dt><dd><dl>
+<dt>(</dt><dd><p>neighborId,
+NodeInformation(</p>
+<blockquote>
+<div><p>Nil,
+NeighborhoodInformation(</p>
+<blockquote>
+<div><p>1,
+neighborWeight,
+(avgMembershipScore * neighborWeight).toFloat,
+avgMembershipScore.toFloat),</p>
+</div></blockquote>
+<p>Map.empty[Int, NeighborhoodInformation]</p>
+</div></blockquote>
+<p>)))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+res</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+.sumByKey</p>
+</div></blockquote>
+<p>// uncomment for adhoc job
+//.withReducers(100)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Replace incoming knownFor scores with ratioScoreIgnoringMembershipScores</p></li>
+<li><p>&#64;param knownFor</p></li>
+<li><p>&#64;param simsGraphWithoutSelfLoops</p></li>
+<li><p>&#64;param globalAvgWeight</p></li>
+<li><p>&#64;param clusterStats</p></li>
+<li><p>&#64;param avgMembershipScore</p></li>
+<li><p>&#64;return</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+<dt>def newKnownForScores(</dt><dd><p>knownFor: TypedPipe[(Long, Array[(Int, Float)])],
+simsGraphWithoutSelfLoops: TypedPipe[(Long, Map[Long, Float])],
+globalAvgWeight: Double,
+clusterStats: Map[Int, NeighborhoodInformation],
+avgMembershipScore: Double</p>
+</dd>
+<dt>): TypedPipe[(Long, Array[(Int, Float)])] = {</dt><dd><dl>
+<dt>collectInformationPerNode(simsGraphWithoutSelfLoops, knownFor, avgMembershipScore)</dt><dd><dl>
+<dt>.mapValues {</dt><dd><dl>
+<dt>case NodeInformation(originalClusters, overallStats, statsOfClustersInNeighborhood) =&gt;</dt><dd><dl>
+<dt>originalClusters.map { clusterId =&gt;</dt><dd><dl>
+<dt>(</dt><dd><p>clusterId,
+getScoresForCluster(</p>
+<blockquote>
+<div><p>overallStats,
+statsOfClustersInNeighborhood(clusterId),
+clusterStats(clusterId).nodeCount,
+clusterStats(clusterId).sumOfMembershipWeights,
+globalAvgWeight,
+0</p>
+</div></blockquote>
+<p>).ratioScoreIgnoringMembershipScores.toFloat)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}.toArray</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../_sources/src/scala/com/twitter/simclusters_v2/scalding/UpdateKnownFor.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../../" id="documentation_options" src="../../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.servo.database</p>
+<p>import com.twitter.servo.repository._
+import com.twitter.util.Future
+import scala.collection.mutable.{HashMap, HashSet, ListBuffer}
+import scala.collection.generic.Growable</p>
+<p>object Database {</p>
+<blockquote>
+<div><dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Construct a KeyValueRepository wrapping access to a database.</p></li>
+<li></li>
+<li><p>Data retrieved as a row from the query is passed to a Builder producing a</p></li>
+<li><p>(Key, Row) tuple.  Once all rows have been processed this way it is passed as a</p></li>
+<li><p>sequence to a post-query function that can perform actions (aggregation usually)</p></li>
+<li><p>and produce a final sequence of (Key, Value).</p></li>
+<li></li>
+<li><p>&#64;tparam Q</p></li>
+<li><p>how we’ll be querying the this repository</p></li>
+<li></li>
+<li><p>&#64;tparam K</p></li>
+<li><p>the key used for looking data up</p></li>
+<li></li>
+<li><p>&#64;tparam R</p></li>
+<li><p>each entry from the the database will be represented as an instance of R</p></li>
+<li></li>
+<li><p>&#64;tparam V</p></li>
+<li><p>the repository will return a V produced by processing one or more Rs</p></li>
+<li></li>
+<li><p>&#64;param database</p></li>
+<li><p>A database used to back the KeyValueRepository being built.</p></li>
+<li></li>
+<li><p>&#64;param dbQuery</p></li>
+<li><p>A database query for fetching records to be parsed into objects of type</p></li>
+<li><p>Row. The query string can contain instances of the character ‘?’ as</p></li>
+<li><p>placeholders for parameter passed into the <cite>Database.select</cite> calls.</p></li>
+<li></li>
+<li><p>&#64;param builder</p></li>
+<li><p>A Builder that builds (K, Row) pairs from ResultSets from the database</p></li>
+<li></li>
+<li><p>&#64;param postProcess</p></li>
+<li><p>A function which can manipulate the Seq[(K, Row)] that is returned from the</p></li>
+<li><p>database. Useful for aggregating multi-mapped K, V pairs where V holds a</p></li>
+<li><p>container with multiple values for the same key in the database.  This function</p></li>
+<li><p>should not manipulate the list of keys; doing so will result in Return.None</p></li>
+<li><p>elements in the ensuing KeyValueResult.</p></li>
+<li></li>
+<li><p>AggregateByKey has a basic implementation that groups R objects by a</p></li>
+<li><p>specified identifier and may be useful as a common impl.</p></li>
+<li></li>
+<li><p>&#64;param selectParams</p></li>
+<li><p>A function that is applied to the distinct keys in a repository query.</p></li>
+<li><p>The result is passed to <cite>Database.select</cite> to be used for filling in</p></li>
+<li><p>bind variables in dbQuery. By default, the repository query is passed</p></li>
+<li><p>directly to the select. The use cases for this function are situations</p></li>
+<li><p>where the SELECT statement takes multiple parameters.</p></li>
+<li></li>
+<li><p>Example:</p></li>
+<li><p>// A repository that takes Seq[Long]s of userids and returns</p></li>
+<li><p>// Item objects of a parameterized item type.</p></li>
+<li><p>Database.keyValueRepository[Seq[Long], Long, Item, Item](</p></li>
+<li><p>database,</p></li>
+<li><p>“SELECT * FROM items WHERE user_id IN (?) AND item_type = ?;”,</p></li>
+<li><p>ItemBuilder,</p></li>
+<li><p>selectParams = Seq(_: Seq[Long], itemType)</p></li>
+<li><p>)</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>def keyValueRepository[Q &lt;: Seq[K], K, R, V](</dt><dd><p>database: Database,
+dbQuery: String,
+builder: Builder[(K, R)],
+postProcess: Seq[(K, R)] =&gt; Seq[(K, V)] =</p>
+<blockquote>
+<div><p>(identity[Seq[(K, V)]] _): (Seq[(K, V)] =&gt; Seq[(K, V)]),</p>
+</div></blockquote>
+<p>selectParams: Seq[K] =&gt; Seq[Any] = (Seq(_: Seq[K])): (Seq[K] =&gt; collection.Seq[Seq[K]])</p>
+</dd>
+<dt>): KeyValueRepository[Q, K, V] =</dt><dd><dl>
+<dt>query =&gt; {</dt><dd><dl>
+<dt>if (query.isEmpty) {</dt><dd><p>KeyValueResult.emptyFuture</p>
+</dd>
+<dt>} else {</dt><dd><p>val uniqueKeys = query.distinct
+KeyValueResult.fromPairs(uniqueKeys) {</p>
+<blockquote>
+<div><p>database.select(dbQuery, builder, selectParams(uniqueKeys): _*) map postProcess</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>A thin trait for async interaction with a database.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>trait Database {</dt><dd><p>def select[A](query: String, builder: Builder[A], params: Any*): Future[Seq[A]]
+def selectOne[A](query: String, builder: Builder[A], params: Any*): Future[Option[A]]
+def execute(query: String, params: Any*): Future[Int]
+def insert(query: String, params: Any*): Future[Long]
+def release(): Unit</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>object NullDatabase extends Database {</dt><dd><dl class="simple">
+<dt>override def select[Unit](query: String, builder: Builder[Unit], params: Any*) =</dt><dd><p>Future.value(Seq.empty[Unit])</p>
+</dd>
+<dt>override def selectOne[Unit](query: String, builder: Builder[Unit], params: Any*) =</dt><dd><p>Future.value(None)</p>
+</dd>
+</dl>
+<p>override def release() = ()</p>
+<dl class="simple">
+<dt>override def execute(query: String, params: Any*) =</dt><dd><p>Future.value(0)</p>
+</dd>
+<dt>override def insert(query: String, params: Any*) =</dt><dd><p>Future.value(0)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>object AggregateByKey {</dt><dd><dl class="simple">
+<dt>def apply[K, R, A](</dt><dd><p>extractKey: R =&gt; K,
+reduce: Seq[R] =&gt; A,
+pruneDuplicates: Boolean = false</p>
+</dd>
+</dl>
+<p>) = new AggregateByKey(extractKey, reduce, pruneDuplicates)</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>In the event that the item type (V) does not carry an aggregation key then we can have</p></li>
+<li><p>the Builder return a tuple with some id attached.  If that is done then each Row from the</p></li>
+<li><p>builder will look something like (SomeGroupId, SomeRowObject).  Because we tend to minimize</p></li>
+<li><p>data duplication this seems to be a pretty common pattern and can be seen in</p></li>
+<li><p>SavedSearchesRepository, FacebookConnectionsRepository, and UserToRoleRepository.</p></li>
+<li></li>
+<li><p>&#64;tparam K</p></li>
+<li><p>The type for the key</p></li>
+<li><p>&#64;tparam V</p></li>
+<li><p>The type of a single element of the list</p></li>
+<li><p>&#64;tparam A</p></li>
+<li><p>The object we’ll aggregate list items into</p></li>
+<li><p>&#64;param reduce</p></li>
+<li><p>A function that combines a seq of V into A</p></li>
+<li><p>&#64;param pruneDuplicates</p></li>
+<li><p>If set this ensures that, at most, one instance of any given V will be passed into reduce.</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>def withKeyValuePairs[K, V, A](</dt><dd><p>reduce: Seq[V] =&gt; A,
+pruneDuplicates: Boolean</p>
+</dd>
+<dt>): AggregateByKey[K, (K, V), A] =</dt><dd><dl class="simple">
+<dt>new AggregateByKey(</dt><dd><p>{ case (k, _) =&gt; k },
+values =&gt; reduce(values map { case (_, v) =&gt; v }),
+pruneDuplicates</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Basic aggregator that extracts keys from a Row, groups into a Seq by those keys, and</p></li>
+<li><p>performs some reduction step to mash those into an aggregated object.  Order is not</p></li>
+<li><p>necessarily kept between the retrieving rows from the database and passing them into</p></li>
+<li><p>reduce.</p></li>
+<li></li>
+<li><p>&#64;tparam K</p></li>
+<li><p>the type used by the item on which we aggregate rows</p></li>
+<li></li>
+<li><p>&#64;tparam R</p></li>
+<li><p>object that a single row of the query will be represented as</p></li>
+<li></li>
+<li><p>&#64;tparam A</p></li>
+<li><p>what we collect groups of R into</p></li>
+<li></li>
+<li><p>&#64;param extractKey</p></li>
+<li><p>function to extract a key from a row object</p></li>
+<li></li>
+<li><p>&#64;param reduce</p></li>
+<li><p>function that can take a sequence of rows and combine them into an aggregate</p></li>
+<li></li>
+<li><p>&#64;param pruneDuplicates</p></li>
+<li><p>if set this will ensure that at most one copy of each R will be passed into reduce (as</p></li>
+<li><p>determined by R’s equal method) but will pass the input through a set which will</p></li>
+<li><p>likely lose ordering.</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+<dt>class AggregateByKey[K, R, A](</dt><dd><p>extractKey: R =&gt; K,
+reduce: Seq[R] =&gt; A,
+pruneDuplicates: Boolean = false)</p>
+<blockquote>
+<div><p>extends (Seq[R] =&gt; Seq[(K, A)]) {</p>
+</div></blockquote>
+<dl>
+<dt>override def apply(input: Seq[R]): Seq[(K, A)] = {</dt><dd><p>val collectionMap = new HashMap[K, Growable[R] with Iterable[R]]</p>
+<dl>
+<dt>def emptyCollection: Growable[R] with Iterable[R] =</dt><dd><dl class="simple">
+<dt>if (pruneDuplicates) {</dt><dd><p>new HashSet[R]</p>
+</dd>
+<dt>} else {</dt><dd><p>new ListBuffer[R]</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>input foreach { element =&gt;</dt><dd><p>(collectionMap.getOrElseUpdate(extractKey(element), emptyCollection)) += element</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>collectionMap map {</dt><dd><dl class="simple">
+<dt>case (key, items) =&gt;</dt><dd><p>key -&gt; reduce(items toSeq)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>} toSeq</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../../_sources/tweetypie/servo/repo/src/main/scala/com/twitter/servo/database/Database.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

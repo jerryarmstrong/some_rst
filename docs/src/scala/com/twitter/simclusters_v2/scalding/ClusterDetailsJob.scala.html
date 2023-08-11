@@ -1,0 +1,1202 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../" id="documentation_options" src="../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.simclusters_v2.scalding</p>
+<p>import com.twitter.algebird.OptionMonoid
+import com.twitter.algebird.QTree
+import com.twitter.algebird.QTreeSemigroup
+import com.twitter.algebird.Semigroup
+import com.twitter.dal.client.dataset.KeyValDALDataset
+import com.twitter.dal.client.dataset.SnapshotDALDataset
+import com.twitter.hermit.candidate.thriftscala.Candidates
+import com.twitter.pluck.source.cassowary.FollowingsCosineSimilaritiesManhattanSource
+import com.twitter.pluck.source.cassowary.SimsCandidatesSource
+import com.twitter.scalding._
+import com.twitter.scalding_internal.dalv2.DAL
+import com.twitter.scalding_internal.dalv2.DALWrite._
+import com.twitter.scalding_internal.dalv2.remote_access.ExplicitLocation
+import com.twitter.scalding_internal.dalv2.remote_access.ProcAtla
+import com.twitter.scalding_internal.job.TwitterExecutionApp
+import com.twitter.scalding_internal.job.analytics_batch._
+import com.twitter.scalding_internal.multiformat.format.keyval.KeyVal
+import com.twitter.simclusters_v2.common.ModelVersions
+import com.twitter.simclusters_v2.hdfs_sources._
+import com.twitter.simclusters_v2.scalding.common.Util
+import com.twitter.simclusters_v2.scalding.embedding.common.ExternalDataSources
+import com.twitter.simclusters_v2.thriftscala._
+import com.twitter.usersource.snapshot.flat.UsersourceFlatScalaDataset
+import com.twitter.usersource.snapshot.flat.thriftscala.FlatUser</p>
+<dl>
+<dt>object ClusterDetailsJob {</dt><dd><p>case class Scores(followScore: Double, favScore: Double, logFavScore: Double)</p>
+<dl class="simple">
+<dt>case class IntermediateDetails(</dt><dd><p>numUsersWithAnyNonZeroScore: Int,
+numUsersWithNonZeroFollowScore: Int,
+numUsersWithNonZeroFavScore: Int,
+favQTree: Option[QTree[Double]],
+followQTree: Option[QTree[Double]],
+logFavQTree: Option[QTree[Double]],
+sumOfSquares: Scores,
+sum: Scores,
+min: Scores,
+max: Scores)</p>
+</dd>
+<dt>case class InfoFromUserSource(</dt><dd><p>fractionMarkedNSFWUser: Double,
+languageToFractionDeviceLanguage: Map[String, Double],
+countryCodeToFractionKnownForWithCountryCode: Map[String, Double],
+languageToFractionInferredLanguage: Map[String, Double])</p>
+</dd>
+<dt>def positiveMin(a: Double, b: Double) = {</dt><dd><p>if (math.min(a, b) == 0.0) math.max(a, b) else math.min(a, b)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>case class ClusterDetailsSemigroup(implicit qtreeSemigroup: Semigroup[QTree[Double]])</dt><dd><blockquote>
+<div><p>extends Semigroup[IntermediateDetails] {</p>
+</div></blockquote>
+<p>val optionMonoid: OptionMonoid[QTree[Double]] = new OptionMonoid[QTree[Double]]()
+override def plus(</p>
+<blockquote>
+<div><p>left: IntermediateDetails,
+right: IntermediateDetails</p>
+</div></blockquote>
+<dl>
+<dt>): IntermediateDetails = {</dt><dd><dl>
+<dt>IntermediateDetails(</dt><dd><p>left.numUsersWithAnyNonZeroScore + right.numUsersWithAnyNonZeroScore,
+left.numUsersWithNonZeroFollowScore + right.numUsersWithNonZeroFollowScore,
+left.numUsersWithNonZeroFavScore + right.numUsersWithNonZeroFavScore,
+optionMonoid.plus(left.favQTree, right.favQTree),
+optionMonoid.plus(left.followQTree, right.followQTree),
+optionMonoid.plus(left.logFavQTree, right.logFavQTree),
+Scores(</p>
+<blockquote>
+<div><p>left.sumOfSquares.followScore + right.sumOfSquares.followScore,
+left.sumOfSquares.favScore + right.sumOfSquares.favScore,
+left.sumOfSquares.logFavScore + right.sumOfSquares.logFavScore</p>
+</div></blockquote>
+<p>),
+Scores(</p>
+<blockquote>
+<div><p>left.sum.followScore + right.sum.followScore,
+left.sum.favScore + right.sum.favScore,
+left.sum.logFavScore + right.sum.logFavScore</p>
+</div></blockquote>
+<p>),
+Scores(</p>
+<blockquote>
+<div><p>positiveMin(left.min.followScore, right.min.followScore),
+positiveMin(left.min.favScore, right.min.favScore),
+positiveMin(left.min.logFavScore, right.min.logFavScore)</p>
+</div></blockquote>
+<p>),
+Scores(</p>
+<blockquote>
+<div><p>math.max(left.max.followScore, right.max.followScore),
+math.max(left.max.favScore, right.max.favScore),
+math.max(left.max.logFavScore, right.max.logFavScore)</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def intermediateDetailsPipe(</dt><dd><p>input: TypedPipe[(Long, ClustersUserIsInterestedIn)],
+qtreeSemigroupKParameter: Int</p>
+</dd>
+<dt>): TypedPipe[(Int, IntermediateDetails)] = {</dt><dd><dl class="simple">
+<dt>implicit val qtSg: Semigroup[QTree[Double]] =</dt><dd><p>new QTreeSemigroup[Double](qtreeSemigroupKParameter)</p>
+</dd>
+</dl>
+<p>implicit val cdSg: Semigroup[IntermediateDetails] = ClusterDetailsSemigroup()
+input</p>
+<blockquote>
+<div><dl>
+<dt>.flatMap {</dt><dd><dl>
+<dt>case (userId, clusterScoresStruct) =&gt;</dt><dd><p>val clusterScoresArray = clusterScoresStruct.clusterIdToScores.toArray
+clusterScoresArray.map {</p>
+<blockquote>
+<div><dl>
+<dt>case (clusterId, scoresStruct) =&gt;</dt><dd><p>val followScore = scoresStruct.followScore.getOrElse(0.0)
+val favScore = scoresStruct.favScore.getOrElse(0.0)
+val logFavScore = scoresStruct.logFavScore.getOrElse(0.0)
+(</p>
+<blockquote>
+<div><p>clusterId,
+IntermediateDetails(</p>
+<blockquote>
+<div><p>numUsersWithAnyNonZeroScore = 1,
+numUsersWithNonZeroFollowScore = if (followScore &gt; 0) 1 else 0,
+numUsersWithNonZeroFavScore = if (favScore &gt; 0) 1 else 0,
+favQTree = if (favScore &gt; 0) Some(QTree(favScore)) else None,
+followQTree = if (followScore &gt; 0) Some(QTree(followScore)) else None,
+logFavQTree = if (logFavScore &gt; 0) Some(QTree(logFavScore)) else None,
+sumOfSquares = Scores(</p>
+<blockquote>
+<div><p>followScore * followScore,
+favScore * favScore,
+logFavScore * logFavScore),</p>
+</div></blockquote>
+<p>sum = Scores(followScore, favScore, logFavScore),
+min = Scores(followScore, favScore, logFavScore),
+max = Scores(followScore, favScore, logFavScore)</p>
+</div></blockquote>
+<p>)</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+.sumByKey
+// Uncomment for adhoc job
+//.withReducers(100)
+.toTypedPipe</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private def safeGetDoubleOpt(x: Option[Double]): Double = {</dt><dd><p>x.map { y =&gt; if (y.isNaN) 0 else y }.getOrElse(0)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def getSimilaritiesForAllPairs(</dt><dd><p>input: TypedPipe[(Long, ClustersUserIsInterestedIn)]</p>
+</dd>
+<dt>)(</dt><dd><p>implicit uniqueID: UniqueID</p>
+</dd>
+<dt>): TypedPipe[((Int, Int), Scores)] = {</dt><dd><p>val allClusterPairsBeforeSumByKey = Stat(“all_cluster_pairs_before_sum_by_key”)
+val clusterPairsWithin10Ratio = Stat(“cluster_pairs_within_10_ratio”)
+val clusterPairsBeforeTopK = Stat(“cluster_pairs_before_thresholding”)</p>
+<dl>
+<dt>input</dt><dd><dl>
+<dt>.flatMap {</dt><dd><dl>
+<dt>case (userId, clusterScoresStruct) =&gt;</dt><dd><p>val clusterScoresArray = clusterScoresStruct.clusterIdToScores.toArray
+(0 until clusterScoresArray.length).flatMap { i =&gt;</p>
+<blockquote>
+<div><dl>
+<dt>(0 until clusterScoresArray.length).map { j =&gt;</dt><dd><p>val (clusterI, scoresI) = clusterScoresArray(i)
+val (clusterJ, scoresJ) = clusterScoresArray(j)
+val ratioOfSizes =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>scoresI.numUsersInterestedInThisClusterUpperBound.getOrElse(1).toDouble /</dt><dd><p>scoresJ.numUsersInterestedInThisClusterUpperBound.getOrElse(1).toDouble</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>allClusterPairsBeforeSumByKey.inc()
+if (ratioOfSizes &gt; 0.1 &amp;&amp; ratioOfSizes &lt; 10) {</p>
+<blockquote>
+<div><p>clusterPairsWithin10Ratio.inc()</p>
+</div></blockquote>
+<p>}
+val followI = safeGetDoubleOpt(scoresI.followScoreClusterNormalizedOnly)
+val followJ = safeGetDoubleOpt(scoresJ.followScoreClusterNormalizedOnly)
+val follow = followI * followJ
+val favI = safeGetDoubleOpt(scoresI.favScoreClusterNormalizedOnly)
+val favJ = safeGetDoubleOpt(scoresJ.favScoreClusterNormalizedOnly)
+val fav = favI * favJ
+val logFavI = safeGetDoubleOpt(scoresI.logFavScoreClusterNormalizedOnly)
+val logFavJ = safeGetDoubleOpt(scoresJ.logFavScoreClusterNormalizedOnly)
+val logFav = logFavI * logFavJ
+((clusterI, clusterJ), (follow, fav, logFav))</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+.sumByKey
+// Uncomment for adhoc job
+//.withReducers(600)
+.map {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case (key, (follow, fav, logFav)) =&gt;</dt><dd><p>clusterPairsBeforeTopK.inc()
+(key, Scores(follow, fav, logFav))</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def keepTopNeighbors(</dt><dd><p>allPairs: TypedPipe[((Int, Int), Scores)],
+cosineThreshold: Double</p>
+</dd>
+<dt>)(</dt><dd><p>implicit uniqueID: UniqueID</p>
+</dd>
+<dt>): TypedPipe[(Int, List[ClusterNeighbor])] = {</dt><dd><p>val clusterPairsMoreThanThreshold = Stat(”<a href="#id11"><span class="problematic" id="id12">cluster_pairs_cosine_gt_</span></a>” + cosineThreshold)
+val clusterPairsAfterTopK = Stat(“cluster_pairs_after_topk”)
+val clustersWithFewNeighbors = Stat(s”clusters_with_fewer_than_100_neighbors”)
+val clustersWithManyNeighbors = Stat(s”clusters_with_more_than_100_neighbors”)</p>
+<dl>
+<dt>allPairs</dt><dd><dl>
+<dt>.flatMap {</dt><dd><dl>
+<dt>case ((cI, cJ), Scores(followScore, favScore, logFavScore)) =&gt;</dt><dd><dl class="simple">
+<dt>if (followScore &gt; cosineThreshold || logFavScore &gt; cosineThreshold || favScore &gt; cosineThreshold) {</dt><dd><p>clusterPairsMoreThanThreshold.inc()
+Some((cI, ClusterNeighbor(cJ, Some(followScore), Some(favScore), Some(logFavScore))))</p>
+</dd>
+</dl>
+<p>} else None</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+.group
+.toList
+// Uncomment for adhoc job
+//.withReducers(40)
+.map {</p>
+<blockquote>
+<div><dl>
+<dt>case (key, seq) =&gt;</dt><dd><p>val finalSize = seq.size
+clusterPairsAfterTopK.incBy(finalSize)
+if (finalSize &lt; 100) {</p>
+<blockquote>
+<div><p>clustersWithFewNeighbors.inc()</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>clustersWithManyNeighbors.inc()</p>
+</dd>
+</dl>
+<blockquote>
+<div><p>key,
+seq.sortBy {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case cn: ClusterNeighbor =&gt;</dt><dd><dl class="simple">
+<dt>-(cn.followCosineSimilarity.getOrElse(0.0) + cn.logFavCosineSimilarity.getOrElse(</dt><dd><p>0.0)) / 2</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</div></blockquote>
+<p>})</p>
+</div></blockquote>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>def getTopSimilarClustersWithCosine(</dt><dd><p>input: TypedPipe[(Long, ClustersUserIsInterestedIn)],
+cosineThreshold: Double</p>
+</dd>
+<dt>)(</dt><dd><p>implicit uniqueID: UniqueID</p>
+</dd>
+<dt>): TypedPipe[(Int, List[ClusterNeighbor])] = {</dt><dd><p>keepTopNeighbors(getSimilaritiesForAllPairs(input), cosineThreshold)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def getDistributionDetails(</dt><dd><p>qtree: QTree[Double],
+sum: Double,
+sumOfSquares: Double,
+min: Double,
+max: Double,
+fullSize: Int</p>
+</dd>
+<dt>): DistributionDetails = {</dt><dd><p>val mean = sum / fullSize
+// note that the below is the naive calculation, and not the sample standard dev formula
+// that divides by n-1. I don’t think it makes a difference at our scale whether we use n or n-1
+// and I’d rather use the simpler one.
+val stdDev = math.sqrt(sumOfSquares / fullSize - mean * mean)</p>
+<dl class="simple">
+<dt>def getQB(percentile: Double): QuantileBounds = {</dt><dd><p>val (lb, ub) = qtree.quantileBounds(percentile)
+QuantileBounds(lb, ub)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>DistributionDetails(</dt><dd><p>mean = mean,
+standardDeviation = Some(stdDev),
+min = Some(min),
+p25 = Some(getQB(0.25)),
+p50 = Some(getQB(0.5)),
+p75 = Some(getQB(0.75)),
+p95 = Some(getQB(0.95)),
+max = Some(max)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def keepCorrectModel(</dt><dd><p>input: TypedPipe[(Long, ClustersUserIsInterestedIn)],
+modelVersionToKeep: String</p>
+</dd>
+<dt>)(</dt><dd><p>implicit uniqId: UniqueID</p>
+</dd>
+<dt>): TypedPipe[(Long, ClustersUserIsInterestedIn)] = {</dt><dd><p>val allRecords = Stat(“all_input_records”)
+val withCorrectVersion = Stat(“with_correct_version”)
+input.filter {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case (_, clusterScoresStruct) =&gt;</dt><dd><p>//  allRecords.inc()
+val result = clusterScoresStruct.knownForModelVersion == modelVersionToKeep
+//  if (result) withCorrectVersion.inc()
+result</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def getInfoFromUserSource(</dt><dd><p>knownFor: TypedPipe[(Int, List[(Long, Float)])],
+usersource: TypedPipe[FlatUser],
+inferredLanguages: TypedPipe[(Long, Seq[(String, Double)])]</p>
+</dd>
+<dt>)(</dt><dd><p>implicit uniqId: UniqueID</p>
+</dd>
+<dt>): TypedPipe[(Int, InfoFromUserSource)] = {</dt><dd><dl>
+<dt>val knownForUsers = knownFor.flatMap {</dt><dd><dl>
+<dt>case (clusterId, userScoreList) =&gt;</dt><dd><dl class="simple">
+<dt>userScoreList.map {</dt><dd><dl class="simple">
+<dt>case (userId, _) =&gt;</dt><dd><p>(userId, clusterId)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>usersource</dt><dd><dl>
+<dt>.collect {</dt><dd><dl>
+<dt>case fuser: FlatUser if fuser.id.isDefined =&gt;</dt><dd><dl>
+<dt>(</dt><dd><p>fuser.id.get,
+(</p>
+<blockquote>
+<div><p>fuser.accountCountryCode.getOrElse(“”),
+fuser.language.getOrElse(“”),
+fuser.nsfwUser.getOrElse(false)</p>
+</div></blockquote>
+<p>))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+.join(knownForUsers)
+.leftJoin(inferredLanguages)
+.map {</p>
+<blockquote>
+<div><dl>
+<dt>case (_, (((countryCode, language, nsfw), clusterId), inferredLangsOpt)) =&gt;</dt><dd><p>val nsfwInt = if (nsfw) 1 else 0
+(</p>
+<blockquote>
+<div><p>clusterId,
+(</p>
+<blockquote>
+<div><p>1,
+nsfwInt,
+Map(language -&gt; 1),
+Map(countryCode -&gt; 1),
+inferredLangsOpt.getOrElse(Seq((“”, 1.0))).toMap</p>
+</div></blockquote>
+<p>)</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+.sumByKey
+.mapValues {</p>
+<blockquote>
+<div><dl>
+<dt>case (</dt><dd><blockquote>
+<div><p>denominator,
+nsfwNumerator,
+languageNumeratorsMap,
+countryNumeratorsMap,
+inferredLangsNumeratorsMap) =&gt;</p>
+</div></blockquote>
+<dl class="simple">
+<dt>InfoFromUserSource(</dt><dd><p>nsfwNumerator * 1.0 / denominator,
+languageNumeratorsMap.mapValues { x =&gt; x * 1.0 / denominator },
+countryNumeratorsMap.mapValues { x =&gt; x * 1.0 / denominator },
+inferredLangsNumeratorsMap.mapValues { x =&gt; x * 1.0 / denominator }</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Run the cluster details job and return the details for each cluster</p></li>
+<li><p>&#64;param input interestedIn data</p></li>
+<li><p>&#64;param qtreeSemigroupKParameter parameter for calculating percentiles using qtree monoid (set to a small number, usually &lt; 7)</p></li>
+<li><p>&#64;param modelVersionToKeep which modelVersion to use from interestedIn dataset</p></li>
+<li><p>&#64;param knownFor clusterId -&gt; users known for this cluster and their scores</p></li>
+<li><p>&#64;param knownForTranspose userId -&gt; clusters this user is known for and their scores</p></li>
+<li><p>&#64;param usersource -&gt; user source</p></li>
+<li><p>&#64;param simsGraph -&gt; sims graph in the form of userId -&gt; adjacency list</p></li>
+<li><p>&#64;param cosineThreshold -&gt; cosine threshold to include a cluster in the list of similar clusters for a given cluster</p></li>
+<li><p>&#64;param uniqId</p></li>
+<li><p>&#64;return pipe with (modelVersion, clusterId) as the key and ClusterDetails struct as the value.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>def run(</dt><dd><p>input: TypedPipe[(Long, ClustersUserIsInterestedIn)],
+qtreeSemigroupKParameter: Int,
+modelVersionToKeep: String,
+knownFor: TypedPipe[(Int, List[(Long, Float)])],
+knownForTranspose: TypedPipe[(Long, Array[(Int, Float)])],
+usersource: Option[TypedPipe[FlatUser]],
+inferredLanguageSource: Option[TypedPipe[(Long, Seq[(String, Double)])]],
+simsGraph: Option[TypedPipe[(Long, Map[Long, Float])]],
+cosineThreshold: Double</p>
+</dd>
+<dt>)(</dt><dd><p>implicit uniqId: UniqueID</p>
+</dd>
+<dt>): Execution[TypedPipe[((String, Int), ClusterDetails)]] = {</dt><dd><p>val topSimilarClusters = getTopSimilarClustersWithCosine(input, cosineThreshold)
+val infoFromUserSource: TypedPipe[(Int, InfoFromUserSource)] = (for {</p>
+<blockquote>
+<div><p>us &lt;- usersource
+inferredLanguages &lt;- inferredLanguageSource</p>
+</div></blockquote>
+<p>} yield getInfoFromUserSource(knownFor, us, inferredLanguages)).getOrElse(TypedPipe.empty)</p>
+<dl class="simple">
+<dt>val clusterEvaluationExec = simsGraph match {</dt><dd><dl class="simple">
+<dt>case Some(sg) =&gt;</dt><dd><p>ClusterEvaluation.clusterLevelEvaluation(sg, knownForTranspose, “eval”)</p>
+</dd>
+<dt>case None =&gt;</dt><dd><p>val dummyPipe: TypedPipe[(Int, (Int, ClusterQuality))] = TypedPipe.empty
+Execution.from(dummyPipe)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>clusterEvaluationExec</dt><dd><dl>
+<dt>.map { clusterIdToSizesAndQualities =&gt;</dt><dd><dl>
+<dt>val clusterQualities: TypedPipe[(Int, ClusterQuality)] =</dt><dd><p>clusterIdToSizesAndQualities.mapValues(_._2)</p>
+</dd>
+<dt>intermediateDetailsPipe(</dt><dd><p>keepCorrectModel(input, modelVersionToKeep),
+qtreeSemigroupKParameter)
+.leftJoin(topSimilarClusters)
+.leftJoin(infoFromUserSource)
+.leftJoin(clusterQualities)
+.join(knownFor)
+.map {</p>
+<blockquote>
+<div><dl>
+<dt>case (</dt><dd><blockquote>
+<div><blockquote>
+<div><p>clusterId,
+(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>(</dt><dd><p>((intermediateDetails, topSimilarNeighborsOpt), userSourceInfoOpt),
+qualityOpt),</p>
+</dd>
+</dl>
+<p>knownForUsers)</p>
+</div></blockquote>
+</div></blockquote>
+<p>) =&gt;</p>
+</div></blockquote>
+<dl class="simple">
+<dt>val knownForSorted = knownForUsers.sortBy(-_._2).map {</dt><dd><dl class="simple">
+<dt>case (userId, score) =&gt;</dt><dd><p>UserWithScore(userId, score)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+(modelVersionToKeep, clusterId) -&gt;</p>
+<blockquote>
+<div><dl>
+<dt>ClusterDetails(</dt><dd><p>numUsersWithAnyNonZeroScore = intermediateDetails.numUsersWithAnyNonZeroScore,
+numUsersWithNonZeroFavScore = intermediateDetails.numUsersWithNonZeroFavScore,
+numUsersWithNonZeroFollowScore =</p>
+<blockquote>
+<div><p>intermediateDetails.numUsersWithNonZeroFollowScore,</p>
+</div></blockquote>
+<dl>
+<dt>favScoreDistributionDetails = intermediateDetails.favQTree.map { qt =&gt;</dt><dd><dl class="simple">
+<dt>getDistributionDetails(</dt><dd><p>qtree = qt,
+sum = intermediateDetails.sum.favScore,
+sumOfSquares = intermediateDetails.sumOfSquares.favScore,
+min = intermediateDetails.min.favScore,
+max = intermediateDetails.max.favScore,
+fullSize = intermediateDetails.numUsersWithNonZeroFavScore</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>},
+followScoreDistributionDetails = intermediateDetails.followQTree.map { qt =&gt;</p>
+<blockquote>
+<div><dl class="simple">
+<dt>getDistributionDetails(</dt><dd><p>qtree = qt,
+sum = intermediateDetails.sum.followScore,
+sumOfSquares = intermediateDetails.sumOfSquares.followScore,
+min = intermediateDetails.min.followScore,
+max = intermediateDetails.max.followScore,
+fullSize = intermediateDetails.numUsersWithNonZeroFollowScore</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<p>},
+logFavScoreDistributionDetails = intermediateDetails.logFavQTree.map { qt =&gt;</p>
+<blockquote>
+<div><dl class="simple">
+<dt>getDistributionDetails(</dt><dd><p>qtree = qt,
+sum = intermediateDetails.sum.logFavScore,
+sumOfSquares = intermediateDetails.sumOfSquares.logFavScore,
+min = intermediateDetails.min.logFavScore,
+max = intermediateDetails.max.logFavScore,
+// note: user has non-zero fav score iff a user has non-zero log-fav score
+fullSize = intermediateDetails.numUsersWithNonZeroFavScore</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<p>},
+knownForUsersAndScores = Some(knownForSorted),
+neighborClusters = topSimilarNeighborsOpt,
+fractionKnownForMarkedNSFWUser = userSourceInfoOpt.map(_.fractionMarkedNSFWUser),
+languageToFractionDeviceLanguage =</p>
+<blockquote>
+<div><p>userSourceInfoOpt.map(_.languageToFractionDeviceLanguage),</p>
+</div></blockquote>
+<dl class="simple">
+<dt>countryCodeToFractionKnownForWithCountryCode =</dt><dd><p>userSourceInfoOpt.map(_.countryCodeToFractionKnownForWithCountryCode),</p>
+</dd>
+</dl>
+<p>qualityMeasuredOnSimsGraph = qualityOpt,
+languageToFractionInferredLanguage =</p>
+<blockquote>
+<div><p>userSourceInfoOpt.map(_.languageToFractionInferredLanguage),</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def getTruncatedSims(</dt><dd><p>sims: TypedPipe[Candidates],
+maxNeighbors: Int</p>
+</dd>
+<dt>): TypedPipe[(Long, Map[Long, Float])] = {</dt><dd><dl>
+<dt>sims.map { cands =&gt;</dt><dd><dl>
+<dt>(</dt><dd><p>cands.userId,
+// These candidates are already sorted, but leaving it in just in case the behavior changes upstream
+cands.candidates</p>
+<blockquote>
+<div><p>.map { c =&gt; (c.userId, c.score.toFloat) }.sortBy(-_._2).take(maxNeighbors).toMap</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><dl class="simple">
+<dt>scalding remote run  –main-class com.twitter.simclusters_v2.scalding.ClusterDetailsAdhoc </dt><dd><p>–target src/scala/com/twitter/simclusters_v2/scalding:cluster_details-adhoc –hadoop-properties “scalding.with.reducers.set.explicitly=true mapreduce.job.reduces=4000” –user recos-platform – –date 2020-06-25 –dateForUserSource 2020-06-25 –includeUserSource –outputDir /user/recos-platform/adhoc/your_ldap/cluster_details_inferred_lang</p>
+</dd>
+</dl>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>object ClusterDetailsAdhoc extends TwitterExecutionApp {</dt><dd><p>implicit val tz: java.util.TimeZone = DateOps.UTC
+implicit val dp = DateParser.default</p>
+<dl>
+<dt>def job: Execution[Unit] =</dt><dd><dl>
+<dt>Execution.getConfigMode.flatMap {</dt><dd><dl>
+<dt>case (config, mode) =&gt;</dt><dd><dl>
+<dt>Execution.withId { implicit uniqueId =&gt;</dt><dd><p>val args = config.getArgs
+val date = DateRange.parse(args(“dateForUserSource”))
+val (knownFor, knownForTranspose) =</p>
+<blockquote>
+<div><dl>
+<dt>args</dt><dd><dl>
+<dt>.optional(“knownForDir”).map { location =&gt;</dt><dd><dl class="simple">
+<dt>(</dt><dd><p>KnownForSources.transpose(KnownForSources.readKnownFor(location)),
+KnownForSources.readKnownFor(location)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>}.getOrElse(</dt><dd><dl class="simple">
+<dt>(</dt><dd><p>KnownForSources.clusterToKnownFor_20M_145K_updated,
+KnownForSources.knownFor_20M_145K_updated</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl>
+<dt>val interestedIn = args</dt><dd><dl>
+<dt>.optional(“inputDir”).map { interestedInInputDir =&gt;</dt><dd><p>TypedPipe.from(AdhocKeyValSources.interestedInSource(interestedInInputDir))</p>
+</dd>
+<dt>}.getOrElse(</dt><dd><dl>
+<dt>DAL</dt><dd><dl class="simple">
+<dt>.readMostRecentSnapshotNoOlderThan(</dt><dd><p>SimclustersV2InterestedIn20M145KUpdatedScalaDataset,
+Days(14))</p>
+</dd>
+</dl>
+<p>.withRemoteReadPolicy(ExplicitLocation(ProcAtla))
+.toTypedPipe
+.map {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case KeyVal(userId, clustersUserIsInterestedIn) =&gt;</dt><dd><p>(userId, clustersUserIsInterestedIn)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>val userSourceOpt = if (args.boolean(“includeUserSource”)) {</dt><dd><p>Some(DAL.readMostRecentSnapshot(UsersourceFlatScalaDataset, date).toTypedPipe)</p>
+</dd>
+</dl>
+<p>} else None</p>
+<dl class="simple">
+<dt>val inferredLanguagesOpt = if (args.boolean(“includeUserSource”)) {</dt><dd><p>Some(ExternalDataSources.inferredUserProducedLanguageSource)</p>
+</dd>
+</dl>
+<p>} else None</p>
+<dl>
+<dt>val simsGraphOpt = args.optional(“simsForEvalInputDir”).map { sgDir =&gt;</dt><dd><dl class="simple">
+<dt>ClusterDetailsJob.getTruncatedSims(</dt><dd><p>TypedPipe.from(WTFCandidatesSource(sgDir)),
+args.int(“maxSimsNeighborsForEval”, 20)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>Util.printCounters(</dt><dd><dl class="simple">
+<dt>ClusterDetailsJob</dt><dd><dl class="simple">
+<dt>.run(</dt><dd><p>interestedIn,
+args.int(“qtreeSemigroupKParameter”, 3),
+args.getOrElse(“modelVersion”, “20M_145K_updated”),
+knownFor,
+knownForTranspose,
+userSourceOpt,
+inferredLanguagesOpt,
+simsGraphOpt,
+cosineThreshold = args.double(“cosineThreshold”, 0.01)</p>
+</dd>
+<dt>).flatMap(</dt><dd><p>_.writeExecution(AdhocKeyValSources.clusterDetailsSource(args(“outputDir”))))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>trait ClusterDetailsBatchTrait extends TwitterScheduledExecutionApp {</dt><dd><p>implicit val tz = DateOps.UTC
+implicit val parser = DateParser.default</p>
+<p>def firstTime: String
+def batchIncrement: Duration
+def manhattanOutputPath: String
+def clusterDetailsLiteOutputPath: String
+def modelVersion: String
+def knownForDataset: KeyValDALDataset[KeyVal[Long, ClustersUserIsKnownFor]]
+def interestedInDataset: KeyValDALDataset[KeyVal[Long, ClustersUserIsInterestedIn]]
+def outputDataset: KeyValDALDataset[KeyVal[(String, Int), ClusterDetails]]
+def clusterDetailsLiteOutputDataset: SnapshotDALDataset[ClusterDetailsLite]</p>
+<dl class="simple">
+<dt>private lazy val execArgs = AnalyticsBatchExecutionArgs(</dt><dd><p>batchDesc = BatchDescription(this.getClass.getName.replace(“$”, “”)),
+firstTime = BatchFirstTime(RichDate(firstTime)),
+lastTime = None,
+batchIncrement = BatchIncrement(batchIncrement)</p>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>override def scheduledJob: Execution[Unit] = AnalyticsBatchExecution(execArgs) {</dt><dd><dl>
+<dt>implicit dateRange =&gt;</dt><dd><dl>
+<dt>Execution.withId { implicit uniqueId =&gt;</dt><dd><dl>
+<dt>Execution.withArgs { args =&gt;</dt><dd><p>val qtreeSemigroupKParameter = args.int(“qtreeSemigroupKParameter”, 5)
+val maxSimsNeighborsForEval = args.int(“maxSimsNeighborsForEval”, 20)
+val knownForTranspose =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>KnownForSources.fromKeyVal(</dt><dd><p>DAL.readMostRecentSnapshot(knownForDataset, dateRange.extend(Days(7))).toTypedPipe,
+modelVersion)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>val knownFor = KnownForSources.transpose(knownForTranspose)
+val cosineThreshold = args.double(“cosineThreshold”, 0.01)
+val interestedIn =</p>
+<blockquote>
+<div><dl>
+<dt>DAL</dt><dd><p>.readMostRecentSnapshot(interestedInDataset, dateRange.extend(Days(7)))
+.toTypedPipe
+.map {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case KeyVal(userId, clustersUserIsInterestedIn) =&gt;</dt><dd><p>(userId, clustersUserIsInterestedIn)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl>
+<dt>val sims = if (modelVersion == ModelVersions.Model20M145K2020) {</dt><dd><p>// The model version 20m_145k_2020 uses approximate_cosine_follow as the input sims graph
+// to cluster users. The same graph is used to evaluate the clusters
+TypedPipe</p>
+<blockquote>
+<div><p>.from(FollowingsCosineSimilaritiesManhattanSource())
+.map(_._2)</p>
+</div></blockquote>
+</dd>
+<dt>} else {</dt><dd><dl>
+<dt>TypedPipe.from(</dt><dd><dl class="simple">
+<dt>SimsCandidatesSource()(</dt><dd><p>dateRange = dateRange,
+suffixPath = “/classified_candidates_rollup”</p>
+</dd>
+</dl>
+<p>))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+val resultExec = ClusterDetailsJob</p>
+<blockquote>
+<div><dl>
+<dt>.run(</dt><dd><p>interestedIn,
+qtreeSemigroupKParameter,
+modelVersion,
+knownFor,
+knownForTranspose,
+Some(DAL.readMostRecentSnapshot(UsersourceFlatScalaDataset, dateRange).toTypedPipe),
+Some(ExternalDataSources.inferredUserProducedLanguageSource),
+Some(</p>
+<blockquote>
+<div><p>ClusterDetailsJob.getTruncatedSims(sims, maxNeighbors = maxSimsNeighborsForEval)),</p>
+</div></blockquote>
+<p>cosineThreshold</p>
+</dd>
+<dt>).flatMap { resultUnmapped =&gt;</dt><dd><dl>
+<dt>val clusterDetailsExec = resultUnmapped</dt><dd><dl class="simple">
+<dt>.map {</dt><dd><dl class="simple">
+<dt>case (clusterKey, details) =&gt;</dt><dd><p>KeyVal(clusterKey, details)</p>
+</dd>
+</dl>
+</dd>
+<dt>}.writeDALVersionedKeyValExecution(</dt><dd><p>outputDataset,
+D.Suffix(manhattanOutputPath)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>val clusterDetailsLiteExec =</dt><dd><dl>
+<dt>resultUnmapped</dt><dd><dl>
+<dt>.map {</dt><dd><dl>
+<dt>case ((_, clusterId), details)</dt><dd><blockquote>
+<div><p>if modelVersion == ModelVersions.Model20M145KDec11 =&gt;</p>
+</div></blockquote>
+<dl class="simple">
+<dt>ClusterDetailsLite(</dt><dd><p>FullClusterId(ModelVersion.Model20m145kDec11, clusterId),
+details.numUsersWithAnyNonZeroScore,
+details.numUsersWithNonZeroFollowScore,
+details.numUsersWithNonZeroFavScore,
+details.knownForUsersAndScores.getOrElse(Nil)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>case ((_, clusterId), details)</dt><dd><blockquote>
+<div><p>if modelVersion == ModelVersions.Model20M145KUpdated =&gt;</p>
+</div></blockquote>
+<dl class="simple">
+<dt>ClusterDetailsLite(</dt><dd><p>FullClusterId(ModelVersion.Model20m145kUpdated, clusterId),
+details.numUsersWithAnyNonZeroScore,
+details.numUsersWithNonZeroFollowScore,
+details.numUsersWithNonZeroFavScore,
+details.knownForUsersAndScores.getOrElse(Nil)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>case ((_, clusterId), details)</dt><dd><blockquote>
+<div><p>if modelVersion == ModelVersions.Model20M145K2020 =&gt;</p>
+</div></blockquote>
+<dl class="simple">
+<dt>ClusterDetailsLite(</dt><dd><p>FullClusterId(ModelVersion.Model20m145k2020, clusterId),
+details.numUsersWithAnyNonZeroScore,
+details.numUsersWithNonZeroFollowScore,
+details.numUsersWithNonZeroFavScore,
+details.knownForUsersAndScores.getOrElse(Nil)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+<dt>}.writeDALSnapshotExecution(</dt><dd><p>clusterDetailsLiteOutputDataset,
+D.Daily,
+D.Suffix(clusterDetailsLiteOutputPath),
+D.EBLzo(),
+dateRange.end)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>Execution.zip(clusterDetailsExec, clusterDetailsLiteExec)</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>Util.printCounters(resultExec)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>object ClusterDetailsBatch extends ClusterDetailsBatchTrait {</dt><dd><p>override val firstTime: String = “2018-07-28”
+override val batchIncrement: Duration = Days(7)</p>
+<dl class="simple">
+<dt>override val manhattanOutputPath: String =</dt><dd><p>“/user/cassowary/manhattan_sequence_files/simclusters_v2_cluster_details”</p>
+</dd>
+<dt>override val clusterDetailsLiteOutputPath: String =</dt><dd><p>“/user/cassowary/processed/simclusters_v2_cluster_details_lite”</p>
+</dd>
+</dl>
+<p>override val modelVersion: String = ModelVersions.Model20M145KDec11
+override val knownForDataset = SimclustersV2KnownFor20M145KDec11ScalaDataset
+override val interestedInDataset = SimclustersV2InterestedInScalaDataset
+override val outputDataset = SimclustersV2ClusterDetailsScalaDataset
+override val clusterDetailsLiteOutputDataset =</p>
+<blockquote>
+<div><p>SimclustersV2ClusterDetailsLiteScalaDataset</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>object ClusterDetails20M145KUpdated extends ClusterDetailsBatchTrait {</dt><dd><p>override val firstTime: String = “2019-06-16”
+override val batchIncrement: Duration = Days(7)</p>
+<dl class="simple">
+<dt>override val manhattanOutputPath: String =</dt><dd><p>“/user/cassowary/manhattan_sequence_files/simclusters_v2_cluster_details_20m_145k_updated”</p>
+</dd>
+<dt>override val clusterDetailsLiteOutputPath: String =</dt><dd><p>“/user/cassowary/processed/simclusters_v2_cluster_details_lite_20m_145k_updated”</p>
+</dd>
+</dl>
+<p>override val modelVersion: String = ModelVersions.Model20M145KUpdated
+override val knownForDataset = SimclustersV2KnownFor20M145KUpdatedScalaDataset
+override val interestedInDataset = SimclustersV2InterestedIn20M145KUpdatedScalaDataset
+override val outputDataset = SimclustersV2ClusterDetails20M145KUpdatedScalaDataset
+override val clusterDetailsLiteOutputDataset =</p>
+<blockquote>
+<div><p>SimclustersV2ClusterDetailsLite20M145KUpdatedScalaDataset</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>capesospy-v2 update –build_locally –start_cron cluster_details_20m_145k_2020 </p></li>
+<li><p>src/scala/com/twitter/simclusters_v2/capesos_config/atla_proc.yaml</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>object ClusterDetails20M145K2020 extends ClusterDetailsBatchTrait {</dt><dd><p>override val firstTime: String = “2020-10-15”
+override val batchIncrement: Duration = Days(7)</p>
+<dl class="simple">
+<dt>override val manhattanOutputPath: String =</dt><dd><p>“/user/cassowary/manhattan_sequence_files/simclusters_v2_cluster_details_20m_145k_2020”</p>
+</dd>
+<dt>override val clusterDetailsLiteOutputPath: String =</dt><dd><p>“/user/cassowary/processed/simclusters_v2_cluster_details_lite_20m_145k_2020”</p>
+</dd>
+</dl>
+<p>override val modelVersion: String = ModelVersions.Model20M145K2020
+override val knownForDataset = SimclustersV2KnownFor20M145K2020ScalaDataset
+override val interestedInDataset = SimclustersV2InterestedIn20M145K2020ScalaDataset
+override val outputDataset = SimclustersV2ClusterDetails20M145K2020ScalaDataset
+override val clusterDetailsLiteOutputDataset =</p>
+<blockquote>
+<div><p>SimclustersV2ClusterDetailsLite20M145K2020ScalaDataset</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<p>/**
+scalding remote run  –main-class com.twitter.simclusters_v2.scalding.DumpClusterDetailsAdhoc </p>
+<blockquote>
+<div><blockquote>
+<div><p>–target src/scala/com/twitter/simclusters_v2/scalding:cluster_details-dump –user recos-platform – –date 2020-06-25 –clusterIds 5542 129677 48645 –inputDir /user/recos-platform/adhoc/your_ldap/cluster_details_inferred_lang</p>
+</div></blockquote>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</div></blockquote>
+<dl>
+<dt>object DumpClusterDetailsAdhoc extends TwitterExecutionApp {</dt><dd><dl>
+<dt>def job: Execution[Unit] =</dt><dd><dl>
+<dt>Execution.getConfigMode.flatMap {</dt><dd><dl>
+<dt>case (config, mode) =&gt;</dt><dd><dl>
+<dt>Execution.withId { implicit uniqueId =&gt;</dt><dd><p>val args = config.getArgs
+val clusters = args.list(“clusterIds”).map(_.toInt).toSet //(1 to 2500).toSet //
+TypedPipe</p>
+<blockquote>
+<div><p>.from(AdhocKeyValSources.clusterDetailsSource(args(“inputDir”)))
+.filter { case ((modelVersion, clusterId), details) =&gt; clusters.contains(clusterId) }
+.toIterableExecution
+.map { iter =&gt;</p>
+<blockquote>
+<div><p>iter.foreach { x =&gt; println(Util.prettyJsonMapper.writeValueAsString(x)) }</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>./bazel bundle src/scala/com/twitter/simclusters_v2/scalding:cluster_details &amp;&amp; </p></li>
+<li><p>oscar hdfs –user cassowary –host hadoopnest2.atla.twitter.com –bundle cluster_details </p></li>
+<li><p>–tool com.twitter.simclusters_v2.scalding.DumpClusterSimilaritiesAdhoc –screen –screen-detached </p></li>
+<li><p>–tee your_ldap/dumpClusterSimilarities_20200103 – </p></li>
+<li><p>–inputDir /user/cassowary/manhattan_sequence_files/simclusters_v2_cluster_details_20m_145k_updated/ </p></li>
+<li><p>–outputDir adhoc/your_ldap</p></li>
+</ul>
+<p><a href="#id9"><span class="problematic" id="id10">*</span></a>/</p>
+</dd>
+<dt>object DumpClusterSimilaritiesAdhoc extends TwitterExecutionApp {</dt><dd><dl>
+<dt>def job: Execution[Unit] =</dt><dd><dl>
+<dt>Execution.getConfigMode.flatMap {</dt><dd><dl>
+<dt>case (config, mode) =&gt;</dt><dd><dl>
+<dt>Execution.withId { implicit uniqueId =&gt;</dt><dd><p>val args = config.getArgs
+TypedPipe</p>
+<blockquote>
+<div><p>.from(AdhocKeyValSources.clusterDetailsSource(args(“inputDir”)))
+.flatMap {</p>
+<blockquote>
+<div><dl>
+<dt>case ((_, clusterId), details) =&gt;</dt><dd><dl>
+<dt>details.neighborClusters.getOrElse(Nil).map { neighbor =&gt;</dt><dd><dl class="simple">
+<dt>val compositeScore = (neighbor.followCosineSimilarity</dt><dd><p>.getOrElse(0.0) + neighbor.favCosineSimilarity.getOrElse(0.0)) / 2</p>
+</dd>
+</dl>
+<dl class="simple">
+<dt>(</dt><dd><p>clusterId,
+neighbor.clusterId,
+“%.4f”.format(compositeScore)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}.writeExecution(TypedTsv(args(“outputDir”)))</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../_sources/src/scala/com/twitter/simclusters_v2/scalding/ClusterDetailsJob.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../" id="documentation_options" src="../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.earlybird.partition;</p>
+<p>import java.util.Date;</p>
+<p>import com.google.common.annotations.VisibleForTesting;</p>
+<p>import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.clients.consumer.KafkaConsumer;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;</p>
+<p>import com.twitter.search.common.indexing.thriftjava.AntisocialUserUpdate;
+import com.twitter.search.common.metrics.SearchCounter;
+import com.twitter.search.common.metrics.SearchRateCounter;
+import com.twitter.search.common.metrics.SearchTimer;
+import com.twitter.search.common.util.io.kafka.CompactThriftDeserializer;
+import com.twitter.search.common.util.io.kafka.FinagleKafkaClientUtils;
+import com.twitter.search.earlybird.common.config.EarlybirdProperty;
+import com.twitter.search.earlybird.common.userupdates.UserUpdate;
+import com.twitter.search.earlybird.exception.MissingKafkaTopicException;</p>
+<dl>
+<dt>public class UserUpdatesStreamIndexer extends SimpleStreamIndexer&lt;Long, AntisocialUserUpdate&gt; {</dt><dd><p>private static final Logger LOG = LoggerFactory.getLogger(UserUpdatesStreamIndexer.class);</p>
+<dl class="simple">
+<dt>private static final SearchCounter NUM_CORRUPT_DATA_ERRORS =</dt><dd><p>SearchCounter.export(“num_user_updates_kafka_consumer_corrupt_data_errors”);</p>
+</dd>
+</dl>
+<p>protected static String kafkaClientId = “”;</p>
+<p>private final SegmentManager segmentManager;
+private final SearchIndexingMetricSet searchIndexingMetricSet;</p>
+<dl>
+<dt>public UserUpdatesStreamIndexer(KafkaConsumer&lt;Long, AntisocialUserUpdate&gt; kafkaConsumer,</dt><dd><blockquote>
+<div><blockquote>
+<div><p>String topic,
+SearchIndexingMetricSet searchIndexingMetricSet,
+SegmentManager segmentManager)</p>
+</div></blockquote>
+<p>throws MissingKafkaTopicException {</p>
+</div></blockquote>
+<p>super(kafkaConsumer, topic);
+this.segmentManager = segmentManager;
+this.searchIndexingMetricSet = searchIndexingMetricSet;</p>
+<p>indexingSuccesses = SearchRateCounter.export(“user_update_indexing_successes”);
+indexingFailures = SearchRateCounter.export(“user_update_indexing_failures”);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Provides user updates kafka consumer to EarlybirdWireModule.</p></li>
+<li><p>&#64;return</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>public static KafkaConsumer&lt;Long, AntisocialUserUpdate&gt; provideKafkaConsumer() {</dt><dd><dl class="simple">
+<dt>return FinagleKafkaClientUtils.newKafkaConsumerForAssigning(</dt><dd><p>EarlybirdProperty.KAFKA_PATH.get(),
+new CompactThriftDeserializer&lt;&gt;(AntisocialUserUpdate.class),
+kafkaClientId,
+MAX_POLL_RECORDS);</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>UserUpdate convertToUserInfoUpdate(AntisocialUserUpdate update) {</dt><dd><dl class="simple">
+<dt>return new UserUpdate(</dt><dd><p>update.getUserID(),
+update.getType(),
+update.isValue() ? 1 : 0,
+new Date(update.getUpdatedAt()));</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;VisibleForTesting
+protected void validateAndIndexRecord(ConsumerRecord&lt;Long, AntisocialUserUpdate&gt; record) {</p>
+<blockquote>
+<div><p>AntisocialUserUpdate update = record.value();
+if (update == null) {</p>
+<blockquote>
+<div><p>LOG.warn(“null value returned from poll”);
+return;</p>
+</div></blockquote>
+<p>}
+if (update.getType() == null) {</p>
+<blockquote>
+<div><p>LOG.error(“User update does not have type set: “ + update);
+NUM_CORRUPT_DATA_ERRORS.increment();
+return;</p>
+</div></blockquote>
+<p>}</p>
+<p>SearchTimer timer = searchIndexingMetricSet.userUpdateIndexingStats.startNewTimer();
+boolean isUpdateIndexed = segmentManager.indexUserUpdate(</p>
+<blockquote>
+<div><p>convertToUserInfoUpdate(update));</p>
+</div></blockquote>
+<p>searchIndexingMetricSet.userUpdateIndexingStats.stopTimerAndIncrement(timer);</p>
+<dl class="simple">
+<dt>if (isUpdateIndexed) {</dt><dd><p>indexingSuccesses.increment();</p>
+</dd>
+<dt>} else {</dt><dd><p>indexingFailures.increment();</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../_sources/src/java/com/twitter/search/earlybird/partition/UserUpdatesStreamIndexer.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

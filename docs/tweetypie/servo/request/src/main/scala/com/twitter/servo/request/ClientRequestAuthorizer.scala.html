@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../../" id="documentation_options" src="../../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.servo.request</p>
+<p>import com.twitter.servo.gate.RateLimitingGate
+import com.twitter.servo.util.Gate
+import com.twitter.util.Future</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Collects per-request stats by method-name and client.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+</dl>
+<p>trait ClientRequestAuthorizer extends ((String, Option[String]) =&gt; Future[Unit]) { self =&gt;</p>
+<blockquote>
+<div><dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>&#64;param methodName the name of the Service method being called</p></li>
+<li><p>&#64;param clientIdStrOpt an Option of the string value of the originating</p></li>
+<li><p>request’s ClientId</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+</dl>
+<p>def apply(methodName: String, clientIdStrOpt: Option[String]): Future[Unit]</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Compose this authorizer with another so that one is applied after the other.</p></li>
+<li></li>
+<li><p>The resultant authorizer requires both underlying authorizers to succeed in</p></li>
+<li><p>order to authorize a request.</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>def andThen(other: ClientRequestAuthorizer) = new ClientRequestAuthorizer {</dt><dd><dl>
+<dt>override def apply(methodName: String, clientIdStrOpt: Option[String]): Future[Unit] = {</dt><dd><dl class="simple">
+<dt>self.apply(methodName, clientIdStrOpt) flatMap { _ =&gt;</dt><dd><p>other(methodName, clientIdStrOpt)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>object ClientRequestAuthorizer {</dt><dd><p>case class UnauthorizedException(msg: String) extends Exception(msg)</p>
+<dl>
+<dt>protected[this] val noClientIdException =</dt><dd><p>Future.exception(new UnauthorizedException(“No ClientId specified”))</p>
+</dd>
+<dt>protected[this] val unauthorizedException =</dt><dd><p>new UnauthorizedException(“Your ClientId is not authorized.”)</p>
+</dd>
+<dt>protected[this] val overRateLimitException =</dt><dd><p>new UnauthorizedException(“Your ClientId is over the allowed rate limit.”)</p>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Increment stats counters for this request.</p></li>
+<li></li>
+<li><p>Note that ClientRequestAuthorizer.observed doesn’t compose in the same fashion</p></li>
+<li><p>as other authorizers via <cite>andThen</cite>. In order to observe authorization results,</p></li>
+<li><p>pass in an underlying authorizer as an argument to observed.</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+<dt>def observed(</dt><dd><p>underlyingAuthorizer: ClientRequestAuthorizer,
+observer: ClientRequestObserver</p>
+</dd>
+<dt>) = new ClientRequestAuthorizer {</dt><dd><dl>
+<dt>override def apply(methodName: String, clientIdStrOpt: Option[String]): Future[Unit] = {</dt><dd><p>val clientIdStr = clientIdStrOpt.getOrElse(“no_client_id”)</p>
+<p>observer(methodName, clientIdStrOpt map { Seq(_) })</p>
+<dl class="simple">
+<dt>underlyingAuthorizer(methodName, clientIdStrOpt) onFailure { _ =&gt;</dt><dd><p>observer.unauthorized(methodName, clientIdStr)</p>
+</dd>
+<dt>} onSuccess { _ =&gt;</dt><dd><p>observer.authorized(methodName, clientIdStr)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def observed(observer: ClientRequestObserver): ClientRequestAuthorizer =</dt><dd><p>observed(ClientRequestAuthorizer.permissive, observer)</p>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Lets all requests through.</p></li>
+</ul>
+<p><a href="#id9"><span class="problematic" id="id10">*</span></a>/</p>
+</dd>
+<dt>def permissive = new ClientRequestAuthorizer {</dt><dd><p>override def apply(methodName: String, clientIdStrOpt: Option[String]) = Future.Done</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>A Generic Authorizer that allows you to pass in your own authorizer function (filter).</p></li>
+<li><p>The filter should take in methodName and clientId and return a Boolean decision</p></li>
+<li></li>
+<li><p>Note: Requires requests to have ClientIds.</p></li>
+<li><p>&#64;param exception return this exception if the request does not pass the filter</p></li>
+</ul>
+<p><a href="#id11"><span class="problematic" id="id12">*</span></a>/</p>
+</dd>
+<dt>def filtered(</dt><dd><p>filter: (String, String) =&gt; Boolean,
+exception: Exception = unauthorizedException</p>
+</dd>
+<dt>): ClientRequestAuthorizer =</dt><dd><dl>
+<dt>new ClientRequestAuthorizer {</dt><dd><p>val futureException = Future.exception(exception)</p>
+<dl>
+<dt>override def apply(methodName: String, clientIdStrOpt: Option[String]): Future[Unit] = {</dt><dd><dl class="simple">
+<dt>clientIdStrOpt match {</dt><dd><dl class="simple">
+<dt>case Some(clientIdStr) =&gt;</dt><dd><dl class="simple">
+<dt>if (filter(methodName, clientIdStr))</dt><dd><p>Future.Done</p>
+</dd>
+<dt>else</dt><dd><p>futureException</p>
+</dd>
+</dl>
+</dd>
+<dt>case None =&gt;</dt><dd><p>noClientIdException</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Authorizes client requests based on a allowlist of ClientId strings.</p></li>
+</ul>
+<p><a href="#id13"><span class="problematic" id="id14">*</span></a>/</p>
+</dd>
+<dt>def allowlisted(allowlist: Set[String]): ClientRequestAuthorizer =</dt><dd><dl class="simple">
+<dt>filtered { (_, clientIdStr) =&gt;</dt><dd><p>allowlist.contains(clientIdStr)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Authorizes requests if and only if they have an associated ClientId.</p></li>
+</ul>
+<p><a href="#id15"><span class="problematic" id="id16">*</span></a>/</p>
+</dd>
+<dt>def withClientId: ClientRequestAuthorizer = filtered { (_, _) =&gt;</dt><dd><p>true</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Consult a (presumably) Decider-backed predicate to authorize requests by ClientId.</p></li>
+<li><p>&#64;param exception return this exception if the request does not pass the filter</p></li>
+</ul>
+<p><a href="#id17"><span class="problematic" id="id18">*</span></a>/</p>
+</dd>
+<dt>def deciderable(</dt><dd><p>isAvailable: String =&gt; Boolean,
+exception: Exception = unauthorizedException</p>
+</dd>
+<dt>): ClientRequestAuthorizer =</dt><dd><dl>
+<dt>filtered(</dt><dd><dl class="simple">
+<dt>{ (_, clientIdStr) =&gt;</dt><dd><p>isAvailable(clientIdStr)</p>
+</dd>
+</dl>
+<p>},
+exception</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Simple rate limiter for unknown client ids. Useful for letting new clients</p></li>
+<li><p>send some traffic without the risk of being overrun by requests.</p></li>
+<li></li>
+<li><p>&#64;param limitPerSecond Number of calls per second we can tolerate</p></li>
+</ul>
+<p><a href="#id19"><span class="problematic" id="id20">*</span></a>/</p>
+</dd>
+<dt>def rateLimited(limitPerSecond: Double): ClientRequestAuthorizer = {</dt><dd><p>gated(RateLimitingGate.uniform(limitPerSecond), overRateLimitException)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Simple Gate based authorizer, will authorize according to the result of the gate regardless</p></li>
+<li><p>of the client/method name</p></li>
+</ul>
+<p><a href="#id21"><span class="problematic" id="id22">*</span></a>/</p>
+</dd>
+<dt>def gated(</dt><dd><p>gate: Gate[Unit],
+exception: Exception = unauthorizedException</p>
+</dd>
+<dt>): ClientRequestAuthorizer = {</dt><dd><p>deciderable(_ =&gt; gate(), exception)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>&#64;return A ClientRequestAuthorizer that switches between two provided</p></li>
+<li><p>ClientRequestAuthorizers depending on a decider.</p></li>
+</ul>
+<p><a href="#id23"><span class="problematic" id="id24">*</span></a>/</p>
+</dd>
+<dt>def select(</dt><dd><p>decider: Gate[Unit],
+ifTrue: ClientRequestAuthorizer,
+ifFalse: ClientRequestAuthorizer</p>
+</dd>
+<dt>): ClientRequestAuthorizer =</dt><dd><dl>
+<dt>new ClientRequestAuthorizer {</dt><dd><dl>
+<dt>override def apply(methodName: String, clientIdStrOpt: Option[String]): Future[Unit] =</dt><dd><dl class="simple">
+<dt>decider.pick(</dt><dd><p>ifTrue(methodName, clientIdStrOpt),
+ifFalse(methodName, clientIdStrOpt)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../../_sources/tweetypie/servo/request/src/main/scala/com/twitter/servo/request/ClientRequestAuthorizer.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

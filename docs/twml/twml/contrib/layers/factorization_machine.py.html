@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../" id="documentation_options" src="../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p># pylint: disable=no-member, arguments-differ, attribute-defined-outside-init, unused-argument
+“””
+Implementing factorization Layer
+“””</p>
+<p>from twitter.deepbird.sparse.sparse_ops import _pad_empty_outputs</p>
+<p>import tensorflow.compat.v1 as tf
+import twml
+from twml.layers.layer import Layer</p>
+<dl>
+<dt>class FactorizationMachine(Layer):</dt><dd><p>“””factorization machine layer class.
+This layer implements the factorization machine operation.
+The paper is “Factorization Machines” by Steffen Rendle.
+TDD: go/tf-fm-tdd</p>
+<dl class="simple">
+<dt>Arguments:</dt><dd><dl class="simple">
+<dt>num_latent_variables:</dt><dd><p>num of latent variables
+The number of parameter in this layer is num_latent_variables x n where n is number of
+input features.</p>
+</dd>
+<dt>weight_initializer:</dt><dd><p>Initializer function for the weight matrix.
+This argument defaults to zeros_initializer().
+This is valid when the FullSparse is the first layer of
+parameters but should be changed otherwise.</p>
+</dd>
+<dt>weight_regularizer:</dt><dd><p>Regularizer function for the weight matrix.
+Ensure to add tf.losses.get_regularization_loss() to your loss for this to take effect.</p>
+</dd>
+<dt>activation:</dt><dd><p>Activation function (callable). Set it to None to maintain a linear activation.</p>
+</dd>
+<dt>trainable:</dt><dd><p>Boolean, if <cite>True</cite> also add variables to the graph collection
+<code class="docutils literal notranslate"><span class="pre">GraphKeys.TRAINABLE_VARIABLES</span></code> (see <a class="reference external" href="https://www.tensorflow.org/versions/master/api_docs/python/tf/Variable">tf.Variable</a>).</p>
+</dd>
+<dt>name:</dt><dd><p>String, the name of the layer. Layers with the same name will
+share weights, but to avoid mistakes we require <code class="docutils literal notranslate"><span class="pre">reuse=True</span></code> in such cases.</p>
+</dd>
+<dt>use_sparse_grads:</dt><dd><p>Boolean, if <cite>True</cite> do sparse mat mul with <cite>embedding_lookup_sparse</cite>, which will
+make gradients to weight matrix also sparse in backward pass. This can lead to non-trivial
+speed up at training time when input_size is large and optimizer handles sparse gradients
+correctly (eg. with SGD or LazyAdamOptimizer). If weight matrix is small, it’s recommended
+to set this flag to <cite>False</cite>; for most use cases of FullSparse, however, weight matrix will
+be large, so it’s better to set it to <cite>True</cite></p>
+</dd>
+<dt>use_binary_values:</dt><dd><p>Assume all non zero values are 1. Defaults to False.
+This can improve training if used in conjunction with MDL.
+This parameter can also be a list of binary values if <cite>inputs</cite> passed to <cite>call</cite> a list.</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>“””</p>
+<dl>
+<dt>def __init__(self,</dt><dd><p>num_latent_variables=10,
+weight_initializer=None,
+activation=None,
+trainable=True,
+name=None,
+use_sparse_grads=True,
+use_binary_values=False,
+weight_regularizer=None,
+substract_self_cross=True,
+<a href="#id1"><span class="problematic" id="id2">**</span></a>kwargs):
+super(FactorizationMachine, self).__init__(trainable=trainable, name=name, <a href="#id3"><span class="problematic" id="id4">**</span></a>kwargs)</p>
+<dl class="simple">
+<dt>if weight_initializer is None:</dt><dd><p>weight_initializer = tf.zeros_initializer()</p>
+</dd>
+</dl>
+<p>self.weight_initializer = weight_initializer
+self.num_latent_variables = num_latent_variables
+self.activation = activation
+self.use_sparse_grads = use_sparse_grads
+self.use_binary_values = use_binary_values
+self.weight_regularizer = weight_regularizer
+self.substract_self_cross = substract_self_cross</p>
+</dd>
+<dt>def build(self, input_shape):</dt><dd><p>“””
+creates``weight`` Variable of shape``[input_size, num_latent_variables]``.</p>
+<p>“””</p>
+<p>shape = [input_shape[1], self.num_latent_variables]</p>
+<p># There is a 2GB limitation for each tensor because of protobuf.
+# 2**30 is 1GB. 2 * (2**30) is 2GB.
+dtype = tf.as_dtype(self.dtype)
+requested_size = input_shape[1] * self.num_latent_variables * dtype.size
+if (requested_size &gt;= 2**31):</p>
+<blockquote>
+<div><dl class="simple">
+<dt>raise ValueError(“Weight tensor can not be larger than 2GB. “ %</dt><dd><p>“Requested Dimensions(%d, %d) of type %s (%d bytes total)”
+(input_shape[1], self.num_latent_variables, dtype.name))</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl class="simple">
+<dt>if not callable(self.weight_initializer):</dt><dd><p>shape = None</p>
+</dd>
+</dl>
+<p># dense tensor
+self.weight = self.add_variable(</p>
+<blockquote>
+<div><p>‘weight’,
+initializer=self.weight_initializer,
+regularizer=self.weight_regularizer,
+shape=shape,
+dtype=self.dtype,
+trainable=True,</p>
+</div></blockquote>
+<p>)</p>
+<p>self.built = True</p>
+</dd>
+<dt>def compute_output_shape(self, input_shape):</dt><dd><p>“””Computes the output shape of the layer given the input shape.</p>
+<dl class="simple">
+<dt>Args:</dt><dd><dl class="simple">
+<dt>input_shape: A (possibly nested tuple of) <cite>TensorShape</cite>.  It need not</dt><dd><p>be fully defined (e.g. the batch size may be unknown).</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>Raises NotImplementedError.</p>
+<p>“””
+raise NotImplementedError</p>
+</dd>
+<dt>def call(self, inputs, <a href="#id5"><span class="problematic" id="id6">**</span></a>kwargs):  # pylint: disable=unused-argument</dt><dd><p>“””The logic of the layer lives here.</p>
+<dl class="simple">
+<dt>Arguments:</dt><dd><dl class="simple">
+<dt>inputs:</dt><dd><p>A SparseTensor</p>
+</dd>
+</dl>
+</dd>
+<dt>Returns:</dt><dd><ul class="simple">
+<li><p>If <cite>inputs</cite> is <cite>SparseTensor</cite>, then returns a number with cross info</p></li>
+</ul>
+</dd>
+</dl>
+<p>“””
+# The following are given:
+# - inputs is a sparse tensor, we call it sp_x.
+# - The dense_v tensor is a dense matrix, whose row i
+#   corresponds to the vector V_i.
+#   weights has shape [num_features, k]
+sp_x = inputs
+if isinstance(inputs, twml.SparseTensor):</p>
+<blockquote>
+<div><p>sp_x = inputs.to_tf()</p>
+</div></blockquote>
+<dl class="simple">
+<dt>elif not isinstance(sp_x, tf.SparseTensor):</dt><dd><p>raise TypeError(“The sp_x must be of type tf.SparseTensor or twml.SparseTensor”)</p>
+</dd>
+</dl>
+<p>indices = sp_x.indices[:, 1]
+batch_ids = sp_x.indices[:, 0]
+values = tf.reshape(sp_x.values, [-1, 1], name=self.name)
+if self.use_sparse_grads:</p>
+<blockquote>
+<div><p>v = tf.nn.embedding_lookup(self.weight, indices)
+# if (self.use_binary_values):
+#   values = tf.ones(tf.shape(values), dtype=values.dtype)
+v_times_x = v * values
+# First term: Sum_k  [Sum_i (v_ik * x_i)]^2
+all_crosses = tf.segment_sum(v_times_x, batch_ids, name=self.name)
+all_crosses_squared = tf.reduce_sum((all_crosses * all_crosses), 1)</p>
+<dl class="simple">
+<dt>if self.substract_self_cross:</dt><dd><p># Second term: Sum_k Sum_i [ (v_ik * x_i)^2 ]
+v_times_x_2 = v_times_x**2
+self_crosses = tf.reduce_sum(tf.segment_sum(v_times_x_2, batch_ids, name=self.name), 1)
+outputs = all_crosses_squared - self_crosses</p>
+</dd>
+<dt>else:</dt><dd><p>outputs = all_crosses_squared</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl>
+<dt>else:</dt><dd><p># need to check if prediction is faster with code below
+crossTerm = tf.reduce_sum((tf.sparse_tensor_dense_matmul(sp_x, self.weight)**2), 1)</p>
+<dl class="simple">
+<dt>if self.substract_self_cross:</dt><dd><p># compute self-cross term
+self_crossTerm = tf.reduce_sum(tf.segment_sum((tf.gather(self.weight, indices) * values)**2, batch_ids), 1)
+outputs = crossTerm - self_crossTerm</p>
+</dd>
+<dt>else:</dt><dd><p>outputs = crossTerm</p>
+</dd>
+</dl>
+</dd>
+<dt>if self.activation is not None:</dt><dd><p>outputs = self.activation(outputs)</p>
+</dd>
+</dl>
+<p>outputs = tf.reshape(outputs, [-1, 1], name=self.name)
+outputs = _pad_empty_outputs(outputs, tf.cast(sp_x.dense_shape[0], tf.int32))
+# set more explicit and static shape to avoid shape inference error
+# valueError: The last dimension of the inputs to <cite>Dense</cite> should be defined. Found <cite>None</cite>
+outputs.set_shape([None, 1])
+return outputs</p>
+</dd>
+</dl>
+</dd>
+</dl>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../_sources/twml/twml/contrib/layers/factorization_machine.py.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

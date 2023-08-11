@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.frigate.pushservice.rank</p>
+<p>import com.twitter.frigate.common.base.CandidateDetails
+import com.twitter.frigate.pushservice.model.PushTypes.PushCandidate
+import com.twitter.util.Future</p>
+<p>import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.frigate.pushservice.params.MrQualityUprankingPartialTypeEnum
+import com.twitter.frigate.common.base.TweetCandidate
+import com.twitter.frigate.common.rec_types.RecTypes
+import com.twitter.frigate.pushservice.params.PushConstants.OoncQualityCombinedScore</p>
+<p>object ModelBasedRanker {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>def rankBySpecifiedScore(</dt><dd><p>candidatesDetails: Seq[CandidateDetails[PushCandidate]],
+scoreExtractor: PushCandidate =&gt; Future[Option[Double]]</p>
+</dd>
+</dl>
+<p>): Future[Seq[CandidateDetails[PushCandidate]]] = {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>val scoredCandidatesFutures = candidatesDetails.map { cand =&gt;</dt><dd><p>scoreExtractor(cand.candidate).map { scoreOp =&gt; (cand, scoreOp.getOrElse(0.0)) }</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>Future.collect(scoredCandidatesFutures).map { scores =&gt;</dt><dd><p>val sorted = scores.sortBy { candidateDetails =&gt; -1 * candidateDetails._2 }
+sorted.map(_._1)</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>def populatePredictionScoreStats(</dt><dd><p>candidatesDetails: Seq[CandidateDetails[PushCandidate]],
+scoreExtractor: PushCandidate =&gt; Future[Option[Double]],
+predictionScoreStats: StatsReceiver</p>
+</dd>
+<dt>): Unit = {</dt><dd><p>val scoreScaleFactorForStat = 10000
+val statName = “prediction_scores”
+candidatesDetails.map {</p>
+<blockquote>
+<div><dl>
+<dt>case CandidateDetails(candidate, source) =&gt;</dt><dd><p>val crt = candidate.commonRecType
+scoreExtractor(candidate).map { scoreOp =&gt;</p>
+<blockquote>
+<div><p>val scaledScore = (scoreOp.getOrElse(0.0) * scoreScaleFactorForStat).toFloat
+predictionScoreStats.scope(“all_candidates”).stat(statName).add(scaledScore)
+predictionScoreStats.scope(crt.toString()).stat(statName).add(scaledScore)</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def populateMrWeightedOpenOrNtabClickScoreStats(</dt><dd><p>candidatesDetails: Seq[CandidateDetails[PushCandidate]],
+predictionScoreStats: StatsReceiver</p>
+</dd>
+<dt>): Unit = {</dt><dd><dl class="simple">
+<dt>populatePredictionScoreStats(</dt><dd><p>candidatesDetails,
+candidate =&gt; candidate.mrWeightedOpenOrNtabClickRankingProbability,
+predictionScoreStats</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def populateMrQualityUprankingScoreStats(</dt><dd><p>candidatesDetails: Seq[CandidateDetails[PushCandidate]],
+predictionScoreStats: StatsReceiver</p>
+</dd>
+<dt>): Unit = {</dt><dd><dl class="simple">
+<dt>populatePredictionScoreStats(</dt><dd><p>candidatesDetails,
+candidate =&gt; candidate.mrQualityUprankingProbability,
+predictionScoreStats</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>def rankByMrWeightedOpenOrNtabClickScore(</dt><dd><p>candidatesDetails: Seq[CandidateDetails[PushCandidate]]</p>
+</dd>
+</dl>
+<p>): Future[Seq[CandidateDetails[PushCandidate]]] = {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>rankBySpecifiedScore(</dt><dd><p>candidatesDetails,
+candidate =&gt; candidate.mrWeightedOpenOrNtabClickRankingProbability</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>def transformSigmoid(</dt><dd><p>score: Double,
+weight: Double = 1.0,
+bias: Double = 0.0</p>
+</dd>
+<dt>): Double = {</dt><dd><p>val base = -1.0 * (weight * score + bias)
+val cappedBase = math.max(math.min(base, 100.0), -100.0)
+1.0 / (1.0 + math.exp(cappedBase))</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>def transformLinear(</dt><dd><p>score: Double,
+bar: Double = 1.0</p>
+</dd>
+<dt>): Double = {</dt><dd><p>val positiveBar = math.abs(bar)
+val cappedScore = math.max(math.min(score, positiveBar), -1.0 * positiveBar)
+cappedScore / positiveBar</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>def transformIdentity(</dt><dd><p>score: Double</p>
+</dd>
+</dl>
+<p>): Double = score</p>
+<dl class="simple">
+<dt>def rankByQualityOoncCombinedScore(</dt><dd><p>candidatesDetails: Seq[CandidateDetails[PushCandidate]],
+qualityScoreTransform: Double =&gt; Double,
+qualityScoreBoost: Double = 1.0</p>
+</dd>
+</dl>
+<p>): Future[Seq[CandidateDetails[PushCandidate]]] = {</p>
+<blockquote>
+<div><dl>
+<dt>rankBySpecifiedScore(</dt><dd><p>candidatesDetails,
+candidate =&gt; {</p>
+<blockquote>
+<div><dl>
+<dt>val ooncScoreFutOpt: Future[Option[Double]] =</dt><dd><p>candidate.mrWeightedOpenOrNtabClickRankingProbability</p>
+</dd>
+<dt>val qualityScoreFutOpt: Future[Option[Double]] =</dt><dd><p>candidate.mrQualityUprankingProbability</p>
+</dd>
+<dt>Future</dt><dd><dl>
+<dt>.join(</dt><dd><p>ooncScoreFutOpt,
+qualityScoreFutOpt</p>
+</dd>
+<dt>).map {</dt><dd><dl>
+<dt>case (Some(ooncScore), Some(qualityScore)) =&gt;</dt><dd><p>val transformedQualityScore = qualityScoreTransform(qualityScore)
+val combinedScore = ooncScore * (1.0 + qualityScoreBoost * transformedQualityScore)
+candidate</p>
+<blockquote>
+<div><p>.cacheExternalScore(OoncQualityCombinedScore, Future.value(Some(combinedScore)))</p>
+</div></blockquote>
+<p>Some(combinedScore)</p>
+</dd>
+</dl>
+<p>case _ =&gt; None</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>def rerankByProducerQualityOoncCombinedScore(</dt><dd><p>candidateDetails: Seq[CandidateDetails[PushCandidate]]</p>
+</dd>
+<dt>)(</dt><dd><p>implicit stat: StatsReceiver</p>
+</dd>
+<dt>): Future[Seq[CandidateDetails[PushCandidate]]] = {</dt><dd><p>val scopedStat = stat.scope(“producer_quality_reranking”)
+val oonCandidates = candidateDetails.filter {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case CandidateDetails(pushCandidate: PushCandidate, _) =&gt;</dt><dd><p>tweetCandidateSelector(pushCandidate, MrQualityUprankingPartialTypeEnum.Oon)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>val rankedOonCandidatesFut = rankBySpecifiedScore(</dt><dd><p>oonCandidates,
+candidate =&gt; {</p>
+<blockquote>
+<div><dl>
+<dt>val baseScoreFutureOpt: Future[Option[Double]] = {</dt><dd><dl class="simple">
+<dt>val qualityCombinedScoreFutureOpt =</dt><dd><p>candidate.getExternalCachedScoreByName(OoncQualityCombinedScore)</p>
+</dd>
+</dl>
+<p>val ooncScoreFutureOpt = candidate.mrWeightedOpenOrNtabClickRankingProbability
+Future.join(qualityCombinedScoreFutureOpt, ooncScoreFutureOpt).map {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case (Some(qualityCombinedScore), _) =&gt;</dt><dd><p>scopedStat.counter(“quality_combined_score”).incr()
+Some(qualityCombinedScore)</p>
+</dd>
+<dt>case (_, ooncScoreOpt) =&gt;</dt><dd><p>scopedStat.counter(“oonc_score”).incr()
+ooncScoreOpt</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}
+baseScoreFutureOpt.map {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case Some(baseScore) =&gt;</dt><dd><p>val boostRatio = candidate.mrProducerQualityUprankingBoost.getOrElse(1.0)
+if (boostRatio &gt; 1.0) scopedStat.counter(“author_uprank”).incr()
+else if (boostRatio &lt; 1.0) scopedStat.counter(“author_downrank”).incr()
+else scopedStat.counter(“author_noboost”).incr()
+Some(baseScore * boostRatio)</p>
+</dd>
+<dt>case _ =&gt;</dt><dd><p>scopedStat.counter(“empty_score”).incr()
+None</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>rankedOonCandidatesFut.map { rankedOonCandidates =&gt;</dt><dd><p>val sortedOonCandidateIterator = rankedOonCandidates.toIterator
+candidateDetails.map { ooncRankedCandidate =&gt;</p>
+<blockquote>
+<div><dl class="simple">
+<dt>val isOon = tweetCandidateSelector(</dt><dd><p>ooncRankedCandidate.candidate,
+MrQualityUprankingPartialTypeEnum.Oon)</p>
+</dd>
+<dt>if (sortedOonCandidateIterator.hasNext &amp;&amp; isOon)</dt><dd><p>sortedOonCandidateIterator.next()</p>
+</dd>
+</dl>
+<p>else ooncRankedCandidate</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def tweetCandidateSelector(</dt><dd><p>pushCandidate: PushCandidate,
+selectedCandidateType: MrQualityUprankingPartialTypeEnum.Value</p>
+</dd>
+<dt>): Boolean = {</dt><dd><dl>
+<dt>pushCandidate match {</dt><dd><dl>
+<dt>case candidate: PushCandidate with TweetCandidate =&gt;</dt><dd><dl>
+<dt>selectedCandidateType match {</dt><dd><dl>
+<dt>case MrQualityUprankingPartialTypeEnum.Oon =&gt;</dt><dd><p>val crt = candidate.commonRecType
+RecTypes.isOutOfNetworkTweetRecType(crt) || RecTypes.outOfNetworkTopicTweetTypes</p>
+<blockquote>
+<div><p>.contains(crt)</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>case _ =&gt; true</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>case _ =&gt; false</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/pushservice/src/main/scala/com/twitter/frigate/pushservice/rank/ModelBasedRanker.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

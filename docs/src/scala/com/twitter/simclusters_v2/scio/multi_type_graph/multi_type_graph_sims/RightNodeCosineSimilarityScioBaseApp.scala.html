@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../" id="documentation_options" src="../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.simclusters_v2.scio
+package multi_type_graph.multi_type_graph_sims</p>
+<p>import com.spotify.scio.ScioContext
+import com.spotify.scio.coders.Coder
+import com.spotify.scio.values.SCollection
+import com.twitter.beam.io.dal.DAL
+import com.twitter.beam.io.fs.multiformat.PathLayout
+import com.twitter.beam.job.DateRangeOptions
+import com.twitter.common.util.Clock
+import com.twitter.dal.client.dataset.KeyValDALDataset
+import com.twitter.dal.client.dataset.SnapshotDALDataset
+import com.twitter.scalding_internal.multiformat.format.keyval.KeyVal
+import com.twitter.scio_internal.coders.ThriftStructLazyBinaryScroogeCoder
+import com.twitter.scio_internal.job.ScioBeamJob
+import com.twitter.scrooge.ThriftStruct
+import com.twitter.simclusters_v2.hdfs_sources.RightNodeSimHashScioScalaDataset
+import com.twitter.simclusters_v2.scio.multi_type_graph.common.MultiTypeGraphUtil
+import com.twitter.simclusters_v2.thriftscala._
+import com.twitter.util.Duration
+import com.twitter.wtf.dataflow.cosine_similarity.ApproximateMatrixSelfTransposeMultiplicationJob
+import java.time.Instant</p>
+<dl>
+<dt>trait RightNodeCosineSimilarityScioBaseApp</dt><dd><blockquote>
+<div><p>extends ScioBeamJob[DateRangeOptions]
+with ApproximateMatrixSelfTransposeMultiplicationJob[RightNode] {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>override implicit def scroogeCoder[T &lt;: ThriftStruct: Manifest]: Coder[T] =</dt><dd><p>ThriftStructLazyBinaryScroogeCoder.scroogeCoder</p>
+</dd>
+</dl>
+<p>override val ordering: Ordering[RightNode] = MultiTypeGraphUtil.rightNodeOrdering</p>
+<p>val isAdhoc: Boolean
+val cosineSimKeyValSnapshotDataset: KeyValDALDataset[KeyVal[RightNode, SimilarRightNodes]]
+val rightNodeSimHashSnapshotDataset: SnapshotDALDataset[RightNodeSimHashSketch] =</p>
+<blockquote>
+<div><p>RightNodeSimHashScioScalaDataset</p>
+</div></blockquote>
+<p>val cosineSimJobOutputDirectory: String = Config.cosineSimJobOutputDirectory</p>
+<dl>
+<dt>override def graph(</dt><dd><p>implicit sc: ScioContext,
+coder: Coder[RightNode]</p>
+</dd>
+<dt>): SCollection[(Long, RightNode, Double)] =</dt><dd><p>MultiTypeGraphUtil.getTruncatedMultiTypeGraph(noOlderThan = Duration.fromDays(14))</p>
+</dd>
+<dt>override def simHashSketches(</dt><dd><p>implicit sc: ScioContext,
+coder: Coder[RightNode]</p>
+</dd>
+<dt>): SCollection[(RightNode, Array[Byte])] = {</dt><dd><dl>
+<dt>sc.customInput(</dt><dd><blockquote>
+<div><p>“ReadSimHashSketches”,
+DAL</p>
+<blockquote>
+<div><dl class="simple">
+<dt>.readMostRecentSnapshotNoOlderThan(</dt><dd><p>rightNodeSimHashSnapshotDataset,
+Duration.fromDays(14),
+Clock.SYSTEM_CLOCK,
+DAL.Environment.Prod</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+</div></blockquote>
+<dl class="simple">
+<dt>).map { sketch =&gt;</dt><dd><p>sketch.rightNode -&gt; sketch.simHashOfEngagers.toArray</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>override def configurePipeline(</dt><dd><p>sc: ScioContext,
+opts: DateRangeOptions</p>
+</dd>
+<dt>): Unit = {</dt><dd><p>implicit def scioContext: ScioContext = sc
+// DAL.Environment variable for WriteExecs
+val dalEnv = if (isAdhoc) DAL.Environment.Dev else DAL.Environment.Prod</p>
+<dl>
+<dt>val topKRightNodes: SCollection[(RightNode, SimilarRightNodes)] = topK</dt><dd><dl>
+<dt>.collect {</dt><dd><dl>
+<dt>case (rightNode, simRightNodes) =&gt;</dt><dd><dl class="simple">
+<dt>val sims = simRightNodes.collect {</dt><dd><p>case (simRightNode, score) =&gt; SimilarRightNode(simRightNode, score)</p>
+</dd>
+</dl>
+<p>}
+(rightNode, SimilarRightNodes(sims))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>topKRightNodes</dt><dd><dl>
+<dt>.map {</dt><dd><p>case (rightNode, sims) =&gt; KeyVal(rightNode, sims)</p>
+</dd>
+<dt>}.saveAsCustomOutput(</dt><dd><p>name = “WriteRightNodeCosineSimilarityDataset”,
+DAL.writeVersionedKeyVal(</p>
+<blockquote>
+<div><p>cosineSimKeyValSnapshotDataset,
+PathLayout.VersionedPath(prefix =</p>
+<blockquote>
+<div><dl>
+<dt>((if (!isAdhoc)</dt><dd><blockquote>
+<div><p>MultiTypeGraphUtil.RootMHPath</p>
+</div></blockquote>
+<dl class="simple">
+<dt>else</dt><dd><p>MultiTypeGraphUtil.AdhocRootPath)</p>
+</dd>
+</dl>
+<ul class="simple">
+<li><p>Config.cosineSimJobOutputDirectory)),</p></li>
+</ul>
+</dd>
+</dl>
+</div></blockquote>
+<p>instant = Instant.ofEpochMilli(opts.interval.getEndMillis - 1L),
+environmentOverride = dalEnv,</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../_sources/src/scala/com/twitter/simclusters_v2/scio/multi_type_graph/multi_type_graph_sims/RightNodeCosineSimilarityScioBaseApp.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

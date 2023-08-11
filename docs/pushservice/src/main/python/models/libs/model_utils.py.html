@@ -1,0 +1,474 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../" id="documentation_options" src="../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>import sys</p>
+<p>import twml</p>
+<p>from .initializer import customized_glorot_uniform</p>
+<p>import tensorflow.compat.v1 as tf
+import yaml</p>
+<p># checkstyle: noqa</p>
+<dl>
+<dt>def read_config(whitelist_yaml_file):</dt><dd><dl class="simple">
+<dt>with tf.gfile.FastGFile(whitelist_yaml_file) as f:</dt><dd><dl class="simple">
+<dt>try:</dt><dd><p>return yaml.safe_load(f)</p>
+</dd>
+<dt>except yaml.YAMLError as exc:</dt><dd><p>print(exc)
+sys.exit(1)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+<dt>def _sparse_feature_fixup(features, input_size_bits):</dt><dd><p>“””Rebuild a sparse tensor feature so that its dense shape attribute is present.</p>
+<dl class="simple">
+<dt>Arguments:</dt><dd><p>features (SparseTensor): Sparse feature tensor of shape <code class="docutils literal notranslate"><span class="pre">(B,</span> <span class="pre">sparse_feature_dim)</span></code>.
+input_size_bits (int): Number of columns in <code class="docutils literal notranslate"><span class="pre">log2</span></code> scale. Must be positive.</p>
+</dd>
+<dt>Returns:</dt><dd><p>SparseTensor: Rebuilt and non-faulty version of <cite>features</cite>.”””</p>
+</dd>
+</dl>
+<p>sparse_feature_dim = tf.constant(2**input_size_bits, dtype=tf.int64)
+sparse_shape = tf.stack([features.dense_shape[0], sparse_feature_dim])
+sparse_tf = tf.SparseTensor(features.indices, features.values, sparse_shape)
+return sparse_tf</p>
+</dd>
+<dt>def self_atten_dense(input, out_dim, activation=None, use_bias=True, name=None):</dt><dd><dl>
+<dt>def safe_concat(base, suffix):</dt><dd><p>“””Concats variables name components if base is given.”””
+if not base:</p>
+<blockquote>
+<div><p>return base</p>
+</div></blockquote>
+<p>return f”{base}:{suffix}”</p>
+</dd>
+</dl>
+<p>input_dim = input.shape.as_list()[1]</p>
+<dl class="simple">
+<dt>sigmoid_out = twml.layers.FullDense(</dt><dd><p>input_dim, dtype=tf.float32, activation=tf.nn.sigmoid, name=safe_concat(name, “sigmoid_out”)</p>
+</dd>
+</dl>
+<p>)(input)
+atten_input = sigmoid_out * input
+mlp_out = twml.layers.FullDense(</p>
+<blockquote>
+<div><p>out_dim,
+dtype=tf.float32,
+activation=activation,
+use_bias=use_bias,
+name=safe_concat(name, “mlp_out”),</p>
+</div></blockquote>
+<p>)(atten_input)
+return mlp_out</p>
+</dd>
+<dt>def get_dense_out(input, out_dim, activation, dense_type):</dt><dd><dl class="simple">
+<dt>if dense_type == “full_dense”:</dt><dd><p>out = twml.layers.FullDense(out_dim, dtype=tf.float32, activation=activation)(input)</p>
+</dd>
+<dt>elif dense_type == “self_atten_dense”:</dt><dd><p>out = self_atten_dense(input, out_dim, activation=activation)</p>
+</dd>
+</dl>
+<p>return out</p>
+</dd>
+<dt>def get_input_trans_func(bn_normalized_dense, is_training):</dt><dd><p>gw_normalized_dense = tf.expand_dims(bn_normalized_dense, -1)
+group_num = bn_normalized_dense.shape.as_list()[1]</p>
+<dl class="simple">
+<dt>gw_normalized_dense = GroupWiseTrans(group_num, 1, 8, name=”groupwise_1”, activation=tf.tanh)(</dt><dd><p>gw_normalized_dense</p>
+</dd>
+</dl>
+<p>)
+gw_normalized_dense = GroupWiseTrans(group_num, 8, 4, name=”groupwise_2”, activation=tf.tanh)(</p>
+<blockquote>
+<div><p>gw_normalized_dense</p>
+</div></blockquote>
+<p>)
+gw_normalized_dense = GroupWiseTrans(group_num, 4, 1, name=”groupwise_3”, activation=tf.tanh)(</p>
+<blockquote>
+<div><p>gw_normalized_dense</p>
+</div></blockquote>
+<p>)</p>
+<p>gw_normalized_dense = tf.squeeze(gw_normalized_dense, [-1])</p>
+<dl class="simple">
+<dt>bn_gw_normalized_dense = tf.layers.batch_normalization(</dt><dd><p>gw_normalized_dense,
+training=is_training,
+renorm_momentum=0.9999,
+momentum=0.9999,
+renorm=is_training,
+trainable=True,</p>
+</dd>
+</dl>
+<p>)</p>
+<p>return bn_gw_normalized_dense</p>
+</dd>
+<dt>def tensor_dropout(</dt><dd><p>input_tensor,
+rate,
+is_training,
+sparse_tensor=None,</p>
+</dd>
+<dt>):</dt><dd><p>“””
+Implements dropout layer for both dense and sparse input_tensor</p>
+<dl>
+<dt>Arguments:</dt><dd><dl class="simple">
+<dt>input_tensor:</dt><dd><p>B x D dense tensor, or a sparse tensor</p>
+</dd>
+<dt>rate (float32):</dt><dd><p>dropout rate</p>
+</dd>
+<dt>is_training (bool):</dt><dd><p>training stage or not.</p>
+</dd>
+<dt>sparse_tensor (bool):</dt><dd><p>whether the input_tensor is sparse tensor or not. Default to be None, this value has to be passed explicitly.</p>
+</dd>
+<dt>rescale_sparse_dropout (bool):</dt><dd><p>Do we need to do rescaling or not.</p>
+</dd>
+</dl>
+</dd>
+<dt>Returns:</dt><dd><p>tensor dropped out”””</p>
+</dd>
+<dt>if sparse_tensor == True:</dt><dd><dl>
+<dt>if is_training:</dt><dd><dl>
+<dt>with tf.variable_scope(“sparse_dropout”):</dt><dd><p>values = input_tensor.values
+keep_mask = tf.keras.backend.random_binomial(</p>
+<blockquote>
+<div><p>tf.shape(values), p=1 - rate, dtype=tf.float32, seed=None</p>
+</div></blockquote>
+<p>)
+keep_mask.set_shape([None])
+keep_mask = tf.cast(keep_mask, tf.bool)</p>
+<p>keep_indices = tf.boolean_mask(input_tensor.indices, keep_mask, axis=0)
+keep_values = tf.boolean_mask(values, keep_mask, axis=0)</p>
+<p>dropped_tensor = tf.SparseTensor(keep_indices, keep_values, input_tensor.dense_shape)
+return dropped_tensor</p>
+</dd>
+</dl>
+</dd>
+<dt>else:</dt><dd><p>return input_tensor</p>
+</dd>
+</dl>
+</dd>
+<dt>elif sparse_tensor == False:</dt><dd><p>return tf.layers.dropout(input_tensor, rate=rate, training=is_training)</p>
+</dd>
+</dl>
+</dd>
+<dt>def adaptive_transformation(bn_normalized_dense, is_training, func_type=”default”):</dt><dd><dl class="simple">
+<dt>assert func_type in [</dt><dd><p>“default”,
+“tiny”,</p>
+</dd>
+</dl>
+<p>], f”fun_type can only be one of default and tiny, but get {func_type}”</p>
+<p>gw_normalized_dense = tf.expand_dims(bn_normalized_dense, -1)
+group_num = bn_normalized_dense.shape.as_list()[1]</p>
+<dl>
+<dt>if func_type == “default”:</dt><dd><dl class="simple">
+<dt>gw_normalized_dense = FastGroupWiseTrans(</dt><dd><p>group_num, 1, 8, name=”groupwise_1”, activation=tf.tanh, init_multiplier=8</p>
+</dd>
+</dl>
+<p>)(gw_normalized_dense)</p>
+<dl class="simple">
+<dt>gw_normalized_dense = FastGroupWiseTrans(</dt><dd><p>group_num, 8, 4, name=”groupwise_2”, activation=tf.tanh, init_multiplier=8</p>
+</dd>
+</dl>
+<p>)(gw_normalized_dense)</p>
+<dl class="simple">
+<dt>gw_normalized_dense = FastGroupWiseTrans(</dt><dd><p>group_num, 4, 1, name=”groupwise_3”, activation=tf.tanh, init_multiplier=8</p>
+</dd>
+</dl>
+<p>)(gw_normalized_dense)</p>
+</dd>
+<dt>elif func_type == “tiny”:</dt><dd><dl class="simple">
+<dt>gw_normalized_dense = FastGroupWiseTrans(</dt><dd><p>group_num, 1, 2, name=”groupwise_1”, activation=tf.tanh, init_multiplier=8</p>
+</dd>
+</dl>
+<p>)(gw_normalized_dense)</p>
+<dl class="simple">
+<dt>gw_normalized_dense = FastGroupWiseTrans(</dt><dd><p>group_num, 2, 1, name=”groupwise_2”, activation=tf.tanh, init_multiplier=8</p>
+</dd>
+</dl>
+<p>)(gw_normalized_dense)</p>
+<dl class="simple">
+<dt>gw_normalized_dense = FastGroupWiseTrans(</dt><dd><p>group_num, 1, 1, name=”groupwise_3”, activation=tf.tanh, init_multiplier=8</p>
+</dd>
+</dl>
+<p>)(gw_normalized_dense)</p>
+</dd>
+</dl>
+<p>gw_normalized_dense = tf.squeeze(gw_normalized_dense, [-1])
+bn_gw_normalized_dense = tf.layers.batch_normalization(</p>
+<blockquote>
+<div><p>gw_normalized_dense,
+training=is_training,
+renorm_momentum=0.9999,
+momentum=0.9999,
+renorm=is_training,
+trainable=True,</p>
+</div></blockquote>
+<p>)</p>
+<p>return bn_gw_normalized_dense</p>
+</dd>
+<dt>class FastGroupWiseTrans(object):</dt><dd><p>“””
+used to apply group-wise fully connected layers to the input.
+it applies a tiny, unique MLP to each individual feature.”””</p>
+<dl>
+<dt>def __init__(self, group_num, input_dim, out_dim, name, activation=None, init_multiplier=1):</dt><dd><p>self.group_num = group_num
+self.input_dim = input_dim
+self.out_dim = out_dim
+self.activation = activation
+self.init_multiplier = init_multiplier</p>
+<dl>
+<dt>self.w = tf.get_variable(</dt><dd><p>name + “_group_weight”,
+[1, group_num, input_dim, out_dim],
+initializer=customized_glorot_uniform(</p>
+<blockquote>
+<div><p>fan_in=input_dim * init_multiplier, fan_out=out_dim * init_multiplier</p>
+</div></blockquote>
+<p>),
+trainable=True,</p>
+</dd>
+</dl>
+<p>)
+self.b = tf.get_variable(</p>
+<blockquote>
+<div><p>name + “_group_bias”,
+[1, group_num, out_dim],
+initializer=tf.constant_initializer(0.0),
+trainable=True,</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+<dt>def __call__(self, input_tensor):</dt><dd><p>“””
+input_tensor: batch_size x group_num x input_dim
+output_tensor:  batch_size x group_num x out_dim”””
+input_tensor_expand = tf.expand_dims(input_tensor, axis=-1)</p>
+<dl class="simple">
+<dt>output_tensor = tf.add(</dt><dd><p>tf.reduce_sum(tf.multiply(input_tensor_expand, self.w), axis=-2, keepdims=False),
+self.b,</p>
+</dd>
+</dl>
+<p>)</p>
+<dl class="simple">
+<dt>if self.activation is not None:</dt><dd><p>output_tensor = self.activation(output_tensor)</p>
+</dd>
+</dl>
+<p>return output_tensor</p>
+</dd>
+</dl>
+</dd>
+<dt>class GroupWiseTrans(object):</dt><dd><p>“””
+Used to apply group fully connected layers to the input.
+“””</p>
+<dl>
+<dt>def __init__(self, group_num, input_dim, out_dim, name, activation=None):</dt><dd><p>self.group_num = group_num
+self.input_dim = input_dim
+self.out_dim = out_dim
+self.activation = activation</p>
+<p>w_list, b_list = [], []
+for idx in range(out_dim):</p>
+<blockquote>
+<div><dl class="simple">
+<dt>this_w = tf.get_variable(</dt><dd><p>name + f”_group_weight_{idx}”,
+[1, group_num, input_dim],
+initializer=tf.keras.initializers.glorot_uniform(),
+trainable=True,</p>
+</dd>
+</dl>
+<p>)
+this_b = tf.get_variable(</p>
+<blockquote>
+<div><p>name + f”_group_bias_{idx}”,
+[1, group_num, 1],
+initializer=tf.constant_initializer(0.0),
+trainable=True,</p>
+</div></blockquote>
+<p>)
+w_list.append(this_w)
+b_list.append(this_b)</p>
+</div></blockquote>
+<p>self.w_list = w_list
+self.b_list = b_list</p>
+</dd>
+<dt>def __call__(self, input_tensor):</dt><dd><p>“””
+input_tensor: batch_size x group_num x input_dim
+output_tensor: batch_size x group_num x out_dim
+“””
+out_tensor_list = []
+for idx in range(self.out_dim):</p>
+<blockquote>
+<div><dl class="simple">
+<dt>this_res = (</dt><dd><p>tf.reduce_sum(input_tensor * self.w_list[idx], axis=-1, keepdims=True) + self.b_list[idx]</p>
+</dd>
+</dl>
+<p>)
+out_tensor_list.append(this_res)</p>
+</div></blockquote>
+<p>output_tensor = tf.concat(out_tensor_list, axis=-1)</p>
+<dl class="simple">
+<dt>if self.activation is not None:</dt><dd><p>output_tensor = self.activation(output_tensor)</p>
+</dd>
+</dl>
+<p>return output_tensor</p>
+</dd>
+</dl>
+</dd>
+<dt>def add_scalar_summary(var, name, name_scope=”hist_dense_feature/”):</dt><dd><dl class="simple">
+<dt>with tf.name_scope(“summaries/”):</dt><dd><dl class="simple">
+<dt>with tf.name_scope(name_scope):</dt><dd><p>tf.summary.scalar(name, var)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+<dt>def add_histogram_summary(var, name, name_scope=”hist_dense_feature/”):</dt><dd><dl class="simple">
+<dt>with tf.name_scope(“summaries/”):</dt><dd><dl class="simple">
+<dt>with tf.name_scope(name_scope):</dt><dd><p>tf.summary.histogram(name, tf.reshape(var, [-1]))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+<dt>def sparse_clip_by_value(sparse_tf, min_val, max_val):</dt><dd><p>new_vals = tf.clip_by_value(sparse_tf.values, min_val, max_val)
+return tf.SparseTensor(sparse_tf.indices, new_vals, sparse_tf.dense_shape)</p>
+</dd>
+<dt>def check_numerics_with_msg(tensor, message=””, sparse_tensor=False):</dt><dd><dl class="simple">
+<dt>if sparse_tensor:</dt><dd><p>values = tf.debugging.check_numerics(tensor.values, message=message)
+return tf.SparseTensor(tensor.indices, values, tensor.dense_shape)</p>
+</dd>
+<dt>else:</dt><dd><p>return tf.debugging.check_numerics(tensor, message=message)</p>
+</dd>
+</dl>
+</dd>
+<dt>def pad_empty_sparse_tensor(tensor):</dt><dd><dl class="simple">
+<dt>dummy_tensor = tf.SparseTensor(</dt><dd><p>indices=[[0, 0]],
+values=[0.00001],
+dense_shape=tensor.dense_shape,</p>
+</dd>
+</dl>
+<p>)
+result = tf.cond(</p>
+<blockquote>
+<div><p>tf.equal(tf.size(tensor.values), 0),
+lambda: dummy_tensor,
+lambda: tensor,</p>
+</div></blockquote>
+<p>)
+return result</p>
+</dd>
+<dt>def filter_nans_and_infs(tensor, sparse_tensor=False):</dt><dd><dl>
+<dt>if sparse_tensor:</dt><dd><p>sparse_values = tensor.values
+filtered_val = tf.where(</p>
+<blockquote>
+<div><p>tf.logical_or(tf.is_nan(sparse_values), tf.is_inf(sparse_values)),
+tf.zeros_like(sparse_values),
+sparse_values,</p>
+</div></blockquote>
+<p>)
+return tf.SparseTensor(tensor.indices, filtered_val, tensor.dense_shape)</p>
+</dd>
+<dt>else:</dt><dd><dl class="simple">
+<dt>return tf.where(</dt><dd><p>tf.logical_or(tf.is_nan(tensor), tf.is_inf(tensor)), tf.zeros_like(tensor), tensor</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+<dt>def generate_disliked_mask(labels):</dt><dd><p>“””Generate a disliked mask where only samples with dislike labels are set to 1 otherwise set to 0.
+Args:</p>
+<blockquote>
+<div><p>labels: labels of training samples, which is a 2D tensor of shape batch_size x 3: [OONCs, engagements, dislikes]</p>
+</div></blockquote>
+<dl class="simple">
+<dt>Returns:</dt><dd><p>1D tensor of shape batch_size x 1: [dislikes (booleans)]</p>
+</dd>
+</dl>
+<p>“””
+return tf.equal(tf.reshape(labels[:, 2], shape=[-1, 1]), 1)</p>
+</dd>
+</dl>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../_sources/pushservice/src/main/python/models/libs/model_utils.py.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

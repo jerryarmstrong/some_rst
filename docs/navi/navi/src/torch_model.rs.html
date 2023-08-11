@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../" id="documentation_options" src="../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>#[cfg(feature = “torch”)]
+pub mod torch {</p>
+<blockquote>
+<div><p>use std::fmt;
+use std::fmt::Display;
+use std::string::String;</p>
+<p>use crate::TensorReturnEnum;
+use crate::SerializedInput;
+use crate::bootstrap::TensorInput;
+use crate::cli_args::{Args, ARGS, MODEL_SPECS};
+use crate::metrics;
+use crate::metrics::{</p>
+<blockquote>
+<div><p>INFERENCE_FAILED_REQUESTS_BY_MODEL, NUM_REQUESTS_FAILED, NUM_REQUESTS_FAILED_BY_MODEL,</p>
+</div></blockquote>
+<p>};
+use crate::predict_service::Model;
+use anyhow::Result;
+use dr_transform::converter::BatchPredictionRequestToTorchTensorConverter;
+use dr_transform::converter::Converter;
+use serde_json::Value;
+use tch::Tensor;
+use tch::{kind, CModule, IValue};</p>
+<p>#[derive(Debug)]
+pub struct TorchModel {</p>
+<blockquote>
+<div><p>pub model_idx: usize,
+pub version: i64,
+pub module: CModule,
+pub export_dir: String,
+// FIXME: make this Box&lt;Option&lt;..&gt;&gt; so input converter can be optional.
+// Also consider adding output_converter.
+pub input_converter: Box&lt;dyn Converter&gt;,</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>impl Display for TorchModel {</dt><dd><dl>
+<dt>fn fmt(&amp;self, f: &amp;mut fmt::Formatter) -&gt; fmt::Result {</dt><dd><dl class="simple">
+<dt>write!(</dt><dd><p>f,
+“idx: {}, torch model_name:{}, version:{}”,
+self.model_idx, MODEL_SPECS[self.model_idx], self.version</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>impl TorchModel {</dt><dd><dl>
+<dt>pub fn new(idx: usize, version: String, _model_config: &amp;Value) -&gt; Result&lt;TorchModel&gt; {</dt><dd><p>let export_dir = format!(“{}/{}/model.pt”, ARGS.model_dir[idx], version);
+let model = CModule::load(&amp;export_dir).unwrap();
+let torch_model = TorchModel {</p>
+<blockquote>
+<div><p>model_idx: idx,
+version: Args::version_str_to_epoch(&amp;version)?,
+module: model,
+export_dir,
+//TODO: move converter lookup in a registry.
+input_converter: Box::new(BatchPredictionRequestToTorchTensorConverter::new(</p>
+<blockquote>
+<div><p>&amp;ARGS.model_dir[idx].as_str(),
+version.as_str(),
+vec![],
+Some(&amp;metrics::register_dynamic_metrics),</p>
+</div></blockquote>
+<p>)),</p>
+</div></blockquote>
+<p>};</p>
+<p>torch_model.warmup()?;
+Ok(torch_model)</p>
+</dd>
+</dl>
+<p>}
+#[inline(always)]
+pub fn decode_to_inputs(bytes: SerializedInput) -&gt; Vec&lt;Tensor&gt; {</p>
+<blockquote>
+<div><p>//FIXME: for now we generate 4 random tensors as inputs to unblock end to end testing
+//when Shajan’s decoder is ready we will swap
+let row = bytes.len() as i64;
+let t1 = Tensor::randn(&amp;[row, 5293], kind::FLOAT_CPU); //continuous
+let t2 = Tensor::randint(10, &amp;[row, 149], kind::INT64_CPU); //binary
+let t3 = Tensor::randint(10, &amp;[row, 320], kind::INT64_CPU); //discrete
+let t4 = Tensor::randn(&amp;[row, 200], kind::FLOAT_CPU); //user_embedding
+let t5 = Tensor::randn(&amp;[row, 200], kind::FLOAT_CPU); //user_eng_embedding
+let t6 = Tensor::randn(&amp;[row, 200], kind::FLOAT_CPU); //author_embedding</p>
+<p>vec![t1, t2, t3, t4, t5, t6]</p>
+</div></blockquote>
+<p>}
+#[inline(always)]
+pub fn output_to_vec(res: IValue, dst: &amp;mut Vec&lt;f32&gt;) {</p>
+<blockquote>
+<div><dl>
+<dt>match res {</dt><dd><p>IValue::Tensor(tensor) =&gt; TorchModel::tensors_to_vec(&amp;[tensor], dst),
+IValue::Tuple(ivalues) =&gt; {</p>
+<blockquote>
+<div><p>TorchModel::tensors_to_vec(&amp;TorchModel::ivalues_to_tensors(ivalues), dst)</p>
+</div></blockquote>
+<p>}
+_ =&gt; panic!(“we only support output as a single tensor or a vec of tensors”),</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}
+#[inline(always)]
+pub fn tensor_flatten_size(t: &amp;Tensor) -&gt; usize {</p>
+<blockquote>
+<div><p>t.size().into_iter().fold(1, <a href="#id1"><span class="problematic" id="id2">|acc, x|</span></a> acc * x) as usize</p>
+</div></blockquote>
+<p>}
+#[inline(always)]
+pub fn tensor_to_vec&lt;T: kind::Element&gt;(res: &amp;Tensor) -&gt; Vec&lt;T&gt; {</p>
+<blockquote>
+<div><p>let size = TorchModel::tensor_flatten_size(res);
+let mut res_f32: Vec&lt;T&gt; = Vec::with_capacity(size);
+unsafe {</p>
+<blockquote>
+<div><p>res_f32.set_len(size);</p>
+</div></blockquote>
+<p>}
+res.copy_data(res_f32.as_mut_slice(), size);
+// println!(“Copied tensor:{}, {:?}”, res_f32.len(), res_f32);
+res_f32</p>
+</div></blockquote>
+<p>}
+#[inline(always)]
+pub fn tensors_to_vec(tensors: &amp;[Tensor], dst: &amp;mut Vec&lt;f32&gt;) {</p>
+<blockquote>
+<div><p>let mut offset = dst.len();
+tensors.iter().for_each(<a href="#id3"><span class="problematic" id="id4">|t|</span></a> {</p>
+<blockquote>
+<div><p>let size = TorchModel::tensor_flatten_size(t);
+let next_size = offset + size;
+unsafe {</p>
+<blockquote>
+<div><p>dst.set_len(next_size);</p>
+</div></blockquote>
+<p>}
+t.copy_data(&amp;mut dst[offset..], size);
+offset = next_size;</p>
+</div></blockquote>
+<p>});</p>
+</div></blockquote>
+<p>}
+pub fn ivalues_to_tensors(ivalues: Vec&lt;IValue&gt;) -&gt; Vec&lt;Tensor&gt; {</p>
+<blockquote>
+<div><dl>
+<dt>ivalues</dt><dd><p>.into_iter()
+.map(<a href="#id5"><span class="problematic" id="id6">|t|</span></a> {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if let IValue::Tensor(vanilla_t) = t {</dt><dd><p>vanilla_t</p>
+</dd>
+<dt>} else {</dt><dd><p>panic!(“not a tensor”)</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>})
+.collect::&lt;Vec&lt;Tensor&gt;&gt;()</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>impl Model for TorchModel {</dt><dd><dl class="simple">
+<dt>fn warmup(&amp;self) -&gt; Result&lt;()&gt; {</dt><dd><p>Ok(())</p>
+</dd>
+</dl>
+<p>}
+//TODO: torch runtime needs some refactor to make it a generic interface
+#[inline(always)]
+fn do_predict(</p>
+<blockquote>
+<div><p>&amp;self,
+input_tensors: Vec&lt;Vec&lt;TensorInput&gt;&gt;,
+total_len: u64,</p>
+</div></blockquote>
+<dl>
+<dt>) -&gt; (Vec&lt;TensorReturnEnum&gt;, Vec&lt;Vec&lt;usize&gt;&gt;) {</dt><dd><p>let mut buf: Vec&lt;f32&gt; = Vec::with_capacity(10_000);
+let mut batch_ends = vec![0usize; input_tensors.len()];
+for (i, batch_bytes_in_request) in input_tensors.into_iter().enumerate() {</p>
+<blockquote>
+<div><dl>
+<dt>for _ in batch_bytes_in_request.into_iter() {</dt><dd><p>//FIXME: for now use some hack
+let model_input = TorchModel::decode_to_inputs(vec![0u8; 30]); //self.input_converter.convert(bytes);
+let input_batch_tensors = model_input</p>
+<blockquote>
+<div><p>.into_iter()
+.map(<a href="#id7"><span class="problematic" id="id8">|t|</span></a> IValue::Tensor(t))
+.collect::&lt;Vec&lt;IValue&gt;&gt;();</p>
+</div></blockquote>
+<p>// match self.module.forward_is(&amp;input_batch_tensors) {
+match self.module.method_is(“forward_serve”, &amp;input_batch_tensors) {</p>
+<blockquote>
+<div><p>Ok(res) =&gt; TorchModel::output_to_vec(res, &amp;mut buf),
+Err(e) =&gt; {</p>
+<blockquote>
+<div><p>NUM_REQUESTS_FAILED.inc_by(total_len);
+NUM_REQUESTS_FAILED_BY_MODEL</p>
+<blockquote>
+<div><p>.with_label_values(&amp;[&amp;MODEL_SPECS[self.model_idx]])
+.inc_by(total_len);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>INFERENCE_FAILED_REQUESTS_BY_MODEL</dt><dd><p>.with_label_values(&amp;[&amp;MODEL_SPECS[self.model_idx]])
+.inc_by(total_len);</p>
+</dd>
+</dl>
+<p>panic!(“{model}: {e:?}”, model = MODEL_SPECS[self.model_idx], e = e);</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}
+batch_ends[i] = buf.len();</p>
+</div></blockquote>
+<blockquote>
+<div><p>vec![TensorReturnEnum::FloatTensorReturn(Box::new(buf))],
+vec![batch_ends],</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>}
+#[inline(always)]
+fn model_idx(&amp;self) -&gt; usize {</p>
+<blockquote>
+<div><p>self.model_idx</p>
+</div></blockquote>
+<p>}
+#[inline(always)]
+fn version(&amp;self) -&gt; i64 {</p>
+<blockquote>
+<div><p>self.version</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../_sources/navi/navi/src/torch_model.rs.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

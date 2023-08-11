@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../" id="documentation_options" src="../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.ingester.pipeline.twitter;</p>
+<p>import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.ExecutorService;
+import javax.naming.NamingException;</p>
+<p>import com.google.common.collect.Queues;</p>
+<p>import org.apache.commons.pipeline.StageException;
+import org.apache.commons.pipeline.validation.ConsumedTypes;
+import org.apache.commons.pipeline.validation.ProducesConsumed;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;</p>
+<p>import com.twitter.search.common.metrics.SearchCustomGauge;
+import com.twitter.search.common.metrics.SearchRateCounter;
+import com.twitter.search.common.relevance.entities.TwitterMessage;
+import com.twitter.search.common.relevance.text.TweetParser;
+import com.twitter.search.ingester.pipeline.util.PipelineStageRuntimeException;</p>
+<p>&#64;ConsumedTypes(TwitterMessage.class)
+&#64;ProducesConsumed
+public class TextFeatureExtractionWorkersStage extends TwitterBaseStage</p>
+<blockquote>
+<div><blockquote>
+<div><p>&lt;TwitterMessage, TwitterMessage&gt; {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>private static final Logger LOG =</dt><dd><p>LoggerFactory.getLogger(TextFeatureExtractionWorkersStage.class);</p>
+</dd>
+</dl>
+<p>private static final int NUM_THREADS = 5;
+private static final int MAX_QUEUE_SIZE = 100;
+private static final long SLOW_TWEET_TIME_MILLIS = 1000;
+private ExecutorService executorService = null;</p>
+<p>// define as static so that FeatureExtractorWorker thread can use it
+private static SearchRateCounter slowTweetCounter;
+private SearchRateCounter threadErrorCounter;
+private SearchRateCounter threadInterruptionCounter;
+private final BlockingQueue&lt;TwitterMessage&gt; messageQueue =</p>
+<blockquote>
+<div><p>Queues.newLinkedBlockingQueue(MAX_QUEUE_SIZE);</p>
+</div></blockquote>
+<p>private TweetParser tweetParser;</p>
+<p>&#64;Override
+public void initStats() {</p>
+<blockquote>
+<div><p>super.initStats();
+innerSetupStats();</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+protected void innerSetupStats() {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>slowTweetCounter = SearchRateCounter.export(</dt><dd><p>getStageNamePrefix() + “_text_feature_extraction_slow_tweet_count”);</p>
+</dd>
+<dt>SearchCustomGauge.export(getStageNamePrefix() + “_queue_size”,</dt><dd><p>messageQueue::size);</p>
+</dd>
+<dt>threadErrorCounter = SearchRateCounter.export(</dt><dd><p>getStageNamePrefix() + “_text_quality_evaluation_thread_error”);</p>
+</dd>
+<dt>threadInterruptionCounter = SearchRateCounter.export(</dt><dd><p>getStageNamePrefix() + “_text_quality_evaluation_thread_interruption”);</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+protected void doInnerPreprocess() throws StageException, NamingException {</p>
+<blockquote>
+<div><p>innerSetup();
+// anything threading related, we don’t need in V2 as of yet.
+executorService = wireModule.getThreadPool(NUM_THREADS);
+for (int i = 0; i &lt; NUM_THREADS; ++i) {</p>
+<blockquote>
+<div><p>executorService.submit(new FeatureExtractorWorker());</p>
+</div></blockquote>
+<p>}
+LOG.info(“Initialized {} parsers.”, NUM_THREADS);</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+protected void innerSetup() {</p>
+<blockquote>
+<div><p>tweetParser = new TweetParser();</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public void innerProcess(Object obj) throws StageException {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (!(obj instanceof TwitterMessage)) {</dt><dd><p>LOG.error(“Object is not a TwitterMessage object: {}”, obj);
+return;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>TwitterMessage message = TwitterMessage.class.cast(obj);
+try {</p>
+<blockquote>
+<div><p>messageQueue.put(message);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} catch (InterruptedException ie) {</dt><dd><p>LOG.error(“Interrupted exception adding to the queue”, ie);</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>private boolean tryToParse(TwitterMessage message) {</dt><dd><p>boolean isAbleToParse = false;
+long startTime = clock.nowMillis();
+// Parse tweet and merge the parsed out features into what we already have in the message.
+try {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>synchronized (this) {</dt><dd><p>tweetParser.parseTweet(message, false, false);</p>
+</dd>
+</dl>
+<p>}
+// If parsing failed we don’t need to pass the tweet down the pipeline.
+isAbleToParse = true;</p>
+</div></blockquote>
+<dl>
+<dt>} catch (Exception e) {</dt><dd><p>threadErrorCounter.increment();
+LOG.error(“Uncaught exception from tweetParser.parseTweet()”, e);</p>
+</dd>
+<dt>} finally {</dt><dd><p>long elapsedTime = clock.nowMillis() - startTime;
+if (elapsedTime &gt; SLOW_TWEET_TIME_MILLIS) {</p>
+<blockquote>
+<div><p>LOG.debug(“Took {}ms to parse tweet {}: {}”, elapsedTime, message.getId(), message);
+slowTweetCounter.increment();</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}
+return isAbleToParse;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;Override
+protected TwitterMessage innerRunStageV2(TwitterMessage message) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (!tryToParse(message)) {</dt><dd><p>throw new PipelineStageRuntimeException(“Failed to parse, not passing to next stage.”);</p>
+</dd>
+</dl>
+<p>}</p>
+<p>return message;</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public void innerPostprocess() {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (executorService != null) {</dt><dd><p>executorService.shutdownNow();</p>
+</dd>
+</dl>
+<p>}
+executorService = null;</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>private class FeatureExtractorWorker implements Runnable {</dt><dd><dl>
+<dt>public void run() {</dt><dd><dl>
+<dt>while (!Thread.currentThread().isInterrupted()) {</dt><dd><p>TwitterMessage message = null;
+try {</p>
+<blockquote>
+<div><p>message = messageQueue.take();</p>
+</div></blockquote>
+<dl>
+<dt>} catch (InterruptedException ie) {</dt><dd><p>threadInterruptionCounter.increment();
+LOG.error(“Interrupted exception polling from the queue”, ie);
+continue;</p>
+</dd>
+<dt>} finally {</dt><dd><dl class="simple">
+<dt>if (tryToParse(message)) {</dt><dd><p>emitAndCount(message);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../_sources/src/java/com/twitter/search/ingester/pipeline/twitter/TextFeatureExtractionWorkersStage.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

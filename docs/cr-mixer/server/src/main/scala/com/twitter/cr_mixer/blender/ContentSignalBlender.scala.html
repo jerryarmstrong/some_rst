@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.cr_mixer.blender</p>
+<p>import com.twitter.cr_mixer.model.BlendedCandidate
+import com.twitter.cr_mixer.model.InitialCandidate
+import com.twitter.cr_mixer.param.BlenderParams
+import com.twitter.cr_mixer.thriftscala.SimilarityEngineType
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.snowflake.id.SnowflakeId
+import com.twitter.timelines.configapi.Params
+import com.twitter.util.Future
+import com.twitter.util.Time
+import javax.inject.Inject</p>
+<p>case class ContentSignalBlender &#64;Inject() (globalStats: StatsReceiver) {</p>
+<blockquote>
+<div><p>private val name: String = this.getClass.getCanonicalName
+private val stats: StatsReceiver = globalStats.scope(name)</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Exposes multiple types of sorting relying only on Content Based signals</p></li>
+<li><p>Candidate Recency, Random, FavoriteCount and finally Standardized, which standardizes the scores</p></li>
+<li><p>that come from the active SimilarityEngine and then sort on the standardized scores.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>def blend(</dt><dd><p>params: Params,
+inputCandidates: Seq[Seq[InitialCandidate]],</p>
+</dd>
+<dt>): Future[Seq[BlendedCandidate]] = {</dt><dd><p>// Filter out empty candidate sequence
+val candidates = inputCandidates.filter(_.nonEmpty)
+val sortedCandidates = params(BlenderParams.ContentBlenderTypeSortingAlgorithmParam) match {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case BlenderParams.ContentBasedSortingAlgorithmEnum.CandidateRecency =&gt;</dt><dd><p>candidates.flatten.sortBy(c =&gt; getSnowflakeTimeStamp(c.tweetId)).reverse</p>
+</dd>
+<dt>case BlenderParams.ContentBasedSortingAlgorithmEnum.RandomSorting =&gt;</dt><dd><p>candidates.flatten.sortBy(_ =&gt; scala.util.Random.nextDouble())</p>
+</dd>
+<dt>case BlenderParams.ContentBasedSortingAlgorithmEnum.FavoriteCount =&gt;</dt><dd><p>candidates.flatten.sortBy(-_.tweetInfo.favCount)</p>
+</dd>
+<dt>case BlenderParams.ContentBasedSortingAlgorithmEnum.SimilarityToSignalSorting =&gt;</dt><dd><p>standardizeAndSortByScore(flattenAndGroupByEngineTypeOrFirstContribEngine(candidates))</p>
+</dd>
+<dt>case _ =&gt;</dt><dd><p>candidates.flatten.sortBy(-_.tweetInfo.favCount)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<p>stats.stat(“candidates”).add(sortedCandidates.size)</p>
+<dl class="simple">
+<dt>val blendedCandidates =</dt><dd><p>BlendedCandidatesBuilder.build(inputCandidates, removeDuplicates(sortedCandidates))</p>
+</dd>
+</dl>
+<p>Future.value(blendedCandidates)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def removeDuplicates(candidates: Seq[InitialCandidate]): Seq[InitialCandidate] = {</dt><dd><p>val seen = collection.mutable.Set.empty[Long]
+candidates.filter { c =&gt;</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (seen.contains(c.tweetId)) {</dt><dd><p>false</p>
+</dd>
+<dt>} else {</dt><dd><p>seen += c.tweetId
+true</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def groupByEngineTypeOrFirstContribEngine(</dt><dd><p>candidates: Seq[InitialCandidate]</p>
+</dd>
+<dt>): Map[SimilarityEngineType, Seq[InitialCandidate]] = {</dt><dd><dl>
+<dt>val grouped = candidates.groupBy { candidate =&gt;</dt><dd><p>val contrib = candidate.candidateGenerationInfo.contributingSimilarityEngines
+if (contrib.nonEmpty) {</p>
+<blockquote>
+<div><p>contrib.head.similarityEngineType</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>candidate.candidateGenerationInfo.similarityEngineInfo.similarityEngineType</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}
+grouped</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private def flattenAndGroupByEngineTypeOrFirstContribEngine(</dt><dd><p>candidates: Seq[Seq[InitialCandidate]]</p>
+</dd>
+<dt>): Seq[Seq[InitialCandidate]] = {</dt><dd><p>val flat = candidates.flatten
+val grouped = groupByEngineTypeOrFirstContribEngine(flat)
+grouped.values.toSeq</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def standardizeAndSortByScore(</dt><dd><p>candidates: Seq[Seq[InitialCandidate]]</p>
+</dd>
+<dt>): Seq[InitialCandidate] = {</dt><dd><dl>
+<dt>candidates</dt><dd><dl>
+<dt>.map { innerSeq =&gt;</dt><dd><dl>
+<dt>val meanScore = innerSeq</dt><dd><p>.map(c =&gt; c.candidateGenerationInfo.similarityEngineInfo.score.getOrElse(0.0))
+.sum / innerSeq.length</p>
+</dd>
+<dt>val stdDev = scala.math</dt><dd><dl class="simple">
+<dt>.sqrt(</dt><dd><dl class="simple">
+<dt>innerSeq</dt><dd><p>.map(c =&gt; c.candidateGenerationInfo.similarityEngineInfo.score.getOrElse(0.0))
+.map(a =&gt; a - meanScore)
+.map(a =&gt; a * a)
+.sum / innerSeq.length)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+<dt>innerSeq</dt><dd><dl>
+<dt>.map(c =&gt;</dt><dd><dl>
+<dt>(</dt><dd><p>c,
+c.candidateGenerationInfo.similarityEngineInfo.score</p>
+<blockquote>
+<div><dl class="simple">
+<dt>.map { score =&gt;</dt><dd><p>if (stdDev != 0) (score - meanScore) / stdDev
+else 0.0</p>
+</dd>
+</dl>
+<p>}
+.getOrElse(0.0)))</p>
+</div></blockquote>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}.flatten.sortBy { case (_, standardizedScore) =&gt; -standardizedScore }
+.map { case (candidate, _) =&gt; candidate }</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def getSnowflakeTimeStamp(tweetId: Long): Time = {</dt><dd><p>val isSnowflake = SnowflakeId.isSnowflakeId(tweetId)
+if (isSnowflake) {</p>
+<blockquote>
+<div><p>SnowflakeId(tweetId).time</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>Time.fromMilliseconds(0L)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/cr-mixer/server/src/main/scala/com/twitter/cr_mixer/blender/ContentSignalBlender.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

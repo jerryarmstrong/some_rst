@@ -1,0 +1,951 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../" id="documentation_options" src="../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>use std::collections::BTreeSet;
+use std::fmt::{self, Debug, Display};
+use std::fs;</p>
+<p>use crate::all_config;
+use crate::all_config::AllConfig;
+use anyhow::{bail, Context};
+use bpr_thrift::data::DataRecord;
+use bpr_thrift::prediction_service::BatchPredictionRequest;
+use bpr_thrift::tensor::GeneralTensor;
+use log::debug;
+use ndarray::Array2;
+use once_cell::sync::OnceCell;
+use ort::tensor::InputTensor;
+use prometheus::{HistogramOpts, HistogramVec};
+use segdense::mapper::{FeatureMapper, MapReader};
+use segdense::segdense_transform_spec_home_recap_2022::{DensificationTransformSpec, Root};
+use segdense::util;
+use thrift::protocol::{TBinaryInputProtocol, TSerializable};
+use thrift::transport::TBufferChannel;</p>
+<dl>
+<dt>pub fn log_feature_match(</dt><dd><p>dr: &amp;DataRecord,
+seg_dense_config: &amp;DensificationTransformSpec,
+dr_type: String,</p>
+</dd>
+<dt>) {</dt><dd><p>// Note the following algorithm matches features from config using linear search.
+// Also the record source is MinDataRecord. This includes only binary and continous features for now.</p>
+<dl>
+<dt>for (feature_id, feature_value) in dr.continuous_features.as_ref().unwrap() {</dt><dd><dl class="simple">
+<dt>debug!(</dt><dd><p>“{} - Continous Datarecord =&gt; Feature ID: {}, Feature value: {}”,
+dr_type, feature_id, feature_value</p>
+</dd>
+</dl>
+<p>);
+for input_feature in &amp;seg_dense_config.cont.input_features {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if input_feature.feature_id == <a href="#id1"><span class="problematic" id="id2">*</span></a>feature_id {</dt><dd><p>debug!(“Matching input feature: {:?}”, input_feature)</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>for feature_id in dr.binary_features.as_ref().unwrap() {</dt><dd><dl class="simple">
+<dt>debug!(</dt><dd><p>“{} - Binary Datarecord =&gt; Feature ID: {}”,
+dr_type, feature_id</p>
+</dd>
+</dl>
+<p>);
+for input_feature in &amp;seg_dense_config.binary.input_features {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if input_feature.feature_id == <a href="#id3"><span class="problematic" id="id4">*</span></a>feature_id {</dt><dd><p>debug!(“Found input feature: {:?}”, input_feature)</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>pub fn log_feature_matches(drs: &amp;Vec&lt;DataRecord&gt;, seg_dense_config: &amp;DensificationTransformSpec) {</dt><dd><dl class="simple">
+<dt>for dr in drs {</dt><dd><p>log_feature_match(dr, seg_dense_config, String::from(“individual”));</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>pub trait Converter: Send + Sync + Debug + ‘static + Display {</dt><dd><p>fn convert(&amp;self, input: Vec&lt;Vec&lt;u8&gt;&gt;) -&gt; (Vec&lt;InputTensor&gt;, Vec&lt;usize&gt;);</p>
+</dd>
+</dl>
+<p>}</p>
+<p>#[derive(Debug)]
+#[allow(dead_code)]
+pub struct BatchPredictionRequestToTorchTensorConverter {</p>
+<blockquote>
+<div><p>all_config: AllConfig,
+seg_dense_config: Root,
+all_config_path: String,
+seg_dense_config_path: String,
+feature_mapper: FeatureMapper,
+user_embedding_feature_id: i64,
+user_eng_embedding_feature_id: i64,
+author_embedding_feature_id: i64,
+discrete_features_to_report: BTreeSet&lt;i64&gt;,
+continuous_features_to_report: BTreeSet&lt;i64&gt;,
+discrete_feature_metrics: &amp;’static HistogramVec,
+continuous_feature_metrics: &amp;’static HistogramVec,</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>impl Display for BatchPredictionRequestToTorchTensorConverter {</dt><dd><dl>
+<dt>fn fmt(&amp;self, f: &amp;mut fmt::Formatter) -&gt; fmt::Result {</dt><dd><dl class="simple">
+<dt>write!(</dt><dd><p>f,
+“all_config_path: {}, seg_dense_config_path:{}”,
+self.all_config_path, self.seg_dense_config_path</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>impl BatchPredictionRequestToTorchTensorConverter {</dt><dd><dl>
+<dt>pub fn new(</dt><dd><p>model_dir: &amp;str,
+model_version: &amp;str,
+reporting_feature_ids: Vec&lt;(i64, &amp;str)&gt;,
+register_metric_fn: Option&lt;impl Fn(&amp;HistogramVec)&gt;,</p>
+</dd>
+<dt>) -&gt; anyhow::Result&lt;BatchPredictionRequestToTorchTensorConverter&gt; {</dt><dd><p>let all_config_path = format!(“{}/{}/all_config.json”, model_dir, model_version);
+let seg_dense_config_path = format!(</p>
+<blockquote>
+<div><p>“{}/{}/segdense_transform_spec_home_recap_2022.json”,
+model_dir, model_version</p>
+</div></blockquote>
+<p>);
+let seg_dense_config = util::load_config(&amp;seg_dense_config_path)?;
+let all_config = all_config::parse(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>&amp;fs::read_to_string(&amp;all_config_path)</dt><dd><p>.with_context(|| “error loading all_config.json - “)?,</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>)?;</p>
+<p>let feature_mapper = util::load_from_parsed_config(seg_dense_config.clone())?;</p>
+<dl>
+<dt>let user_embedding_feature_id = Self::get_feature_id(</dt><dd><dl class="simple">
+<dt>&amp;all_config</dt><dd><p>.train_data
+.seg_dense_schema
+.renamed_features
+.user_embedding,</p>
+</dd>
+</dl>
+<p>&amp;seg_dense_config,</p>
+</dd>
+</dl>
+<p>);
+let user_eng_embedding_feature_id = Self::get_feature_id(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>&amp;all_config</dt><dd><p>.train_data
+.seg_dense_schema
+.renamed_features
+.user_eng_embedding,</p>
+</dd>
+</dl>
+<p>&amp;seg_dense_config,</p>
+</div></blockquote>
+<p>);
+let author_embedding_feature_id = Self::get_feature_id(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>&amp;all_config</dt><dd><p>.train_data
+.seg_dense_schema
+.renamed_features
+.author_embedding,</p>
+</dd>
+</dl>
+<p>&amp;seg_dense_config,</p>
+</div></blockquote>
+<p>);
+static METRICS: OnceCell&lt;(HistogramVec, HistogramVec)&gt; = OnceCell::new();
+let (discrete_feature_metrics, continuous_feature_metrics) = METRICS.get_or_init(|| {</p>
+<blockquote>
+<div><dl>
+<dt>let discrete = HistogramVec::new(</dt><dd><dl>
+<dt>HistogramOpts::new(“:navi:feature_id:discrete”, “Discrete Feature ID values”)</dt><dd><dl class="simple">
+<dt>.buckets(Vec::from(&amp;[</dt><dd><p>0.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0, 110.0,
+120.0, 130.0, 140.0, 150.0, 160.0, 170.0, 180.0, 190.0, 200.0, 250.0,
+300.0, 500.0, 1000.0, 10000.0, 100000.0,</p>
+</dd>
+</dl>
+<p>] as &amp;’static [f64])),</p>
+</dd>
+</dl>
+<p>&amp;[“feature_id”],</p>
+</dd>
+</dl>
+<p>)
+.expect(“metric cannot be created”);
+let continuous = HistogramVec::new(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>HistogramOpts::new(</dt><dd><p>“:navi:feature_id:continuous”,
+“continuous Feature ID values”,</p>
+</dd>
+</dl>
+<p>)
+.buckets(Vec::from(&amp;[</p>
+<blockquote>
+<div><p>0.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0, 110.0, 120.0,
+130.0, 140.0, 150.0, 160.0, 170.0, 180.0, 190.0, 200.0, 250.0, 300.0, 500.0,
+1000.0, 10000.0, 100000.0,</p>
+</div></blockquote>
+<p>] as &amp;’static [f64])),
+&amp;[“feature_id”],</p>
+</div></blockquote>
+<p>)
+.expect(“metric cannot be created”);
+register_metric_fn.map(<a href="#id21"><span class="problematic" id="id22">|r|</span></a> {</p>
+<blockquote>
+<div><p>r(&amp;discrete);
+r(&amp;continuous);</p>
+</div></blockquote>
+<p>});
+(discrete, continuous)</p>
+</div></blockquote>
+<p>});</p>
+<p>let mut discrete_features_to_report = BTreeSet::new();
+let mut continuous_features_to_report = BTreeSet::new();</p>
+<dl>
+<dt>for (feature_id, feature_type) in reporting_feature_ids.iter() {</dt><dd><dl>
+<dt>match <a href="#id5"><span class="problematic" id="id6">*</span></a>feature_type {</dt><dd><p>“discrete” =&gt; discrete_features_to_report.insert(feature_id.clone()),
+“continuous” =&gt; continuous_features_to_report.insert(feature_id.clone()),
+_ =&gt; bail!(</p>
+<blockquote>
+<div><p>“Invalid feature type {} for reporting metrics!”,
+feature_type</p>
+</div></blockquote>
+<p>),</p>
+</dd>
+</dl>
+<p>};</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>Ok(BatchPredictionRequestToTorchTensorConverter {</dt><dd><p>all_config,
+seg_dense_config,
+all_config_path,
+seg_dense_config_path,
+feature_mapper,
+user_embedding_feature_id,
+user_eng_embedding_feature_id,
+author_embedding_feature_id,
+discrete_features_to_report,
+continuous_features_to_report,
+discrete_feature_metrics,
+continuous_feature_metrics,</p>
+</dd>
+</dl>
+<p>})</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>fn get_feature_id(feature_name: &amp;str, seg_dense_config: &amp;Root) -&gt; i64 {</dt><dd><p>// given a feature name, we get the complex feature type id
+for feature in &amp;seg_dense_config.complex_feature_type_transform_spec {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if feature.full_feature_name == feature_name {</dt><dd><p>return feature.feature_id;</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}
+-1</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>fn parse_batch_prediction_request(bytes: Vec&lt;u8&gt;) -&gt; BatchPredictionRequest {</dt><dd><p>// parse batch prediction request into a struct from byte array repr.
+let mut bc = TBufferChannel::with_capacity(bytes.len(), 0);
+bc.set_readable_bytes(&amp;bytes);
+let mut protocol = TBinaryInputProtocol::new(bc, true);
+BatchPredictionRequest::read_from_in_protocol(&amp;mut protocol).unwrap()</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>fn get_embedding_tensors(</dt><dd><p>&amp;self,
+bprs: &amp;[BatchPredictionRequest],
+feature_id: i64,
+batch_size: &amp;[usize],</p>
+</dd>
+<dt>) -&gt; Array2&lt;f32&gt; {</dt><dd><p>// given an embedding feature id, extract the float tensor array into tensors.
+let cols: usize = 200;
+let rows: usize = batch_size[batch_size.len() - 1];
+let total_size = rows * cols;</p>
+<p>let mut working_set = vec![0 as f32; total_size];
+let mut bpr_start = 0;
+for (bpr, &amp;bpr_end) in bprs.iter().zip(batch_size) {</p>
+<blockquote>
+<div><dl>
+<dt>if bpr.common_features.is_some() {</dt><dd><dl>
+<dt>if bpr.common_features.as_ref().unwrap().tensors.is_some() {</dt><dd><dl class="simple">
+<dt>if bpr</dt><dd><p>.common_features
+.as_ref()
+.unwrap()
+.tensors
+.as_ref()
+.unwrap()
+.contains_key(&amp;feature_id)</p>
+</dd>
+</dl>
+<dl>
+<dt>{</dt><dd><dl>
+<dt>let source_tensor = bpr</dt><dd><p>.common_features
+.as_ref()
+.unwrap()
+.tensors
+.as_ref()
+.unwrap()
+.get(&amp;feature_id)
+.unwrap();</p>
+</dd>
+<dt>let tensor = match source_tensor {</dt><dd><p>GeneralTensor::FloatTensor(float_tensor) =&gt;
+//Tensor::of_slice(
+{</p>
+<blockquote>
+<div><dl class="simple">
+<dt>float_tensor</dt><dd><p>.floats
+.iter()
+.map(<a href="#id23"><span class="problematic" id="id24">|x|</span></a> x.into_inner() as f32)
+.collect::&lt;Vec&lt;_&gt;&gt;()</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+_ =&gt; vec![0 as f32; cols],</p>
+</dd>
+</dl>
+<p>};</p>
+<p>// since the tensor is found in common feature, add it in all batches
+for row in bpr_start..bpr_end {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>for col in 0..cols {</dt><dd><p>working_set[row * cols + col] = tensor[col];</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}
+// find the feature in individual feature list and add to corresponding batch.
+for (index, datarecord) in bpr.individual_features_list.iter().enumerate() {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if datarecord.tensors.is_some()</dt><dd><dl class="simple">
+<dt>&amp;&amp; datarecord</dt><dd><p>.tensors
+.as_ref()
+.unwrap()
+.contains_key(&amp;feature_id)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<dl>
+<dt>{</dt><dd><dl>
+<dt>let source_tensor = datarecord</dt><dd><p>.tensors
+.as_ref()
+.unwrap()
+.get(&amp;feature_id)
+.unwrap();</p>
+</dd>
+<dt>let tensor = match source_tensor {</dt><dd><dl class="simple">
+<dt>GeneralTensor::FloatTensor(float_tensor) =&gt; float_tensor</dt><dd><p>.floats
+.iter()
+.map(<a href="#id25"><span class="problematic" id="id26">|x|</span></a> x.into_inner() as f32)
+.collect::&lt;Vec&lt;_&gt;&gt;(),</p>
+</dd>
+</dl>
+<p>_ =&gt; vec![0 as f32; cols],</p>
+</dd>
+</dl>
+<p>};
+for col in 0..cols {</p>
+<blockquote>
+<div><p>working_set[(bpr_start + index) * cols + col] = tensor[col];</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}
+bpr_start = bpr_end;</p>
+</div></blockquote>
+<p>}
+Array2::&lt;f32&gt;::from_shape_vec([rows, cols], working_set).unwrap()</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// Todo : Refactor, create a generic version with different type and field accessors
+//   Example paramterize and then instiantiate the following
+//           (FLOAT –&gt; FLOAT, DataRecord.continuous_feature)
+//           (BOOL –&gt; INT64, DataRecord.binary_feature)
+//           (INT64 –&gt; INT64, DataRecord.discrete_feature)
+fn get_continuous(&amp;self, bprs: &amp;[BatchPredictionRequest], batch_ends: &amp;[usize]) -&gt; InputTensor {</p>
+<blockquote>
+<div><p>// These need to be part of model schema
+let rows: usize = batch_ends[batch_ends.len() - 1];
+let cols: usize = 5293;
+let full_size: usize = rows * cols;
+let default_val = f32::NAN;</p>
+<p>let mut tensor = vec![default_val; full_size];</p>
+<p>let mut bpr_start = 0;
+for (bpr, &amp;bpr_end) in bprs.iter().zip(batch_ends) {</p>
+<blockquote>
+<div><p>// Common features
+if bpr.common_features.is_some()</p>
+<blockquote>
+<div><dl class="simple">
+<dt>&amp;&amp; bpr</dt><dd><p>.common_features
+.as_ref()
+.unwrap()
+.continuous_features
+.is_some()</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl>
+<dt>{</dt><dd><dl>
+<dt>let common_features = bpr</dt><dd><p>.common_features
+.as_ref()
+.unwrap()
+.continuous_features
+.as_ref()
+.unwrap();</p>
+</dd>
+<dt>for feature in common_features {</dt><dd><dl>
+<dt>match self.feature_mapper.get(feature.0) {</dt><dd><dl>
+<dt>Some(f_info) =&gt; {</dt><dd><p>let idx = f_info.index_within_tensor as usize;
+if idx &lt; cols {</p>
+<blockquote>
+<div><p>// Set value in each row
+for r in bpr_start..bpr_end {</p>
+<blockquote>
+<div><p>let flat_index: usize = r * cols + idx;
+tensor[flat_index] = feature.1.into_inner() as f32;</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}
+None =&gt; (),</p>
+</dd>
+</dl>
+<p>}
+if self.continuous_features_to_report.contains(feature.0) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>self.continuous_feature_metrics</dt><dd><p>.with_label_values(&amp;[feature.0.to_string().as_str()])
+.observe(feature.1.into_inner())</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl class="simple">
+<dt>} else if self.discrete_features_to_report.contains(feature.0) {</dt><dd><dl class="simple">
+<dt>self.discrete_feature_metrics</dt><dd><p>.with_label_values(&amp;[feature.0.to_string().as_str()])
+.observe(feature.1.into_inner())</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// Process the batch of datarecords
+for r in bpr_start..bpr_end {</p>
+<blockquote>
+<div><dl>
+<dt>let dr: &amp;DataRecord =</dt><dd><p>&amp;bpr.individual_features_list[usize::try_from(r - bpr_start).unwrap()];</p>
+</dd>
+<dt>if dr.continuous_features.is_some() {</dt><dd><dl>
+<dt>for feature in dr.continuous_features.as_ref().unwrap() {</dt><dd><dl>
+<dt>match self.feature_mapper.get(&amp;feature.0) {</dt><dd><dl>
+<dt>Some(f_info) =&gt; {</dt><dd><p>let idx = f_info.index_within_tensor as usize;
+let flat_index: usize = r * cols + idx;
+if flat_index &lt; tensor.len() &amp;&amp; idx &lt; cols {</p>
+<blockquote>
+<div><p>tensor[flat_index] = feature.1.into_inner() as f32;</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}
+None =&gt; (),</p>
+</dd>
+</dl>
+<p>}
+if self.continuous_features_to_report.contains(feature.0) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>self.continuous_feature_metrics</dt><dd><p>.with_label_values(&amp;[feature.0.to_string().as_str()])
+.observe(feature.1.into_inner() as f64)</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl class="simple">
+<dt>} else if self.discrete_features_to_report.contains(feature.0) {</dt><dd><dl class="simple">
+<dt>self.discrete_feature_metrics</dt><dd><p>.with_label_values(&amp;[feature.0.to_string().as_str()])
+.observe(feature.1.into_inner() as f64)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}
+bpr_start = bpr_end;</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>InputTensor::FloatTensor(</dt><dd><dl class="simple">
+<dt>Array2::&lt;f32&gt;::from_shape_vec([rows, cols], tensor)</dt><dd><p>.unwrap()
+.into_dyn(),</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>fn get_binary(&amp;self, bprs: &amp;[BatchPredictionRequest], batch_ends: &amp;[usize]) -&gt; InputTensor {</dt><dd><p>// These need to be part of model schema
+let rows: usize = batch_ends[batch_ends.len() - 1];
+let cols: usize = 149;
+let full_size: usize = rows * cols;
+let default_val: i64 = 0;</p>
+<p>let mut v = vec![default_val; full_size];</p>
+<p>let mut bpr_start = 0;
+for (bpr, &amp;bpr_end) in bprs.iter().zip(batch_ends) {</p>
+<blockquote>
+<div><p>// Common features
+if bpr.common_features.is_some()</p>
+<blockquote>
+<div><dl class="simple">
+<dt>&amp;&amp; bpr</dt><dd><p>.common_features
+.as_ref()
+.unwrap()
+.binary_features
+.is_some()</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl>
+<dt>{</dt><dd><dl>
+<dt>let common_features = bpr</dt><dd><p>.common_features
+.as_ref()
+.unwrap()
+.binary_features
+.as_ref()
+.unwrap();</p>
+</dd>
+<dt>for feature in common_features {</dt><dd><dl>
+<dt>match self.feature_mapper.get(feature) {</dt><dd><dl>
+<dt>Some(f_info) =&gt; {</dt><dd><p>let idx = f_info.index_within_tensor as usize;
+if idx &lt; cols {</p>
+<blockquote>
+<div><p>// Set value in each row
+for r in bpr_start..bpr_end {</p>
+<blockquote>
+<div><p>let flat_index: usize = r * cols + idx;
+v[flat_index] = 1;</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}
+None =&gt; (),</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// Process the batch of datarecords
+for r in bpr_start..bpr_end {</p>
+<blockquote>
+<div><p>let dr: &amp;DataRecord = &amp;bpr.individual_features_list[r - bpr_start];
+if dr.binary_features.is_some() {</p>
+<blockquote>
+<div><dl>
+<dt>for feature in dr.binary_features.as_ref().unwrap() {</dt><dd><dl>
+<dt>match self.feature_mapper.get(&amp;feature) {</dt><dd><dl class="simple">
+<dt>Some(f_info) =&gt; {</dt><dd><p>let idx = f_info.index_within_tensor as usize;
+let flat_index: usize = r * cols + idx;
+v[flat_index] = 1;</p>
+</dd>
+</dl>
+<p>}
+None =&gt; (),</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}
+bpr_start = bpr_end;</p>
+</div></blockquote>
+<p>}
+InputTensor::Int64Tensor(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>Array2::&lt;i64&gt;::from_shape_vec([rows, cols], v)</dt><dd><p>.unwrap()
+.into_dyn(),</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<p>#[allow(dead_code)]
+fn get_discrete(&amp;self, bprs: &amp;[BatchPredictionRequest], batch_ends: &amp;[usize]) -&gt; InputTensor {</p>
+<blockquote>
+<div><p>// These need to be part of model schema
+let rows: usize = batch_ends[batch_ends.len() - 1];
+let cols: usize = 320;
+let full_size: usize = rows * cols;
+let default_val: i64 = 0;</p>
+<p>let mut v = vec![default_val; full_size];</p>
+<p>let mut bpr_start = 0;
+for (bpr, &amp;bpr_end) in bprs.iter().zip(batch_ends) {</p>
+<blockquote>
+<div><p>// Common features
+if bpr.common_features.is_some()</p>
+<blockquote>
+<div><dl class="simple">
+<dt>&amp;&amp; bpr</dt><dd><p>.common_features
+.as_ref()
+.unwrap()
+.discrete_features
+.is_some()</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl>
+<dt>{</dt><dd><dl>
+<dt>let common_features = bpr</dt><dd><p>.common_features
+.as_ref()
+.unwrap()
+.discrete_features
+.as_ref()
+.unwrap();</p>
+</dd>
+<dt>for feature in common_features {</dt><dd><dl>
+<dt>match self.feature_mapper.get(feature.0) {</dt><dd><dl>
+<dt>Some(f_info) =&gt; {</dt><dd><p>let idx = f_info.index_within_tensor as usize;
+if idx &lt; cols {</p>
+<blockquote>
+<div><p>// Set value in each row
+for r in bpr_start..bpr_end {</p>
+<blockquote>
+<div><p>let flat_index: usize = r * cols + idx;
+v[flat_index] = <a href="#id7"><span class="problematic" id="id8">*</span></a>feature.1;</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}
+None =&gt; (),</p>
+</dd>
+</dl>
+<p>}
+if self.discrete_features_to_report.contains(feature.0) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>self.discrete_feature_metrics</dt><dd><p>.with_label_values(&amp;[feature.0.to_string().as_str()])
+.observe(<a href="#id9"><span class="problematic" id="id10">*</span></a>feature.1 as f64)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// Process the batch of datarecords
+for r in bpr_start..bpr_end {</p>
+<blockquote>
+<div><p>let dr: &amp;DataRecord = &amp;bpr.individual_features_list[usize::try_from(r).unwrap()];
+if dr.discrete_features.is_some() {</p>
+<blockquote>
+<div><dl>
+<dt>for feature in dr.discrete_features.as_ref().unwrap() {</dt><dd><dl>
+<dt>match self.feature_mapper.get(&amp;feature.0) {</dt><dd><dl>
+<dt>Some(f_info) =&gt; {</dt><dd><p>let idx = f_info.index_within_tensor as usize;
+let flat_index: usize = r * cols + idx;
+if flat_index &lt; v.len() &amp;&amp; idx &lt; cols {</p>
+<blockquote>
+<div><p>v[flat_index] = <a href="#id11"><span class="problematic" id="id12">*</span></a>feature.1;</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}
+None =&gt; (),</p>
+</dd>
+</dl>
+<p>}
+if self.discrete_features_to_report.contains(feature.0) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>self.discrete_feature_metrics</dt><dd><p>.with_label_values(&amp;[feature.0.to_string().as_str()])
+.observe(<a href="#id13"><span class="problematic" id="id14">*</span></a>feature.1 as f64)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}
+bpr_start = bpr_end;</p>
+</div></blockquote>
+<p>}
+InputTensor::Int64Tensor(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>Array2::&lt;i64&gt;::from_shape_vec([rows, cols], v)</dt><dd><p>.unwrap()
+.into_dyn(),</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>)</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>fn get_user_embedding(</dt><dd><p>&amp;self,
+bprs: &amp;[BatchPredictionRequest],
+batch_ends: &amp;[usize],</p>
+</dd>
+<dt>) -&gt; InputTensor {</dt><dd><dl class="simple">
+<dt>InputTensor::FloatTensor(</dt><dd><dl class="simple">
+<dt>self.get_embedding_tensors(bprs, self.user_embedding_feature_id, batch_ends)</dt><dd><p>.into_dyn(),</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>fn get_eng_embedding(</dt><dd><p>&amp;self,
+bpr: &amp;[BatchPredictionRequest],
+batch_ends: &amp;[usize],</p>
+</dd>
+<dt>) -&gt; InputTensor {</dt><dd><dl class="simple">
+<dt>InputTensor::FloatTensor(</dt><dd><dl class="simple">
+<dt>self.get_embedding_tensors(bpr, self.user_eng_embedding_feature_id, batch_ends)</dt><dd><p>.into_dyn(),</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>fn get_author_embedding(</dt><dd><p>&amp;self,
+bpr: &amp;[BatchPredictionRequest],
+batch_ends: &amp;[usize],</p>
+</dd>
+<dt>) -&gt; InputTensor {</dt><dd><dl class="simple">
+<dt>InputTensor::FloatTensor(</dt><dd><dl class="simple">
+<dt>self.get_embedding_tensors(bpr, self.author_embedding_feature_id, batch_ends)</dt><dd><p>.into_dyn(),</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>impl Converter for BatchPredictionRequestToTorchTensorConverter {</dt><dd><dl>
+<dt>fn convert(&amp;self, batched_bytes: Vec&lt;Vec&lt;u8&gt;&gt;) -&gt; (Vec&lt;InputTensor&gt;, Vec&lt;usize&gt;) {</dt><dd><dl>
+<dt>let bprs = batched_bytes</dt><dd><p>.into_iter()
+.map(<a href="#id27"><span class="problematic" id="id28">|bytes|</span></a> {</p>
+<blockquote>
+<div><p>BatchPredictionRequestToTorchTensorConverter::parse_batch_prediction_request(bytes)</p>
+</div></blockquote>
+<p>})
+.collect::&lt;Vec&lt;_&gt;&gt;();</p>
+</dd>
+<dt>let batch_ends = bprs</dt><dd><p>.iter()
+.map(<a href="#id29"><span class="problematic" id="id30">|bpr|</span></a> bpr.individual_features_list.len())
+.scan(0usize, <a href="#id31"><span class="problematic" id="id32">|acc, e|</span></a> {</p>
+<blockquote>
+<div><p>//running total
+<a href="#id15"><span class="problematic" id="id16">*</span></a>acc = <a href="#id17"><span class="problematic" id="id18">*</span></a>acc + e;
+Some(<a href="#id19"><span class="problematic" id="id20">*</span></a>acc)</p>
+</div></blockquote>
+<p>})
+.collect::&lt;Vec&lt;_&gt;&gt;();</p>
+</dd>
+</dl>
+<p>let t1 = self.get_continuous(&amp;bprs, &amp;batch_ends);
+let t2 = self.get_binary(&amp;bprs, &amp;batch_ends);
+//let _t3 = self.get_discrete(&amp;bprs, &amp;batch_ends);
+let t4 = self.get_user_embedding(&amp;bprs, &amp;batch_ends);
+let t5 = self.get_eng_embedding(&amp;bprs, &amp;batch_ends);
+let t6 = self.get_author_embedding(&amp;bprs, &amp;batch_ends);</p>
+<p>(vec![t1, t2, t4, t5, t6], batch_ends)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../_sources/navi/dr_transform/src/converter.rs.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

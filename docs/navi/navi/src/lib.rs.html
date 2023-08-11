@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../" id="documentation_options" src="../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>#[macro_use]
+extern crate lazy_static;
+extern crate core;</p>
+<p>use serde_json::Value;
+use tokio::sync::oneshot::Sender;
+use tokio::time::Instant;
+use std::ops::Deref;
+use itertools::Itertools;
+use crate::bootstrap::TensorInput;
+use crate::predict_service::Model;
+use crate::tf_proto::{DataType, TensorProto};</p>
+<p>pub mod batch;
+pub mod bootstrap;
+pub mod cli_args;
+pub mod metrics;
+pub mod onnx_model;
+pub mod predict_service;
+pub mod tf_model;
+pub mod torch_model;
+pub mod cores {</p>
+<blockquote>
+<div><p>pub mod validator;</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>pub mod tf_proto {</dt><dd><p>tonic::include_proto!(“tensorflow”);
+pub mod tensorflow_serving {</p>
+<blockquote>
+<div><p>tonic::include_proto!(“tensorflow.serving”);</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>pub mod kf_serving {</dt><dd><p>tonic::include_proto!(“inference”);</p>
+</dd>
+</dl>
+<p>}
+#[cfg(test)]
+mod tests {</p>
+<blockquote>
+<div><p>use crate::cli_args::Args;
+#[test]
+fn test_version_string_to_epoch() {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>assert_eq!(</dt><dd><p>Args::version_str_to_epoch(“2022-12-20T10:18:53.000Z”).unwrap_or(-1),
+1671531533000</p>
+</dd>
+</dl>
+<p>);
+assert_eq!(Args::version_str_to_epoch(“1203444”).unwrap_or(-1), 1203444);</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>mod utils {</dt><dd><p>use crate::cli_args::{ARGS, MODEL_SPECS};
+use anyhow::Result;
+use log::info;
+use serde_json::Value;</p>
+<dl class="simple">
+<dt>pub fn read_config(meta_file: &amp;String) -&gt; Result&lt;Value&gt; {</dt><dd><p>let json = std::fs::read_to_string(meta_file)?;
+let v: Value = serde_json::from_str(&amp;json)?;
+Ok(v)</p>
+</dd>
+</dl>
+<p>}
+pub fn get_config_or_else&lt;F&gt;(model_config: &amp;Value, key: &amp;str, default: F) -&gt; String
+where</p>
+<blockquote>
+<div><p>F: FnOnce() -&gt; String,</p>
+</div></blockquote>
+<dl>
+<dt>{</dt><dd><dl>
+<dt>match model_config[key] {</dt><dd><dl class="simple">
+<dt>Value::String(ref v) =&gt; {</dt><dd><p>info!(“from model_config: {}={}”, key, v);
+v.to_string()</p>
+</dd>
+</dl>
+<p>}
+Value::Number(ref num) =&gt; {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>info!(</dt><dd><p>“from model_config: {}={} (turn number into a string)”,
+key, num</p>
+</dd>
+</dl>
+<p>);
+num.to_string()</p>
+</div></blockquote>
+<p>}
+_ =&gt; {</p>
+<blockquote>
+<div><p>let d = default();
+info!(“from default: {}={}”, key, d);
+d</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}
+pub fn get_config_or(model_config: &amp;Value, key: &amp;str, default: &amp;str) -&gt; String {</p>
+<blockquote>
+<div><p>get_config_or_else(model_config, key, || default.to_string())</p>
+</div></blockquote>
+<p>}
+pub fn get_meta_dir() -&gt; &amp;’static str {</p>
+<blockquote>
+<div><dl>
+<dt>ARGS.meta_json_dir</dt><dd><p>.as_ref()
+.map(<a href="#id3"><span class="problematic" id="id4">|s|</span></a> s.as_str())
+.unwrap_or_else(|| {</p>
+<blockquote>
+<div><p>let model_dir = &amp;ARGS.model_dir[0];
+let meta_dir = &amp;model_dir[0..model_dir.rfind(&amp;MODEL_SPECS[0]).unwrap()];
+info!(</p>
+<blockquote>
+<div><p>“no meta_json_dir specified, hence derive from first model dir:{}-&gt;{}”,
+model_dir, meta_dir</p>
+</div></blockquote>
+<p>);
+meta_dir</p>
+</div></blockquote>
+<p>})</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>pub type SerializedInput = Vec&lt;u8&gt;;
+pub const VERSION: &amp;str = env!(“CARGO_PKG_VERSION”);
+pub const NAME: &amp;str = env!(“CARGO_PKG_NAME”);
+pub type ModelFactory&lt;T&gt; = fn(usize, String, &amp;Value) -&gt; anyhow::Result&lt;T&gt;;
+pub const MAX_NUM_MODELS: usize = 16;
+pub const MAX_NUM_OUTPUTS: usize = 30;
+pub const MAX_NUM_INPUTS: usize = 120;
+pub const META_INFO: &amp;str = “META.json”;</p>
+<p>//use a heap allocated generic type here so that both
+//Tensorflow &amp; Pytorch implementation can return their Tensor wrapped in a Box
+//without an extra memcopy to Vec
+pub type TensorReturn&lt;T&gt; = Box&lt;dyn Deref&lt;Target = [T]&gt;&gt;;</p>
+<p>//returned tensor may be int64 i.e., a list of relevant ad ids
+pub enum TensorReturnEnum {</p>
+<blockquote>
+<div><p>FloatTensorReturn(TensorReturn&lt;f32&gt;),
+StringTensorReturn(TensorReturn&lt;String&gt;),
+Int64TensorReturn(TensorReturn&lt;i64&gt;),
+Int32TensorReturn(TensorReturn&lt;i32&gt;),</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>impl TensorReturnEnum {</dt><dd><p>#[inline(always)]
+pub fn slice(&amp;self, start: usize, end: usize) -&gt; TensorScores {</p>
+<blockquote>
+<div><dl>
+<dt>match self {</dt><dd><dl class="simple">
+<dt>TensorReturnEnum::FloatTensorReturn(f32_return) =&gt; {</dt><dd><p>TensorScores::Float32TensorScores(f32_return[start..end].to_vec())</p>
+</dd>
+</dl>
+<p>}
+TensorReturnEnum::Int64TensorReturn(i64_return) =&gt; {</p>
+<blockquote>
+<div><p>TensorScores::Int64TensorScores(i64_return[start..end].to_vec())</p>
+</div></blockquote>
+<p>}
+TensorReturnEnum::Int32TensorReturn(i32_return) =&gt; {</p>
+<blockquote>
+<div><p>TensorScores::Int32TensorScores(i32_return[start..end].to_vec())</p>
+</div></blockquote>
+<p>}
+TensorReturnEnum::StringTensorReturn(str_return) =&gt; {</p>
+<blockquote>
+<div><p>TensorScores::StringTensorScores(str_return[start..end].to_vec())</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>#[derive(Debug)]
+pub enum PredictResult {</p>
+<blockquote>
+<div><p>Ok(Vec&lt;TensorScores&gt;, i64),
+DropDueToOverload,
+ModelNotFound(usize),
+ModelNotReady(usize),
+ModelVersionNotFound(usize, i64),</p>
+</div></blockquote>
+<p>}</p>
+<p>#[derive(Debug)]
+pub enum TensorScores {</p>
+<blockquote>
+<div><p>Float32TensorScores(Vec&lt;f32&gt;),
+Int64TensorScores(Vec&lt;i64&gt;),
+Int32TensorScores(Vec&lt;i32&gt;),
+StringTensorScores(Vec&lt;String&gt;),</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>impl TensorScores {</dt><dd><dl>
+<dt>pub fn create_tensor_proto(self) -&gt; TensorProto {</dt><dd><dl>
+<dt>match self {</dt><dd><dl class="simple">
+<dt>TensorScores::Float32TensorScores(f32_tensor) =&gt; TensorProto {</dt><dd><p>dtype: DataType::DtFloat as i32,
+float_val: f32_tensor,
+..Default::default()</p>
+</dd>
+</dl>
+<p>},
+TensorScores::Int64TensorScores(i64_tensor) =&gt; TensorProto {</p>
+<blockquote>
+<div><p>dtype: DataType::DtInt64 as i32,
+int64_val: i64_tensor,
+..Default::default()</p>
+</div></blockquote>
+<p>},
+TensorScores::Int32TensorScores(i32_tensor) =&gt; TensorProto {</p>
+<blockquote>
+<div><p>dtype: DataType::DtInt32 as i32,
+int_val: i32_tensor,
+..Default::default()</p>
+</div></blockquote>
+<p>},
+TensorScores::StringTensorScores(str_tensor) =&gt; TensorProto {</p>
+<blockquote>
+<div><p>dtype: DataType::DtString as i32,
+string_val: str_tensor.into_iter().map(<a href="#id5"><span class="problematic" id="id6">|s|</span></a> s.into_bytes()).collect_vec(),
+..Default::default()</p>
+</div></blockquote>
+<p>},</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}
+pub fn len(&amp;self) -&gt; usize {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>match &amp;self {</dt><dd><p>TensorScores::Float32TensorScores(t) =&gt; t.len(),
+TensorScores::Int64TensorScores(t) =&gt; t.len(),
+TensorScores::Int32TensorScores(t) =&gt; t.len(),
+TensorScores::StringTensorScores(t) =&gt; t.len(),</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>#[derive(Debug)]
+pub enum PredictMessage&lt;T: Model&gt; {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>Predict(</dt><dd><p>usize,
+Option&lt;i64&gt;,
+Vec&lt;TensorInput&gt;,
+Sender&lt;PredictResult&gt;,
+Instant,</p>
+</dd>
+</dl>
+<p>),
+UpsertModel(T),
+/*
+#[allow(dead_code)]
+DeleteModel(usize),</p>
+<blockquote>
+<div><p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</div></blockquote>
+</div></blockquote>
+<p>}</p>
+<p>#[derive(Debug)]
+pub struct Callback(Sender&lt;PredictResult&gt;, usize);</p>
+<p>pub const MAX_VERSIONS_PER_MODEL: usize = 2;</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../_sources/navi/navi/src/lib.rs.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

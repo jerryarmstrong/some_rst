@@ -1,0 +1,421 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../" id="documentation_options" src="../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.earlybird.partition;</p>
+<p>import java.util.concurrent.TimeUnit;</p>
+<p>import com.google.common.annotations.VisibleForTesting;</p>
+<p>import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;</p>
+<p>import com.twitter.search.common.concurrent.ScheduledExecutorServiceFactory;
+import com.twitter.search.common.config.Config;
+import com.twitter.search.common.metrics.SearchCounter;
+import com.twitter.search.common.metrics.SearchStatsReceiver;
+import com.twitter.search.earlybird.EarlybirdStatus;
+import com.twitter.search.earlybird.common.config.EarlybirdConfig;
+import com.twitter.search.earlybird.exception.CriticalExceptionHandler;
+import com.twitter.search.earlybird.exception.EarlybirdStartupException;
+import com.twitter.search.earlybird.querycache.QueryCacheManager;
+import com.twitter.search.earlybird.segment.SegmentDataProvider;
+import com.twitter.search.earlybird.thrift.EarlybirdStatusCode;
+import com.twitter.search.earlybird.util.OneTaskScheduledExecutorManager;
+import com.twitter.search.earlybird.util.PeriodicActionParams;
+import com.twitter.search.earlybird.util.ShutdownWaitTimeParams;
+import com.twitter.search.queryparser.query.QueryParserException;</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>PartitionManager is responsible for indexing data for a partition, including Tweets and Users.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>public abstract class PartitionManager extends OneTaskScheduledExecutorManager {</dt><dd><p>private static final Logger LOG = LoggerFactory.getLogger(PartitionManager.class);</p>
+<dl class="simple">
+<dt>private static final SearchCounter IGNORED_EXCEPTIONS =</dt><dd><p>SearchCounter.export(“partition_manager_ignored_exceptions”);</p>
+</dd>
+</dl>
+<p>private static final String PARTITION_MANAGER_THREAD_NAME = “PartitionManager”;
+private static final boolean THREAD_IS_DAEMON = true;
+protected static final String INDEX_CURRENT_SEGMENT = “indexing the current segment”;
+protected static final String SETUP_QUERY_CACHE = “setting up query cache”;</p>
+<p>protected final SegmentManager segmentManager;
+protected final QueryCacheManager queryCacheManager;
+// Should be updated by info read from ZK
+protected final DynamicPartitionConfig dynamicPartitionConfig;</p>
+<p>private final SearchIndexingMetricSet searchIndexingMetricSet;</p>
+<p>private boolean partitionManagerFirstLoop = true;</p>
+<dl>
+<dt>public PartitionManager(QueryCacheManager queryCacheManager,</dt><dd><blockquote>
+<div><p>SegmentManager segmentManager,
+DynamicPartitionConfig dynamicPartitionConfig,
+ScheduledExecutorServiceFactory executorServiceFactory,
+SearchIndexingMetricSet searchIndexingMetricSet,
+SearchStatsReceiver searchStatsReceiver,
+CriticalExceptionHandler criticalExceptionHandler) {</p>
+</div></blockquote>
+<dl>
+<dt>super(</dt><dd><p>executorServiceFactory,
+PARTITION_MANAGER_THREAD_NAME,
+THREAD_IS_DAEMON,
+PeriodicActionParams.withFixedDelay(</p>
+<blockquote>
+<div><p>EarlybirdConfig.getInt(“time_slice_roll_check_interval_ms”, 500),
+TimeUnit.MILLISECONDS),</p>
+</div></blockquote>
+<p>ShutdownWaitTimeParams.indefinitely(),
+searchStatsReceiver,
+criticalExceptionHandler);</p>
+</dd>
+</dl>
+<p>this.segmentManager = segmentManager;
+this.queryCacheManager = queryCacheManager;
+this.dynamicPartitionConfig = dynamicPartitionConfig;
+this.searchIndexingMetricSet = searchIndexingMetricSet;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Runs the partition manager.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>public final void runImpl() {</dt><dd><dl>
+<dt>if (partitionManagerFirstLoop) {</dt><dd><dl class="simple">
+<dt>try {</dt><dd><p>testHookBeforeStartUp();
+startUp();
+validateSegments();
+segmentManager.logState(“After startUp”);</p>
+</dd>
+<dt>} catch (Throwable t) {</dt><dd><p>criticalExceptionHandler.handle(this, t);
+shutDownIndexing();
+throw new RuntimeException(“PartitionManager unhandled exception, stopping scheduler”, t);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>try {</dt><dd><p>testHookAfterSleep();
+indexingLoop(partitionManagerFirstLoop);</p>
+</dd>
+<dt>} catch (InterruptedException e) {</dt><dd><p>LOG.warn(“PartitionManager thread interrupted, stoping scheduler”, e);
+shutDownIndexing();
+throw new RuntimeException(“PartitionManager thread interrupted”, e);</p>
+</dd>
+<dt>} catch (Exception e) {</dt><dd><p>LOG.error(“Exception in indexing PartitionManager loop”, e);
+IGNORED_EXCEPTIONS.increment();</p>
+</dd>
+<dt>} catch (Throwable t) {</dt><dd><p>LOG.error(“Unhandled exception in indexing PartitionManager loop”, t);
+criticalExceptionHandler.handle(this, t);
+shutDownIndexing();
+throw new RuntimeException(“PartitionManager unhandled exception, stopping scheduler”, t);</p>
+</dd>
+<dt>} finally {</dt><dd><p>partitionManagerFirstLoop = false;</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Returns the SegmentDataProvider instance that will be used to fetch the information for all</p></li>
+<li><p>segments.</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+</dl>
+<p>public abstract SegmentDataProvider getSegmentDataProvider();</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Starts up this partition manager.</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+</dl>
+<p>protected abstract void startUp() throws Exception;</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Runs one indexing iteration.</p></li>
+<li></li>
+<li><p>&#64;param firstLoop Determines if this is the first time the indexing loop is running.</p></li>
+</ul>
+<p><a href="#id9"><span class="problematic" id="id10">*</span></a>/</p>
+</dd>
+</dl>
+<p>protected abstract void indexingLoop(boolean firstLoop) throws Exception;</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Shuts down all indexing.</p></li>
+</ul>
+<p><a href="#id11"><span class="problematic" id="id12">*</span></a>/</p>
+</dd>
+</dl>
+<p>protected abstract void shutDownIndexing();</p>
+<p>&#64;Override
+public void shutdownComponent() {</p>
+<blockquote>
+<div><p>shutDownIndexing();</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Notifies all other threads that the partition manager has become current (ie. has indexed all</p></li>
+<li><p>available events).</p></li>
+</ul>
+<p><a href="#id13"><span class="problematic" id="id14">*</span></a>/</p>
+</dd>
+<dt>public void becomeCurrent() {</dt><dd><p>LOG.info(“PartitionManager became current”);
+if (EarlybirdStatus.isStarting()) {</p>
+<blockquote>
+<div><p>EarlybirdStatus.setStatus(EarlybirdStatusCode.CURRENT);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>LOG.warn(“Could not set statusCode to CURRENT from “ + EarlybirdStatus.getStatusCode());</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// Now that we’re done starting up, set the query cache thread pool size to one.
+queryCacheManager.setWorkerPoolSizeAfterStartup();</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>protected void setupQueryCacheIfNeeded() throws QueryParserException {</dt><dd><p>queryCacheManager.setupTasksIfNeeded(segmentManager);</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// Only for tests, used for testing exception handling
+private static TestHook testHookBeforeStartUp;
+private static TestHook testHookAfterSleep;</p>
+<dl>
+<dt>private static void testHookBeforeStartUp() throws Exception {</dt><dd><dl class="simple">
+<dt>if (Config.environmentIsTest() &amp;&amp; testHookBeforeStartUp != null) {</dt><dd><p>testHookBeforeStartUp.run();</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private static void testHookAfterSleep() throws Exception {</dt><dd><dl class="simple">
+<dt>if (Config.environmentIsTest() &amp;&amp; testHookAfterSleep != null) {</dt><dd><p>testHookAfterSleep.run();</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;Override
+protected void runOneIteration() {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>try {</dt><dd><p>runImpl();</p>
+</dd>
+<dt>} catch (Throwable t) {</dt><dd><p>LOG.error(“Unhandled exception in PartitionManager loop”, t);
+throw new RuntimeException(t.getMessage());</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>public SearchIndexingMetricSet getSearchIndexingMetricSet() {</dt><dd><p>return searchIndexingMetricSet;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Allows tests to run code before the partition manager starts up.</p></li>
+<li></li>
+<li><p>&#64;param testHook The code to run before the start up.</p></li>
+</ul>
+<p><a href="#id15"><span class="problematic" id="id16">*</span></a>/</p>
+</dd>
+</dl>
+<p>&#64;VisibleForTesting
+public static void setTestHookBeforeStartUp(TestHook testHook) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (Config.environmentIsTest()) {</dt><dd><p>testHookBeforeStartUp = testHook;</p>
+</dd>
+<dt>} else {</dt><dd><p>throw new RuntimeException(“Trying to set startup test hook in non-test code!!”);</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Allows tests to run code before the indexing loop.</p></li>
+<li></li>
+<li><p>&#64;param testHook The code to run before the indexing loop.</p></li>
+</ul>
+<p><a href="#id17"><span class="problematic" id="id18">*</span></a>/</p>
+</dd>
+</dl>
+<p>&#64;VisibleForTesting
+public static void setTestHookAfterSleep(TestHook testHook) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (Config.environmentIsTest()) {</dt><dd><p>testHookAfterSleep = testHook;</p>
+</dd>
+<dt>} else {</dt><dd><p>throw new RuntimeException(“Trying to set test hook in non-test code!!”);</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>An interface that allows tests to run code at various points in the PartitionManager’s</p></li>
+<li><p>lyfecycle.</p></li>
+</ul>
+<p><a href="#id19"><span class="problematic" id="id20">*</span></a>/</p>
+</dd>
+</dl>
+<p>&#64;VisibleForTesting
+public interface TestHook {</p>
+<blockquote>
+<div><dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Defines the code that should be run.</p></li>
+</ul>
+<p><a href="#id21"><span class="problematic" id="id22">*</span></a>/</p>
+</dd>
+</dl>
+<p>void run() throws Exception;</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Allows tests to determine if this partition manager is all caught up.</p></li>
+<li></li>
+<li><p>&#64;return <a class="reference external" href="mailto:{&#37;&#52;&#48;code">{<span>&#64;</span>code</a> true} if this partition manager is caught up, <a class="reference external" href="mailto:{&#37;&#52;&#48;code">{<span>&#64;</span>code</a> false} otherwise.</p></li>
+</ul>
+<p><a href="#id23"><span class="problematic" id="id24">*</span></a>/</p>
+</dd>
+</dl>
+<p>&#64;VisibleForTesting
+public abstract boolean isCaughtUpForTests();</p>
+<p>&#64;VisibleForTesting
+protected void validateSegments() throws EarlybirdStartupException {</p>
+<blockquote>
+<div><p>// This is necessary because many tests rely on starting partition manager but not indexing any
+// tweets. However, we do not want Earlybirds to start in production if they are not serving any
+// tweets. (SEARCH-24238)
+if (Config.environmentIsTest()) {</p>
+<blockquote>
+<div><p>return;</p>
+</div></blockquote>
+<p>}
+validateSegmentsForNonTest();</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;VisibleForTesting
+protected void validateSegmentsForNonTest() throws EarlybirdStartupException {</p>
+<blockquote>
+<div><p>// Subclasses can override this and provide additional checks.
+if (segmentManager.getNumIndexedDocuments() == 0) {</p>
+<blockquote>
+<div><p>throw new EarlybirdStartupException(“Earlybird has zero indexed documents.”);</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../_sources/src/java/com/twitter/search/earlybird/partition/PartitionManager.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

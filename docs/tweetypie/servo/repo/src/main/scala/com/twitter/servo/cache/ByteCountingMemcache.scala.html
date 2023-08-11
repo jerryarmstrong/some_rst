@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../../" id="documentation_options" src="../../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.servo.cache</p>
+<p>import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.util.{Duration, Future}</p>
+<dl>
+<dt>case class ByteCountingMemcacheFactory(</dt><dd><p>memcacheFactory: MemcacheFactory,
+statsReceiver: StatsReceiver,
+delimiter: String = constants.Colon,
+checksumSize: Int = 8) // memcached checksums are u64s</p>
+<blockquote>
+<div><p>extends MemcacheFactory {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>def apply() =</dt><dd><p>new ByteCountingMemcache(memcacheFactory(), statsReceiver, delimiter, checksumSize)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>A decorator around a Memcache that counts the rough number</p></li>
+<li><p>of bytes transferred, bucketed &amp; rolled up by in/out, method name,</p></li>
+<li><p>and key prefix</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>class ByteCountingMemcache(</dt><dd><p>underlying: Memcache,
+statsReceiver: StatsReceiver,
+delimiter: String,
+checksumSize: Int)</p>
+<blockquote>
+<div><p>extends Memcache {</p>
+</div></blockquote>
+<p>val scopedReceiver = statsReceiver.scope(“memcache”).scope(“bytes”)</p>
+<p>val outStat = scopedReceiver.stat(“out”)
+val outReceiver = scopedReceiver.scope(“out”)</p>
+<p>val inStat = scopedReceiver.stat(“in”)
+val inReceiver = scopedReceiver.scope(“in”)</p>
+<p>val getOutStat = outReceiver.stat(“get”)
+val getOutReceiver = outReceiver.scope(“get”)</p>
+<p>val getInStat = inReceiver.stat(“get”)
+val getInReceiver = inReceiver.scope(“get”)
+val getInHitsStat = getInReceiver.stat(“hits”)
+val getInHitsReceiver = getInReceiver.scope(“hits”)
+val getInMissesStat = getInReceiver.stat(“misses”)
+val getInMissesReceiver = getInReceiver.scope(“misses”)</p>
+<p>val gwcOutStat = outReceiver.stat(“get_with_checksum”)
+val gwcOutReceiver = outReceiver.scope(“get_with_checksum”)</p>
+<p>val gwcInStat = inReceiver.stat(“get_with_checksum”)
+val gwcInReceiver = inReceiver.scope(“get_with_checksum”)
+val gwcInHitsStat = gwcOutReceiver.stat(“hits”)
+val gwcInHitsReceiver = gwcOutReceiver.scope(“hits”)
+val gwcInMissesStat = gwcOutReceiver.stat(“misses”)
+val gwcInMissesReceiver = gwcOutReceiver.scope(“misses”)</p>
+<p>val addStat = outReceiver.stat(“add”)
+val addReceiver = outReceiver.scope(“add”)</p>
+<p>val setStat = outReceiver.stat(“set”)
+val setReceiver = outReceiver.scope(“set”)</p>
+<p>val replaceStat = outReceiver.stat(“replace”)
+val replaceReceiver = outReceiver.scope(“replace”)</p>
+<p>val casStat = outReceiver.stat(“check_and_set”)
+val casReceiver = outReceiver.scope(“check_and_set”)</p>
+<p>def release() = underlying.release()</p>
+<p>// get namespace from key
+protected[this] def ns(key: String) = {</p>
+<blockquote>
+<div><p>val idx = math.min(key.size - 1, math.max(key.lastIndexOf(delimiter), 0))
+key.substring(0, idx).replaceAll(delimiter, “_”)</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>override def get(keys: Seq[String]): Future[KeyValueResult[String, Array[Byte]]] = {</dt><dd><dl class="simple">
+<dt>keys foreach { key =&gt;</dt><dd><p>val size = key.size
+outStat.add(size)
+getOutStat.add(size)
+getOutReceiver.stat(ns(key)).add(size)</p>
+</dd>
+</dl>
+<p>}
+underlying.get(keys) onSuccess { lr =&gt;</p>
+<blockquote>
+<div><dl class="simple">
+<dt>lr.found foreach {</dt><dd><dl class="simple">
+<dt>case (key, bytes) =&gt;</dt><dd><p>val size = key.size + bytes.length
+inStat.add(size)
+getInStat.add(size)
+getInHitsStat.add(size)
+getInHitsReceiver.stat(ns(key)).add(size)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+lr.notFound foreach { key =&gt;</p>
+<blockquote>
+<div><p>val size = key.size
+inStat.add(size)
+getInStat.add(size)
+getInMissesStat.add(size)
+getInMissesReceiver.stat(ns(key)).add(size)</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>override def getWithChecksum(</dt><dd><p>keys: Seq[String]</p>
+</dd>
+<dt>): Future[CsKeyValueResult[String, Array[Byte]]] = {</dt><dd><dl class="simple">
+<dt>keys foreach { key =&gt;</dt><dd><p>val size = key.size
+outStat.add(size)
+gwcOutStat.add(size)
+gwcOutReceiver.stat(ns(key)).add(size)</p>
+</dd>
+</dl>
+<p>}
+underlying.getWithChecksum(keys) onSuccess { lr =&gt;</p>
+<blockquote>
+<div><dl class="simple">
+<dt>lr.found foreach {</dt><dd><dl class="simple">
+<dt>case (key, (bytes, _)) =&gt;</dt><dd><p>val size = key.size + (bytes map { _.length } getOrElse (0)) + checksumSize
+inStat.add(size)
+gwcInStat.add(size)
+gwcInHitsStat.add(size)
+gwcInHitsReceiver.stat(ns(key)).add(size)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+lr.notFound foreach { key =&gt;</p>
+<blockquote>
+<div><p>val size = key.size
+inStat.add(size)
+gwcInStat.add(size)
+gwcInMissesStat.add(size)
+gwcInMissesReceiver.stat(ns(key)).add(size)</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>override def add(key: String, value: Array[Byte], ttl: Duration): Future[Boolean] = {</dt><dd><p>val size = key.size + value.size
+outStat.add(size)
+addStat.add(size)
+addReceiver.stat(ns(key)).add(size)
+underlying.add(key, value, ttl)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>override def checkAndSet(</dt><dd><p>key: String,
+value: Array[Byte],
+checksum: Checksum,
+ttl: Duration</p>
+</dd>
+<dt>): Future[Boolean] = {</dt><dd><p>val size = key.size + value.size + checksumSize
+outStat.add(size)
+casStat.add(size)
+casReceiver.stat(ns(key)).add(size)
+underlying.checkAndSet(key, value, checksum, ttl)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>override def set(key: String, value: Array[Byte], ttl: Duration): Future[Unit] = {</dt><dd><p>val size = key.size + value.size
+outStat.add(size)
+setStat.add(size)
+setReceiver.stat(ns(key)).add(size)
+underlying.set(key, value, ttl)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>override def replace(key: String, value: Array[Byte], ttl: Duration): Future[Boolean] = {</dt><dd><p>val size = key.size + value.size
+outStat.add(size)
+replaceStat.add(size)
+replaceReceiver.stat(ns(key)).add(size)
+underlying.replace(key, value, ttl)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>override def delete(key: String): Future[Boolean] = {</dt><dd><p>outStat.add(key.size)
+underlying.delete(key)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>override def incr(key: String, delta: Long = 1): Future[Option[Long]] = {</dt><dd><p>val size = key.size + 8
+outStat.add(size)
+underlying.incr(key, delta)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>override def decr(key: String, delta: Long = 1): Future[Option[Long]] = {</dt><dd><p>val size = key.size + 8
+outStat.add(size)
+underlying.decr(key, delta)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../../_sources/tweetypie/servo/repo/src/main/scala/com/twitter/servo/cache/ByteCountingMemcache.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

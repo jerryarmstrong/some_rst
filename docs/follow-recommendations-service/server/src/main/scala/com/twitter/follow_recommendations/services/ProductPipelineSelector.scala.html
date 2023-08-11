@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.follow_recommendations.services</p>
+<p>import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.follow_recommendations.common.base.StatsUtil
+import com.twitter.follow_recommendations.common.models.CandidateUser
+import com.twitter.follow_recommendations.common.models.DebugOptions
+import com.twitter.follow_recommendations.models.DebugParams
+import com.twitter.follow_recommendations.models.RecommendationRequest
+import com.twitter.follow_recommendations.models.RecommendationResponse
+import com.twitter.stitch.Stitch
+import com.twitter.timelines.configapi.Params
+import javax.inject.Inject
+import javax.inject.Singleton
+import scala.util.Random</p>
+<p>&#64;Singleton
+class ProductPipelineSelector &#64;Inject() (</p>
+<blockquote>
+<div><p>recommendationsService: RecommendationsService,
+productMixerRecommendationService: ProductMixerRecommendationService,
+productPipelineSelectorConfig: ProductPipelineSelectorConfig,
+baseStats: StatsReceiver) {</p>
+<p>private val frsStats = baseStats.scope(“follow_recommendations_service”)
+private val stats = frsStats.scope(“product_pipeline_selector_parity”)</p>
+<p>private val readFromProductMixerCounter = stats.counter(“select_product_mixer”)
+private val readFromOldFRSCounter = stats.counter(“select_old_frs”)</p>
+<dl>
+<dt>def selectPipeline(</dt><dd><p>request: RecommendationRequest,
+params: Params</p>
+</dd>
+<dt>): Stitch[RecommendationResponse] = {</dt><dd><dl>
+<dt>productPipelineSelectorConfig</dt><dd><dl>
+<dt>.getDarkReadAndExpParams(request.displayLocation).map { darkReadAndExpParam =&gt;</dt><dd><dl class="simple">
+<dt>if (params(darkReadAndExpParam.expParam)) {</dt><dd><p>readFromProductMixerPipeline(request, params)</p>
+</dd>
+<dt>} else if (params(darkReadAndExpParam.darkReadParam)) {</dt><dd><p>darkReadAndReturnResult(request, params)</p>
+</dd>
+<dt>} else {</dt><dd><p>readFromOldFrsPipeline(request, params)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}.getOrElse(readFromOldFrsPipeline(request, params))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private def readFromProductMixerPipeline(</dt><dd><p>request: RecommendationRequest,
+params: Params</p>
+</dd>
+<dt>): Stitch[RecommendationResponse] = {</dt><dd><p>readFromProductMixerCounter.incr()
+productMixerRecommendationService.get(request, params)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private def readFromOldFrsPipeline(</dt><dd><p>request: RecommendationRequest,
+params: Params</p>
+</dd>
+<dt>): Stitch[RecommendationResponse] = {</dt><dd><p>readFromOldFRSCounter.incr()
+recommendationsService.get(request, params)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def darkReadAndReturnResult(</dt><dd><p>request: RecommendationRequest,
+params: Params</p>
+</dd>
+<dt>): Stitch[RecommendationResponse] = {</dt><dd><p>val darkReadStats = stats.scope(“select_dark_read”, request.displayLocation.toFsName)
+darkReadStats.counter(“count”).incr()</p>
+<p>// If no seed is set, create a random one that both requests will use to remove differences
+// in randomness for the WeightedCandidateSourceRanker
+val randomizationSeed = new Random().nextLong()</p>
+<dl class="simple">
+<dt>val oldFRSPiplelineRequest = request.copy(</dt><dd><dl class="simple">
+<dt>debugParams = Some(</dt><dd><dl class="simple">
+<dt>request.debugParams.getOrElse(</dt><dd><p>DebugParams(None, Some(DebugOptions(randomizationSeed = Some(randomizationSeed))))))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>)
+val productMixerPipelineRequest = request.copy(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>debugParams = Some(</dt><dd><dl class="simple">
+<dt>request.debugParams.getOrElse(</dt><dd><dl class="simple">
+<dt>DebugParams(</dt><dd><p>None,
+Some(DebugOptions(doNotLog = true, randomizationSeed = Some(randomizationSeed))))))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+</div></blockquote>
+<p>)</p>
+<dl>
+<dt>StatsUtil</dt><dd><dl>
+<dt>.profileStitch(</dt><dd><p>readFromOldFrsPipeline(oldFRSPiplelineRequest, params),
+darkReadStats.scope(“frs_timing”)).applyEffect { frsOldPipelineResponse =&gt;
+Stitch.async(</p>
+<blockquote>
+<div><dl>
+<dt>StatsUtil</dt><dd><dl>
+<dt>.profileStitch(</dt><dd><p>readFromProductMixerPipeline(productMixerPipelineRequest, params),
+darkReadStats.scope(“product_mixer_timing”)).liftToOption().map {
+case Some(frsProductMixerResponse) =&gt;</p>
+<blockquote>
+<div><p>darkReadStats.counter(“product_mixer_pipeline_success”).incr()
+compare(request, frsOldPipelineResponse, frsProductMixerResponse)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>case None =&gt;</dt><dd><p>darkReadStats.counter(“product_mixer_pipeline_failure”).incr()</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def compare(</dt><dd><p>request: RecommendationRequest,
+frsOldPipelineResponse: RecommendationResponse,
+frsProductMixerResponse: RecommendationResponse</p>
+</dd>
+<dt>): Unit = {</dt><dd><p>val compareStats = stats.scope(“pipeline_comparison”, request.displayLocation.toFsName)
+compareStats.counter(“total-comparisons”).incr()</p>
+<p>val oldFrsMap = frsOldPipelineResponse.recommendations.map { user =&gt; user.id -&gt; user }.toMap
+val productMixerMap = frsProductMixerResponse.recommendations.map { user =&gt;</p>
+<blockquote>
+<div><p>user.id -&gt; user</p>
+</div></blockquote>
+<p>}.toMap</p>
+<p>compareTopNResults(3, frsOldPipelineResponse, frsProductMixerResponse, compareStats)
+compareTopNResults(5, frsOldPipelineResponse, frsProductMixerResponse, compareStats)
+compareTopNResults(25, frsOldPipelineResponse, frsProductMixerResponse, compareStats)
+compareTopNResults(50, frsOldPipelineResponse, frsProductMixerResponse, compareStats)
+compareTopNResults(75, frsOldPipelineResponse, frsProductMixerResponse, compareStats)</p>
+<p>// Compare individual matching candidates
+oldFrsMap.keys.foreach(userId =&gt; {</p>
+<blockquote>
+<div><dl>
+<dt>if (productMixerMap.contains(userId)) {</dt><dd><dl class="simple">
+<dt>(oldFrsMap(userId), productMixerMap(userId)) match {</dt><dd><dl class="simple">
+<dt>case (oldFrsUser: CandidateUser, productMixerUser: CandidateUser) =&gt;</dt><dd><p>compareStats.counter(“matching-user-count”).incr()
+compareUser(oldFrsUser, productMixerUser, compareStats)</p>
+</dd>
+<dt>case _ =&gt;</dt><dd><p>compareStats.counter(“unknown-user-type-count”).incr()</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>} else {</dt><dd><p>compareStats.counter(“missing-user-count”).incr()</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>})</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def compareTopNResults(</dt><dd><p>n: Int,
+frsOldPipelineResponse: RecommendationResponse,
+frsProductMixerResponse: RecommendationResponse,
+compareStats: StatsReceiver</p>
+</dd>
+<dt>): Unit = {</dt><dd><dl>
+<dt>if (frsOldPipelineResponse.recommendations.size &gt;= n &amp;&amp; frsProductMixerResponse.recommendations.size &gt;= n) {</dt><dd><p>val oldFrsPipelineFirstN = frsOldPipelineResponse.recommendations.take(n).map(_.id)
+val productMixerPipelineFirstN = frsProductMixerResponse.recommendations.take(n).map(_.id)</p>
+<dl class="simple">
+<dt>if (oldFrsPipelineFirstN.sorted == productMixerPipelineFirstN.sorted)</dt><dd><p>compareStats.counter(s”first-$n-sorted-equal-ids”).incr()</p>
+</dd>
+<dt>if (oldFrsPipelineFirstN == productMixerPipelineFirstN)</dt><dd><p>compareStats.counter(s”first-$n-unsorted-ids-equal”).incr()</p>
+</dd>
+<dt>else</dt><dd><p>compareStats.counter(s”first-$n-unsorted-ids-unequal”).incr()</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def compareUser(</dt><dd><p>oldFrsUser: CandidateUser,
+productMixerUser: CandidateUser,
+stats: StatsReceiver</p>
+</dd>
+<dt>): Unit = {</dt><dd><p>val userStats = stats.scope(“matching-user”)</p>
+<dl class="simple">
+<dt>if (oldFrsUser.score != productMixerUser.score)</dt><dd><p>userStats.counter(“mismatch-score”).incr()</p>
+</dd>
+<dt>if (oldFrsUser.reason != productMixerUser.reason)</dt><dd><p>userStats.counter(“mismatch-reason”).incr()</p>
+</dd>
+<dt>if (oldFrsUser.userCandidateSourceDetails != productMixerUser.userCandidateSourceDetails)</dt><dd><p>userStats.counter(“mismatch-userCandidateSourceDetails”).incr()</p>
+</dd>
+<dt>if (oldFrsUser.adMetadata != productMixerUser.adMetadata)</dt><dd><p>userStats.counter(“mismatch-adMetadata”).incr()</p>
+</dd>
+<dt>if (oldFrsUser.trackingToken != productMixerUser.trackingToken)</dt><dd><p>userStats.counter(“mismatch-trackingToken”).incr()</p>
+</dd>
+<dt>if (oldFrsUser.dataRecord != productMixerUser.dataRecord)</dt><dd><p>userStats.counter(“mismatch-dataRecord”).incr()</p>
+</dd>
+<dt>if (oldFrsUser.scores != productMixerUser.scores)</dt><dd><p>userStats.counter(“mismatch-scores”).incr()</p>
+</dd>
+<dt>if (oldFrsUser.infoPerRankingStage != productMixerUser.infoPerRankingStage)</dt><dd><p>userStats.counter(“mismatch-infoPerRankingStage”).incr()</p>
+</dd>
+<dt>if (oldFrsUser.params != productMixerUser.params)</dt><dd><p>userStats.counter(“mismatch-params”).incr()</p>
+</dd>
+<dt>if (oldFrsUser.engagements != productMixerUser.engagements)</dt><dd><p>userStats.counter(“mismatch-engagements”).incr()</p>
+</dd>
+<dt>if (oldFrsUser.recommendationFlowIdentifier != productMixerUser.recommendationFlowIdentifier)</dt><dd><p>userStats.counter(“mismatch-recommendationFlowIdentifier”).incr()</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/follow-recommendations-service/server/src/main/scala/com/twitter/follow_recommendations/services/ProductPipelineSelector.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

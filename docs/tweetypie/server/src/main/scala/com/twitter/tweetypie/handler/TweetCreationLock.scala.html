@@ -1,0 +1,606 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.tweetypie
+package handler</p>
+<p>import com.twitter.servo.cache.Cache
+import com.twitter.servo.util.Scribe
+import com.twitter.tweetypie.serverutil.ExceptionCounter
+import com.twitter.tweetypie.thriftscala.PostTweetResult
+import com.twitter.tweetypie.util.TweetCreationLock.Key
+import com.twitter.tweetypie.util.TweetCreationLock.State
+import com.twitter.util.Base64Long
+import scala.util.Random
+import scala.util.control.NoStackTrace
+import scala.util.control.NonFatal</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>This exception is returned from TweetCreationLock if there is an</p></li>
+<li><p>in-progress cache entry for this key. It is possible that the key</p></li>
+<li><p>exists because the key was not properly cleaned up, but it’s</p></li>
+<li><p>impossible to differentiate between these cases. We resolve this by</p></li>
+<li><p>returning TweetCreationInProgress and having a (relatively) short TTL</p></li>
+<li><p>on the cache entry so that the client and/or user may retry.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+</dl>
+<p>case object TweetCreationInProgress extends Exception with NoStackTrace</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Thrown when the TweetCreationLock discovers that there is already</p></li>
+<li><p>a tweet with the specified uniqueness id.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+</dl>
+<p>case class DuplicateTweetCreation(tweetId: TweetId) extends Exception with NoStackTrace</p>
+<dl>
+<dt>trait TweetCreationLock {</dt><dd><dl class="simple">
+<dt>def apply(</dt><dd><p>key: Key,
+dark: Boolean,
+nullcast: Boolean</p>
+</dd>
+<dt>)(</dt><dd><p>insert: =&gt; Future[PostTweetResult]</p>
+</dd>
+</dl>
+<p>): Future[PostTweetResult]
+def unlock(key: Key): Future[Unit]</p>
+</dd>
+</dl>
+<p>}</p>
+<p>object CacheBasedTweetCreationLock {</p>
+<blockquote>
+<div><dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Indicates that setting the lock value failed because the state of</p></li>
+<li><p>that key in the cache has been changed (by another process or</p></li>
+<li><p>cache eviction).</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+</dl>
+<p>case object UnexpectedCacheState extends Exception with NoStackTrace</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Thrown when the process of updating the lock cache failed more</p></li>
+<li><p>than the allowed number of times.</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+</dl>
+<p>case class RetriesExhausted(failures: Seq[Exception]) extends Exception with NoStackTrace</p>
+<dl>
+<dt>def shouldRetry(e: Exception): Boolean =</dt><dd><dl class="simple">
+<dt>e match {</dt><dd><p>case TweetCreationInProgress =&gt; false
+case _: DuplicateTweetCreation =&gt; false
+case _: RetriesExhausted =&gt; false
+case _ =&gt; true</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>def ttlChooser(shortTtl: Duration, longTtl: Duration): (Key, State) =&gt; Duration =</dt><dd><dl>
+<dt>(_, state) =&gt;</dt><dd><dl class="simple">
+<dt>state match {</dt><dd><p>case _: State.AlreadyCreated =&gt; longTtl
+case _ =&gt; shortTtl</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>The log format is tab-separated (base 64 tweet_id, base 64</p></li>
+<li><p>uniqueness_id). It’s logged this way in order to minimize the</p></li>
+<li><p>storage requirement and to make it easy to analyze. Each log line</p></li>
+<li><p>should be 24 bytes, including newline.</p></li>
+</ul>
+<p><a href="#id9"><span class="problematic" id="id10">*</span></a>/</p>
+</dd>
+<dt>val formatUniquenessLogEntry: ((String, TweetId)) =&gt; String = {</dt><dd><p>case (uniquenessId, tweetId) =&gt; Base64Long.toBase64(tweetId) + “t” + uniquenessId</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Scribe the uniqueness id paired with the tweet id so that we can</p></li>
+<li><p>track the rate of failures of the uniqueness id check by</p></li>
+<li><p>detecting multiple tweets created with the same uniqueness id.</p></li>
+<li></li>
+<li><p>Scribe to a test category because we only need to keep this</p></li>
+<li><p>information around for long enough to find any duplicates.</p></li>
+</ul>
+<p><a href="#id11"><span class="problematic" id="id12">*</span></a>/</p>
+</dd>
+<dt>val ScribeUniquenessId: FutureEffect[(String, TweetId)] =</dt><dd><p>Scribe(“test_tweetypie_uniqueness_id”) contramap formatUniquenessLogEntry</p>
+</dd>
+</dl>
+<p>private[this] val UniquenessIdLog = Logger(“com.twitter.tweetypie.handler.UniquenessId”)</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Log the uniqueness ids to a standard logger (for use when it’s</p></li>
+<li><p>not production traffic).</p></li>
+</ul>
+<p><a href="#id13"><span class="problematic" id="id14">*</span></a>/</p>
+</dd>
+<dt>val LogUniquenessId: FutureEffect[(String, TweetId)] = FutureEffect[(String, TweetId)] { rec =&gt;</dt><dd><p>UniquenessIdLog.info(formatUniquenessLogEntry(rec))
+Future.Unit</p>
+</dd>
+</dl>
+<p>}</p>
+<p>private val log = Logger(getClass)</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>This class adds locking around Tweet creation, to prevent creating</p></li>
+<li><p>duplicate tweets when two identical requests arrive simultaneously.</p></li>
+<li><p>A lock is created in cache using the user id and a hash of the tweet text</p></li>
+<li><p>in the case of tweets, or the source_status_id in the case of retweets.</p></li>
+<li><p>If another process attempts to lock for the same user and hash, the request</p></li>
+<li><p>fails as a duplicate.  The lock lasts for 10 seconds if it is not deleted.</p></li>
+<li><p>Given the hard timeout of 5 seconds on all requests, it should never take</p></li>
+<li><p>us longer than 5 seconds to create a request, but we’ve observed times of up</p></li>
+<li><p>to 10 seconds to create statuses for some of our more popular users.</p></li>
+<li></li>
+<li><p>When a request with a uniqueness id is successful, the id of the</p></li>
+<li><p>created tweet will be stored in the cache so that subsequent</p></li>
+<li><p>requests can retrieve the originally-created tweet rather than</p></li>
+<li><p>duplicating creation or getting an exception.</p></li>
+</ul>
+<p><a href="#id15"><span class="problematic" id="id16">*</span></a>/</p>
+</dd>
+<dt>class CacheBasedTweetCreationLock(</dt><dd><p>cache: Cache[Key, State],
+maxTries: Int,
+stats: StatsReceiver,
+logUniquenessId: FutureEffect[(String, TweetId)])</p>
+<blockquote>
+<div><p>extends TweetCreationLock {</p>
+</div></blockquote>
+<p>import CacheBasedTweetCreationLock._</p>
+<p>private[this] val eventCounters = stats.scope(“event”)</p>
+<dl class="simple">
+<dt>private[this] def event(k: Key, name: String): Unit = {</dt><dd><p>log.debug(s”$name:$k”)
+eventCounters.counter(name).incr()</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private[this] def retryLoop[A](action: =&gt; Future[A]): Future[A] = {</dt><dd><dl>
+<dt>def go(failures: List[Exception]): Future[A] =</dt><dd><dl>
+<dt>if (failures.length &gt;= maxTries) {</dt><dd><p>Future.exception(RetriesExhausted(failures.reverse))</p>
+</dd>
+<dt>} else {</dt><dd><dl class="simple">
+<dt>action.rescue {</dt><dd><p>case e: Exception if shouldRetry(e) =&gt; go(e :: failures)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>go(Nil)</p>
+</dd>
+</dl>
+<p>}</p>
+<p>private[this] val lockerExceptions = ExceptionCounter(stats)</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Obtain the lock for creating a tweet. If this method completes</p></li>
+<li><p>without throwing an exception, then the lock value was</p></li>
+<li><p>successfully set in cache, which indicates a high probability</p></li>
+<li><p>that this is the only process that is attempting to create this</p></li>
+<li><p>tweet. (The uncertainty comes from the possibility of lock</p></li>
+<li><p>entries missing from the cache.)</p></li>
+<li></li>
+<li><p>&#64;throws TweetCreationInProgress if there is another process</p></li>
+<li><p>trying to create this tweet.</p></li>
+<li></li>
+<li><p>&#64;throws DuplicateTweetCreation if a tweet has already been</p></li>
+<li><p>created for a duplicate request. The exception has the id of</p></li>
+<li><p>the created tweet.</p></li>
+<li></li>
+<li><p>&#64;throws RetriesExhausted if obtaining the lock failed more than</p></li>
+<li><p>the requisite number of times.</p></li>
+</ul>
+<p><a href="#id17"><span class="problematic" id="id18">*</span></a>/</p>
+</dd>
+<dt>private[this] def obtainLock(k: Key, token: Long): Future[Time] = retryLoop {</dt><dd><p>val lockTime = Time.now</p>
+<p>// Get the current state for this key.
+cache</p>
+<blockquote>
+<div><p>.getWithChecksum(Seq(k))
+.flatMap(initialStateKvr =&gt; Future.const(initialStateKvr(k)))
+.flatMap {</p>
+<blockquote>
+<div><dl>
+<dt>case None =&gt;</dt><dd><p>// Nothing in cache for this key
+cache</p>
+<blockquote>
+<div><p>.add(k, State.InProgress(token, lockTime))
+.flatMap {</p>
+<blockquote>
+<div><p>case true =&gt; Future.value(lockTime)
+case false =&gt; Future.exception(UnexpectedCacheState)</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+</dd>
+<dt>case Some((Throw(e), _)) =&gt;</dt><dd><p>Future.exception(e)</p>
+</dd>
+<dt>case Some((Return(st), cs)) =&gt;</dt><dd><dl>
+<dt>st match {</dt><dd><dl>
+<dt>case State.Unlocked =&gt;</dt><dd><p>// There is an Unlocked entry for this key, which
+// implies that a previous attempt was cleaned up.
+cache</p>
+<blockquote>
+<div><p>.checkAndSet(k, State.InProgress(token, lockTime), cs)
+.flatMap {</p>
+<blockquote>
+<div><p>case true =&gt; Future.value(lockTime)
+case false =&gt; Future.exception(UnexpectedCacheState)</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+</dd>
+<dt>case State.InProgress(cachedToken, creationStartedTimestamp) =&gt;</dt><dd><dl>
+<dt>if (cachedToken == token) {</dt><dd><p>// There is an in-progress entry for <em>this process</em>. This
+// can happen on a retry if the <cite>add</cite> actually succeeds
+// but the future fails. The retry can return the result
+// of the add that we previously tried.
+Future.value(creationStartedTimestamp)</p>
+</dd>
+<dt>} else {</dt><dd><p>// There is an in-progress entry for <em>a different
+// process</em>. This implies that there is another tweet
+// creation in progress for <em>this tweet</em>.
+val tweetCreationAge = Time.now - creationStartedTimestamp
+k.uniquenessId.foreach { id =&gt;</p>
+<blockquote>
+<div><dl class="simple">
+<dt>log.info(</dt><dd><dl class="simple">
+<dt>“Found an in-progress tweet creation for uniqueness id %s %s ago”</dt><dd><p>.format(id, tweetCreationAge)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<p>}
+stats.stat(“in_progress_age_ms”).add(tweetCreationAge.inMilliseconds)
+Future.exception(TweetCreationInProgress)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>case State.AlreadyCreated(tweetId, creationStartedTimestamp) =&gt;</dt><dd><p>// Another process successfully created a tweet for this
+// key.
+val tweetCreationAge = Time.now - creationStartedTimestamp
+stats.stat(“already_created_age_ms”).add(tweetCreationAge.inMilliseconds)
+Future.exception(DuplicateTweetCreation(tweetId))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Attempt to remove this process’ lock entry from the cache. This</p></li>
+<li><p>is done by writing a short-lived tombstone, so that we can ensure</p></li>
+<li><p>that we only overwrite the entry if it is still an entry for this</p></li>
+<li><p>process instead of another process’ entry.</p></li>
+</ul>
+<p><a href="#id19"><span class="problematic" id="id20">*</span></a>/</p>
+</dd>
+<dt>private[this] def cleanupLoop(k: Key, token: Long): Future[Unit] =</dt><dd><dl>
+<dt>retryLoop {</dt><dd><p>// Instead of deleting the value, we attempt to write Unlocked,
+// because we only want to delete it if it was the value that we
+// wrote ourselves, and there is no delete call that is
+// conditional on the extant value.
+cache</p>
+<blockquote>
+<div><p>.getWithChecksum(Seq(k))
+.flatMap(kvr =&gt; Future.const(kvr(k)))
+.flatMap {</p>
+<blockquote>
+<div><dl>
+<dt>case None =&gt;</dt><dd><p>// Nothing in the cache for this tweet creation, so cleanup
+// is successful.
+Future.Unit</p>
+</dd>
+<dt>case Some((tryV, cs)) =&gt;</dt><dd><p>// If we failed trying to deserialize the value, then we
+// want to let the error bubble up, because there is no good
+// recovery procedure, since we can’t tell whether the entry
+// is ours.
+Future.const(tryV).flatMap {</p>
+<blockquote>
+<div><dl>
+<dt>case State.InProgress(presentToken, _) =&gt;</dt><dd><dl class="simple">
+<dt>if (presentToken == token) {</dt><dd><p>// This is <em>our</em> in-progress marker, so we want to
+// overwrite it with the tombstone. If checkAndSet
+// returns false, that’s OK, because that means
+// someone else overwrote the value, and we don’t have
+// to clean it up anymore.
+cache.checkAndSet(k, State.Unlocked, cs).unit</p>
+</dd>
+<dt>} else {</dt><dd><p>// Indicates that another request has overwritten our
+// state before we cleaned it up. This should only
+// happen when our token was cleared from cache and
+// another process started a duplicate create. This
+// should be very infrequent. We count it just to be
+// sure.
+event(k, “other_attempt_in_progress”)
+Future.Unit</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>case _ =&gt;</dt><dd><p>// Cleanup has succeeded, because we are not responsible
+// for the cache entry anymore.
+Future.Unit</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+</dd>
+<dt>}.onSuccess { _ =&gt; event(k, “cleanup_attempt_succeeded”) }</dt><dd><dl class="simple">
+<dt>.handle {</dt><dd><p>case _ =&gt; event(k, “cleanup_attempt_failed”)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Mark that a tweet has been successfully created. Subsequent calls</p></li>
+<li><p>to <cite>apply</cite> with this key will receive a DuplicateTweetCreation</p></li>
+<li><p>exception with the specified id.</p></li>
+</ul>
+<p><a href="#id21"><span class="problematic" id="id22">*</span></a>/</p>
+</dd>
+<dt>private[this] def creationComplete(k: Key, tweetId: TweetId, lockTime: Time): Future[Unit] =</dt><dd><p>// Unconditionally set the state because regardless of the
+// value present, we know that we want to transition to the
+// AlreadyCreated state for this key.
+retryLoop(cache.set(k, State.AlreadyCreated(tweetId, lockTime)))</p>
+<blockquote>
+<div><p>.onSuccess(_ =&gt; event(k, “mark_created_succeeded”))
+.onFailure { case _ =&gt; event(k, “mark_created_failed”) }
+// If this fails, it’s OK for the request to complete
+// successfully, because it’s more harmful to create the tweet
+// and return failure than it is to complete it successfully,
+// but fail to honor the uniqueness id next time.
+.handle { case NonFatal(_) =&gt; }</p>
+</div></blockquote>
+</dd>
+<dt>private[this] def createWithLock(</dt><dd><p>k: Key,
+create: =&gt; Future[PostTweetResult]</p>
+</dd>
+<dt>): Future[PostTweetResult] = {</dt><dd><p>val token = Random.nextLong
+event(k, “lock_attempted”)</p>
+<dl>
+<dt>obtainLock(k, token)</dt><dd><p>.onSuccess { _ =&gt; event(k, “lock_obtained”) }
+.handle {</p>
+<blockquote>
+<div><p>// If we run out of retries when trying to get the lock, then
+// just go ahead with tweet creation. We should keep an eye on
+// how frequently this happens, because this means that the
+// only sign that this is happening will be duplicate tweet
+// creations.
+case RetriesExhausted(failures) =&gt;</p>
+<blockquote>
+<div><p>event(k, “lock_failure_ignored”)
+// Treat this as the time that we obtained the lock.
+Time.now</p>
+</div></blockquote>
+</div></blockquote>
+<p>}
+.onFailure {</p>
+<blockquote>
+<div><p>case e =&gt; lockerExceptions(e)</p>
+</div></blockquote>
+<p>}
+.flatMap { lockTime =&gt;</p>
+<blockquote>
+<div><dl>
+<dt>create.transform {</dt><dd><dl>
+<dt>case r &#64; Return(PostTweetResult(_, Some(tweet), _, _, _, _, _)) =&gt;</dt><dd><p>event(k, “create_succeeded”)</p>
+<p>k.uniquenessId.foreach { u =&gt; logUniquenessId((u, tweet.id)) }</p>
+<p>// Update the lock entry to remember the id of the tweet we
+// created and extend the TTL.
+creationComplete(k, tweet.id, lockTime).before(Future.const(r))</p>
+</dd>
+<dt>case other =&gt;</dt><dd><dl class="simple">
+<dt>other match {</dt><dd><dl class="simple">
+<dt>case Throw(e) =&gt;</dt><dd><p>log.debug(s”Tweet creation failed for key $k”, e)</p>
+</dd>
+<dt>case Return(r) =&gt;</dt><dd><p>log.debug(s”Tweet creation failed for key $k, so unlocking: $r”)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>event(k, “create_failed”)</p>
+<p>// Attempt to clean up the lock after the failed create.
+cleanupLoop(k, token).before(Future.const(other))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Make a best-effort attempt at removing the duplicate cache entry</p></li>
+<li><p>for this key. If this fails, it is not catastrophic. The worst-case</p></li>
+<li><p>behavior should be that the user has to wait for the short TTL to</p></li>
+<li><p>elapse before tweeting succeeds.</p></li>
+</ul>
+<p><a href="#id23"><span class="problematic" id="id24">*</span></a>/</p>
+</dd>
+<dt>def unlock(k: Key): Future[Unit] =</dt><dd><p>retryLoop(cache.delete(k).unit).onSuccess(_ =&gt; event(k, “deleted”))</p>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Prevent duplicate tweet creation.</p></li>
+<li></li>
+<li><p>Ensures that no more than one tweet creation for the same key is</p></li>
+<li><p>happening at the same time. If <cite>create</cite> fails, then the key will</p></li>
+<li><p>be removed from the cache. If it succeeds, then the key will be</p></li>
+<li><p>retained.</p></li>
+<li></li>
+<li><p>&#64;throws DuplicateTweetCreation if a tweet has already been</p></li>
+<li><p>created by a previous request. The exception has the id of the</p></li>
+<li><p>created tweet.</p></li>
+<li></li>
+<li><p>&#64;throws TweetCreationInProgress. See the documentation above.</p></li>
+</ul>
+<p><a href="#id25"><span class="problematic" id="id26">*</span></a>/</p>
+</dd>
+<dt>def apply(</dt><dd><p>k: Key,
+isDark: Boolean,
+nullcast: Boolean</p>
+</dd>
+<dt>)(</dt><dd><p>create: =&gt; Future[PostTweetResult]</p>
+</dd>
+<dt>): Future[PostTweetResult] =</dt><dd><dl>
+<dt>if (isDark) {</dt><dd><p>event(k, “dark_create”)
+create</p>
+</dd>
+<dt>} else if (nullcast) {</dt><dd><p>event(k, “nullcast_create”)
+create</p>
+</dd>
+<dt>} else {</dt><dd><dl>
+<dt>createWithLock(k, create).onFailure {</dt><dd><p>// Another process is creating this same tweet (or has already
+// created it)
+case TweetCreationInProgress =&gt;</p>
+<blockquote>
+<div><p>event(k, “tweet_creation_in_progress”)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>case _: DuplicateTweetCreation =&gt;</dt><dd><p>event(k, “tweet_already_created”)</p>
+</dd>
+</dl>
+<p>case _ =&gt;</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/tweetypie/server/src/main/scala/com/twitter/tweetypie/handler/TweetCreationLock.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

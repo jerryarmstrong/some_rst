@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.earlybird.search.relevance.collectors;</p>
+<p>import java.io.IOException;</p>
+<p>import com.google.common.base.Preconditions;</p>
+<p>import com.twitter.common.util.Clock;
+import com.twitter.common_internal.collections.RandomAccessPriorityQueue;
+import com.twitter.search.common.relevance.features.TweetIntegerShingleSignature;
+import com.twitter.search.common.schema.base.ImmutableSchemaInterface;
+import com.twitter.search.common.schema.earlybird.EarlybirdCluster;
+import com.twitter.search.common.search.EarlyTerminationState;
+import com.twitter.search.earlybird.common.userupdates.UserTable;
+import com.twitter.search.earlybird.search.relevance.RelevanceHit;
+import com.twitter.search.earlybird.search.relevance.RelevanceSearchRequestInfo;
+import com.twitter.search.earlybird.search.relevance.RelevanceSearchResults;
+import com.twitter.search.earlybird.search.relevance.scoring.ScoringFunction;
+import com.twitter.search.earlybird.stats.EarlybirdSearcherStats;
+import com.twitter.search.earlybird.thrift.ThriftSearchResultMetadata;
+import com.twitter.search.earlybird.thrift.ThriftSearchResultsRelevanceStats;</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>RelevanceTopCollector is a results collector that collects the top numResults by</p></li>
+<li><p>score, filtering out duplicates.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>public class RelevanceTopCollector extends AbstractRelevanceCollector {</dt><dd><p>// Search results are collected in a min-heap.
+protected final RandomAccessPriorityQueue&lt;RelevanceHit, TweetIntegerShingleSignature&gt; minQueue;</p>
+<p>// Number of hits actually added to the min queue after dupe filtering and skipping.
+// Less than or equal to numHitsProcessed.
+protected int numHitsCollected;</p>
+<p>// The ‘top’ of the min heap, or, the lowest scored document in the heap.
+private RelevanceHit pqTop;
+private float lowestScore = ScoringFunction.SKIP_HIT;</p>
+<p>private final boolean isFilterDupes;</p>
+<dl>
+<dt>public RelevanceTopCollector(</dt><dd><blockquote>
+<div><p>ImmutableSchemaInterface schema,
+RelevanceSearchRequestInfo searchRequestInfo,
+ScoringFunction scoringFunction,
+EarlybirdSearcherStats searcherStats,
+EarlybirdCluster cluster,
+UserTable userTable,
+Clock clock,
+int requestDebugMode) {</p>
+</div></blockquote>
+<dl>
+<dt>super(schema, searchRequestInfo, scoringFunction, searcherStats, cluster, userTable, clock,</dt><dd><p>requestDebugMode);</p>
+</dd>
+<dt>this.minQueue = new RandomAccessPriorityQueue&lt;RelevanceHit, TweetIntegerShingleSignature&gt;(</dt><dd><blockquote>
+<div><p>searchRequestInfo.getNumResultsRequested(), RelevanceHit.PQ_COMPARATOR_BY_SCORE) {</p>
+</div></blockquote>
+<p>&#64;Override
+protected RelevanceHit getSentinelObject() {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>return new RelevanceHit(); // default relevance constructor would create a hit with the</dt><dd><p>// lowest score possible.</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>};
+this.pqTop = minQueue.top();
+this.isFilterDupes = getSearchRequestInfo().getRelevanceOptions().isFilterDups();</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>protected void collectWithScoreInternal(</dt><dd><blockquote>
+<div><p>long tweetID,
+long timeSliceID,
+float score,
+ThriftSearchResultMetadata metadata) {</p>
+</div></blockquote>
+<p>// This collector cannot handle these scores:
+assert !Float.isNaN(score);</p>
+<dl class="simple">
+<dt>if (score &lt;= lowestScore) {</dt><dd><p>// Since docs are returned in-order (i.e., increasing doc Id), a document
+// with equal score to pqTop.score cannot compete since HitQueue favors
+// documents with lower doc Ids. Therefore reject those docs too.
+// IMPORTANT: docs skipped by the scoring function will have scores set
+// to ScoringFunction.SKIP_HIT, meaning they will not be collected.
+return;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>boolean dupFound = false;
+Preconditions.checkState(metadata.isSetSignature(),</p>
+<blockquote>
+<div><dl class="simple">
+<dt>“The signature should be set at metadata collection time, but it is null. “</dt><dd><ul class="simple">
+<li><p>“Tweet id = %s, metadata = %s”,</p></li>
+</ul>
+</dd>
+</dl>
+<p>tweetID,
+metadata);</p>
+</div></blockquote>
+<p>int signatureInt = metadata.getSignature();
+final TweetIntegerShingleSignature signature =</p>
+<blockquote>
+<div><p>TweetIntegerShingleSignature.deserialize(signatureInt);</p>
+</div></blockquote>
+<dl>
+<dt>if (isFilterDupes) {</dt><dd><p>// update duplicate if any
+if (signatureInt != TweetIntegerShingleSignature.DEFAULT_NO_SIGNATURE) {</p>
+<blockquote>
+<div><dl>
+<dt>dupFound = minQueue.incrementElement(</dt><dd><p>signature,
+element -&gt; {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (score &gt; element.getScore()) {</dt><dd><p>element.update(timeSliceID, tweetID, signature, metadata);</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>);</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>if (!dupFound) {</dt><dd><p>numHitsCollected++;</p>
+<p>// if we didn’t find a duplicate element to update then we add it now as a new element to the
+// pq
+pqTop = minQueue.updateTop(top -&gt; top.update(timeSliceID, tweetID, signature, metadata));</p>
+<p>lowestScore = pqTop.getScore();</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;Override
+protected void doCollectWithScore(final long tweetID, final float score) throws IOException {</p>
+<blockquote>
+<div><p>ThriftSearchResultMetadata metadata = collectMetadata();
+scoringFunction.populateResultMetadataBasedOnScoringData(</p>
+<blockquote>
+<div><p>searchRequestInfo.getSearchQuery().getResultMetadataOptions(),
+metadata,
+scoringFunction.getScoringDataForCurrentDocument());</p>
+</div></blockquote>
+<p>collectWithScoreInternal(tweetID, currTimeSliceID, score, metadata);</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public EarlyTerminationState innerShouldCollectMore() {</p>
+<blockquote>
+<div><p>// Note that numHitsCollected here might be less than num results collected in the
+// TwitterEarlyTerminationCollector, if we hit dups or there are very low scores.
+if (numHitsCollected &gt;= getMaxHitsToProcess()) {</p>
+<blockquote>
+<div><p>return setEarlyTerminationState(EarlyTerminationState.TERMINATED_MAX_HITS_EXCEEDED);</p>
+</div></blockquote>
+<p>}
+return EarlyTerminationState.COLLECTING;</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+protected RelevanceSearchResults doGetRelevanceResults() throws IOException {</p>
+<blockquote>
+<div><p>return getRelevanceResultsInternal();</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>protected RelevanceSearchResults getRelevanceResultsInternal() {</dt><dd><dl class="simple">
+<dt>return resultsFromQueue(minQueue, getSearchRequestInfo().getNumResultsRequested(),</dt><dd><p>getRelevanceStats());</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private static RelevanceSearchResults resultsFromQueue(</dt><dd><blockquote>
+<div><p>RandomAccessPriorityQueue&lt;RelevanceHit, TweetIntegerShingleSignature&gt; pq,
+int desiredNumResults,
+ThriftSearchResultsRelevanceStats relevanceStats) {</p>
+</div></blockquote>
+<p>// trim first in case we didn’t fill up the queue to not get any sentinel values here
+int numResults = pq.trim();
+if (numResults &gt; desiredNumResults) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>for (int i = 0; i &lt; numResults - desiredNumResults; i++) {</dt><dd><p>pq.pop();</p>
+</dd>
+</dl>
+<p>}
+numResults = desiredNumResults;</p>
+</div></blockquote>
+<p>}
+RelevanceSearchResults results = new RelevanceSearchResults(numResults);
+// insert hits in decreasing order by score
+for (int i = numResults - 1; i &gt;= 0; i–) {</p>
+<blockquote>
+<div><p>RelevanceHit hit = pq.pop();
+results.setHit(hit, i);</p>
+</div></blockquote>
+<p>}
+results.setRelevanceStats(relevanceStats);
+results.setNumHits(numResults);
+return results;</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/src/java/com/twitter/search/earlybird/search/relevance/collectors/RelevanceTopCollector.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

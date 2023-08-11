@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../" id="documentation_options" src="../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>import os
+from typing import Dict</p>
+<p>from twitter.deepbird.projects.magic_recs.libs.model_utils import filter_nans_and_infs
+import twml
+from twml.layers import full_sparse, sparse_max_norm</p>
+<p>from .params import FeaturesParams, GraphParams, SparseFeaturesParams</p>
+<p>import tensorflow as tf
+from tensorflow import Tensor
+import tensorflow.compat.v1 as tf1</p>
+<p>FEAT_CONFIG_DEFAULT_VAL = 0
+DEFAULT_FEATURE_LIST_PATH = “./feature_list_default.yaml”
+FEATURE_LIST_DEFAULT_PATH = os.path.join(</p>
+<blockquote>
+<div><p>os.path.dirname(os.path.realpath(__file__)), DEFAULT_FEATURE_LIST_PATH</p>
+</div></blockquote>
+<p>)</p>
+<p>def get_feature_config(data_spec_path=None, feature_list_provided=[], params: GraphParams = None):</p>
+<blockquote>
+<div><p>a_string_feat_list = [feat for feat, feat_type in feature_list_provided if feat_type != “S”]</p>
+<dl class="simple">
+<dt>builder = twml.contrib.feature_config.FeatureConfigBuilder(</dt><dd><p>data_spec_path=data_spec_path, debug=False</p>
+</dd>
+</dl>
+<p>)</p>
+<dl class="simple">
+<dt>builder = builder.extract_feature_group(</dt><dd><p>feature_regexes=a_string_feat_list,
+group_name=”continuous_features”,
+default_value=FEAT_CONFIG_DEFAULT_VAL,
+type_filter=[“CONTINUOUS”],</p>
+</dd>
+</dl>
+<p>)</p>
+<dl class="simple">
+<dt>builder = builder.extract_feature_group(</dt><dd><p>feature_regexes=a_string_feat_list,
+group_name=”binary_features”,
+type_filter=[“BINARY”],</p>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>if params.model.features.sparse_features:</dt><dd><dl class="simple">
+<dt>builder = builder.extract_features_as_hashed_sparse(</dt><dd><p>feature_regexes=a_string_feat_list,
+hash_space_size_bits=params.model.features.sparse_features.bits,
+type_filter=[“DISCRETE”, “STRING”, “SPARSE_BINARY”],
+output_tensor_name=”sparse_not_continuous”,</p>
+</dd>
+</dl>
+<p>)</p>
+<dl class="simple">
+<dt>builder = builder.extract_features_as_hashed_sparse(</dt><dd><p>feature_regexes=[feat for feat, feat_type in feature_list_provided if feat_type == “S”],
+hash_space_size_bits=params.model.features.sparse_features.bits,
+type_filter=[“SPARSE_CONTINUOUS”],
+output_tensor_name=”sparse_continuous”,</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>builder = builder.add_labels([task.label for task in params.tasks] + [“label.ntabDislike”])</p>
+<dl class="simple">
+<dt>if params.weight:</dt><dd><p>builder = builder.define_weight(params.weight)</p>
+</dd>
+</dl>
+<p>return builder.build()</p>
+</div></blockquote>
+<dl>
+<dt>def dense_features(features: Dict[str, Tensor], training: bool) -&gt; Tensor:</dt><dd><p>“””
+Performs feature transformations on the raw dense features (continuous and binary).
+“””
+with tf.name_scope(“dense_features”):</p>
+<blockquote>
+<div><p>x = filter_nans_and_infs(features[“continuous_features”])</p>
+<p>x = tf.sign(x) * tf.math.log(tf.abs(x) + 1)
+x = tf1.layers.batch_normalization(</p>
+<blockquote>
+<div><p>x, momentum=0.9999, training=training, renorm=training, axis=1</p>
+</div></blockquote>
+<p>)
+x = tf.clip_by_value(x, -5, 5)</p>
+<p>transformed_continous_features = tf.where(tf.math.is_nan(x), tf.zeros_like(x), x)</p>
+<p>binary_features = filter_nans_and_infs(features[“binary_features”])
+binary_features = tf.dtypes.cast(binary_features, tf.float32)</p>
+<p>output = tf.concat([transformed_continous_features, binary_features], axis=1)</p>
+</div></blockquote>
+<p>return output</p>
+</dd>
+<dt>def sparse_features(</dt><dd><p>features: Dict[str, Tensor], training: bool, params: SparseFeaturesParams</p>
+</dd>
+<dt>) -&gt; Tensor:</dt><dd><p>“””
+Performs feature transformations on the raw sparse features.
+“””</p>
+<dl>
+<dt>with tf.name_scope(“sparse_features”):</dt><dd><dl>
+<dt>with tf.name_scope(“sparse_not_continuous”):</dt><dd><dl class="simple">
+<dt>sparse_not_continuous = full_sparse(</dt><dd><p>inputs=features[“sparse_not_continuous”],
+output_size=params.embedding_size,
+use_sparse_grads=training,
+use_binary_values=False,</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>with tf.name_scope(“sparse_continuous”):</dt><dd><dl class="simple">
+<dt>shape_enforced_input = twml.util.limit_sparse_tensor_size(</dt><dd><p>sparse_tf=features[“sparse_continuous”], input_size_bits=params.bits, mask_indices=False</p>
+</dd>
+</dl>
+<p>)</p>
+<dl class="simple">
+<dt>normalized_continuous_sparse = sparse_max_norm(</dt><dd><p>inputs=shape_enforced_input, is_training=training</p>
+</dd>
+</dl>
+<p>)</p>
+<dl class="simple">
+<dt>sparse_continuous = full_sparse(</dt><dd><p>inputs=normalized_continuous_sparse,
+output_size=params.embedding_size,
+use_sparse_grads=training,
+use_binary_values=False,</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>output = tf.concat([sparse_not_continuous, sparse_continuous], axis=1)</p>
+</dd>
+</dl>
+<p>return output</p>
+</dd>
+<dt>def get_features(features: Dict[str, Tensor], training: bool, params: FeaturesParams) -&gt; Tensor:</dt><dd><p>“””
+Performs feature transformations on the dense and sparse features and combine the resulting
+tensors into a single one.
+“””
+with tf.name_scope(“features”):</p>
+<blockquote>
+<div><p>x = dense_features(features, training)
+tf1.logging.info(f”Dense features: {x.shape}”)</p>
+<dl class="simple">
+<dt>if params.sparse_features:</dt><dd><p>x = tf.concat([x, sparse_features(features, training, params.sparse_features)], axis=1)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>return x</p>
+</dd>
+</dl>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../_sources/pushservice/src/main/python/models/heavy_ranking/features.py.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

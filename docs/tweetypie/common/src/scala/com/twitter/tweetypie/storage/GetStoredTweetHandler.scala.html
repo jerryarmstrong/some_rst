@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../" id="documentation_options" src="../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.tweetypie.storage</p>
+<p>import com.twitter.conversions.DurationOps._
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.stitch.Stitch
+import com.twitter.stitch.StitchSeqGroup
+import com.twitter.tweetypie.storage.TweetStorageClient.GetStoredTweet
+import com.twitter.tweetypie.storage.TweetStorageClient.GetStoredTweet.Error
+import com.twitter.tweetypie.storage.TweetStorageClient.GetStoredTweet.Response._
+import com.twitter.tweetypie.storage.TweetUtils._
+import com.twitter.tweetypie.thriftscala.Tweet
+import com.twitter.util.Time
+import com.twitter.util.Try
+import scala.collection.mutable</p>
+<dl>
+<dt>object GetStoredTweetHandler {</dt><dd><dl>
+<dt>private[this] object DeletedState {</dt><dd><dl>
+<dt>def unapply(stateRecord: Option[TweetStateRecord]): Option[TweetStateRecord] =</dt><dd><dl>
+<dt>stateRecord match {</dt><dd><dl>
+<dt>case state &#64; (Some(_: TweetStateRecord.SoftDeleted) | Some(</dt><dd><blockquote>
+<div><p>_: TweetStateRecord.HardDeleted) | Some(_: TweetStateRecord.BounceDeleted)) =&gt;</p>
+</div></blockquote>
+<p>state</p>
+</dd>
+</dl>
+<p>case _ =&gt; None</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private[this] def deletedAtMs(stateRecord: Option[TweetStateRecord]): Option[Long] =</dt><dd><dl class="simple">
+<dt>stateRecord match {</dt><dd><p>case Some(d: TweetStateRecord.SoftDeleted) =&gt; Some(d.createdAt)
+case Some(d: TweetStateRecord.BounceDeleted) =&gt; Some(d.createdAt)
+case Some(d: TweetStateRecord.HardDeleted) =&gt; Some(d.deletedAt)
+case _ =&gt; None</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>private[this] def tweetResponseFromRecords(</dt><dd><p>tweetId: TweetId,
+mhRecords: Seq[TweetManhattanRecord],
+statsReceiver: StatsReceiver,</p>
+</dd>
+<dt>): GetStoredTweet.Response = {</dt><dd><dl class="simple">
+<dt>val errs =</dt><dd><p>mutable.Buffer[Error]()</p>
+</dd>
+<dt>val hasStoredTweetFields: Boolean = mhRecords.exists {</dt><dd><p>case TweetManhattanRecord(TweetKey(_, _: TweetKey.LKey.FieldKey), _) =&gt; true
+case _ =&gt; false</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>val storedTweet = if (hasStoredTweetFields) {</dt><dd><dl class="simple">
+<dt>Try(buildStoredTweet(tweetId, mhRecords, includeScrubbed = true))</dt><dd><p>.onFailure(_ =&gt; errs.append(Error.TweetIsCorrupt))
+.toOption</p>
+</dd>
+</dl>
+</dd>
+<dt>} else {</dt><dd><p>None</p>
+</dd>
+</dl>
+<p>}</p>
+<p>val scrubbedFields: Set[FieldId] = extractScrubbedFields(mhRecords)
+val tweet: Option[Tweet] = storedTweet.map(StorageConversions.fromStoredTweetAllowInvalid)
+val stateRecords: Seq[TweetStateRecord] = TweetStateRecord.fromTweetMhRecords(mhRecords)
+val tweetState: Option[TweetStateRecord] = TweetStateRecord.mostRecent(mhRecords)</p>
+<dl>
+<dt>storedTweet.foreach { storedTweet =&gt;</dt><dd><p>val storedExpectedFields = storedTweet.getFieldBlobs(expectedFields)
+val missingExpectedFields = expectedFields.filterNot(storedExpectedFields.contains)
+if (missingExpectedFields.nonEmpty || !isValid(storedTweet)) {</p>
+<blockquote>
+<div><p>errs.append(Error.TweetFieldsMissingOrInvalid)</p>
+</div></blockquote>
+<p>}</p>
+<p>val invalidScrubbedFields = storedTweet.getFieldBlobs(scrubbedFields).keys
+if (invalidScrubbedFields.nonEmpty) {</p>
+<blockquote>
+<div><p>errs.append(Error.ScrubbedFieldsPresent)</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>if (deletedAtMs(tweetState).exists(_ &lt; Time.now.inMilliseconds - 14.days.inMilliseconds)) {</dt><dd><p>errs.append(Error.TweetShouldBeHardDeleted)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>val err = Option(errs.toList).filter(_.nonEmpty)</p>
+<dl class="simple">
+<dt>(tweet, tweetState, err) match {</dt><dd><dl class="simple">
+<dt>case (None, None, None) =&gt;</dt><dd><p>statsReceiver.counter(“not_found”).incr()
+NotFound(tweetId)</p>
+</dd>
+<dt>case (None, Some(tweetState: TweetStateRecord.HardDeleted), None) =&gt;</dt><dd><p>statsReceiver.counter(“hard_deleted”).incr()
+HardDeleted(tweetId, Some(tweetState), stateRecords, scrubbedFields)</p>
+</dd>
+<dt>case (None, _, Some(errs)) =&gt;</dt><dd><p>statsReceiver.counter(“failed”).incr()
+Failed(tweetId, tweetState, stateRecords, scrubbedFields, errs)</p>
+</dd>
+<dt>case (Some(tweet), _, Some(errs)) =&gt;</dt><dd><p>statsReceiver.counter(“found_invalid”).incr()
+FoundWithErrors(tweet, tweetState, stateRecords, scrubbedFields, errs)</p>
+</dd>
+<dt>case (Some(tweet), DeletedState(state), None) =&gt;</dt><dd><p>statsReceiver.counter(“deleted”).incr()
+FoundDeleted(tweet, Some(state), stateRecords, scrubbedFields)</p>
+</dd>
+<dt>case (Some(tweet), _, None) =&gt;</dt><dd><p>statsReceiver.counter(“found”).incr()
+Found(tweet, tweetState, stateRecords, scrubbedFields)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>def apply(read: ManhattanOperations.Read, statsReceiver: StatsReceiver): GetStoredTweet = {</p>
+<blockquote>
+<div><dl>
+<dt>object mhGroup extends StitchSeqGroup[TweetId, Seq[TweetManhattanRecord]] {</dt><dd><dl class="simple">
+<dt>override def run(tweetIds: Seq[TweetId]): Stitch[Seq[Seq[TweetManhattanRecord]]] = {</dt><dd><p>Stats.addWidthStat(“getStoredTweet”, “tweetIds”, tweetIds.size, statsReceiver)
+Stitch.traverse(tweetIds)(read(_))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>tweetId =&gt;</dt><dd><dl>
+<dt>if (tweetId &lt;= 0) {</dt><dd><p>Stitch.NotFound</p>
+</dd>
+<dt>} else {</dt><dd><dl>
+<dt>Stitch</dt><dd><p>.call(tweetId, mhGroup)
+.map(mhRecords =&gt;</p>
+<blockquote>
+<div><p>tweetResponseFromRecords(tweetId, mhRecords, statsReceiver.scope(“getStoredTweet”)))</p>
+</div></blockquote>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../_sources/tweetypie/common/src/scala/com/twitter/tweetypie/storage/GetStoredTweetHandler.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

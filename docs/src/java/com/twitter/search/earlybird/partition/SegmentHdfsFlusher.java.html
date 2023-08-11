@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../" id="documentation_options" src="../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.earlybird.partition;</p>
+<p>import java.io.File;
+import java.io.IOException;
+import java.util.concurrent.TimeUnit;</p>
+<p>import org.apache.commons.io.FileUtils;
+import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.Path;
+import org.apache.lucene.store.Directory;
+import org.apache.lucene.store.FSDirectory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;</p>
+<p>import com.twitter.common.base.Command;
+import com.twitter.common.quantity.Amount;
+import com.twitter.common.quantity.Time;
+import com.twitter.search.common.database.DatabaseConfig;
+import com.twitter.search.common.metrics.Timer;
+import com.twitter.search.common.util.io.flushable.PersistentFile;
+import com.twitter.search.common.util.zktrylock.TryLock;
+import com.twitter.search.common.util.zktrylock.ZooKeeperTryLockFactory;</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Flush segments to disk and upload them to HDFS.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>public class SegmentHdfsFlusher {</dt><dd><p>private static final Logger LOG = LoggerFactory.getLogger(SegmentHdfsFlusher.class);
+private static final Amount&lt;Long, Time&gt; HDFS_UPLOADER_TRY_LOCK_NODE_EXPIRATION_TIME_MILLIS =</p>
+<blockquote>
+<div><p>Amount.of(1L, Time.HOURS);</p>
+</div></blockquote>
+<p>private final SegmentSyncConfig sync;
+private final boolean holdLockWhileUploading;
+private final ZooKeeperTryLockFactory zkTryLockFactory;</p>
+<dl>
+<dt>public SegmentHdfsFlusher(ZooKeeperTryLockFactory zooKeeperTryLockFactory,</dt><dd><blockquote>
+<div><p>SegmentSyncConfig sync,
+boolean holdLockWhileUploading) {</p>
+</div></blockquote>
+<p>this.zkTryLockFactory = zooKeeperTryLockFactory;
+this.sync = sync;
+this.holdLockWhileUploading = holdLockWhileUploading;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>public SegmentHdfsFlusher(</dt><dd><blockquote>
+<div><p>ZooKeeperTryLockFactory zooKeeperTryLockFactory,
+SegmentSyncConfig sync) {</p>
+</div></blockquote>
+<p>this(zooKeeperTryLockFactory, sync, true);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private boolean shouldFlushSegment(SegmentInfo segmentInfo) {</dt><dd><dl class="simple">
+<dt>return segmentInfo.isEnabled()</dt><dd><p>&amp;&amp; !segmentInfo.getSyncInfo().isFlushed()
+&amp;&amp; segmentInfo.isComplete()
+&amp;&amp; segmentInfo.isOptimized()
+&amp;&amp; !segmentInfo.isFailedOptimize()
+&amp;&amp; !segmentInfo.getSyncInfo().isLoaded();</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Flushes a segment to local disk and to HDFS.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>public boolean flushSegmentToDiskAndHDFS(SegmentInfo segmentInfo) {</dt><dd><dl class="simple">
+<dt>if (!shouldFlushSegment(segmentInfo)) {</dt><dd><p>return false;</p>
+</dd>
+</dl>
+<p>}
+try {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (segmentInfo.isIndexing()) {</dt><dd><p>LOG.error(“Tried to flush current segment!”);
+return false;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// Check-and-set the beingUploaded flag from false to true. If the CAS fails, it means the
+// segment is being flushed already, or being deleted. In this case, we can just return false.
+if (!segmentInfo.casBeingUploaded(false, true)) {</p>
+<blockquote>
+<div><p>LOG.warn(“Tried to flush a segment that’s being flushed or deleted.”);
+return false;</p>
+</div></blockquote>
+<p>}</p>
+<p>// At this point, the above CAS must have returned false. This mean the beingUploaded flag
+// was false, and set to true now. We can proceed with flushing the segment.
+try {</p>
+<blockquote>
+<div><p>checkAndFlushSegmentToHdfs(segmentInfo);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} finally {</dt><dd><p>segmentInfo.setBeingUploaded(false);</p>
+</dd>
+</dl>
+<p>}
+return true;</p>
+</div></blockquote>
+<dl>
+<dt>} catch (Exception e) {</dt><dd><dl class="simple">
+<dt>LOG.error(“Exception while flushing IndexSegment to “</dt><dd><ul class="simple">
+<li><p>segmentInfo.getSyncInfo().getHdfsFlushDir(), e);</p></li>
+</ul>
+</dd>
+</dl>
+<p>return false;</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>First try to acquire a lock in Zookeeper for this segment, so multiple Earlybirds in the same</p></li>
+<li><p>partition don’t flush or upload the segment at the same time. When the lock is acquired, check</p></li>
+<li><p>for the segment in HDFS. If the data already exists, don’t flush to disk.</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>private void checkAndFlushSegmentToHdfs(final SegmentInfo segment) {</dt><dd><p>LOG.info(“Checking and flushing segment {}”, segment);</p>
+<dl>
+<dt>try {</dt><dd><p>// Always flush the segment locally.
+Directory dir = FSDirectory.open(createFlushDir(segment).toPath());
+segment.flush(dir);
+LOG.info(“Completed local flush of segment {}. Flush to HDFS enabled: {}”,</p>
+<blockquote>
+<div><p>segment, sync.isFlushToHdfsEnabled());</p>
+</div></blockquote>
+</dd>
+<dt>} catch (IOException e) {</dt><dd><p>LOG.error(“Failed to flush segment “ + segment + “ locally”, e);
+return;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>if (!holdLockWhileUploading) {</dt><dd><p>flushToHdfsIfNecessary(segment);</p>
+</dd>
+<dt>} else {</dt><dd><dl class="simple">
+<dt>TryLock lock = zkTryLockFactory.createTryLock(</dt><dd><p>DatabaseConfig.getLocalHostname(),
+sync.getZooKeeperSyncFullPath(),
+sync.getVersionedName(segment.getSegment()),
+HDFS_UPLOADER_TRY_LOCK_NODE_EXPIRATION_TIME_MILLIS</p>
+</dd>
+</dl>
+<p>);</p>
+<p>boolean gotLock = lock.tryWithLock((Command) () -&gt; flushToHdfsIfNecessary(segment));
+if (!gotLock) {</p>
+<blockquote>
+<div><p>LOG.info(“Failed to get zk upload lock for segment {}”, segment);</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Check whether the segment has already been flushed to HDFS. If not, flush the segment to disk</p></li>
+<li><p>and upload the files to HDFS.</p></li>
+<li></li>
+<li><p>If the ZK lock isn’t used, there is a race between the existence check and the upload (in</p></li>
+<li><p>which another Earlybird can sneak in and upload the segment), so we will potentially upload</p></li>
+<li><p>the same segment from different hosts. Thus, the Earlybird hostname is part of the segment’s</p></li>
+<li><p>path on HDFS.</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+<dt>private void flushToHdfsIfNecessary(SegmentInfo segmentInfo) {</dt><dd><p>Timer timer = new Timer(TimeUnit.MILLISECONDS);
+String status = “flushed”;
+try (FileSystem fs = HdfsUtil.getHdfsFileSystem()) {</p>
+<blockquote>
+<div><p>// If we can’t load segments from HDFS, don’t bother checking HDFS for the segment
+if (sync.isSegmentLoadFromHdfsEnabled()</p>
+<blockquote>
+<div><blockquote>
+<div><dl class="simple">
+<dt>&amp;&amp; (segmentInfo.getSyncInfo().isFlushed()</dt><dd><p>|| HdfsUtil.segmentExistsOnHdfs(fs, segmentInfo))) {</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>status = “existing”;</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else if (sync.isFlushToHdfsEnabled()) {</dt><dd><p>copyLocalFilesToHdfs(fs, segmentInfo);
+status = “uploaded”;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// whether we uploaded, or someone else did, this segment should now be on HDFS. If
+// uploading to HDFS is disabled, we still consider it complete.
+segmentInfo.getSyncInfo().setFlushed(true);</p>
+</div></blockquote>
+<dl>
+<dt>} catch (IOException e) {</dt><dd><p>LOG.error(“Failed copying segment {} to HDFS after {} ms”, segmentInfo, timer.stop(), e);
+status = “exception”;</p>
+</dd>
+<dt>} finally {</dt><dd><dl class="simple">
+<dt>if (timer.running()) {</dt><dd><p>timer.stop();</p>
+</dd>
+</dl>
+<p>}
+LOG.info(“Flush of segment {} to HDFS completed in {} milliseconds. Status: {}”,</p>
+<blockquote>
+<div><p>segmentInfo, timer.getElapsed(), status);</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Copy local segment files to HDFS. Files are first copied into a temporary directory</p></li>
+<li><p>in the form &lt;hostname&gt;_&lt;segmentname&gt; and when all the files are written out to HDFS,</p></li>
+<li><p>the dir is renamed to &lt;segmentname&gt;_&lt;hostname&gt;, where it is accessible to other Earlybirds.</p></li>
+</ul>
+<p><a href="#id9"><span class="problematic" id="id10">*</span></a>/</p>
+</dd>
+<dt>private void copyLocalFilesToHdfs(FileSystem fs, SegmentInfo segment) throws IOException {</dt><dd><p>String hdfsTempBaseDir = segment.getSyncInfo().getHdfsTempFlushDir();</p>
+<p>// If the temp dir already exists on HDFS, a prior flush must have been interrupted.
+// Delete it and start fresh.
+removeHdfsTempDir(fs, hdfsTempBaseDir);</p>
+<dl>
+<dt>for (String fileName<span class="classifier">sync.getAllSyncFileNames(segment)) {</span></dt><dd><p>String hdfsFileName = hdfsTempBaseDir + “/” + fileName;
+String localBaseDir = segment.getSyncInfo().getLocalSyncDir();
+String localFileName = localBaseDir + “/” + fileName;</p>
+<dl class="simple">
+<dt>LOG.debug(“About to start copying {} to HDFS, from {} to {}”,</dt><dd><p>fileName, localFileName, hdfsFileName);</p>
+</dd>
+</dl>
+<p>Timer timer = new Timer(TimeUnit.MILLISECONDS);
+fs.copyFromLocalFile(new Path(localFileName), new Path(hdfsFileName));
+LOG.debug(“Completed copying {} to HDFS, from {} to {}, in {} ms”,</p>
+<blockquote>
+<div><p>fileName, localFileName, hdfsFileName, timer.stop());</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<p>// now let’s rename the dir into its proper form.
+String hdfsBaseDir = segment.getSyncInfo().getHdfsFlushDir();
+if (fs.rename(new Path(hdfsTempBaseDir), new Path(hdfsBaseDir))) {</p>
+<blockquote>
+<div><p>LOG.info(“Renamed segment dir on HDFS from {} to {}”, hdfsTempBaseDir, hdfsBaseDir);</p>
+</div></blockquote>
+<dl>
+<dt>} else {</dt><dd><dl class="simple">
+<dt>String errorMessage = String.format(“Failed to rename segment dir on HDFS from %s to %s”,</dt><dd><p>hdfsTempBaseDir, hdfsBaseDir);</p>
+</dd>
+</dl>
+<p>LOG.error(errorMessage);</p>
+<p>removeHdfsTempDir(fs, hdfsTempBaseDir);</p>
+<p>// Throw an IOException so the calling code knows that the copy failed
+throw new IOException(errorMessage);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private void removeHdfsTempDir(FileSystem fs, String tempDir) throws IOException {</dt><dd><p>Path tempDirPath = new Path(tempDir);
+if (fs.exists(tempDirPath)) {</p>
+<blockquote>
+<div><p>LOG.info(“Found existing temporary flush dir {} on HDFS, removing”, tempDir);
+if (!fs.delete(tempDirPath, true /* recursive <a href="#id11"><span class="problematic" id="id12">*</span></a>/)) {</p>
+<blockquote>
+<div><p>LOG.error(“Failed to delete temp dir {}”, tempDir);</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// Create or replace the local flush directory
+private File createFlushDir(SegmentInfo segmentInfo) throws IOException {</p>
+<blockquote>
+<div><p>final String flushDirStr = segmentInfo.getSyncInfo().getLocalSyncDir();</p>
+<p>File flushDir = new File(flushDirStr);
+if (flushDir.exists()) {</p>
+<blockquote>
+<div><p>// Delete just the flushed persistent files if they are there.
+// We may also have the lucene on-disk indexed in the same dir here,
+// that we do not want to delete.
+for (String persistentFile : sync.getPersistentFileNames(segmentInfo)) {</p>
+<blockquote>
+<div><dl>
+<dt>for (String fileName<span class="classifier">PersistentFile.getAllFileNames(persistentFile)) {</span></dt><dd><p>File file = new File(flushDir, fileName);
+if (file.exists()) {</p>
+<blockquote>
+<div><p>LOG.info(“Deleting incomplete flush file {}”, file.getAbsolutePath());
+FileUtils.forceDelete(file);</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}
+return flushDir;</p>
+</div></blockquote>
+<p>}</p>
+<p>// Try to create the flush directory
+if (!flushDir.mkdirs()) {</p>
+<blockquote>
+<div><p>throw new IOException(“Not able to create segment flush directory &quot;” + flushDirStr + “&quot;”);</p>
+</div></blockquote>
+<p>}</p>
+<p>return flushDir;</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../_sources/src/java/com/twitter/search/earlybird/partition/SegmentHdfsFlusher.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

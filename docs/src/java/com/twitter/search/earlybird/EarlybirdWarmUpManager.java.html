@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../" id="documentation_options" src="../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.earlybird;</p>
+<p>import com.google.common.annotations.VisibleForTesting;</p>
+<p>import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;</p>
+<p>import com.twitter.common.util.Clock;
+import com.twitter.common.zookeeper.ServerSet;
+import com.twitter.decider.Decider;
+import com.twitter.search.common.decider.DeciderUtil;
+import com.twitter.search.earlybird.partition.PartitionConfig;
+import com.twitter.search.earlybird.partition.SearchIndexingMetricSet;
+import com.twitter.search.earlybird.thrift.EarlybirdStatusCode;</p>
+<dl>
+<dt>public class EarlybirdWarmUpManager {</dt><dd><p>private static final Logger LOG = LoggerFactory.getLogger(EarlybirdWarmUpManager.class);
+private static final String WARM_UP_ON_DURATION_DECIDER_KEY_PATTERN =</p>
+<blockquote>
+<div><p>“%s_warm_up_duration_seconds”;</p>
+</div></blockquote>
+<p>private final EarlybirdServerSetManager earlybirdServerSetManager;
+private final String clusterName;
+private final SearchIndexingMetricSet.StartupMetric startUpInWarmUpMetric;
+private final Decider decider;
+private final Clock clock;</p>
+<dl>
+<dt>public EarlybirdWarmUpManager(EarlybirdServerSetManager earlybirdServerSetManager,</dt><dd><blockquote>
+<div><p>PartitionConfig partitionConfig,
+SearchIndexingMetricSet searchIndexingMetricSet,
+Decider decider,
+Clock clock) {</p>
+</div></blockquote>
+<p>this.earlybirdServerSetManager = earlybirdServerSetManager;
+this.clusterName = partitionConfig.getClusterName();
+this.startUpInWarmUpMetric = searchIndexingMetricSet.startupInWarmUp;
+this.decider = decider;
+this.clock = clock;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public String getServerSetIdentifier() {</dt><dd><p>return earlybirdServerSetManager.getServerSetIdentifier();</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Warms up the earlybird. The earlybird joins a special server set that gets production dark</p></li>
+<li><p>reads, and leaves this server set after a specified period of time.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>public void warmUp() throws InterruptedException, ServerSet.UpdateException {</dt><dd><dl>
+<dt>int warmUpDurationSeconds = DeciderUtil.getAvailability(</dt><dd><p>decider,
+String.format(WARM_UP_ON_DURATION_DECIDER_KEY_PATTERN, clusterName.replaceAll(“-”, “_”)));</p>
+</dd>
+<dt>if (warmUpDurationSeconds == 0) {</dt><dd><dl class="simple">
+<dt>LOG.info(String.format(“Warm up stage duration for cluster %s set to 0. Skipping.”,</dt><dd><p>clusterName));</p>
+</dd>
+</dl>
+<p>return;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>earlybirdServerSetManager.joinServerSet(“internal warm up”);</p>
+<p>// If doWarmUp() is interrupted, try to leave the server set, and propagate the
+// InterruptedException. Otherwise, try to leave the server set, and propagate any exception
+// that it might throw.
+InterruptedException warmUpInterruptedException = null;
+try {</p>
+<blockquote>
+<div><p>doWarmUp(warmUpDurationSeconds);</p>
+</div></blockquote>
+<dl>
+<dt>} catch (InterruptedException e) {</dt><dd><p>warmUpInterruptedException = e;
+throw e;</p>
+</dd>
+<dt>} finally {</dt><dd><dl>
+<dt>if (warmUpInterruptedException != null) {</dt><dd><dl class="simple">
+<dt>try {</dt><dd><p>earlybirdServerSetManager.leaveServerSet(“internal warm up”);</p>
+</dd>
+<dt>} catch (Exception e) {</dt><dd><p>warmUpInterruptedException.addSuppressed(e);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>} else {</dt><dd><p>earlybirdServerSetManager.leaveServerSet(“internal warm up”);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;VisibleForTesting
+protected void doWarmUp(int warmUpDurationSeconds) throws InterruptedException {</p>
+<blockquote>
+<div><p>long warmUpStartTimeMillis = clock.nowMillis();
+LOG.info(String.format(“Warming up for %d seconds.”, warmUpDurationSeconds));
+EarlybirdStatus.beginEvent(“warm_up”, startUpInWarmUpMetric);</p>
+<p>// Sleep for warmUpDurationSeconds seconds, but check if the server is going down every second.
+int count = 0;
+try {</p>
+<blockquote>
+<div><dl>
+<dt>while ((count++ &lt; warmUpDurationSeconds)</dt><dd><blockquote>
+<div><p>&amp;&amp; (EarlybirdStatus.getStatusCode() != EarlybirdStatusCode.STOPPING)) {</p>
+</div></blockquote>
+<p>clock.waitFor(1000);</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<dl>
+<dt>} finally {</dt><dd><dl class="simple">
+<dt>LOG.info(String.format(“Done warming up after %d milliseconds.”,</dt><dd><p>clock.nowMillis() - warmUpStartTimeMillis));</p>
+</dd>
+</dl>
+<p>EarlybirdStatus.endEvent(“warm_up”, startUpInWarmUpMetric);</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../_sources/src/java/com/twitter/search/earlybird/EarlybirdWarmUpManager.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

@@ -1,0 +1,854 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../" id="documentation_options" src="../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.simclusters_v2.scalding
+package multi_type_graph.assemble_multi_type_graph</p>
+<p>import com.twitter.bijection.scrooge.BinaryScalaCodec
+import com.twitter.scalding_internal.job.RequiredBinaryComparators.ordSer
+import com.twitter.scalding.typed.TypedPipe
+import com.twitter.scalding.{DateRange, Days, Stat, UniqueID}
+import com.twitter.scalding_internal.dalv2.DAL
+import com.twitter.simclusters_v2.scalding.embedding.common.ExternalDataSources
+import com.twitter.simclusters_v2.thriftscala.{</p>
+<blockquote>
+<div><p>LeftNode,
+Noun,
+RightNode,
+RightNodeType,
+RightNodeWithEdgeWeight</p>
+</div></blockquote>
+<p>}
+import java.util.TimeZone
+import com.twitter.iesource.thriftscala.{InteractionEvent, InteractionType, ReferenceTweet}
+import com.twitter.simclusters_v2.common.{Country, Language, TopicId, TweetId, UserId}
+import com.twitter.usersource.snapshot.combined.UsersourceScalaDataset
+import com.twitter.frigate.data_pipeline.magicrecs.magicrecs_notifications_lite.thriftscala.MagicRecsNotificationLite
+import com.twitter.twadoop.user.gen.thriftscala.CombinedUser</p>
+<dl>
+<dt>object AssembleMultiTypeGraph {</dt><dd><p>import Config._</p>
+<dl>
+<dt>implicit val nounOrdering: Ordering[Noun] = new Ordering[Noun] {</dt><dd><p>// We define an ordering for each noun type as specified in simclusters_v2/multi_type_graph.thrift
+// Please make sure we don’t remove anything here that’s still a part of the union Noun thrift and
+// vice versa, if we add a new noun type to thrift, an ordering for it needs to added here as well.
+def nounTypeOrder(noun: Noun): Int = noun match {</p>
+<blockquote>
+<div><p>case _: Noun.UserId =&gt; 0
+case _: Noun.Country =&gt; 1
+case _: Noun.Language =&gt; 2
+case _: Noun.Query =&gt; 3
+case _: Noun.TopicId =&gt; 4
+case _: Noun.TweetId =&gt; 5</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>override def compare(x: Noun, y: Noun): Int = (x, y) match {</dt><dd><p>case (Noun.UserId(a), Noun.UserId(b)) =&gt; a compare b
+case (Noun.Country(a), Noun.Country(b)) =&gt; a compare b
+case (Noun.Language(a), Noun.Language(b)) =&gt; a compare b
+case (Noun.Query(a), Noun.Query(b)) =&gt; a compare b
+case (Noun.TopicId(a), Noun.TopicId(b)) =&gt; a compare b
+case (Noun.TweetId(a), Noun.TweetId(b)) =&gt; a compare b
+case (nounA, nounB) =&gt; nounTypeOrder(nounA) compare nounTypeOrder(nounB)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}
+implicit val rightNodeTypeOrdering: Ordering[RightNodeType] = ordSer[RightNodeType]</p>
+<dl>
+<dt>implicit val rightNodeTypeWithNounOrdering: Ordering[RightNode] =</dt><dd><dl>
+<dt>new Ordering[RightNode] {</dt><dd><dl class="simple">
+<dt>override def compare(x: RightNode, y: RightNode): Int = {</dt><dd><dl class="simple">
+<dt>Ordering</dt><dd><p>.Tuple2(rightNodeTypeOrdering, nounOrdering)
+.compare((x.rightNodeType, x.noun), (y.rightNodeType, y.noun))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>def getUserTweetInteractionGraph(</dt><dd><p>tweetInteractionEvents: TypedPipe[InteractionEvent],</p>
+</dd>
+<dt>)(</dt><dd><p>implicit uniqueID: UniqueID</p>
+</dd>
+<dt>): TypedPipe[(LeftNode, RightNodeWithEdgeWeight)] = {</dt><dd><p>val numUserTweetInteractionEntries = Stat(“num_user_tweet_interaction_entries”)
+val numDistinctUserTweetInteractionEntries = Stat(“num_distinct_user_tweet_interaction_entries”)
+val numFavedTweets = Stat(“num_faved_tweets”)
+val numRepliedTweets = Stat(“num_replied_tweets”)
+val numRetweetedTweets = Stat(“num_retweeted_tweets”)
+val userTweetInteractionsByType: TypedPipe[((UserId, RightNodeType), TweetId)] =</p>
+<blockquote>
+<div><dl>
+<dt>tweetInteractionEvents</dt><dd><dl>
+<dt>.flatMap { event =&gt;</dt><dd><p>val referenceTweet: Option[ReferenceTweet] = event.referenceTweet
+val targetId: Long = event.targetId
+val userId: Long = event.engagingUserId</p>
+<p>//  To find the id of the tweet that was interacted with
+//  For likes, this is the targetId; for retweet or reply, it is the referenceTweet’s id
+//  One thing to note is that for likes, referenceTweet is empty
+val (tweetIdOpt, rightNodeTypeOpt) = {</p>
+<blockquote>
+<div><dl>
+<dt>event.interactionType match {</dt><dd><dl>
+<dt>case Some(InteractionType.Favorite) =&gt;</dt><dd><p>// Only allow favorites on original tweets, not retweets, to avoid double-counting
+// because we have retweet-type tweets in the data source as well
+(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (referenceTweet.isEmpty) {</dt><dd><p>numFavedTweets.inc()
+Some(targetId)</p>
+</dd>
+</dl>
+<p>} else None,
+Some(RightNodeType.FavTweet))</p>
+</div></blockquote>
+</dd>
+<dt>case Some(InteractionType.Reply) =&gt;</dt><dd><p>numRepliedTweets.inc()
+(referenceTweet.map(_.tweetId), Some(RightNodeType.ReplyTweet))</p>
+</dd>
+<dt>case Some(InteractionType.Retweet) =&gt;</dt><dd><p>numRetweetedTweets.inc()
+(referenceTweet.map(_.tweetId), Some(RightNodeType.RetweetTweet))</p>
+</dd>
+</dl>
+<p>case _ =&gt; (None, None)</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}
+for {</p>
+<blockquote>
+<div><p>tweetId &lt;- tweetIdOpt
+rightNodeType &lt;- rightNodeTypeOpt</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} yield {</dt><dd><p>numUserTweetInteractionEntries.inc()
+((userId, rightNodeType), tweetId)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl>
+<dt>userTweetInteractionsByType</dt><dd><p>.mapValues(Set(_))
+.sumByKey
+.flatMap {</p>
+<blockquote>
+<div><dl>
+<dt>case ((userId, rightNodeType), tweetIdSet) =&gt;</dt><dd><dl>
+<dt>tweetIdSet.map { tweetId =&gt;</dt><dd><p>numDistinctUserTweetInteractionEntries.inc()
+(</p>
+<blockquote>
+<div><p>LeftNode.UserId(userId),
+RightNodeWithEdgeWeight(</p>
+<blockquote>
+<div><p>rightNode = RightNode(rightNodeType = rightNodeType, noun = Noun.TweetId(tweetId)),
+weight = 1.0))</p>
+</div></blockquote>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def getUserFavGraph(</dt><dd><p>userUserFavEdges: TypedPipe[(UserId, UserId, Double)]</p>
+</dd>
+<dt>)(</dt><dd><p>implicit uniqueID: UniqueID</p>
+</dd>
+<dt>): TypedPipe[(LeftNode, RightNodeWithEdgeWeight)] = {</dt><dd><p>val numInputFavEdges = Stat(“num_input_fav_edges”)
+userUserFavEdges.map {</p>
+<blockquote>
+<div><dl>
+<dt>case (srcId, destId, edgeWt) =&gt;</dt><dd><p>numInputFavEdges.inc()
+(</p>
+<blockquote>
+<div><p>LeftNode.UserId(srcId),
+RightNodeWithEdgeWeight(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>rightNode =</dt><dd><p>RightNode(rightNodeType = RightNodeType.FavUser, noun = Noun.UserId(destId)),</p>
+</dd>
+</dl>
+<p>weight = edgeWt))</p>
+</div></blockquote>
+</div></blockquote>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def getUserFollowGraph(</dt><dd><p>userUserFollowEdges: TypedPipe[(UserId, UserId)]</p>
+</dd>
+<dt>)(</dt><dd><p>implicit uniqueID: UniqueID</p>
+</dd>
+<dt>): TypedPipe[(LeftNode, RightNodeWithEdgeWeight)] = {</dt><dd><p>val numFlockFollowEdges = Stat(“num_flock_follow_edges”)
+userUserFollowEdges.map {</p>
+<blockquote>
+<div><dl>
+<dt>case (srcId, destId) =&gt;</dt><dd><p>numFlockFollowEdges.inc()
+(</p>
+<blockquote>
+<div><p>LeftNode.UserId(srcId),
+RightNodeWithEdgeWeight(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>rightNode =</dt><dd><p>RightNode(rightNodeType = RightNodeType.FollowUser, noun = Noun.UserId(destId)),</p>
+</dd>
+</dl>
+<p>weight = 1.0))</p>
+</div></blockquote>
+</div></blockquote>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def getUserBlockGraph(</dt><dd><p>userUserBlockEdges: TypedPipe[(UserId, UserId)]</p>
+</dd>
+<dt>)(</dt><dd><p>implicit uniqueID: UniqueID</p>
+</dd>
+<dt>): TypedPipe[(LeftNode, RightNodeWithEdgeWeight)] = {</dt><dd><p>val numFlockBlockEdges = Stat(“num_flock_block_edges”)
+userUserBlockEdges.map {</p>
+<blockquote>
+<div><dl>
+<dt>case (srcId, destId) =&gt;</dt><dd><p>numFlockBlockEdges.inc()
+(</p>
+<blockquote>
+<div><p>LeftNode.UserId(srcId),
+RightNodeWithEdgeWeight(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>rightNode =</dt><dd><p>RightNode(rightNodeType = RightNodeType.BlockUser, noun = Noun.UserId(destId)),</p>
+</dd>
+</dl>
+<p>weight = 1.0))</p>
+</div></blockquote>
+</div></blockquote>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def getUserAbuseReportGraph(</dt><dd><p>userUserAbuseReportEdges: TypedPipe[(UserId, UserId)]</p>
+</dd>
+<dt>)(</dt><dd><p>implicit uniqueID: UniqueID</p>
+</dd>
+<dt>): TypedPipe[(LeftNode, RightNodeWithEdgeWeight)] = {</dt><dd><p>val numFlockAbuseEdges = Stat(“num_flock_abuse_edges”)
+userUserAbuseReportEdges.map {</p>
+<blockquote>
+<div><dl>
+<dt>case (srcId, destId) =&gt;</dt><dd><p>numFlockAbuseEdges.inc()
+(</p>
+<blockquote>
+<div><p>LeftNode.UserId(srcId),
+RightNodeWithEdgeWeight(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>rightNode =</dt><dd><p>RightNode(rightNodeType = RightNodeType.AbuseReportUser, noun = Noun.UserId(destId)),</p>
+</dd>
+</dl>
+<p>weight = 1.0))</p>
+</div></blockquote>
+</div></blockquote>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def filterInvalidUsers(</dt><dd><p>flockEdges: TypedPipe[(UserId, UserId)],
+validUsers: TypedPipe[UserId]</p>
+</dd>
+<dt>): TypedPipe[(UserId, UserId)] = {</dt><dd><dl>
+<dt>flockEdges</dt><dd><p>.join(validUsers.asKeys)
+//      .withReducers(10000)
+.map {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case (srcId, (destId, _)) =&gt;</dt><dd><p>(destId, srcId)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+.join(validUsers.asKeys)
+//      .withReducers(10000)
+.map {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case (destId, (srcId, _)) =&gt;</dt><dd><p>(srcId, destId)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def getUserSpamReportGraph(</dt><dd><p>userUserSpamReportEdges: TypedPipe[(UserId, UserId)]</p>
+</dd>
+<dt>)(</dt><dd><p>implicit uniqueID: UniqueID</p>
+</dd>
+<dt>): TypedPipe[(LeftNode, RightNodeWithEdgeWeight)] = {</dt><dd><p>val numFlockSpamEdges = Stat(“num_flock_spam_edges”)
+userUserSpamReportEdges.map {</p>
+<blockquote>
+<div><dl>
+<dt>case (srcId, destId) =&gt;</dt><dd><p>numFlockSpamEdges.inc()
+(</p>
+<blockquote>
+<div><p>LeftNode.UserId(srcId),
+RightNodeWithEdgeWeight(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>rightNode =</dt><dd><p>RightNode(rightNodeType = RightNodeType.SpamReportUser, noun = Noun.UserId(destId)),</p>
+</dd>
+</dl>
+<p>weight = 1.0))</p>
+</div></blockquote>
+</div></blockquote>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def getUserTopicFollowGraph(</dt><dd><p>topicUserFollowedByEdges: TypedPipe[(TopicId, UserId)]</p>
+</dd>
+<dt>)(</dt><dd><p>implicit uniqueID: UniqueID</p>
+</dd>
+<dt>): TypedPipe[(LeftNode, RightNodeWithEdgeWeight)] = {</dt><dd><p>val numTFGEdges = Stat(“num_tfg_edges”)
+topicUserFollowedByEdges.map {</p>
+<blockquote>
+<div><dl>
+<dt>case (topicId, userId) =&gt;</dt><dd><p>numTFGEdges.inc()
+(</p>
+<blockquote>
+<div><p>LeftNode.UserId(userId),
+RightNodeWithEdgeWeight(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>rightNode =</dt><dd><p>RightNode(rightNodeType = RightNodeType.FollowTopic, noun = Noun.TopicId(topicId)),</p>
+</dd>
+</dl>
+<p>weight = 1.0)</p>
+</div></blockquote>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def getUserSignUpCountryGraph(</dt><dd><p>userSignUpCountryEdges: TypedPipe[(UserId, (Country, Language))]</p>
+</dd>
+<dt>)(</dt><dd><p>implicit uniqueID: UniqueID</p>
+</dd>
+<dt>): TypedPipe[(LeftNode, RightNodeWithEdgeWeight)] = {</dt><dd><p>val numUserSourceEntriesRead = Stat(“num_user_source_entries”)
+userSignUpCountryEdges.map {</p>
+<blockquote>
+<div><dl>
+<dt>case (userId, (country, lang)) =&gt;</dt><dd><p>numUserSourceEntriesRead.inc()
+(</p>
+<blockquote>
+<div><p>LeftNode.UserId(userId),
+RightNodeWithEdgeWeight(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>rightNode =</dt><dd><p>RightNode(rightNodeType = RightNodeType.SignUpCountry, noun = Noun.Country(country)),</p>
+</dd>
+</dl>
+<p>weight = 1.0))</p>
+</div></blockquote>
+</div></blockquote>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def getMagicRecsNotifOpenOrClickTweetsGraph(</dt><dd><p>userMRNotifOpenOrClickEvents: TypedPipe[MagicRecsNotificationLite]</p>
+</dd>
+<dt>)(</dt><dd><p>implicit uniqueID: UniqueID</p>
+</dd>
+<dt>): TypedPipe[(LeftNode, RightNodeWithEdgeWeight)] = {</dt><dd><p>val numNotifOpenOrClickEntries = Stat(“num_notif_open_or_click”)
+userMRNotifOpenOrClickEvents.flatMap { entry =&gt;</p>
+<blockquote>
+<div><p>numNotifOpenOrClickEntries.inc()
+for {</p>
+<blockquote>
+<div><p>userId &lt;- entry.targetUserId
+tweetId &lt;- entry.tweetId</p>
+</div></blockquote>
+<dl>
+<dt>} yield {</dt><dd><dl>
+<dt>(</dt><dd><p>LeftNode.UserId(userId),
+RightNodeWithEdgeWeight(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>rightNode = RightNode(</dt><dd><p>rightNodeType = RightNodeType.NotifOpenOrClickTweet,
+noun = Noun.TweetId(tweetId)),</p>
+</dd>
+</dl>
+<p>weight = 1.0))</p>
+</div></blockquote>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def getUserConsumedLanguagesGraph(</dt><dd><p>userConsumedLanguageEdges: TypedPipe[(UserId, Seq[(Language, Double)])]</p>
+</dd>
+<dt>)(</dt><dd><p>implicit uniqueID: UniqueID</p>
+</dd>
+<dt>): TypedPipe[(LeftNode, RightNodeWithEdgeWeight)] = {</dt><dd><p>val numPenguinSourceEntriesRead = Stat(“num_penguin_source_entries”)
+userConsumedLanguageEdges.flatMap {</p>
+<blockquote>
+<div><dl>
+<dt>case (userId, langWithWeights) =&gt;</dt><dd><p>numPenguinSourceEntriesRead.inc()
+langWithWeights.map {</p>
+<blockquote>
+<div><dl>
+<dt>case (lang, weight) =&gt;</dt><dd><dl>
+<dt>(</dt><dd><p>LeftNode.UserId(userId),
+RightNodeWithEdgeWeight(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>rightNode = RightNode(</dt><dd><p>rightNodeType = RightNodeType.ConsumedLanguage,
+noun = Noun.Language(lang)),</p>
+</dd>
+</dl>
+<p>weight = weight))</p>
+</div></blockquote>
+</dd>
+</dl>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def getSearchGraph(</dt><dd><p>userSearchQueryEdges: TypedPipe[(UserId, String)]</p>
+</dd>
+<dt>)(</dt><dd><p>implicit uniqueID: UniqueID</p>
+</dd>
+<dt>): TypedPipe[(LeftNode, RightNodeWithEdgeWeight)] = {</dt><dd><p>val numSearchQueries = Stat(“num_search_queries”)
+userSearchQueryEdges.map {</p>
+<blockquote>
+<div><dl>
+<dt>case (userId, query) =&gt;</dt><dd><p>numSearchQueries.inc()
+(</p>
+<blockquote>
+<div><p>LeftNode.UserId(userId),
+RightNodeWithEdgeWeight(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>rightNode =</dt><dd><p>RightNode(rightNodeType = RightNodeType.SearchQuery, noun = Noun.Query(query)),</p>
+</dd>
+</dl>
+<p>weight = 1.0))</p>
+</div></blockquote>
+</div></blockquote>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def buildEmployeeGraph(</dt><dd><p>fullGraph: TypedPipe[(LeftNode, RightNodeWithEdgeWeight)]</p>
+</dd>
+<dt>)(</dt><dd><p>implicit uniqueID: UniqueID</p>
+</dd>
+<dt>): TypedPipe[(LeftNode, RightNodeWithEdgeWeight)] = {</dt><dd><p>val numEmployeeEdges = Stat(“num_employee_edges”)
+val employeeIds = Config.SampledEmployeeIds
+fullGraph</p>
+<blockquote>
+<div><dl class="simple">
+<dt>.collect {</dt><dd><dl class="simple">
+<dt>case (LeftNode.UserId(userId), rightNodeWithWeight) if employeeIds.contains(userId) =&gt;</dt><dd><p>numEmployeeEdges.inc()
+(LeftNode.UserId(userId), rightNodeWithWeight)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def getTruncatedGraph(</dt><dd><p>fullGraph: TypedPipe[(LeftNode, RightNodeWithEdgeWeight)],
+topKWithFrequency: TypedPipe[(RightNodeType, Seq[(Noun, Double)])]</p>
+</dd>
+<dt>)(</dt><dd><p>implicit uniqueID: UniqueID</p>
+</dd>
+<dt>): TypedPipe[(LeftNode, RightNodeWithEdgeWeight)] = {</dt><dd><p>val numEntriesTruncatedGraph = Stat(“num_entries_truncated_graph”)
+val numTopKTruncatedNouns = Stat(“num_topk_truncated_nouns”)</p>
+<p>implicit val rightNodeSer: RightNode =&gt; Array[Byte] = BinaryScalaCodec(RightNode)
+val topNouns: TypedPipe[RightNode] = topKWithFrequency</p>
+<blockquote>
+<div><dl>
+<dt>.flatMap {</dt><dd><dl>
+<dt>case (rightNodeType, nounsList) =&gt;</dt><dd><dl>
+<dt>nounsList</dt><dd><dl class="simple">
+<dt>.map {</dt><dd><dl class="simple">
+<dt>case (nounVal, aggregatedFrequency) =&gt;</dt><dd><p>numTopKTruncatedNouns.inc()
+RightNode(rightNodeType, nounVal)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<dl>
+<dt>fullGraph</dt><dd><dl class="simple">
+<dt>.map {</dt><dd><dl class="simple">
+<dt>case (leftNode, rightNodeWithWeight) =&gt;</dt><dd><p>(rightNodeWithWeight.rightNode, (leftNode, rightNodeWithWeight))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+.sketch(reducers = 5000)
+.join(topNouns.asKeys.toTypedPipe)
+.map {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case (rightNode, ((left, rightNodeWithWeight), _)) =&gt;</dt><dd><p>numEntriesTruncatedGraph.inc()
+(left, rightNodeWithWeight)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def getTopKRightNounsWithFrequencies(</dt><dd><p>fullGraph: TypedPipe[(LeftNode, RightNodeWithEdgeWeight)],
+topKConfig: Map[RightNodeType, Int],
+minFrequency: Int</p>
+</dd>
+<dt>)(</dt><dd><p>implicit uniqueID: UniqueID</p>
+</dd>
+<dt>): TypedPipe[(RightNodeType, Seq[(Noun, Double)])] = {</dt><dd><p>val maxAcrossRightNounType: Int = topKConfig.valuesIterator.max
+fullGraph</p>
+<blockquote>
+<div><dl class="simple">
+<dt>.map {</dt><dd><dl class="simple">
+<dt>case (leftNode, rightNodeWithWeight) =&gt;</dt><dd><p>(rightNodeWithWeight.rightNode, 1.0)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+.sumByKey
+//      .withReducers(20000)
+.toTypedPipe
+.filter(_._2 &gt;= minFrequency)
+.map {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case (rightNode, freq) =&gt;</dt><dd><p>(rightNode.rightNodeType, (rightNode.noun, freq))</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+.group(rightNodeTypeOrdering)
+// Note: if maxAcrossRightNounType is &gt;15M, it might result in OOM on reducer
+.sortedReverseTake(maxAcrossRightNounType)(Ordering.by(_._2))
+// An alternative to using group followed by sortedReverseTake is to define TopKMonoids,
+// one for each RightNodeType to get the most frequent rightNouns
+.map {</p>
+<blockquote>
+<div><dl>
+<dt>case (rightNodeType, nounsListWithFreq) =&gt;</dt><dd><dl class="simple">
+<dt>val truncatedList = nounsListWithFreq</dt><dd><p>.sortBy(-_._2)
+.take(topKConfig.getOrElse(rightNodeType, NumTopNounsForUnknownRightNodeType))</p>
+</dd>
+</dl>
+<p>(rightNodeType, truncatedList)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def getValidUsers(</dt><dd><p>userSource: TypedPipe[CombinedUser]</p>
+</dd>
+<dt>)(</dt><dd><p>implicit uniqueID: UniqueID</p>
+</dd>
+<dt>): TypedPipe[UserId] = {</dt><dd><p>val numValidUsers = Stat(“num_valid_users”)
+userSource</p>
+<blockquote>
+<div><dl>
+<dt>.flatMap { u =&gt;</dt><dd><dl class="simple">
+<dt>for {</dt><dd><p>user &lt;- u.user
+if user.id != 0
+safety &lt;- user.safety
+if !(safety.suspended || safety.deactivated)</p>
+</dd>
+<dt>} yield {</dt><dd><p>numValidUsers.inc()
+user.id</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<p>def getFullGraph(
+)(</p>
+<blockquote>
+<div><p>implicit dateRange: DateRange,
+timeZone: TimeZone,
+uniqueID: UniqueID</p>
+</div></blockquote>
+<p>): TypedPipe[(LeftNode, RightNodeWithEdgeWeight)] = {</p>
+<blockquote>
+<div><p>// list of valid UserIds - to filter out deactivated or suspended user accounts
+val userSource: TypedPipe[CombinedUser] =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>DAL</dt><dd><p>.readMostRecentSnapshotNoOlderThan(UsersourceScalaDataset, Days(7)).toTypedPipe</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>val validUsers: TypedPipe[UserId] = getValidUsers(userSource).forceToDisk</p>
+<p>//Dataset read operations</p>
+<p>// ieSource tweet engagements data for tweet favs, replies, retweets - from last 14 days
+val tweetSource: TypedPipe[InteractionEvent] =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>ExternalDataSources.ieSourceTweetEngagementsSource(dateRange =</dt><dd><p>DateRange(dateRange.end - Days(14), dateRange.end))</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>// user-user fav edges
+val userUserFavEdges: TypedPipe[(UserId, UserId, Double)] =</p>
+<blockquote>
+<div><p>ExternalDataSources.getFavEdges(HalfLifeInDaysForFavScore)</p>
+</div></blockquote>
+<p>// user-user follow edges
+val userUserFollowEdges: TypedPipe[(UserId, UserId)] =</p>
+<blockquote>
+<div><p>filterInvalidUsers(ExternalDataSources.flockFollowsSource, validUsers)</p>
+</div></blockquote>
+<p>// user-user block edges
+val userUserBlockEdges: TypedPipe[(UserId, UserId)] =</p>
+<blockquote>
+<div><p>filterInvalidUsers(ExternalDataSources.flockBlocksSource, validUsers)</p>
+</div></blockquote>
+<p>// user-user abuse report edges
+val userUserAbuseReportEdges: TypedPipe[(UserId, UserId)] =</p>
+<blockquote>
+<div><p>filterInvalidUsers(ExternalDataSources.flockReportAsAbuseSource, validUsers)</p>
+</div></blockquote>
+<p>// user-user spam report edges
+val userUserSpamReportEdges: TypedPipe[(UserId, UserId)] =</p>
+<blockquote>
+<div><p>filterInvalidUsers(ExternalDataSources.flockReportAsSpamSource, validUsers)</p>
+</div></blockquote>
+<p>// user-signup country edges
+val userSignUpCountryEdges: TypedPipe[(UserId, (Country, Language))] =</p>
+<blockquote>
+<div><p>ExternalDataSources.userSource</p>
+</div></blockquote>
+<p>// user-consumed language edges
+val userConsumedLanguageEdges: TypedPipe[(UserId, Seq[(Language, Double)])] =</p>
+<blockquote>
+<div><p>ExternalDataSources.inferredUserConsumedLanguageSource</p>
+</div></blockquote>
+<p>// user-topic follow edges
+val topicUserFollowedByEdges: TypedPipe[(TopicId, UserId)] =</p>
+<blockquote>
+<div><p>ExternalDataSources.topicFollowGraphSource</p>
+</div></blockquote>
+<p>// user-MRNotifOpenOrClick events from last 7 days
+val userMRNotifOpenOrClickEvents: TypedPipe[MagicRecsNotificationLite] =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>ExternalDataSources.magicRecsNotficationOpenOrClickEventsSource(dateRange =</dt><dd><p>DateRange(dateRange.end - Days(7), dateRange.end))</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>// user-searchQuery strings from last 7 days
+val userSearchQueryEdges: TypedPipe[(UserId, String)] =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>ExternalDataSources.adaptiveSearchScribeLogsSource(dateRange =</dt><dd><p>DateRange(dateRange.end - Days(7), dateRange.end))</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl class="simple">
+<dt>getUserTweetInteractionGraph(tweetSource) ++</dt><dd><p>getUserFavGraph(userUserFavEdges) ++
+getUserFollowGraph(userUserFollowEdges) ++
+getUserBlockGraph(userUserBlockEdges) ++
+getUserAbuseReportGraph(userUserAbuseReportEdges) ++
+getUserSpamReportGraph(userUserSpamReportEdges) ++
+getUserSignUpCountryGraph(userSignUpCountryEdges) ++
+getUserConsumedLanguagesGraph(userConsumedLanguageEdges) ++
+getUserTopicFollowGraph(topicUserFollowedByEdges) ++
+getMagicRecsNotifOpenOrClickTweetsGraph(userMRNotifOpenOrClickEvents) ++
+getSearchGraph(userSearchQueryEdges)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../_sources/src/scala/com/twitter/simclusters_v2/scalding/multi_type_graph/assemble_multi_type_graph/AssembleMultiTypeGraph.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

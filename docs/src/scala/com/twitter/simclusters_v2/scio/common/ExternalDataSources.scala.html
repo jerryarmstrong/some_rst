@@ -1,0 +1,554 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../" id="documentation_options" src="../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.simclusters_v2.scio.common</p>
+<p>import com.spotify.scio.ScioContext
+import com.spotify.scio.values.SCollection
+import com.twitter.beam.io.dal.DAL
+import com.twitter.common.util.Clock
+import com.twitter.common_header.thriftscala.CommonHeader
+import com.twitter.common_header.thriftscala.IdType
+import com.twitter.common_header.thriftscala.VersionedCommonHeader
+import com.twitter.frigate.data_pipeline.magicrecs.magicrecs_notifications_lite.thriftscala.MagicRecsNotificationLite
+import com.twitter.frigate.data_pipeline.scalding.magicrecs.magicrecs_notification_lite.MagicrecsNotificationLite1DayLagScalaDataset
+import com.twitter.iesource.thriftscala.InteractionEvent
+import com.twitter.iesource.thriftscala.InteractionTargetType
+import com.twitter.interests_ds.jobs.interests_service.UserTopicRelationSnapshotScalaDataset
+import com.twitter.interests.thriftscala.InterestRelationType
+import com.twitter.interests.thriftscala.UserInterestsRelationSnapshot
+import com.twitter.penguin.scalding.datasets.PenguinUserLanguagesScalaDataset
+import com.twitter.search.adaptive.scribing.thriftscala.AdaptiveSearchScribeLog
+import com.twitter.simclusters_v2.hdfs_sources.UserUserFavGraphScalaDataset
+import com.twitter.simclusters_v2.scalding.embedding.common.ExternalDataSources.ValidFlockEdgeStateId
+import com.twitter.simclusters_v2.scalding.embedding.common.ExternalDataSources.getStandardLanguageCode
+import com.twitter.twadoop.user.gen.thriftscala.CombinedUser
+import flockdb_tools.datasets.flock.FlockBlocksEdgesScalaDataset
+import flockdb_tools.datasets.flock.FlockFollowsEdgesScalaDataset
+import flockdb_tools.datasets.flock.FlockReportAsAbuseEdgesScalaDataset
+import flockdb_tools.datasets.flock.FlockReportAsSpamEdgesScalaDataset
+import org.joda.time.Interval
+import com.twitter.simclusters_v2.thriftscala.EdgeWithDecayedWeights
+import com.twitter.usersource.snapshot.combined.UsersourceScalaDataset
+import com.twitter.usersource.snapshot.flat.UsersourceFlatScalaDataset
+import com.twitter.util.Duration
+import twadoop_config.configuration.log_categories.group.search.AdaptiveSearchScalaDataset</p>
+<dl>
+<dt>object ExternalDataSources {</dt><dd><dl>
+<dt>def userSource(</dt><dd><p>noOlderThan: Duration = Duration.fromDays(7)</p>
+</dd>
+<dt>)(</dt><dd><p>implicit sc: ScioContext</p>
+</dd>
+<dt>): SCollection[CombinedUser] = {</dt><dd><dl>
+<dt>sc.customInput(</dt><dd><p>“ReadUserSource”,
+DAL</p>
+<blockquote>
+<div><dl class="simple">
+<dt>.readMostRecentSnapshotNoOlderThan(</dt><dd><p>UsersourceScalaDataset,
+noOlderThan,
+Clock.SYSTEM_CLOCK,
+DAL.Environment.Prod</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def userCountrySource(</dt><dd><p>noOlderThan: Duration = Duration.fromDays(7)</p>
+</dd>
+<dt>)(</dt><dd><p>implicit sc: ScioContext</p>
+</dd>
+<dt>): SCollection[(Long, String)] = {</dt><dd><dl>
+<dt>sc.customInput(</dt><dd><blockquote>
+<div><p>“ReadUserCountrySource”,
+DAL</p>
+<blockquote>
+<div><dl class="simple">
+<dt>.readMostRecentSnapshotNoOlderThan(</dt><dd><p>UsersourceFlatScalaDataset,
+noOlderThan,
+Clock.SYSTEM_CLOCK,
+DAL.Environment.Prod,</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+</div></blockquote>
+<dl>
+<dt>).flatMap { flatUser =&gt;</dt><dd><dl class="simple">
+<dt>for {</dt><dd><p>userId &lt;- flatUser.id
+country &lt;- flatUser.accountCountryCode</p>
+</dd>
+<dt>} yield {</dt><dd><p>(userId, country.toUpperCase)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}.distinct</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def userUserFavSource(</dt><dd><p>noOlderThan: Duration = Duration.fromDays(14)</p>
+</dd>
+<dt>)(</dt><dd><p>implicit sc: ScioContext</p>
+</dd>
+<dt>): SCollection[EdgeWithDecayedWeights] = {</dt><dd><dl>
+<dt>sc.customInput(</dt><dd><p>“ReadUserUserFavSource”,
+DAL</p>
+<blockquote>
+<div><dl class="simple">
+<dt>.readMostRecentSnapshotNoOlderThan(</dt><dd><p>UserUserFavGraphScalaDataset,
+noOlderThan,
+Clock.SYSTEM_CLOCK,
+DAL.Environment.Prod</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def inferredUserConsumedLanguageSource(</dt><dd><p>noOlderThan: Duration = Duration.fromDays(7)</p>
+</dd>
+<dt>)(</dt><dd><p>implicit sc: ScioContext</p>
+</dd>
+<dt>): SCollection[(Long, Seq[(String, Double)])] = {</dt><dd><dl>
+<dt>sc.customInput(</dt><dd><blockquote>
+<div><p>“ReadInferredUserConsumedLanguageSource”,
+DAL</p>
+<blockquote>
+<div><dl class="simple">
+<dt>.readMostRecentSnapshotNoOlderThan(</dt><dd><p>PenguinUserLanguagesScalaDataset,
+noOlderThan,
+Clock.SYSTEM_CLOCK,
+DAL.Environment.Prod</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+</div></blockquote>
+<dl>
+<dt>).map { kv =&gt;</dt><dd><dl>
+<dt>val consumed = kv.value.consumed</dt><dd><dl class="simple">
+<dt>.collect {</dt><dd><dl class="simple">
+<dt>case scoredString if scoredString.weight &gt; 0.001 =&gt; //throw away 5% outliers</dt><dd><p>(getStandardLanguageCode(scoredString.item), scoredString.weight)</p>
+</dd>
+</dl>
+</dd>
+<dt>}.collect {</dt><dd><p>case (Some(language), score) =&gt; (language, score)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>(kv.key, consumed)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def flockBlockSource(</dt><dd><p>noOlderThan: Duration = Duration.fromDays(7)</p>
+</dd>
+<dt>)(</dt><dd><p>implicit sc: ScioContext</p>
+</dd>
+<dt>): SCollection[(Long, Long)] = {</dt><dd><dl>
+<dt>sc.customInput(</dt><dd><blockquote>
+<div><p>“ReadFlockBlock”,
+DAL.readMostRecentSnapshotNoOlderThan(</p>
+<blockquote>
+<div><p>FlockBlocksEdgesScalaDataset,
+noOlderThan,
+Clock.SYSTEM_CLOCK,
+DAL.Environment.Prod))</p>
+</div></blockquote>
+</div></blockquote>
+<dl class="simple">
+<dt>.collect {</dt><dd><dl class="simple">
+<dt>case edge if edge.state == ValidFlockEdgeStateId =&gt;</dt><dd><p>(edge.sourceId, edge.destinationId)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def flockFollowSource(</dt><dd><p>noOlderThan: Duration = Duration.fromDays(7)</p>
+</dd>
+<dt>)(</dt><dd><p>implicit sc: ScioContext</p>
+</dd>
+<dt>): SCollection[(Long, Long)] = {</dt><dd><dl>
+<dt>sc.customInput(</dt><dd><blockquote>
+<div><p>“ReadFlockFollow”,
+DAL</p>
+<blockquote>
+<div><dl class="simple">
+<dt>.readMostRecentSnapshotNoOlderThan(</dt><dd><p>FlockFollowsEdgesScalaDataset,
+noOlderThan,
+Clock.SYSTEM_CLOCK,
+DAL.Environment.Prod))</p>
+</dd>
+</dl>
+</div></blockquote>
+</div></blockquote>
+<dl class="simple">
+<dt>.collect {</dt><dd><dl class="simple">
+<dt>case edge if edge.state == ValidFlockEdgeStateId =&gt;</dt><dd><p>(edge.sourceId, edge.destinationId)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def flockReportAsAbuseSource(</dt><dd><p>noOlderThan: Duration = Duration.fromDays(7)</p>
+</dd>
+<dt>)(</dt><dd><p>implicit sc: ScioContext</p>
+</dd>
+<dt>): SCollection[(Long, Long)] = {</dt><dd><dl>
+<dt>sc.customInput(</dt><dd><blockquote>
+<div><p>“ReadFlockReportAsAbuseJava”,
+DAL</p>
+<blockquote>
+<div><dl class="simple">
+<dt>.readMostRecentSnapshotNoOlderThan(</dt><dd><p>FlockReportAsAbuseEdgesScalaDataset,
+noOlderThan,
+Clock.SYSTEM_CLOCK,
+DAL.Environment.Prod)</p>
+</dd>
+</dl>
+</div></blockquote>
+</div></blockquote>
+<p>)
+.collect {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case edge if edge.state == ValidFlockEdgeStateId =&gt;</dt><dd><p>(edge.sourceId, edge.destinationId)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def flockReportAsSpamSource(</dt><dd><p>noOlderThan: Duration = Duration.fromDays(7)</p>
+</dd>
+<dt>)(</dt><dd><p>implicit sc: ScioContext</p>
+</dd>
+<dt>): SCollection[(Long, Long)] = {</dt><dd><dl>
+<dt>sc.customInput(</dt><dd><blockquote>
+<div><p>“ReadFlockReportAsSpam”,
+DAL</p>
+<blockquote>
+<div><dl class="simple">
+<dt>.readMostRecentSnapshotNoOlderThan(</dt><dd><p>FlockReportAsSpamEdgesScalaDataset,
+noOlderThan,
+Clock.SYSTEM_CLOCK,
+DAL.Environment.Prod))</p>
+</dd>
+</dl>
+</div></blockquote>
+</div></blockquote>
+<dl class="simple">
+<dt>.collect {</dt><dd><dl class="simple">
+<dt>case edge if edge.state == ValidFlockEdgeStateId =&gt;</dt><dd><p>(edge.sourceId, edge.destinationId)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def ieSourceTweetEngagementsSource(</dt><dd><p>interval: Interval</p>
+</dd>
+<dt>)(</dt><dd><p>implicit sc: ScioContext</p>
+</dd>
+<dt>): SCollection[InteractionEvent] = {</dt><dd><dl>
+<dt>sc.customInput(</dt><dd><blockquote>
+<div><p>“ReadIeSourceTweetEngagementsSource”,
+DAL</p>
+<blockquote>
+<div><dl class="simple">
+<dt>.read(</dt><dd><p>com.twitter.iesource.processing.events.batch.ServerEngagementsScalaDataset,
+interval,
+DAL.Environment.Prod,</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+</div></blockquote>
+<dl class="simple">
+<dt>).filter { event =&gt;</dt><dd><p>// filter out logged out users because their favorites are less reliable
+event.engagingUserId &gt; 0L &amp;&amp; event.targetType == InteractionTargetType.Tweet</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def topicFollowGraphSource(</dt><dd><p>noOlderThan: Duration = Duration.fromDays(7)</p>
+</dd>
+<dt>)(</dt><dd><p>implicit sc: ScioContext</p>
+</dd>
+<dt>): SCollection[(Long, Long)] = {</dt><dd><p>// The implementation here is slightly different than the topicFollowGraphSource function in
+// src/scala/com/twitter/simclusters_v2/scalding/embedding/common/ExternalDataSources.scala
+// We don’t do an additional hashJoin on uttFollowableEntitiesSource.
+sc.customInput(</p>
+<blockquote>
+<div><blockquote>
+<div><p>“ReadTopicFollowGraphSource”,
+DAL</p>
+<blockquote>
+<div><dl class="simple">
+<dt>.readMostRecentSnapshotNoOlderThan(</dt><dd><p>UserTopicRelationSnapshotScalaDataset,
+noOlderThan,
+Clock.SYSTEM_CLOCK,
+DAL.Environment.Prod</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+</div></blockquote>
+<dl>
+<dt>).collect {</dt><dd><dl>
+<dt>case userInterestsRelationSnapshot: UserInterestsRelationSnapshot</dt><dd><blockquote>
+<div><dl class="simple">
+<dt>if userInterestsRelationSnapshot.interestType == “UTT” &amp;&amp;</dt><dd><p>userInterestsRelationSnapshot.relation == InterestRelationType.Followed =&gt;</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>(userInterestsRelationSnapshot.interestId, userInterestsRelationSnapshot.userId)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def magicRecsNotficationOpenOrClickEventsSource(</dt><dd><p>interval: Interval</p>
+</dd>
+<dt>)(</dt><dd><p>implicit sc: ScioContext</p>
+</dd>
+<dt>): SCollection[MagicRecsNotificationLite] = {</dt><dd><dl>
+<dt>sc.customInput(</dt><dd><blockquote>
+<div><p>“ReadMagicRecsNotficationOpenOrClickEventsSource”,
+DAL</p>
+<blockquote>
+<div><p>.read(MagicrecsNotificationLite1DayLagScalaDataset, interval, DAL.Environment.Prod))</p>
+</div></blockquote>
+</div></blockquote>
+<dl>
+<dt>.filter { entry =&gt;</dt><dd><p>// keep entries with a valid userId and tweetId, opened or clicked timestamp defined
+val userIdExists = entry.targetUserId.isDefined
+val tweetIdExists = entry.tweetId.isDefined
+val openOrClickExists =</p>
+<blockquote>
+<div><p>entry.openTimestampMs.isDefined || entry.ntabClickTimestampMs.isDefined</p>
+</div></blockquote>
+<p>userIdExists &amp;&amp; tweetIdExists &amp;&amp; openOrClickExists</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def adaptiveSearchScribeLogsSource(</dt><dd><p>interval: Interval</p>
+</dd>
+<dt>)(</dt><dd><p>implicit sc: ScioContext</p>
+</dd>
+<dt>): SCollection[(Long, String)] = {</dt><dd><dl>
+<dt>sc.customInput(</dt><dd><blockquote>
+<div><p>“ReadAdaptiveSearchScribeLogsSource”,
+DAL</p>
+<blockquote>
+<div><p>.read(AdaptiveSearchScalaDataset, interval, DAL.Environment.Prod))</p>
+</div></blockquote>
+</div></blockquote>
+<dl>
+<dt>.flatMap({ scribeLog: AdaptiveSearchScribeLog =&gt;</dt><dd><dl class="simple">
+<dt>for {</dt><dd><p>userId &lt;- userIdFromBlenderAdaptiveScribeLog(scribeLog)
+// filter out logged out search queries
+if userId != 0
+queryString &lt;- scribeLog.requestLog.flatMap(_.request).flatMap(_.rawQuery)</p>
+</dd>
+<dt>} yield {</dt><dd><p>(userId, Set(queryString))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>})
+// if a user searches for the same query multiple times, there could be duplicates.
+// De-dup them to get the distinct queries searched by a user
+.sumByKey
+.flatMap {</p>
+<blockquote>
+<div><dl>
+<dt>case (userId, distinctQuerySet) =&gt;</dt><dd><dl class="simple">
+<dt>distinctQuerySet.map { query =&gt;</dt><dd><p>(userId, query)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def userIdFromBlenderAdaptiveScribeLog(</dt><dd><p>blenderAdaptiveLog: AdaptiveSearchScribeLog</p>
+</dd>
+<dt>): Option[Long] = {</dt><dd><dl>
+<dt>blenderAdaptiveLog.versionedCommonHeader match {</dt><dd><dl>
+<dt>case VersionedCommonHeader.CommonHeader(CommonHeader.ServerHeader(serverHeader)) =&gt;</dt><dd><dl class="simple">
+<dt>serverHeader.requestInfo match {</dt><dd><p>case Some(requestInfo) =&gt; requestInfo.ids.get(IdType.UserId).map(_.toLong)
+case _ =&gt; None</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>case _ =&gt; None</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../_sources/src/scala/com/twitter/simclusters_v2/scio/common/ExternalDataSources.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

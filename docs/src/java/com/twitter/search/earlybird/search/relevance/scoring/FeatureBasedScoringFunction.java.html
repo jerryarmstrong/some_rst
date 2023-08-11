@@ -1,0 +1,1935 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.earlybird.search.relevance.scoring;</p>
+<p>import java.io.IOException;
+import java.util.EnumSet;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.TimeUnit;
+import javax.annotation.Nullable;</p>
+<p>import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Preconditions;
+import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.Iterables;
+import com.google.common.collect.Lists;
+import com.google.common.collect.Maps;
+import com.google.common.primitives.Ints;
+import com.google.common.primitives.Longs;</p>
+<p>import org.apache.lucene.search.Explanation;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;</p>
+<p>import com.twitter.common_internal.bloomfilter.BloomFilter;
+import com.twitter.search.common.constants.SearchCardType;
+import com.twitter.search.common.constants.thriftjava.ThriftLanguage;
+import com.twitter.search.common.database.DatabaseConfig;
+import com.twitter.search.common.features.ExternalTweetFeature;
+import com.twitter.search.common.features.FeatureHandler;
+import com.twitter.search.common.features.thrift.ThriftSearchFeatureSchemaEntry;
+import com.twitter.search.common.features.thrift.ThriftSearchFeatureType;
+import com.twitter.search.common.features.thrift.ThriftSearchResultFeatures;
+import com.twitter.search.common.query.QueryCommonFieldHitsVisitor;
+import com.twitter.search.common.ranking.thriftjava.ThriftRankingParams;
+import com.twitter.search.common.relevance.features.AgeDecay;
+import com.twitter.search.common.relevance.features.RelevanceSignalConstants;
+import com.twitter.search.common.relevance.text.VisibleTokenRatioNormalizer;
+import com.twitter.search.common.results.thriftjava.FieldHitList;
+import com.twitter.search.common.schema.base.ImmutableSchemaInterface;
+import com.twitter.search.common.schema.earlybird.EarlybirdFieldConstants.EarlybirdFieldConstant;
+import com.twitter.search.common.util.LongIntConverter;
+import com.twitter.search.common.util.lang.ThriftLanguageUtil;
+import com.twitter.search.core.earlybird.index.EarlybirdIndexSegmentAtomicReader;
+import com.twitter.search.earlybird.common.userupdates.UserTable;
+import com.twitter.search.earlybird.search.AntiGamingFilter;
+import com.twitter.search.earlybird.search.relevance.LinearScoringData;
+import com.twitter.search.earlybird.search.relevance.LinearScoringData.SkipReason;
+import com.twitter.search.earlybird.search.relevance.LinearScoringParams;
+import com.twitter.search.earlybird.thrift.ThriftSearchQuery;
+import com.twitter.search.earlybird.thrift.ThriftSearchResultExtraMetadata;
+import com.twitter.search.earlybird.thrift.ThriftSearchResultMetadata;
+import com.twitter.search.earlybird.thrift.ThriftSearchResultMetadataOptions;
+import com.twitter.search.earlybird.thrift.ThriftSearchResultType;
+import com.twitter.search.earlybird.thrift.ThriftSearchResultsRelevanceStats;
+import com.twitter.search.earlybird.thrift.ThriftSocialFilterType;</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Base class for scoring functions that rely on the extracted features stored in LinearScoringData.</p></li>
+<li></li>
+<li><p>Extensions of this class must implement 2 methods:</p></li>
+<li></li>
+<li><ul>
+<li><p>computeScore</p></li>
+</ul>
+</li>
+<li><ul>
+<li><p>generateExplanationForScoring</p></li>
+</ul>
+</li>
+<li></li>
+<li><p>They are called for scoring and generating the debug information of the document that it’s</p></li>
+<li><p>currently being evaluated. The field ‘data’ holds the features of the document.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>public abstract class FeatureBasedScoringFunction extends ScoringFunction {</dt><dd><p>private static final Logger LOG = LoggerFactory.getLogger(FeatureBasedScoringFunction.class);</p>
+<p>// A multiplier that’s applied to all scores to avoid scores too low.
+public static final float SCORE_ADJUSTER = 100.0f;</p>
+<dl class="simple">
+<dt>private static final VisibleTokenRatioNormalizer VISIBLE_TOKEN_RATIO_NORMALIZER =</dt><dd><p>VisibleTokenRatioNormalizer.createInstance();</p>
+</dd>
+</dl>
+<p>// Allow default values only for numeric types.
+private static final Set&lt;ThriftSearchFeatureType&gt; ALLOWED_TYPES_FOR_DEFAULT_FEATURE_VALUES =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>EnumSet.of(ThriftSearchFeatureType.INT32_VALUE,</dt><dd><p>ThriftSearchFeatureType.LONG_VALUE,
+ThriftSearchFeatureType.DOUBLE_VALUE);</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl class="simple">
+<dt>private static final Set&lt;Integer&gt; NUMERIC_FEATURES_FOR_WHICH_DEFAULTS_SHOULD_NOT_BE_SET =</dt><dd><dl class="simple">
+<dt>ImmutableSet.of(EarlybirdFieldConstant.TWEET_SIGNATURE.getFieldId(),</dt><dd><p>EarlybirdFieldConstant.REFERENCE_AUTHOR_ID_LEAST_SIGNIFICANT_INT.getFieldId(),
+EarlybirdFieldConstant.REFERENCE_AUTHOR_ID_MOST_SIGNIFICANT_INT.getFieldId());</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>// Name of the scoring function. Used for generating explanations.
+private final String functionName;</p>
+<p>private final BloomFilter trustedFilter;
+private final BloomFilter followFilter;</p>
+<p>// Current timestamp in seconds. Overridable by unit test or by timestamp set in search query.
+private int now;</p>
+<p>private final AntiGamingFilter antiGamingFilter;</p>
+<p>&#64;Nullable
+private final AgeDecay ageDecay;</p>
+<p>protected final LinearScoringParams params;  // Parameters and query-dependent values.</p>
+<p>// In order for the API calls to retrieve the correct <cite>LinearScoringData</cite>
+// for the passed <cite>docId</cite>, we need to maintain a map of <cite>docId</cite> -&gt; <cite>LinearScoringData</cite>
+// NOTE: THIS CAN ONLY BE REFERENCED AT HIT COLLECTION TIME, SINCE DOC IDS ARE NOT UNIQUE
+// ACROSS SEGMENTS. IT’S NOT USABLE DURING BATCH SCORING.
+private final Map&lt;Integer, LinearScoringData&gt; docIdToScoringData;</p>
+<p>private final ThriftSearchResultType searchResultType;</p>
+<p>private final UserTable userTable;</p>
+<p>&#64;VisibleForTesting
+void setNow(int fakeNow) {</p>
+<blockquote>
+<div><p>now = fakeNow;</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>public FeatureBasedScoringFunction(</dt><dd><blockquote>
+<div><p>String functionName,
+ImmutableSchemaInterface schema,
+ThriftSearchQuery searchQuery,
+AntiGamingFilter antiGamingFilter,
+ThriftSearchResultType searchResultType,
+UserTable userTable) throws IOException {</p>
+</div></blockquote>
+<p>super(schema);</p>
+<p>this.functionName = functionName;
+this.searchResultType = searchResultType;
+this.userTable = userTable;</p>
+<p>Preconditions.checkNotNull(searchQuery.getRelevanceOptions());
+ThriftRankingParams rankingParams = searchQuery.getRelevanceOptions().getRankingParams();
+Preconditions.checkNotNull(rankingParams);</p>
+<p>params = new LinearScoringParams(searchQuery, rankingParams);
+docIdToScoringData = new HashMap&lt;&gt;();</p>
+<dl class="simple">
+<dt>long timestamp = searchQuery.isSetTimestampMsecs() &amp;&amp; searchQuery.getTimestampMsecs() &gt; 0</dt><dd><p>? searchQuery.getTimestampMsecs() : System.currentTimeMillis();</p>
+</dd>
+</dl>
+<p>now = Ints.checkedCast(TimeUnit.MILLISECONDS.toSeconds(timestamp));</p>
+<p>this.antiGamingFilter = antiGamingFilter;</p>
+<dl class="simple">
+<dt>this.ageDecay = params.useAgeDecay</dt><dd><p>? new AgeDecay(params.ageDecayBase, params.ageDecayHalflife, params.ageDecaySlope)
+: null;</p>
+</dd>
+<dt>if (searchQuery.isSetTrustedFilter()) {</dt><dd><p>trustedFilter = new BloomFilter(searchQuery.getTrustedFilter());</p>
+</dd>
+<dt>} else {</dt><dd><p>trustedFilter = null;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>if (searchQuery.isSetDirectFollowFilter()) {</dt><dd><p>followFilter = new BloomFilter(searchQuery.getDirectFollowFilter());</p>
+</dd>
+<dt>} else {</dt><dd><p>followFilter = null;</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;VisibleForTesting
+final LinearScoringParams getScoringParams() {</p>
+<blockquote>
+<div><p>return params;</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Returns the LinearScoringData instance associated with the current doc ID. If it doesn’t exist,</p></li>
+<li><p>an empty LinearScoringData is created.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+</dl>
+<p>&#64;Override
+public LinearScoringData getScoringDataForCurrentDocument() {</p>
+<blockquote>
+<div><p>LinearScoringData data = docIdToScoringData.get(getCurrentDocID());
+if (data == null) {</p>
+<blockquote>
+<div><p>data = new LinearScoringData();
+docIdToScoringData.put(getCurrentDocID(), data);</p>
+</div></blockquote>
+<p>}
+return data;</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public void setDebugMode(int debugMode) {</p>
+<blockquote>
+<div><p>super.setDebugMode(debugMode);</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Normal the lucene score, which was unbounded, to a range of [1.0, maxLuceneScoreBoost].</p></li>
+<li><p>The normalized value increases almost linearly in the lucene score range 2.0 ~ 7.0, where</p></li>
+<li><p>most queries fall in. For rare long tail queries, like some hashtags, they have high idf and</p></li>
+<li><p>thus high lucene score, the normalized value won’t have much difference between tweets.</p></li>
+<li><p>The normalization function is:</p></li>
+<li><p>ls = luceneScore</p></li>
+<li><p>norm = min(max, 1 + (max - 1.0) / 2.4 * ln(1 + ls)</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>static float normalizeLuceneScore(float luceneScore, float maxBoost) {</dt><dd><p>return (float) Math.min(maxBoost, 1.0 + (maxBoost - 1.0) / 2.4 * Math.log1p(luceneScore));</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;Override
+protected float score(float luceneQueryScore) throws IOException {</p>
+<blockquote>
+<div><p>return scoreInternal(luceneQueryScore, null);</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>protected LinearScoringData updateLinearScoringData(float luceneQueryScore) throws IOException {</dt><dd><p>// Reset the data for each tweet!!!
+LinearScoringData data = new LinearScoringData();
+docIdToScoringData.put(getCurrentDocID(), data);</p>
+<p>// Set proper version for engagement counters for this request.
+data.skipReason = SkipReason.NOT_SKIPPED;
+data.luceneScore = luceneQueryScore;
+data.userRep = (byte) documentFeatures.getFeatureValue(EarlybirdFieldConstant.USER_REPUTATION);</p>
+<dl class="simple">
+<dt>if (antiGamingFilter != null &amp;&amp; !antiGamingFilter.accept(getCurrentDocID())) {</dt><dd><p>data.skipReason = SkipReason.ANTIGAMING;
+return data;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>data.textScore = (byte) documentFeatures.getFeatureValue(EarlybirdFieldConstant.TEXT_SCORE);
+data.tokenAt140DividedByNumTokensBucket = VISIBLE_TOKEN_RATIO_NORMALIZER.denormalize(</p>
+<blockquote>
+<div><p>(byte) documentFeatures.getFeatureValue(EarlybirdFieldConstant.VISIBLE_TOKEN_RATIO));</p>
+</div></blockquote>
+<p>data.fromUserId = documentFeatures.getFeatureValue(EarlybirdFieldConstant.FROM_USER_ID_CSF);
+data.isFollow = followFilter != null</p>
+<blockquote>
+<div><p>&amp;&amp; followFilter.contains(Longs.toByteArray(data.fromUserId));</p>
+</div></blockquote>
+<dl class="simple">
+<dt>data.isTrusted = trustedFilter != null</dt><dd><p>&amp;&amp; trustedFilter.contains(Longs.toByteArray(data.fromUserId));</p>
+</dd>
+<dt>data.isFromVerifiedAccount = documentFeatures.isFlagSet(</dt><dd><p>EarlybirdFieldConstant.FROM_VERIFIED_ACCOUNT_FLAG);</p>
+</dd>
+<dt>data.isFromBlueVerifiedAccount = documentFeatures.isFlagSet(</dt><dd><p>EarlybirdFieldConstant.FROM_BLUE_VERIFIED_ACCOUNT_FLAG);</p>
+</dd>
+</dl>
+<p>data.isSelfTweet = data.fromUserId == params.searcherId;
+// v1 engagement counters, note that the first three values are post-log2 version
+// of the original unnormalized values.
+data.retweetCountPostLog2 = documentFeatures.getUnnormalizedFeatureValue(</p>
+<blockquote>
+<div><p>EarlybirdFieldConstant.RETWEET_COUNT);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>data.replyCountPostLog2 = documentFeatures.getUnnormalizedFeatureValue(</dt><dd><p>EarlybirdFieldConstant.REPLY_COUNT);</p>
+</dd>
+<dt>data.favCountPostLog2 = documentFeatures.getUnnormalizedFeatureValue(</dt><dd><p>EarlybirdFieldConstant.FAVORITE_COUNT);</p>
+</dd>
+<dt>data.embedsImpressionCount = documentFeatures.getUnnormalizedFeatureValue(</dt><dd><p>EarlybirdFieldConstant.EMBEDS_IMPRESSION_COUNT);</p>
+</dd>
+<dt>data.embedsUrlCount = documentFeatures.getUnnormalizedFeatureValue(</dt><dd><p>EarlybirdFieldConstant.EMBEDS_URL_COUNT);</p>
+</dd>
+<dt>data.videoViewCount = documentFeatures.getUnnormalizedFeatureValue(</dt><dd><p>EarlybirdFieldConstant.VIDEO_VIEW_COUNT);</p>
+</dd>
+</dl>
+<p>// v2 engagement counters
+data.retweetCountV2 = documentFeatures.getUnnormalizedFeatureValue(</p>
+<blockquote>
+<div><p>EarlybirdFieldConstant.RETWEET_COUNT_V2);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>data.replyCountV2 = documentFeatures.getUnnormalizedFeatureValue(</dt><dd><p>EarlybirdFieldConstant.REPLY_COUNT_V2);</p>
+</dd>
+<dt>data.favCountV2 = documentFeatures.getUnnormalizedFeatureValue(</dt><dd><p>EarlybirdFieldConstant.FAVORITE_COUNT_V2);</p>
+</dd>
+</dl>
+<p>// other v2 engagement counters
+data.embedsImpressionCountV2 = documentFeatures.getUnnormalizedFeatureValue(</p>
+<blockquote>
+<div><p>EarlybirdFieldConstant.EMBEDS_IMPRESSION_COUNT_V2);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>data.embedsUrlCountV2 = documentFeatures.getUnnormalizedFeatureValue(</dt><dd><p>EarlybirdFieldConstant.EMBEDS_URL_COUNT_V2);</p>
+</dd>
+<dt>data.videoViewCountV2 = documentFeatures.getUnnormalizedFeatureValue(</dt><dd><p>EarlybirdFieldConstant.VIDEO_VIEW_COUNT_V2);</p>
+</dd>
+</dl>
+<p>// pure v2 engagement counters without v1 counterpart
+data.quotedCount = documentFeatures.getUnnormalizedFeatureValue(</p>
+<blockquote>
+<div><p>EarlybirdFieldConstant.QUOTE_COUNT);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>data.weightedRetweetCount = documentFeatures.getUnnormalizedFeatureValue(</dt><dd><p>EarlybirdFieldConstant.WEIGHTED_RETWEET_COUNT);</p>
+</dd>
+<dt>data.weightedReplyCount = documentFeatures.getUnnormalizedFeatureValue(</dt><dd><p>EarlybirdFieldConstant.WEIGHTED_REPLY_COUNT);</p>
+</dd>
+<dt>data.weightedFavCount = documentFeatures.getUnnormalizedFeatureValue(</dt><dd><p>EarlybirdFieldConstant.WEIGHTED_FAVORITE_COUNT);</p>
+</dd>
+<dt>data.weightedQuoteCount = documentFeatures.getUnnormalizedFeatureValue(</dt><dd><p>EarlybirdFieldConstant.WEIGHTED_QUOTE_COUNT);</p>
+</dd>
+<dt>Double querySpecificScoreAdjustment = params.querySpecificScoreAdjustments == null ? null</dt><dd><p>: params.querySpecificScoreAdjustments.get(tweetIDMapper.getTweetID(getCurrentDocID()));</p>
+</dd>
+<dt>data.querySpecificScore =</dt><dd><p>querySpecificScoreAdjustment == null ? 0.0 : querySpecificScoreAdjustment;</p>
+</dd>
+<dt>data.authorSpecificScore = params.authorSpecificScoreAdjustments == null</dt><dd><p>? 0.0
+: params.authorSpecificScoreAdjustments.getOrDefault(data.fromUserId, 0.0);</p>
+</dd>
+</dl>
+<p>// respect social filter type
+if (params.socialFilterType != null &amp;&amp; !data.isSelfTweet) {</p>
+<blockquote>
+<div><dl>
+<dt>if ((params.socialFilterType == ThriftSocialFilterType.ALL</dt><dd><blockquote>
+<div><blockquote>
+<div><p>&amp;&amp; !data.isFollow &amp;&amp; !data.isTrusted)</p>
+</div></blockquote>
+<p>|| (params.socialFilterType == ThriftSocialFilterType.TRUSTED &amp;&amp; !data.isTrusted)
+|| (params.socialFilterType == ThriftSocialFilterType.FOLLOWS &amp;&amp; !data.isFollow)) {</p>
+</div></blockquote>
+<p>// we can skip this hit as we only want social results in this mode.
+data.skipReason = SkipReason.SOCIAL_FILTER;
+return data;</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>// 1. first apply all the filters to only non-follow tweets and non-verified accounts,
+//    but be tender to sentinel values
+// unless you specifically asked to apply filters regardless
+if (params.applyFiltersAlways</p>
+<blockquote>
+<div><blockquote>
+<div><dl class="simple">
+<dt>|| (!data.isSelfTweet &amp;&amp; !data.isFollow &amp;&amp; !data.isFromVerifiedAccount</dt><dd><p>&amp;&amp; !data.isFromBlueVerifiedAccount)) {</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl>
+<dt>if (data.userRep &lt; params.reputationMinVal</dt><dd><blockquote>
+<div><p>// don’t filter unset userreps, we give them the benefit of doubt and let it
+// continue to scoring. userrep is unset when either user just signed up or
+// during ingestion time we had trouble getting userrep from reputation service.
+&amp;&amp; data.userRep != RelevanceSignalConstants.UNSET_REPUTATION_SENTINEL) {</p>
+</div></blockquote>
+<p>data.skipReason = SkipReason.LOW_REPUTATION;
+return data;</p>
+</dd>
+<dt>} else if (data.textScore &lt; params.textScoreMinVal</dt><dd><blockquote>
+<div><p>// don’t filter unset text scores, use goodwill value
+&amp;&amp; data.textScore != RelevanceSignalConstants.UNSET_TEXT_SCORE_SENTINEL) {</p>
+</div></blockquote>
+<p>data.skipReason = SkipReason.LOW_TEXT_SCORE;
+return data;</p>
+</dd>
+<dt>} else if (data.retweetCountPostLog2 != LinearScoringData.UNSET_SIGNAL_VALUE</dt><dd><blockquote>
+<div><p>&amp;&amp; data.retweetCountPostLog2 &lt; params.retweetMinVal) {</p>
+</div></blockquote>
+<p>data.skipReason = SkipReason.LOW_RETWEET_COUNT;
+return data;</p>
+</dd>
+<dt>} else if (data.favCountPostLog2 != LinearScoringData.UNSET_SIGNAL_VALUE</dt><dd><blockquote>
+<div><p>&amp;&amp; data.favCountPostLog2 &lt; params.favMinVal) {</p>
+</div></blockquote>
+<p>data.skipReason = SkipReason.LOW_FAV_COUNT;
+return data;</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>// if sentinel value is set, assume goodwill score and let scoring continue.
+if (data.textScore == RelevanceSignalConstants.UNSET_TEXT_SCORE_SENTINEL) {</p>
+<blockquote>
+<div><p>data.textScore = RelevanceSignalConstants.GOODWILL_TEXT_SCORE;</p>
+</div></blockquote>
+<p>}
+if (data.userRep == RelevanceSignalConstants.UNSET_REPUTATION_SENTINEL) {</p>
+<blockquote>
+<div><p>data.userRep = RelevanceSignalConstants.GOODWILL_REPUTATION;</p>
+</div></blockquote>
+<p>}</p>
+<p>data.tweetAgeInSeconds = now - timeMapper.getTime(getCurrentDocID());
+if (data.tweetAgeInSeconds &lt; 0) {</p>
+<blockquote>
+<div><p>data.tweetAgeInSeconds = 0; // Age cannot be negative</p>
+</div></blockquote>
+<p>}</p>
+<p>// The PARUS_SCORE feature should be read as is.
+data.parusScore = documentFeatures.getFeatureValue(EarlybirdFieldConstant.PARUS_SCORE);</p>
+<p>data.isNullcast = documentFeatures.isFlagSet(EarlybirdFieldConstant.IS_NULLCAST_FLAG);
+data.hasUrl =  documentFeatures.isFlagSet(EarlybirdFieldConstant.HAS_LINK_FLAG);
+data.hasImageUrl = documentFeatures.isFlagSet(EarlybirdFieldConstant.HAS_IMAGE_URL_FLAG);
+data.hasVideoUrl = documentFeatures.isFlagSet(EarlybirdFieldConstant.HAS_VIDEO_URL_FLAG);
+data.hasNewsUrl = documentFeatures.isFlagSet(EarlybirdFieldConstant.HAS_NEWS_URL_FLAG);
+data.isReply =  documentFeatures.isFlagSet(EarlybirdFieldConstant.IS_REPLY_FLAG);
+data.isRetweet = documentFeatures.isFlagSet(EarlybirdFieldConstant.IS_RETWEET_FLAG);
+data.isOffensive = documentFeatures.isFlagSet(EarlybirdFieldConstant.IS_OFFENSIVE_FLAG);
+data.hasTrend = documentFeatures.isFlagSet(EarlybirdFieldConstant.HAS_TREND_FLAG);
+data.hasMultipleHashtagsOrTrends =</p>
+<blockquote>
+<div><p>documentFeatures.isFlagSet(EarlybirdFieldConstant.HAS_MULTIPLE_HASHTAGS_OR_TRENDS_FLAG);</p>
+</div></blockquote>
+<p>data.isUserSpam = documentFeatures.isFlagSet(EarlybirdFieldConstant.IS_USER_SPAM_FLAG);
+data.isUserNSFW = documentFeatures.isFlagSet(EarlybirdFieldConstant.IS_USER_NSFW_FLAG)</p>
+<blockquote>
+<div><p>|| userTable.isSet(data.fromUserId, UserTable.NSFW_BIT);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>data.isUserAntiSocial =</dt><dd><p>userTable.isSet(data.fromUserId, UserTable.ANTISOCIAL_BIT);</p>
+</dd>
+</dl>
+<p>data.isUserBot = documentFeatures.isFlagSet(EarlybirdFieldConstant.IS_USER_BOT_FLAG);
+data.hasCard = documentFeatures.isFlagSet(EarlybirdFieldConstant.HAS_CARD_FLAG);
+data.cardType = SearchCardType.UNKNOWN.getByteValue();
+if (data.hasCard) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>data.cardType =</dt><dd><p>(byte) documentFeatures.getFeatureValue(EarlybirdFieldConstant.CARD_TYPE_CSF_FIELD);</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+data.hasVisibleLink = documentFeatures.isFlagSet(EarlybirdFieldConstant.HAS_VISIBLE_LINK_FLAG);</p>
+<dl class="simple">
+<dt>data.hasConsumerVideo =</dt><dd><p>documentFeatures.isFlagSet(EarlybirdFieldConstant.HAS_CONSUMER_VIDEO_FLAG);</p>
+</dd>
+</dl>
+<p>data.hasProVideo = documentFeatures.isFlagSet(EarlybirdFieldConstant.HAS_PRO_VIDEO_FLAG);
+data.hasVine = documentFeatures.isFlagSet(EarlybirdFieldConstant.HAS_VINE_FLAG);
+data.hasPeriscope = documentFeatures.isFlagSet(EarlybirdFieldConstant.HAS_PERISCOPE_FLAG);
+data.hasNativeImage = documentFeatures.isFlagSet(EarlybirdFieldConstant.HAS_NATIVE_IMAGE_FLAG);
+data.hasQuote = documentFeatures.isFlagSet(EarlybirdFieldConstant.HAS_QUOTE_FLAG);
+data.isComposerSourceCamera =</p>
+<blockquote>
+<div><p>documentFeatures.isFlagSet(EarlybirdFieldConstant.COMPOSER_SOURCE_IS_CAMERA_FLAG);</p>
+</div></blockquote>
+<p>// Only read the shared status if the isRetweet or isReply bit is true (minor optimization).
+if (data.isRetweet || (params.getInReplyToStatusId &amp;&amp; data.isReply)) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>data.sharedStatusId =</dt><dd><p>documentFeatures.getFeatureValue(EarlybirdFieldConstant.SHARED_STATUS_ID_CSF);</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<p>// Only read the reference tweet author ID if the isRetweet or isReply bit
+// is true (minor optimization).
+if (data.isRetweet || data.isReply) {</p>
+<blockquote>
+<div><p>// the REFERENCE_AUTHOR_ID_CSF stores the source tweet author id for all retweets
+long referenceAuthorId =</p>
+<blockquote>
+<div><p>documentFeatures.getFeatureValue(EarlybirdFieldConstant.REFERENCE_AUTHOR_ID_CSF);</p>
+</div></blockquote>
+<dl>
+<dt>if (referenceAuthorId &gt; 0) {</dt><dd><p>data.referenceAuthorId = referenceAuthorId;</p>
+</dd>
+<dt>} else {</dt><dd><p>// we also store the reference author id for retweets, directed at tweets, and self threaded
+// tweets separately on Realtime/Protected Earlybirds. This data will be moved to the
+// REFERENCE_AUTHOR_ID_CSF and these fields will be deprecated in SEARCH-34958.
+referenceAuthorId = LongIntConverter.convertTwoIntToOneLong(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>(int) documentFeatures.getFeatureValue(</dt><dd><p>EarlybirdFieldConstant.REFERENCE_AUTHOR_ID_MOST_SIGNIFICANT_INT),</p>
+</dd>
+<dt>(int) documentFeatures.getFeatureValue(</dt><dd><p>EarlybirdFieldConstant.REFERENCE_AUTHOR_ID_LEAST_SIGNIFICANT_INT));</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl class="simple">
+<dt>if (referenceAuthorId &gt; 0) {</dt><dd><p>data.referenceAuthorId = referenceAuthorId;</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>// Convert language to a thrift language and then back to an int in order to
+// ensure a value compatible with our current ThriftLanguage definition.
+ThriftLanguage tweetLang = ThriftLanguageUtil.safeFindByValue(</p>
+<blockquote>
+<div><p>(int) documentFeatures.getFeatureValue(EarlybirdFieldConstant.LANGUAGE));</p>
+</div></blockquote>
+<p>data.tweetLangId = tweetLang.getValue();
+// Set the language-related features here so that they can be later used in promotion/demotion
+// and also be transferred to ThriftSearchResultMetadata
+data.userLangMult = computeUserLangMultiplier(data, params);
+data.hasDifferentLang = params.uiLangId != ThriftLanguage.UNKNOWN.getValue()</p>
+<blockquote>
+<div><p>&amp;&amp; params.uiLangId != data.tweetLangId;</p>
+</div></blockquote>
+<dl class="simple">
+<dt>data.hasEnglishTweetAndDifferentUILang = data.hasDifferentLang</dt><dd><p>&amp;&amp; data.tweetLangId == ThriftLanguage.ENGLISH.getValue();</p>
+</dd>
+<dt>data.hasEnglishUIAndDifferentTweetLang = data.hasDifferentLang</dt><dd><p>&amp;&amp; params.uiLangId == ThriftLanguage.ENGLISH.getValue();</p>
+</dd>
+</dl>
+<p>// Exposed all these features for the clients.
+data.isSensitiveContent =</p>
+<blockquote>
+<div><p>documentFeatures.isFlagSet(EarlybirdFieldConstant.IS_SENSITIVE_CONTENT);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>data.hasMultipleMediaFlag =</dt><dd><p>documentFeatures.isFlagSet(EarlybirdFieldConstant.HAS_MULTIPLE_MEDIA_FLAG);</p>
+</dd>
+</dl>
+<p>data.profileIsEggFlag = documentFeatures.isFlagSet(EarlybirdFieldConstant.PROFILE_IS_EGG_FLAG);
+data.isUserNewFlag = documentFeatures.isFlagSet(EarlybirdFieldConstant.IS_USER_NEW_FLAG);
+data.numMentions = (int) documentFeatures.getFeatureValue(EarlybirdFieldConstant.NUM_MENTIONS);
+data.numHashtags = (int) documentFeatures.getFeatureValue(EarlybirdFieldConstant.NUM_HASHTAGS);
+data.linkLanguage =</p>
+<blockquote>
+<div><p>(int) documentFeatures.getFeatureValue(EarlybirdFieldConstant.LINK_LANGUAGE);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>data.prevUserTweetEngagement =</dt><dd><p>(int) documentFeatures.getFeatureValue(EarlybirdFieldConstant.PREV_USER_TWEET_ENGAGEMENT);</p>
+</dd>
+</dl>
+<p>// health model scores by HML
+data.toxicityScore = documentFeatures.getUnnormalizedFeatureValue(</p>
+<blockquote>
+<div><p>EarlybirdFieldConstant.TOXICITY_SCORE);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>data.pBlockScore = documentFeatures.getUnnormalizedFeatureValue(</dt><dd><p>EarlybirdFieldConstant.PBLOCK_SCORE);</p>
+</dd>
+<dt>data.pSpammyTweetScore = documentFeatures.getUnnormalizedFeatureValue(</dt><dd><p>EarlybirdFieldConstant.P_SPAMMY_TWEET_SCORE);</p>
+</dd>
+<dt>data.pReportedTweetScore = documentFeatures.getUnnormalizedFeatureValue(</dt><dd><p>EarlybirdFieldConstant.P_REPORTED_TWEET_SCORE);</p>
+</dd>
+<dt>data.spammyTweetContentScore = documentFeatures.getUnnormalizedFeatureValue(</dt><dd><p>EarlybirdFieldConstant.SPAMMY_TWEET_CONTENT_SCORE</p>
+</dd>
+</dl>
+<p>);
+data.experimentalHealthModelScore1 = documentFeatures.getUnnormalizedFeatureValue(</p>
+<blockquote>
+<div><p>EarlybirdFieldConstant.EXPERIMENTAL_HEALTH_MODEL_SCORE_1);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>data.experimentalHealthModelScore2 = documentFeatures.getUnnormalizedFeatureValue(</dt><dd><p>EarlybirdFieldConstant.EXPERIMENTAL_HEALTH_MODEL_SCORE_2);</p>
+</dd>
+<dt>data.experimentalHealthModelScore3 = documentFeatures.getUnnormalizedFeatureValue(</dt><dd><p>EarlybirdFieldConstant.EXPERIMENTAL_HEALTH_MODEL_SCORE_3);</p>
+</dd>
+<dt>data.experimentalHealthModelScore4 = documentFeatures.getUnnormalizedFeatureValue(</dt><dd><p>EarlybirdFieldConstant.EXPERIMENTAL_HEALTH_MODEL_SCORE_4);</p>
+</dd>
+</dl>
+<p>return data;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>protected float scoreInternal(</dt><dd><blockquote>
+<div><p>float luceneQueryScore, ExplanationWrapper explanation) throws IOException {</p>
+</div></blockquote>
+<p>LinearScoringData data = updateLinearScoringData(luceneQueryScore);
+if (data.skipReason != null &amp;&amp; data.skipReason != SkipReason.NOT_SKIPPED) {</p>
+<blockquote>
+<div><p>return finalizeScore(data, explanation, SKIP_HIT);</p>
+</div></blockquote>
+<p>}</p>
+<p>double score = computeScore(data, explanation != null);
+return postScoreComputation(data, score, true, explanation);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>protected float postScoreComputation(</dt><dd><blockquote>
+<div><p>LinearScoringData data,
+double score,
+boolean boostScoreWithHitAttribution,
+ExplanationWrapper explanation) throws IOException {</p>
+</div></blockquote>
+<p>double modifiedScore = score;
+data.scoreBeforeBoost = modifiedScore;
+if (params.applyBoosts) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>modifiedScore =</dt><dd><p>applyBoosts(data, modifiedScore, boostScoreWithHitAttribution, explanation != null);</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+// Final adjustment to avoid too-low scores.
+modifiedScore <a href="#id7"><span class="problematic" id="id8">*</span></a>= SCORE_ADJUSTER;
+data.scoreAfterBoost = modifiedScore;</p>
+<p>// 3. final score filter
+data.scoreFinal = modifiedScore;
+if ((params.applyFiltersAlways || (!data.isSelfTweet &amp;&amp; !data.isFollow))</p>
+<blockquote>
+<div><blockquote>
+<div><p>&amp;&amp; modifiedScore &lt; params.minScore) {</p>
+</div></blockquote>
+<p>data.skipReason = SkipReason.LOW_FINAL_SCORE;
+modifiedScore = SKIP_HIT;</p>
+</div></blockquote>
+<p>}</p>
+<p>// clear field hits
+this.fieldHitAttribution = null;
+return finalizeScore(data, explanation, modifiedScore);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Applying promotion/demotion to the scores generated by feature-based scoring functions</p></li>
+<li></li>
+<li><p>&#64;param data Original LinearScoringData (to be modified with boosts here)</p></li>
+<li><p>&#64;param score Score generated by the feature-based scoring function</p></li>
+<li><p>&#64;param withHitAttribution Determines if hit attribution data should be included.</p></li>
+<li><p>&#64;param forExplanation Indicates if the score will be computed for generating the explanation.</p></li>
+<li><p>&#64;return Score after applying promotion/demotion</p></li>
+</ul>
+<p><a href="#id9"><span class="problematic" id="id10">*</span></a>/</p>
+</dd>
+<dt>private double applyBoosts(</dt><dd><blockquote>
+<div><p>LinearScoringData data,
+double score,
+boolean withHitAttribution,
+boolean forExplanation) {</p>
+</div></blockquote>
+<p>double boostedScore = score;</p>
+<dl>
+<dt>if (params.useLuceneScoreAsBoost) {</dt><dd><dl class="simple">
+<dt>data.normalizedLuceneScore = normalizeLuceneScore(</dt><dd><p>(float) data.luceneScore, (float) params.maxLuceneScoreBoost);</p>
+</dd>
+</dl>
+<p>boostedScore <a href="#id11"><span class="problematic" id="id12">*</span></a>= data.normalizedLuceneScore;</p>
+</dd>
+</dl>
+<p>}
+if (data.isOffensive) {</p>
+<blockquote>
+<div><p>boostedScore <a href="#id13"><span class="problematic" id="id14">*</span></a>= params.offensiveDamping;</p>
+</div></blockquote>
+<p>}
+if (data.isUserSpam &amp;&amp; params.spamUserDamping != LinearScoringData.NO_BOOST_VALUE) {</p>
+<blockquote>
+<div><p>data.spamUserDampApplied = true;
+boostedScore <a href="#id15"><span class="problematic" id="id16">*</span></a>= params.spamUserDamping;</p>
+</div></blockquote>
+<p>}
+if (data.isUserNSFW &amp;&amp; params.nsfwUserDamping != LinearScoringData.NO_BOOST_VALUE) {</p>
+<blockquote>
+<div><p>data.nsfwUserDampApplied = true;
+boostedScore <a href="#id17"><span class="problematic" id="id18">*</span></a>= params.nsfwUserDamping;</p>
+</div></blockquote>
+<p>}
+if (data.isUserBot &amp;&amp; params.botUserDamping != LinearScoringData.NO_BOOST_VALUE) {</p>
+<blockquote>
+<div><p>data.botUserDampApplied = true;
+boostedScore <a href="#id19"><span class="problematic" id="id20">*</span></a>= params.botUserDamping;</p>
+</div></blockquote>
+<p>}</p>
+<p>// cards
+if (data.hasCard &amp;&amp; params.hasCardBoosts[data.cardType] != LinearScoringData.NO_BOOST_VALUE) {</p>
+<blockquote>
+<div><p>boostedScore <a href="#id21"><span class="problematic" id="id22">*</span></a>= params.hasCardBoosts[data.cardType];
+data.hasCardBoostApplied = true;</p>
+</div></blockquote>
+<p>}</p>
+<p>// trends
+if (data.hasMultipleHashtagsOrTrends) {</p>
+<blockquote>
+<div><p>boostedScore <a href="#id23"><span class="problematic" id="id24">*</span></a>= params.multipleHashtagsOrTrendsDamping;</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else if (data.hasTrend) {</dt><dd><p>data.tweetHasTrendsBoostApplied = true;
+boostedScore <a href="#id25"><span class="problematic" id="id26">*</span></a>= params.tweetHasTrendBoost;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// Media/News url boosts.
+if (data.hasImageUrl || data.hasVideoUrl) {</p>
+<blockquote>
+<div><p>data.hasMedialUrlBoostApplied = true;
+boostedScore <a href="#id27"><span class="problematic" id="id28">*</span></a>= params.tweetHasMediaUrlBoost;</p>
+</div></blockquote>
+<p>}
+if (data.hasNewsUrl) {</p>
+<blockquote>
+<div><p>data.hasNewsUrlBoostApplied = true;
+boostedScore <a href="#id29"><span class="problematic" id="id30">*</span></a>= params.tweetHasNewsUrlBoost;</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>if (data.isFromVerifiedAccount) {</dt><dd><p>data.tweetFromVerifiedAccountBoostApplied = true;
+boostedScore <a href="#id31"><span class="problematic" id="id32">*</span></a>= params.tweetFromVerifiedAccountBoost;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>if (data.isFromBlueVerifiedAccount) {</dt><dd><p>data.tweetFromBlueVerifiedAccountBoostApplied = true;
+boostedScore <a href="#id33"><span class="problematic" id="id34">*</span></a>= params.tweetFromBlueVerifiedAccountBoost;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>if (data.isFollow) {</dt><dd><p>// direct follow, so boost both replies and non-replies.
+data.directFollowBoostApplied = true;
+boostedScore <a href="#id35"><span class="problematic" id="id36">*</span></a>= params.directFollowBoost;</p>
+</dd>
+<dt>} else if (data.isTrusted) {</dt><dd><p>// trusted circle
+if (!data.isReply) {</p>
+<blockquote>
+<div><p>// non-at-reply, in trusted network
+data.trustedCircleBoostApplied = true;
+boostedScore <a href="#id37"><span class="problematic" id="id38">*</span></a>= params.trustedCircleBoost;</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+<dt>} else if (data.isReply) {</dt><dd><p>// at-reply out of my network
+data.outOfNetworkReplyPenaltyApplied = true;
+boostedScore -= params.outOfNetworkReplyPenalty;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>if (data.isSelfTweet) {</dt><dd><p>data.selfTweetBoostApplied = true;
+data.selfTweetMult = params.selfTweetBoost;
+boostedScore <a href="#id39"><span class="problematic" id="id40">*</span></a>= params.selfTweetBoost;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// Language Demotion
+// User language based demotion
+// The data.userLangMult is set in scoreInternal(), and this setting step is always before
+// the applying boosts step
+if (params.useUserLanguageInfo) {</p>
+<blockquote>
+<div><p>boostedScore <a href="#id41"><span class="problematic" id="id42">*</span></a>= data.userLangMult;</p>
+</div></blockquote>
+<p>}
+// UI language based demotion
+if (params.uiLangId != ThriftLanguage.UNKNOWN.getValue()</p>
+<blockquote>
+<div><blockquote>
+<div><p>&amp;&amp; params.uiLangId != data.tweetLangId) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>if (data.tweetLangId == ThriftLanguage.ENGLISH.getValue()) {</dt><dd><p>data.uiLangMult = params.langEnglishTweetDemote;</p>
+</dd>
+<dt>} else if (params.uiLangId == ThriftLanguage.ENGLISH.getValue()) {</dt><dd><p>data.uiLangMult = params.langEnglishUIDemote;</p>
+</dd>
+<dt>} else {</dt><dd><p>data.uiLangMult = params.langDefaultDemote;</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>data.uiLangMult = LinearScoringData.NO_BOOST_VALUE;</p>
+</dd>
+</dl>
+<p>}
+boostedScore <a href="#id43"><span class="problematic" id="id44">*</span></a>= data.uiLangMult;</p>
+<dl class="simple">
+<dt>if (params.useAgeDecay) {</dt><dd><p>// shallow sigmoid with an inflection point at ageDecayHalflife
+data.ageDecayMult = ageDecay.getAgeDecayMultiplier(data.tweetAgeInSeconds);
+boostedScore <a href="#id45"><span class="problematic" id="id46">*</span></a>= data.ageDecayMult;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// Hit Attribute Demotion
+// Scoring is currently based on tokenized user name, text, and url in the tweet
+// If hit attribute collection is enabled, we demote score based on these fields
+if (hitAttributeHelper != null &amp;&amp; params.enableHitDemotion) {</p>
+<blockquote>
+<div><p>Map&lt;Integer, List&lt;String&gt;&gt; hitMap;
+if (forExplanation &amp;&amp; fieldHitAttribution != null) {</p>
+<blockquote>
+<div><p>// if this scoring call is for generating an explanation,
+// we’ll use the fieldHitAttribution found in the search result’s metadata because
+// collectors are not called during the debug workflow
+hitMap = Maps.transformValues(fieldHitAttribution.getHitMap(), FieldHitList::getHitFields);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else if (withHitAttribution) {</dt><dd><p>hitMap = hitAttributeHelper.getHitAttribution(getCurrentDocID());</p>
+</dd>
+<dt>} else {</dt><dd><p>hitMap = Maps.newHashMap();</p>
+</dd>
+</dl>
+<p>}
+Set&lt;String&gt; uniqueFieldHits = ImmutableSet.copyOf(Iterables.concat(hitMap.values()));</p>
+<p>data.hitFields.addAll(uniqueFieldHits);
+// there should always be fields that are hit
+// if there aren’t, we assume this is a call from ‘explain’ in debug mode
+// do not override hit attribute data if in debug mode
+if (!uniqueFieldHits.isEmpty()) {</p>
+<blockquote>
+<div><p>// demotions based strictly on field hits
+if (uniqueFieldHits.size() == 1) {</p>
+<blockquote>
+<div><dl>
+<dt>if (uniqueFieldHits.contains(</dt><dd><blockquote>
+<div><p>EarlybirdFieldConstant.RESOLVED_LINKS_TEXT_FIELD.getFieldName())) {</p>
+</div></blockquote>
+<p>// if url was the only field that was hit, demote
+data.hasUrlOnlyHitDemotionApplied = true;
+boostedScore <a href="#id47"><span class="problematic" id="id48">*</span></a>= params.urlOnlyHitDemotion;</p>
+</dd>
+<dt>} else if (uniqueFieldHits.contains(</dt><dd><blockquote>
+<div><p>EarlybirdFieldConstant.TOKENIZED_FROM_USER_FIELD.getFieldName())) {</p>
+</div></blockquote>
+<p>// if name was the only field that was hit, demote
+data.hasNameOnlyHitDemotionApplied = true;
+boostedScore <a href="#id49"><span class="problematic" id="id50">*</span></a>= params.nameOnlyHitDemotion;</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<dl>
+<dt>} else if (!uniqueFieldHits.contains(EarlybirdFieldConstant.TEXT_FIELD.getFieldName())</dt><dd><blockquote>
+<div><p>&amp;&amp; !uniqueFieldHits.contains(EarlybirdFieldConstant.MENTIONS_FIELD.getFieldName())
+&amp;&amp; !uniqueFieldHits.contains(EarlybirdFieldConstant.HASHTAGS_FIELD.getFieldName())
+&amp;&amp; !uniqueFieldHits.contains(EarlybirdFieldConstant.STOCKS_FIELD.getFieldName())) {</p>
+</div></blockquote>
+<p>// if text or special text was never hit, demote
+data.hasNoTextHitDemotionApplied = true;
+boostedScore <a href="#id51"><span class="problematic" id="id52">*</span></a>= params.noTextHitDemotion;</p>
+</dd>
+<dt>} else if (uniqueFieldHits.size() == 2) {</dt><dd><p>// demotions based on field hit combinations
+// want to demote if we only hit two of the fields (one being text)
+// but with separate terms
+Set&lt;String&gt; fieldIntersections = QueryCommonFieldHitsVisitor.findIntersection(</p>
+<blockquote>
+<div><p>hitAttributeHelper.getNodeToRankMap(),
+hitMap,
+query);</p>
+</div></blockquote>
+<dl>
+<dt>if (fieldIntersections.isEmpty()) {</dt><dd><dl>
+<dt>if (uniqueFieldHits.contains(</dt><dd><blockquote>
+<div><p>EarlybirdFieldConstant.TOKENIZED_FROM_USER_FIELD.getFieldName())) {</p>
+</div></blockquote>
+<p>// if name is hit but has no hits in common with text, demote
+// want to demote cases where we hit part of the person’s name
+// and tweet text separately
+data.hasSeparateTextAndNameHitDemotionApplied = true;
+boostedScore <a href="#id53"><span class="problematic" id="id54">*</span></a>= params.separateTextAndNameHitDemotion;</p>
+</dd>
+<dt>} else if (uniqueFieldHits.contains(</dt><dd><blockquote>
+<div><p>EarlybirdFieldConstant.RESOLVED_LINKS_TEXT_FIELD.getFieldName())) {</p>
+</div></blockquote>
+<p>// if url is hit but has no hits in common with text, demote
+// want to demote cases where we hit a potential domain keyword
+// and tweet text separately
+data.hasSeparateTextAndUrlHitDemotionApplied = true;
+boostedScore <a href="#id55"><span class="problematic" id="id56">*</span></a>= params.separateTextAndUrlHitDemotion;</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>return boostedScore;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Compute the user language based demotion multiplier</p></li>
+</ul>
+<p><a href="#id57"><span class="problematic" id="id58">*</span></a>/</p>
+</dd>
+<dt>private static double computeUserLangMultiplier(</dt><dd><blockquote>
+<div><p>LinearScoringData data, LinearScoringParams params) {</p>
+</div></blockquote>
+<dl>
+<dt>if (data.tweetLangId == params.uiLangId</dt><dd><blockquote>
+<div><p>&amp;&amp; data.tweetLangId != ThriftLanguage.UNKNOWN.getValue()) {</p>
+</div></blockquote>
+<p>// Effectively the uiLang is considered a language that user knows with 1.0 confidence.
+return LinearScoringData.NO_BOOST_VALUE;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>if (params.userLangs[data.tweetLangId] &gt; 0.0) {</dt><dd><p>return params.userLangs[data.tweetLangId];</p>
+</dd>
+</dl>
+<p>}</p>
+<p>return params.unknownLanguageBoost;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Computes the score of the document that it’s currently being evaluated.</p></li>
+<li></li>
+<li><p>The extracted features from the document are available in the field ‘data’.</p></li>
+<li></li>
+<li><p>&#64;param data The LinearScoringData instance that will store the document features.</p></li>
+<li><p>&#64;param forExplanation Indicates if the score will be computed for generating the explanation.</p></li>
+</ul>
+<p><a href="#id59"><span class="problematic" id="id60">*</span></a>/</p>
+</dd>
+<dt>protected abstract double computeScore(</dt><dd><p>LinearScoringData data, boolean forExplanation) throws IOException;</p>
+</dd>
+<dt>private float finalizeScore(</dt><dd><blockquote>
+<div><p>LinearScoringData scoringData,
+ExplanationWrapper explanation,
+double score) throws IOException {</p>
+</div></blockquote>
+<p>scoringData.scoreReturned = score;
+if (explanation != null) {</p>
+<blockquote>
+<div><p>explanation.explanation = generateExplanation(scoringData);</p>
+</div></blockquote>
+<p>}
+return (float) score;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;Override
+protected void initializeNextSegment(EarlybirdIndexSegmentAtomicReader reader)</p>
+<blockquote>
+<div><blockquote>
+<div><p>throws IOException {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>if (antiGamingFilter != null) {</dt><dd><p>antiGamingFilter.startSegment(reader);</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/*</dt><dd><ul class="simple">
+<li><p>Generate the scoring explanation for debug.</p></li>
+</ul>
+<p><a href="#id61"><span class="problematic" id="id62">*</span></a>/</p>
+</dd>
+<dt>private Explanation generateExplanation(LinearScoringData scoringData) throws IOException {</dt><dd><p>final List&lt;Explanation&gt; details = Lists.newArrayList();</p>
+<dl class="simple">
+<dt>details.add(Explanation.match(0.0f, “[PROPERTIES] “</dt><dd><ul class="simple">
+<li><p>scoringData.getPropertyExplanation()));</p></li>
+</ul>
+</dd>
+</dl>
+<p>// 1. Filters
+boolean isHit = scoringData.skipReason == SkipReason.NOT_SKIPPED;
+if (scoringData.skipReason == SkipReason.ANTIGAMING) {</p>
+<blockquote>
+<div><p>details.add(Explanation.noMatch(“SKIPPED for antigaming”));</p>
+</div></blockquote>
+<p>}
+if (scoringData.skipReason == SkipReason.LOW_REPUTATION) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>details.add(Explanation.noMatch(</dt><dd><dl class="simple">
+<dt>String.format(“SKIPPED for low reputation: %.3f &lt; %.3f”,</dt><dd><p>scoringData.userRep, params.reputationMinVal)));</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+if (scoringData.skipReason == SkipReason.LOW_TEXT_SCORE) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>details.add(Explanation.noMatch(</dt><dd><dl class="simple">
+<dt>String.format(“SKIPPED for low text score: %.3f &lt; %.3f”,</dt><dd><p>scoringData.textScore, params.textScoreMinVal)));</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+if (scoringData.skipReason == SkipReason.LOW_RETWEET_COUNT) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>details.add(Explanation.noMatch(</dt><dd><dl class="simple">
+<dt>String.format(“SKIPPED for low retweet count: %.3f &lt; %.3f”,</dt><dd><p>scoringData.retweetCountPostLog2, params.retweetMinVal)));</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+if (scoringData.skipReason == SkipReason.LOW_FAV_COUNT) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>details.add(Explanation.noMatch(</dt><dd><dl class="simple">
+<dt>String.format(“SKIPPED for low fav count: %.3f &lt; %.3f”,</dt><dd><p>scoringData.favCountPostLog2, params.favMinVal)));</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+if (scoringData.skipReason == SkipReason.SOCIAL_FILTER) {</p>
+<blockquote>
+<div><p>details.add(Explanation.noMatch(“SKIPPED for not in the right social circle”));</p>
+</div></blockquote>
+<p>}</p>
+<p>// 2. Explanation depending on the scoring type
+generateExplanationForScoring(scoringData, isHit, details);</p>
+<p>// 3. Explanation depending on boosts
+if (params.applyBoosts) {</p>
+<blockquote>
+<div><p>generateExplanationForBoosts(scoringData, isHit, details);</p>
+</div></blockquote>
+<p>}</p>
+<p>// 4. Final score filter.
+if (scoringData.skipReason == SkipReason.LOW_FINAL_SCORE) {</p>
+<blockquote>
+<div><p>details.add(Explanation.noMatch(“SKIPPED for low final score: “ + scoringData.scoreFinal));
+isHit = false;</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>String hostAndSegment = String.format(“%s host = %s  segment = %s”,</dt><dd><p>functionName, DatabaseConfig.getLocalHostname(), DatabaseConfig.getDatabase());</p>
+</dd>
+<dt>if (isHit) {</dt><dd><p>return Explanation.match((float) scoringData.scoreFinal, hostAndSegment, details);</p>
+</dd>
+<dt>} else {</dt><dd><p>return Explanation.noMatch(hostAndSegment, details);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Generates the explanation for the document that is currently being evaluated.</p></li>
+<li></li>
+<li><p>Implementations of this method must use the ‘details’ parameter to collect its output.</p></li>
+<li></li>
+<li><p>&#64;param scoringData Scoring components for the document</p></li>
+<li><p>&#64;param isHit Indicates whether the document is not skipped</p></li>
+<li><p>&#64;param details Details of the explanation. Used to collect the output.</p></li>
+</ul>
+<p><a href="#id63"><span class="problematic" id="id64">*</span></a>/</p>
+</dd>
+<dt>protected abstract void generateExplanationForScoring(</dt><dd><p>LinearScoringData scoringData, boolean isHit, List&lt;Explanation&gt; details) throws IOException;</p>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Generates the boosts part of the explanation for the document that is currently</p></li>
+<li><p>being evaluated.</p></li>
+</ul>
+<p><a href="#id65"><span class="problematic" id="id66">*</span></a>/</p>
+</dd>
+<dt>private void generateExplanationForBoosts(</dt><dd><blockquote>
+<div><p>LinearScoringData scoringData,
+boolean isHit,
+List&lt;Explanation&gt; details) {</p>
+</div></blockquote>
+<p>List&lt;Explanation&gt; boostDetails = Lists.newArrayList();</p>
+<p>boostDetails.add(Explanation.match((float) scoringData.scoreBeforeBoost, “Score before boost”));</p>
+<p>// Lucene score boost
+if (params.useLuceneScoreAsBoost) {</p>
+<blockquote>
+<div><dl>
+<dt>boostDetails.add(Explanation.match(</dt><dd><p>(float) scoringData.normalizedLuceneScore,
+String.format(“[x] Lucene score boost, luceneScore=%.3f”,</p>
+<blockquote>
+<div><p>scoringData.luceneScore)));</p>
+</div></blockquote>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<p>// card boost
+if (scoringData.hasCardBoostApplied) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>boostDetails.add(Explanation.match((float) params.hasCardBoosts[scoringData.cardType],</dt><dd><p>“[x] card boost for type “ + SearchCardType.cardTypeFromByteValue(scoringData.cardType)));</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<p>// Offensive
+if (scoringData.isOffensive) {</p>
+<blockquote>
+<div><p>boostDetails.add(Explanation.match((float) params.offensiveDamping, “[x] Offensive damping”));</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><dl class="simple">
+<dt>boostDetails.add(Explanation.match(LinearScoringData.NO_BOOST_VALUE,</dt><dd><p>String.format(“Not Offensive, damping=%.3f”, params.offensiveDamping)));</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>// Spam
+if (scoringData.spamUserDampApplied) {</p>
+<blockquote>
+<div><p>boostDetails.add(Explanation.match((float) params.spamUserDamping, “[x] Spam”));</p>
+</div></blockquote>
+<p>}
+// NSFW
+if (scoringData.nsfwUserDampApplied) {</p>
+<blockquote>
+<div><p>boostDetails.add(Explanation.match((float) params.nsfwUserDamping, “[X] NSFW”));</p>
+</div></blockquote>
+<p>}
+// Bot
+if (scoringData.botUserDampApplied) {</p>
+<blockquote>
+<div><p>boostDetails.add(Explanation.match((float) params.botUserDamping, “[X] Bot”));</p>
+</div></blockquote>
+<p>}</p>
+<p>// Multiple hashtags or trends
+if (scoringData.hasMultipleHashtagsOrTrends) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>boostDetails.add(Explanation.match((float) params.multipleHashtagsOrTrendsDamping,</dt><dd><p>“[x] Multiple hashtags or trends boost”));</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><dl class="simple">
+<dt>boostDetails.add(Explanation.match(LinearScoringData.NO_BOOST_VALUE,</dt><dd><dl class="simple">
+<dt>String.format(“No multiple hashtags or trends, damping=%.3f”,</dt><dd><p>params.multipleHashtagsOrTrendsDamping)));</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>if (scoringData.tweetHasTrendsBoostApplied) {</dt><dd><dl class="simple">
+<dt>boostDetails.add(Explanation.match(</dt><dd><p>(float) params.tweetHasTrendBoost, “[x] Tweet has trend boost”));</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>if (scoringData.hasMedialUrlBoostApplied) {</dt><dd><dl class="simple">
+<dt>boostDetails.add(Explanation.match(</dt><dd><p>(float) params.tweetHasMediaUrlBoost, “[x] Media url boost”));</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>if (scoringData.hasNewsUrlBoostApplied) {</dt><dd><dl class="simple">
+<dt>boostDetails.add(Explanation.match(</dt><dd><p>(float) params.tweetHasNewsUrlBoost, “[x] News url boost”));</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>boostDetails.add(Explanation.match(0.0f, “[FIELDS HIT] “ + scoringData.hitFields));</p>
+<dl class="simple">
+<dt>if (scoringData.hasNoTextHitDemotionApplied) {</dt><dd><dl class="simple">
+<dt>boostDetails.add(Explanation.match(</dt><dd><p>(float) params.noTextHitDemotion, “[x] No text hit demotion”));</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>if (scoringData.hasUrlOnlyHitDemotionApplied) {</dt><dd><dl class="simple">
+<dt>boostDetails.add(Explanation.match(</dt><dd><p>(float) params.urlOnlyHitDemotion, “[x] URL only hit demotion”));</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>if (scoringData.hasNameOnlyHitDemotionApplied) {</dt><dd><dl class="simple">
+<dt>boostDetails.add(Explanation.match(</dt><dd><p>(float) params.nameOnlyHitDemotion, “[x] Name only hit demotion”));</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>if (scoringData.hasSeparateTextAndNameHitDemotionApplied) {</dt><dd><dl class="simple">
+<dt>boostDetails.add(Explanation.match((float) params.separateTextAndNameHitDemotion,</dt><dd><p>“[x] Separate text/name demotion”));</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>if (scoringData.hasSeparateTextAndUrlHitDemotionApplied) {</dt><dd><dl class="simple">
+<dt>boostDetails.add(Explanation.match((float) params.separateTextAndUrlHitDemotion,</dt><dd><p>“[x] Separate text/url demotion”));</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>if (scoringData.tweetFromVerifiedAccountBoostApplied) {</dt><dd><dl class="simple">
+<dt>boostDetails.add(Explanation.match((float) params.tweetFromVerifiedAccountBoost,</dt><dd><p>“[x] Verified account boost”));</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>if (scoringData.tweetFromBlueVerifiedAccountBoostApplied) {</dt><dd><dl class="simple">
+<dt>boostDetails.add(Explanation.match((float) params.tweetFromBlueVerifiedAccountBoost,</dt><dd><p>“[x] Blue-verified account boost”));</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>if (scoringData.selfTweetBoostApplied) {</dt><dd><dl class="simple">
+<dt>boostDetails.add(Explanation.match((float) params.selfTweetBoost,</dt><dd><p>“[x] Self tweet boost”));</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>if (scoringData.skipReason == LinearScoringData.SkipReason.SOCIAL_FILTER) {</dt><dd><p>boostDetails.add(Explanation.noMatch(“SKIPPED for social filter”));</p>
+</dd>
+<dt>} else {</dt><dd><dl class="simple">
+<dt>if (scoringData.directFollowBoostApplied) {</dt><dd><dl class="simple">
+<dt>boostDetails.add(Explanation.match((float) params.directFollowBoost,</dt><dd><p>“[x] Direct follow boost”));</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+if (scoringData.trustedCircleBoostApplied) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>boostDetails.add(Explanation.match((float) params.trustedCircleBoost,</dt><dd><p>“[x] Trusted circle boost”));</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+if (scoringData.outOfNetworkReplyPenaltyApplied) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>boostDetails.add(Explanation.match((float) params.outOfNetworkReplyPenalty,</dt><dd><p>“[-] Out of network reply penalty”));</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// Language demotions
+String langDetails = String.format(</p>
+<blockquote>
+<div><p>“tweetLang=[%s] uiLang=[%s]”,
+ThriftLanguageUtil.getLocaleOf(</p>
+<blockquote>
+<div><p>ThriftLanguage.findByValue(scoringData.tweetLangId)).getLanguage(),</p>
+</div></blockquote>
+<p>ThriftLanguageUtil.getLocaleOf(ThriftLanguage.findByValue(params.uiLangId)).getLanguage());</p>
+</div></blockquote>
+<dl class="simple">
+<dt>if (scoringData.uiLangMult == 1.0) {</dt><dd><dl class="simple">
+<dt>boostDetails.add(Explanation.match(</dt><dd><p>LinearScoringData.NO_BOOST_VALUE, “No UI Language demotion: “ + langDetails));</p>
+</dd>
+</dl>
+</dd>
+<dt>} else {</dt><dd><dl class="simple">
+<dt>boostDetails.add(Explanation.match(</dt><dd><p>(float) scoringData.uiLangMult, “[x] UI LangMult: “ + langDetails));</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+StringBuilder userLangDetails = new StringBuilder();
+userLangDetails.append(“userLang=[“);
+for (int i = 0; i &lt; params.userLangs.length; i++) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (params.userLangs[i] &gt; 0.0) {</dt><dd><p>String lang = ThriftLanguageUtil.getLocaleOf(ThriftLanguage.findByValue(i)).getLanguage();
+userLangDetails.append(String.format(“%s:%.3f,”, lang, params.userLangs[i]));</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}
+userLangDetails.append(“]”);
+if (!params.useUserLanguageInfo) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>boostDetails.add(Explanation.noMatch(</dt><dd><p>“No User Language Demotion: “ + userLangDetails.toString()));</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><dl class="simple">
+<dt>boostDetails.add(Explanation.match(</dt><dd><p>(float) scoringData.userLangMult,
+“[x] User LangMult: “ + userLangDetails.toString()));</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>// Age decay
+String ageDecayDetails = String.format(</p>
+<blockquote>
+<div><p>“age=%d seconds, slope=%.3f, base=%.1f, half-life=%.0f”,
+scoringData.tweetAgeInSeconds, params.ageDecaySlope,
+params.ageDecayBase, params.ageDecayHalflife);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>if (params.useAgeDecay) {</dt><dd><dl class="simple">
+<dt>boostDetails.add(Explanation.match(</dt><dd><p>(float) scoringData.ageDecayMult, “[x] AgeDecay: “ + ageDecayDetails));</p>
+</dd>
+</dl>
+</dd>
+<dt>} else {</dt><dd><p>boostDetails.add(Explanation.match(1.0f, “Age decay disabled: “ + ageDecayDetails));</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// Score adjuster
+boostDetails.add(Explanation.match(SCORE_ADJUSTER, “[x] score adjuster”));</p>
+<dl>
+<dt>Explanation boostCombo = isHit</dt><dd><dl class="simple">
+<dt>? Explanation.match((float) scoringData.scoreAfterBoost,</dt><dd><p>“(MATCH) After Boosts and Demotions:”, boostDetails)</p>
+</dd>
+</dl>
+<p>: Explanation.noMatch(“After Boosts and Demotions:”, boostDetails);</p>
+</dd>
+</dl>
+<p>details.add(boostCombo);</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;Override
+protected Explanation doExplain(float luceneQueryScore) throws IOException {</p>
+<blockquote>
+<div><p>// Run the scorer again and get the explanation.
+ExplanationWrapper explanation = new ExplanationWrapper();
+scoreInternal(luceneQueryScore, explanation);
+return explanation.explanation;</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public void populateResultMetadataBasedOnScoringData(</p>
+<blockquote>
+<div><blockquote>
+<div><p>ThriftSearchResultMetadataOptions options,
+ThriftSearchResultMetadata metadata,
+LinearScoringData data) throws IOException {</p>
+</div></blockquote>
+<p>metadata.setResultType(searchResultType);
+metadata.setScore(data.scoreReturned);
+metadata.setFromUserId(data.fromUserId);</p>
+<dl class="simple">
+<dt>if (data.isTrusted) {</dt><dd><p>metadata.setIsTrusted(true);</p>
+</dd>
+</dl>
+<p>}
+if (data.isFollow) {</p>
+<blockquote>
+<div><p>metadata.setIsFollow(true);</p>
+</div></blockquote>
+<p>}
+if (data.skipReason != SkipReason.NOT_SKIPPED) {</p>
+<blockquote>
+<div><p>metadata.setSkipped(true);</p>
+</div></blockquote>
+<p>}
+if ((data.isRetweet || (params.getInReplyToStatusId &amp;&amp; data.isReply))</p>
+<blockquote>
+<div><blockquote>
+<div><p>&amp;&amp; data.sharedStatusId != LinearScoringData.UNSET_SIGNAL_VALUE) {</p>
+</div></blockquote>
+<p>metadata.setSharedStatusId(data.sharedStatusId);</p>
+</div></blockquote>
+<p>}
+if (data.hasCard) {</p>
+<blockquote>
+<div><p>metadata.setCardType(data.cardType);</p>
+</div></blockquote>
+<p>}</p>
+<p>// Optional features.  Note: other optional metadata is populated by
+// AbstractRelevanceCollector, not the scoring function.</p>
+<dl class="simple">
+<dt>if (options.isGetLuceneScore()) {</dt><dd><p>metadata.setLuceneScore(data.luceneScore);</p>
+</dd>
+</dl>
+<p>}
+if (options.isGetReferencedTweetAuthorId()</p>
+<blockquote>
+<div><blockquote>
+<div><p>&amp;&amp; data.referenceAuthorId != LinearScoringData.UNSET_SIGNAL_VALUE) {</p>
+</div></blockquote>
+<p>metadata.setReferencedTweetAuthorId(data.referenceAuthorId);</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>if (options.isGetMediaBits()) {</dt><dd><p>metadata.setHasConsumerVideo(data.hasConsumerVideo);
+metadata.setHasProVideo(data.hasProVideo);
+metadata.setHasVine(data.hasVine);
+metadata.setHasPeriscope(data.hasPeriscope);
+boolean hasNativeVideo =</p>
+<blockquote>
+<div><p>data.hasConsumerVideo || data.hasProVideo || data.hasVine || data.hasPeriscope;</p>
+</div></blockquote>
+<p>metadata.setHasNativeVideo(hasNativeVideo);
+metadata.setHasNativeImage(data.hasNativeImage);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>metadata</dt><dd><p>.setIsOffensive(data.isOffensive)
+.setIsReply(data.isReply)
+.setIsRetweet(data.isRetweet)
+.setHasLink(data.hasUrl)
+.setHasTrend(data.hasTrend)
+.setHasMultipleHashtagsOrTrends(data.hasMultipleHashtagsOrTrends)
+.setRetweetCount((int) data.retweetCountPostLog2)
+.setFavCount((int) data.favCountPostLog2)
+.setReplyCount((int) data.replyCountPostLog2)
+.setEmbedsImpressionCount((int) data.embedsImpressionCount)
+.setEmbedsUrlCount((int) data.embedsUrlCount)
+.setVideoViewCount((int) data.videoViewCount)
+.setResultType(searchResultType)
+.setFromVerifiedAccount(data.isFromVerifiedAccount)
+.setIsUserSpam(data.isUserSpam)
+.setIsUserNSFW(data.isUserNSFW)
+.setIsUserBot(data.isUserBot)
+.setHasImage(data.hasImageUrl)
+.setHasVideo(data.hasVideoUrl)
+.setHasNews(data.hasNewsUrl)
+.setHasCard(data.hasCard)
+.setHasVisibleLink(data.hasVisibleLink)
+.setParusScore(data.parusScore)
+.setTextScore(data.textScore)
+.setUserRep(data.userRep)
+.setTokenAt140DividedByNumTokensBucket(data.tokenAt140DividedByNumTokensBucket);</p>
+</dd>
+<dt>if (!metadata.isSetExtraMetadata()) {</dt><dd><p>metadata.setExtraMetadata(new ThriftSearchResultExtraMetadata());</p>
+</dd>
+</dl>
+<p>}
+ThriftSearchResultExtraMetadata extraMetadata = metadata.getExtraMetadata();</p>
+<p>// Promotion/Demotion features
+extraMetadata.setUserLangScore(data.userLangMult)</p>
+<blockquote>
+<div><p>.setHasDifferentLang(data.hasDifferentLang)
+.setHasEnglishTweetAndDifferentUILang(data.hasEnglishTweetAndDifferentUILang)
+.setHasEnglishUIAndDifferentTweetLang(data.hasEnglishUIAndDifferentTweetLang)
+.setHasQuote(data.hasQuote)
+.setQuotedCount((int) data.quotedCount)
+.setWeightedRetweetCount((int) data.weightedRetweetCount)
+.setWeightedReplyCount((int) data.weightedReplyCount)
+.setWeightedFavCount((int) data.weightedFavCount)
+.setWeightedQuoteCount((int) data.weightedQuoteCount)
+.setQuerySpecificScore(data.querySpecificScore)
+.setAuthorSpecificScore(data.authorSpecificScore)
+.setRetweetCountV2((int) data.retweetCountV2)
+.setFavCountV2((int) data.favCountV2)
+.setReplyCountV2((int) data.replyCountV2)
+.setIsComposerSourceCamera(data.isComposerSourceCamera)
+.setFromBlueVerifiedAccount(data.isFromBlueVerifiedAccount);</p>
+</div></blockquote>
+<p>// Health model scores features
+extraMetadata</p>
+<blockquote>
+<div><p>.setToxicityScore(data.toxicityScore)
+.setPBlockScore(data.pBlockScore)
+.setPSpammyTweetScore(data.pSpammyTweetScore)
+.setPReportedTweetScore(data.pReportedTweetScore)
+.setSpammyTweetContentScore(data.spammyTweetContentScore)
+.setExperimentalHealthModelScore1(data.experimentalHealthModelScore1)
+.setExperimentalHealthModelScore2(data.experimentalHealthModelScore2)
+.setExperimentalHealthModelScore3(data.experimentalHealthModelScore3)
+.setExperimentalHealthModelScore4(data.experimentalHealthModelScore4);</p>
+</div></blockquote>
+<p>// Return all extra features for clients to consume.
+if (options.isGetAllFeatures()) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>extraMetadata.setIsSensitiveContent(data.isSensitiveContent)</dt><dd><p>.setHasMultipleMediaFlag(data.hasMultipleMediaFlag)
+.setProfileIsEggFlag(data.profileIsEggFlag)
+.setIsUserNewFlag(data.isUserNewFlag)
+.setNumMentions(data.numMentions)
+.setNumHashtags(data.numHashtags)
+.setLinkLanguage(data.linkLanguage)
+.setPrevUserTweetEngagement(data.prevUserTweetEngagement);</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<p>// Set features in new Feature Access API format, in the future this will be the only part
+// needed in this method, we don’t need to set any other metadata fields any more.
+if (options.isReturnSearchResultFeatures()) {</p>
+<blockquote>
+<div><p>// If the features are unset, and they were requested, then we can retrieve them. If they are
+// already set, then we don’t need to re-read the document features, and the reader
+// is probably positioned over the wrong document so it will return incorrect results.
+if (!extraMetadata.isSetFeatures()) {</p>
+<blockquote>
+<div><p>// We ignore all features with default values when returning them in the response,
+// because it saves a lot of network bandwidth.
+ThriftSearchResultFeatures features = createFeaturesForDocument(data, true).getFeatures();
+extraMetadata.setFeatures(features);</p>
+</div></blockquote>
+<p>}</p>
+<p>// The raw score may have changed since we created the features, so we should update it.
+extraMetadata.getFeatures().getDoubleValues()</p>
+<blockquote>
+<div><p>.put(ExternalTweetFeature.RAW_EARLYBIRD_SCORE.getId(), data.scoreFinal);</p>
+</div></blockquote>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>metadata</dt><dd><p>.setIsSelfTweet(data.isSelfTweet)
+.setIsUserAntiSocial(data.isUserAntiSocial);</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Create earlybird basic features and dervied features for current document.</p></li>
+<li><p>&#64;return a FeatureHandler object where you can keep adding extra feature values, or you can</p></li>
+<li><p>call .getFeatures() on it to get a Thrift object to return.</p></li>
+</ul>
+<p><a href="#id67"><span class="problematic" id="id68">*</span></a>/</p>
+</dd>
+<dt>protected FeatureHandler createFeaturesForDocument(</dt><dd><blockquote>
+<div><p>LinearScoringData data, boolean ignoreDefaultValues) throws IOException {</p>
+</div></blockquote>
+<p>ThriftSearchResultFeatures features = documentFeatures.getSearchResultFeatures(getSchema());
+if (!ignoreDefaultValues) {</p>
+<blockquote>
+<div><p>setDefaultFeatureValues(features);</p>
+</div></blockquote>
+<p>}</p>
+<p>// add derived features
+return new FeatureHandler(features, ignoreDefaultValues)</p>
+<blockquote>
+<div><p>.addDouble(ExternalTweetFeature.LUCENE_SCORE, data.luceneScore)
+.addInt(ExternalTweetFeature.TWEET_AGE_IN_SECS, data.tweetAgeInSeconds)
+.addBoolean(ExternalTweetFeature.IS_SELF_TWEET, data.isSelfTweet)
+.addBoolean(ExternalTweetFeature.IS_FOLLOW_RETWEET, data.isFollow &amp;&amp; data.isRetweet)
+.addBoolean(ExternalTweetFeature.IS_TRUSTED_RETWEET, data.isTrusted &amp;&amp; data.isRetweet)
+.addBoolean(ExternalTweetFeature.AUTHOR_IS_FOLLOW, data.isFollow)
+.addBoolean(ExternalTweetFeature.AUTHOR_IS_TRUSTED, data.isTrusted)
+.addBoolean(ExternalTweetFeature.AUTHOR_IS_ANTISOCIAL, data.isUserAntiSocial)
+.addBoolean(ExternalTweetFeature.HAS_DIFF_LANG, data.hasDifferentLang)
+.addBoolean(ExternalTweetFeature.HAS_ENGLISH_TWEET_DIFF_UI_LANG,</p>
+<blockquote>
+<div><p>data.hasEnglishTweetAndDifferentUILang)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>.addBoolean(ExternalTweetFeature.HAS_ENGLISH_UI_DIFF_TWEET_LANG,</dt><dd><p>data.hasEnglishUIAndDifferentTweetLang)</p>
+</dd>
+</dl>
+<p>.addDouble(ExternalTweetFeature.SEARCHER_LANG_SCORE, data.userLangMult)
+.addDouble(ExternalTweetFeature.QUERY_SPECIFIC_SCORE, data.querySpecificScore)
+.addDouble(ExternalTweetFeature.AUTHOR_SPECIFIC_SCORE, data.authorSpecificScore);</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Adds default values for most numeric features that do not have a value set yet in the given</p></li>
+<li><p>ThriftSearchResultFeatures instance.</p></li>
+<li></li>
+<li><p>This method is needed because some models do not work properly with missing features. Instead,</p></li>
+<li><p>they expect all features to be present even if they are unset (their values are 0).</p></li>
+</ul>
+<p><a href="#id69"><span class="problematic" id="id70">*</span></a>/</p>
+</dd>
+<dt>protected void setDefaultFeatureValues(ThriftSearchResultFeatures features) {</dt><dd><dl>
+<dt>for (Map.Entry&lt;Integer, ThriftSearchFeatureSchemaEntry&gt; entry</dt><dd><blockquote>
+<div><p>: getSchema().getSearchFeatureSchema().getEntries().entrySet()) {</p>
+</div></blockquote>
+<p>int featureId = entry.getKey();
+ThriftSearchFeatureSchemaEntry schemaEntry = entry.getValue();
+if (shouldSetDefaultValueForFeature(schemaEntry.getFeatureType(), featureId)) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>switch (schemaEntry.getFeatureType()) {</dt><dd><dl class="simple">
+<dt>case INT32_VALUE:</dt><dd><p>features.getIntValues().putIfAbsent(featureId, 0);
+break;</p>
+</dd>
+<dt>case LONG_VALUE:</dt><dd><p>features.getLongValues().putIfAbsent(featureId, 0L);
+break;</p>
+</dd>
+<dt>case DOUBLE_VALUE:</dt><dd><p>features.getDoubleValues().putIfAbsent(featureId, 0.0);
+break;</p>
+</dd>
+<dt>default:</dt><dd><dl class="simple">
+<dt>throw new IllegalArgumentException(</dt><dd><p>“Should set default values only for integer, long or double features. Instead, ”
++ “found feature “ + featureId + “ of type “ + schemaEntry.getFeatureType());</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>protected void overrideFeatureValues(ThriftSearchResultFeatures features,</dt><dd><blockquote>
+<div><p>ThriftSearchResultFeatures overrideFeatures) {</p>
+</div></blockquote>
+<p>LOG.info(“Features before override {}”, features);
+if (overrideFeatures.isSetIntValues()) {</p>
+<blockquote>
+<div><p>overrideFeatures.getIntValues().forEach(features::putToIntValues);</p>
+</div></blockquote>
+<p>}
+if (overrideFeatures.isSetLongValues()) {</p>
+<blockquote>
+<div><p>overrideFeatures.getLongValues().forEach(features::putToLongValues);</p>
+</div></blockquote>
+<p>}
+if (overrideFeatures.isSetDoubleValues()) {</p>
+<blockquote>
+<div><p>overrideFeatures.getDoubleValues().forEach(features::putToDoubleValues);</p>
+</div></blockquote>
+<p>}
+if (overrideFeatures.isSetBoolValues()) {</p>
+<blockquote>
+<div><p>overrideFeatures.getBoolValues().forEach(features::putToBoolValues);</p>
+</div></blockquote>
+<p>}
+if (overrideFeatures.isSetStringValues()) {</p>
+<blockquote>
+<div><p>overrideFeatures.getStringValues().forEach(features::putToStringValues);</p>
+</div></blockquote>
+<p>}
+if (overrideFeatures.isSetBytesValues()) {</p>
+<blockquote>
+<div><p>overrideFeatures.getBytesValues().forEach(features::putToBytesValues);</p>
+</div></blockquote>
+<p>}
+if (overrideFeatures.isSetFeatureStoreDiscreteValues()) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>overrideFeatures.getFeatureStoreDiscreteValues().forEach(</dt><dd><p>features::putToFeatureStoreDiscreteValues);</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+if (overrideFeatures.isSetSparseBinaryValues()) {</p>
+<blockquote>
+<div><p>overrideFeatures.getSparseBinaryValues().forEach(features::putToSparseBinaryValues);</p>
+</div></blockquote>
+<p>}
+if (overrideFeatures.isSetSparseContinuousValues()) {</p>
+<blockquote>
+<div><p>overrideFeatures.getSparseContinuousValues().forEach(features::putToSparseContinuousValues);</p>
+</div></blockquote>
+<p>}
+if (overrideFeatures.isSetGeneralTensorValues()) {</p>
+<blockquote>
+<div><p>overrideFeatures.getGeneralTensorValues().forEach(features::putToGeneralTensorValues);</p>
+</div></blockquote>
+<p>}
+if (overrideFeatures.isSetStringTensorValues()) {</p>
+<blockquote>
+<div><p>overrideFeatures.getStringTensorValues().forEach(features::putToStringTensorValues);</p>
+</div></blockquote>
+<p>}
+LOG.info(“Features after override {}”, features);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Check if a feature is eligible to have its default value automatically set when absent.</p></li>
+<li><p>We have a similar logic for building data record.</p></li>
+</ul>
+<p><a href="#id71"><span class="problematic" id="id72">*</span></a>/</p>
+</dd>
+<dt>private static boolean shouldSetDefaultValueForFeature(</dt><dd><blockquote>
+<div><p>ThriftSearchFeatureType type, int featureId) {</p>
+</div></blockquote>
+<dl>
+<dt>return ALLOWED_TYPES_FOR_DEFAULT_FEATURE_VALUES.contains(type)</dt><dd><p>&amp;&amp; !NUMERIC_FEATURES_FOR_WHICH_DEFAULTS_SHOULD_NOT_BE_SET.contains(featureId)
+&amp;&amp; (ExternalTweetFeature.EARLYBIRD_INDEXED_FEATURE_IDS.contains(featureId)</p>
+<blockquote>
+<div><p>|| ExternalTweetFeature.EARLYBIRD_DERIVED_FEATURE_IDS.contains(featureId));</p>
+</div></blockquote>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;Override
+public void updateRelevanceStats(ThriftSearchResultsRelevanceStats relevanceStats) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (relevanceStats == null) {</dt><dd><p>return;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>LinearScoringData data = getScoringDataForCurrentDocument();</p>
+<dl class="simple">
+<dt>if (data.tweetAgeInSeconds &gt; relevanceStats.getOldestScoredTweetAgeInSeconds()) {</dt><dd><p>relevanceStats.setOldestScoredTweetAgeInSeconds(data.tweetAgeInSeconds);</p>
+</dd>
+</dl>
+<p>}
+relevanceStats.setNumScored(relevanceStats.getNumScored() + 1);
+if (data.scoreReturned == SKIP_HIT) {</p>
+<blockquote>
+<div><p>relevanceStats.setNumSkipped(relevanceStats.getNumSkipped() + 1);
+switch(data.skipReason) {</p>
+<blockquote>
+<div><dl>
+<dt>case ANTIGAMING:</dt><dd><dl class="simple">
+<dt>relevanceStats.setNumSkippedForAntiGaming(</dt><dd><p>relevanceStats.getNumSkippedForAntiGaming() + 1);</p>
+</dd>
+</dl>
+<p>break;</p>
+</dd>
+<dt>case LOW_REPUTATION:</dt><dd><dl class="simple">
+<dt>relevanceStats.setNumSkippedForLowReputation(</dt><dd><p>relevanceStats.getNumSkippedForLowReputation() + 1);</p>
+</dd>
+</dl>
+<p>break;</p>
+</dd>
+<dt>case LOW_TEXT_SCORE:</dt><dd><dl class="simple">
+<dt>relevanceStats.setNumSkippedForLowTextScore(</dt><dd><p>relevanceStats.getNumSkippedForLowTextScore() + 1);</p>
+</dd>
+</dl>
+<p>break;</p>
+</dd>
+<dt>case SOCIAL_FILTER:</dt><dd><dl class="simple">
+<dt>relevanceStats.setNumSkippedForSocialFilter(</dt><dd><p>relevanceStats.getNumSkippedForSocialFilter() + 1);</p>
+</dd>
+</dl>
+<p>break;</p>
+</dd>
+<dt>case LOW_FINAL_SCORE:</dt><dd><dl class="simple">
+<dt>relevanceStats.setNumSkippedForLowFinalScore(</dt><dd><p>relevanceStats.getNumSkippedForLowFinalScore() + 1);</p>
+</dd>
+</dl>
+<p>break;</p>
+</dd>
+<dt>case LOW_RETWEET_COUNT:</dt><dd><p>break;</p>
+</dd>
+<dt>default:</dt><dd><p>LOG.warn(“Unknown SkipReason: “ + data.skipReason);</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>if (data.isFollow) {</dt><dd><p>relevanceStats.setNumFromDirectFollows(relevanceStats.getNumFromDirectFollows() + 1);</p>
+</dd>
+</dl>
+<p>}
+if (data.isTrusted) {</p>
+<blockquote>
+<div><p>relevanceStats.setNumFromTrustedCircle(relevanceStats.getNumFromTrustedCircle() + 1);</p>
+</div></blockquote>
+<p>}
+if (data.isReply) {</p>
+<blockquote>
+<div><p>relevanceStats.setNumReplies(relevanceStats.getNumReplies() + 1);
+if (data.isTrusted) {</p>
+<blockquote>
+<div><p>relevanceStats.setNumRepliesTrusted(relevanceStats.getNumRepliesTrusted() + 1);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else if (!data.isFollow) {</dt><dd><p>relevanceStats.setNumRepliesOutOfNetwork(relevanceStats.getNumRepliesOutOfNetwork() + 1);</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}
+if (data.isSelfTweet) {</p>
+<blockquote>
+<div><p>relevanceStats.setNumSelfTweets(relevanceStats.getNumSelfTweets() + 1);</p>
+</div></blockquote>
+<p>}
+if (data.hasImageUrl || data.hasVideoUrl) {</p>
+<blockquote>
+<div><p>relevanceStats.setNumWithMedia(relevanceStats.getNumWithMedia() + 1);</p>
+</div></blockquote>
+<p>}
+if (data.hasNewsUrl) {</p>
+<blockquote>
+<div><p>relevanceStats.setNumWithNews(relevanceStats.getNumWithNews() + 1);</p>
+</div></blockquote>
+<p>}
+if (data.isUserSpam) {</p>
+<blockquote>
+<div><p>relevanceStats.setNumSpamUser(relevanceStats.getNumSpamUser() + 1);</p>
+</div></blockquote>
+<p>}
+if (data.isUserNSFW) {</p>
+<blockquote>
+<div><p>relevanceStats.setNumOffensive(relevanceStats.getNumOffensive() + 1);</p>
+</div></blockquote>
+<p>}
+if (data.isUserBot) {</p>
+<blockquote>
+<div><p>relevanceStats.setNumBot(relevanceStats.getNumBot() + 1);</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;VisibleForTesting
+static final class ExplanationWrapper {</p>
+<blockquote>
+<div><p>private Explanation explanation;</p>
+<dl class="simple">
+<dt>public Explanation getExplanation() {</dt><dd><p>return explanation;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;Override
+public String toString() {</p>
+<blockquote>
+<div><p>return explanation.toString();</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/src/java/com/twitter/search/earlybird/search/relevance/scoring/FeatureBasedScoringFunction.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

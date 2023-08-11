@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../" id="documentation_options" src="../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>“””Build optimizers and learning rate schedules.”””
+import bisect
+from collections import defaultdict
+import functools
+import math
+import typing
+from typing import Optional
+import warnings</p>
+<p># from large_embeddings.config import EmbeddingOptimizerConfig
+from tml.projects.home.recap import model as model_mod
+from tml.optimizers import config
+from tml.optimizers import compute_lr
+from absl import logging  # type: ignore[attr-defined]</p>
+<p>import torch
+from torchrec.optim import keyed</p>
+<p>_DEFAULT_LR = 24601.0  # NaN the model if we’re not using the learning rate.
+_BACKBONE = “backbone”
+_DENSE_EMBEDDINGS = “dense_ebc”</p>
+<dl>
+<dt>class RecapLRShim(torch.optim.lr_scheduler._LRScheduler):</dt><dd><p>“””Shim to get learning rates into a LRScheduler.</p>
+<p>This adheres to the torch.optim scheduler API and can be plugged anywhere that
+e.g. exponential decay can be used.</p>
+<p>“””</p>
+<dl>
+<dt>def __init__(</dt><dd><p>self,
+optimizer,
+lr_dict: typing.Dict[str, config.LearningRate],
+emb_learning_rate,
+last_epoch=-1,
+verbose=False,</p>
+</dd>
+<dt>):</dt><dd><p>self.optimizer = optimizer
+self.lr_dict = lr_dict
+self.group_names = list(self.lr_dict.keys())
+self.emb_learning_rate = emb_learning_rate</p>
+<p># We handle sparse LR scheduling separately, so only validate LR groups against dense param groups
+num_dense_param_groups = sum(</p>
+<blockquote>
+<div><p>1
+for _, _optim in optimizer._optims
+for _ in _optim.param_groups
+if isinstance(_optim, keyed.KeyedOptimizerWrapper)</p>
+</div></blockquote>
+<p>)
+if num_dense_param_groups != len(lr_dict):</p>
+<blockquote>
+<div><dl class="simple">
+<dt>raise ValueError(</dt><dd><p>f”Optimizer had {len(optimizer.param_groups)}, but config had {len(lr_dict)}.”</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<p>super().__init__(optimizer, last_epoch, verbose)</p>
+</dd>
+<dt>def get_lr(self):</dt><dd><dl>
+<dt>if not self._get_lr_called_within_step:</dt><dd><dl class="simple">
+<dt>warnings.warn(</dt><dd><p>“To get the last learning rate computed by the scheduler, “ “please use <cite>get_last_lr()</cite>.”,
+UserWarning,</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>return self._get_closed_form_lr()</p>
+</dd>
+<dt>def _get_closed_form_lr(self):</dt><dd><p>learning_rates = []</p>
+<dl class="simple">
+<dt>for lr_config in self.lr_dict.values():</dt><dd><p>learning_rates.append(compute_lr(lr_config, self.last_epoch))</p>
+</dd>
+</dl>
+<p># WARNING: The order of appending is important.
+if self.emb_learning_rate:</p>
+<blockquote>
+<div><p>learning_rates.append(compute_lr(self.emb_learning_rate, self.last_epoch))</p>
+</div></blockquote>
+<p>return learning_rates</p>
+</dd>
+</dl>
+</dd>
+<dt>def build_optimizer(</dt><dd><p>model: torch.nn.Module,
+optimizer_config: config.OptimizerConfig,
+emb_optimizer_config: None = None,  # Optional[EmbeddingOptimizerConfig] = None,</p>
+</dd>
+<dt>):</dt><dd><p>“””Builds an optimizer and scheduler.</p>
+<dl class="simple">
+<dt>Args:</dt><dd><p>model: A torch model, probably with DDP/DMP.
+optimizer_config: An OptimizerConfig object that specifies learning rates per tower.</p>
+</dd>
+<dt>Returns:</dt><dd><p>A torch.optim instance, and a scheduler instance.</p>
+</dd>
+</dl>
+<p>“””
+optimizer_fn = functools.partial(</p>
+<blockquote>
+<div><p>torch.optim.Adam,
+lr=_DEFAULT_LR,
+betas=(optimizer_config.adam.beta_1, optimizer_config.adam.beta_2),
+eps=optimizer_config.adam.epsilon,
+maximize=False,</p>
+</div></blockquote>
+<p>)
+if optimizer_config.multi_task_learning_rates:</p>
+<blockquote>
+<div><p>logging.info(”<strong>*</strong> Parameter groups for optimization <strong>*</strong>”)
+# Importantly, we preserve insertion order in dictionaries here.
+parameter_groups: typing.Dict[str, typing.Dict] = defaultdict(dict)
+added_parameters: typing.Set[str] = set()
+for task in optimizer_config.multi_task_learning_rates.tower_learning_rates:</p>
+<blockquote>
+<div><dl>
+<dt>for name, parameter in model.named_parameters():</dt><dd><dl>
+<dt>if f”.{model_mod.sanitize(task)}.” in name:</dt><dd><p>parameter_groups[task][name] = parameter
+logging.info(f”{task}: {name}”)
+if name in added_parameters:</p>
+<blockquote>
+<div><p>raise ValueError(f”Parameter {name} matched multiple tasks.”)</p>
+</div></blockquote>
+<p>added_parameters.add(name)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</div></blockquote>
+<dl class="simple">
+<dt>for name, parameter in model.named_parameters():</dt><dd><dl class="simple">
+<dt>if name not in added_parameters and “embedding_bags” not in name:</dt><dd><p>parameter_groups[_BACKBONE][name] = parameter
+added_parameters.add(name)
+logging.info(f”{_BACKBONE}: {name}”)</p>
+</dd>
+</dl>
+</dd>
+<dt>for name, parameter in model.named_parameters():</dt><dd><dl class="simple">
+<dt>if name not in added_parameters and “embedding_bags” in name:</dt><dd><p>parameter_groups[_DENSE_EMBEDDINGS][name] = parameter
+logging.info(f”{_DENSE_EMBEDDINGS}: {name}”)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>all_learning_rates = optimizer_config.multi_task_learning_rates.tower_learning_rates.copy()
+if optimizer_config.multi_task_learning_rates.backbone_learning_rate is not None:</p>
+<blockquote>
+<div><dl class="simple">
+<dt>all_learning_rates[</dt><dd><p>_BACKBONE</p>
+</dd>
+</dl>
+<p>] = optimizer_config.multi_task_learning_rates.backbone_learning_rate</p>
+</div></blockquote>
+<dl class="simple">
+<dt>if _DENSE_EMBEDDINGS in parameter_groups and emb_optimizer_config:</dt><dd><p>all_learning_rates[_DENSE_EMBEDDINGS] = emb_optimizer_config.learning_rate.copy()</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl class="simple">
+<dt>else:</dt><dd><p>parameter_groups = dict(model.named_parameters())
+all_learning_rates = {“single_task”: optimizer_config.single_task_learning_rate}</p>
+</dd>
+<dt>optimizers = [</dt><dd><p>keyed.KeyedOptimizerWrapper(param_group, optimizer_fn)
+for param_name, param_group in parameter_groups.items()
+if param_name != _DENSE_EMBEDDINGS</p>
+</dd>
+</dl>
+<p>]
+# Making EBC optimizer to be SGD to match fused optimiser
+if _DENSE_EMBEDDINGS in parameter_groups:</p>
+<blockquote>
+<div><dl>
+<dt>optimizers.append(</dt><dd><dl class="simple">
+<dt>keyed.KeyedOptimizerWrapper(</dt><dd><p>parameter_groups[_DENSE_EMBEDDINGS],
+functools.partial(torch.optim.SGD, lr=_DEFAULT_LR, maximize=False, momentum=False),</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>if not parameter_groups.keys() == all_learning_rates.keys():</dt><dd><p>raise ValueError(“Learning rates do not match optimizers”)</p>
+</dd>
+</dl>
+<p># If the optimiser is dense, model.fused_optimizer will be empty (but not None)
+emb_learning_rate = None
+if hasattr(model, “fused_optimizer”) and model.fused_optimizer.optimizers:</p>
+<blockquote>
+<div><p>logging.info(f”Model fused optimiser: {model.fused_optimizer}”)
+optimizers.append(model.fused_optimizer)
+if emb_optimizer_config:</p>
+<blockquote>
+<div><p>emb_learning_rate = emb_optimizer_config.learning_rate.copy()</p>
+</div></blockquote>
+<dl class="simple">
+<dt>else:</dt><dd><p>raise ValueError(“Fused kernel exists, but LR is not set”)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>logging.info(f”<strong>*</strong> Combining optimizers: {optimizers} <strong>*</strong>”)
+optimizer = keyed.CombinedOptimizer(optimizers)
+scheduler = RecapLRShim(optimizer, all_learning_rates, emb_learning_rate)
+logging.info(f”<strong>*</strong> Combined optimizer after init: {optimizer} <strong>*</strong>”)</p>
+<p>return optimizer, scheduler</p>
+</dd>
+</dl>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../_sources/projects/home/recap/optimizer/optimizer.py.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

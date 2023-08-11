@@ -1,0 +1,534 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../" id="documentation_options" src="../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.ingester.pipeline.wire;</p>
+<p>import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import javax.annotation.Nullable;
+import javax.naming.Context;
+import javax.naming.InitialContext;
+import javax.naming.NamingException;</p>
+<p>import scala.Option;
+import scala.collection.JavaConversions$;</p>
+<p>import com.google.common.base.Preconditions;
+import com.google.common.collect.ImmutableList;</p>
+<p>import org.apache.kafka.clients.consumer.KafkaConsumer;
+import org.apache.kafka.clients.producer.Partitioner;
+import org.apache.kafka.common.serialization.Deserializer;
+import org.apache.kafka.common.serialization.Serializer;
+import org.apache.thrift.TBase;
+import org.apache.thrift.protocol.TBinaryProtocol;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;</p>
+<p>import com.twitter.common.util.Clock;
+import com.twitter.common_internal.text.version.PenguinVersion;
+import com.twitter.decider.Decider;
+import com.twitter.decider.DeciderFactory;
+import com.twitter.decider.DeciderFactory$;
+import com.twitter.decider.decisionmaker.DecisionMaker;
+import com.twitter.decider.decisionmaker.MutableDecisionMaker;
+import com.twitter.eventbus.client.EventBusSubscriber;
+import com.twitter.eventbus.client.EventBusSubscriberBuilder;
+import com.twitter.finagle.Service;
+import com.twitter.finagle.ThriftMux;
+import com.twitter.finagle.builder.ClientBuilder;
+import com.twitter.finagle.builder.ClientConfig;
+import com.twitter.finagle.mtls.authentication.ServiceIdentifier;
+import com.twitter.finagle.mtls.client.MtlsThriftMuxClient;
+import com.twitter.finagle.mux.transport.OpportunisticTls;
+import com.twitter.finagle.service.RetryPolicy;
+import com.twitter.finagle.stats.DefaultStatsReceiver;
+import com.twitter.finagle.thrift.ClientId;
+import com.twitter.finagle.thrift.ThriftClientRequest;
+import com.twitter.finatra.kafka.producers.BlockingFinagleKafkaProducer;
+import com.twitter.gizmoduck.thriftjava.UserService;
+import com.twitter.metastore.client_v2.MetastoreClient;
+import com.twitter.pink_floyd.thrift.Storer;
+import com.twitter.search.common.partitioning.base.PartitionMappingManager;
+import com.twitter.search.common.relevance.classifiers.TweetOffensiveEvaluator;
+import com.twitter.search.common.schema.earlybird.EarlybirdCluster;
+import com.twitter.search.common.util.io.kafka.FinagleKafkaClientUtils;
+import com.twitter.search.ingester.pipeline.strato_fetchers.AudioSpaceCoreFetcher;
+import com.twitter.search.ingester.pipeline.strato_fetchers.AudioSpaceParticipantsFetcher;
+import com.twitter.search.ingester.pipeline.strato_fetchers.NamedEntityFetcher;
+import com.twitter.search.ingester.pipeline.util.PenguinVersionsUtil;
+import com.twitter.search.ingester.pipeline.util.PipelineExceptionHandler;
+import com.twitter.storage.client.manhattan.kv.JavaManhattanKVEndpoint;
+import com.twitter.storage.client.manhattan.kv.ManhattanKVClient;
+import com.twitter.storage.client.manhattan.kv.ManhattanKVClientMtlsParams;
+import com.twitter.storage.client.manhattan.kv.ManhattanKVEndpointBuilder;
+import com.twitter.strato.client.Client;
+import com.twitter.strato.client.Strato;
+import com.twitter.tweetypie.thriftjava.TweetService;
+import com.twitter.util.Duration;
+import com.twitter.util.Function;
+import com.twitter.util.Future;</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>The injection module that provides all production bindings.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>public class ProductionWireModule extends WireModule {</dt><dd><p>private static final Logger LOG = LoggerFactory.getLogger(ProductionWireModule.class);</p>
+<p>private static final String DECIDER_BASE = “config/ingester-indexer-decider.yml”;
+private static final String GEOCODE_APP_ID = “search_ingester_readonly”;
+private static final String CLUSTER_DEST_NAME = “”;</p>
+<p>private static final String JNDI_GIZMODUCK_DEST = JNDI_PIPELINE_ROOT + “gizmoduckDest”;</p>
+<p>private static final String PENGUIN_VERSIONS_JNDI_NAME = JNDI_PIPELINE_ROOT + “penguinVersions”;
+private static final String SEGMENT_BUFFER_SIZE_JNDI_NAME =</p>
+<blockquote>
+<div><p>JNDI_PIPELINE_ROOT + “segmentBufferSize”;</p>
+</div></blockquote>
+<dl class="simple">
+<dt>private static final String SEGMENT_SEAL_DELAY_TIME_MS_JNDI_NAME =</dt><dd><p>JNDI_PIPELINE_ROOT + “segmentSealDelayTimeMs”;</p>
+</dd>
+</dl>
+<p>private static final String JNDI_DL_URI = JNDI_PIPELINE_ROOT + “distributedlog/dlUri”;
+private static final String JNDI_DL_CONFIG_FILE =</p>
+<blockquote>
+<div><p>JNDI_PIPELINE_ROOT + “distributedlog/configFile”;</p>
+</div></blockquote>
+<p>private static final String CLUSTER_JNDI_NAME = JNDI_PIPELINE_ROOT + “cluster”;</p>
+<p>private static final String TIME_SLICE_MANAGER_ROOT_PATH = “”;
+private static final String MAX_TIMESLICES_JNDI_NAME =</p>
+<blockquote>
+<div><p>TIME_SLICE_MANAGER_ROOT_PATH + “hashPartition/maxTimeSlices”;</p>
+</div></blockquote>
+<dl class="simple">
+<dt>private static final String MAX_SEGMENT_SIZE_JNDI_NAME =</dt><dd><p>TIME_SLICE_MANAGER_ROOT_PATH + “hashPartition/maxSegmentSize”;</p>
+</dd>
+<dt>private static final String NUM_PARTITIONS_JNDI_NAME =</dt><dd><p>TIME_SLICE_MANAGER_ROOT_PATH + “hashPartition/numPartitions”;</p>
+</dd>
+</dl>
+<p>private static final String PINK_CLIENT_ID = “search_ingester”;</p>
+<p>private final Decider decider;
+private final MutableDecisionMaker mutableDecisionMaker;
+private final int partition;
+private PipelineExceptionHandler pipelineExceptionHandler;
+private final StratoMetaStoreWireModule stratoMetaStoreWireModule;</p>
+<p>private final Client stratoClient;</p>
+<p>private ServiceIdentifier serviceIdentifier = ServiceIdentifier.empty();</p>
+<p>private List&lt;PenguinVersion&gt; penguinVersions;</p>
+<dl>
+<dt>public ProductionWireModule(String deciderOverlay, int partition, Option&lt;String&gt;</dt><dd><blockquote>
+<div><p>serviceIdentifierFlag) {</p>
+</div></blockquote>
+<p>mutableDecisionMaker = new MutableDecisionMaker();
+decider = DeciderFactory.get()</p>
+<blockquote>
+<div><p>.withBaseConfig(DECIDER_BASE)
+.withOverlayConfig(deciderOverlay)
+.withRefreshBase(false)
+.withDecisionMakers(</p>
+<blockquote>
+<div><dl>
+<dt>ImmutableList.&lt;DecisionMaker&gt;builder()</dt><dd><p>.add(mutableDecisionMaker)
+.addAll(JavaConversions$.MODULE$.asJavaCollection(</p>
+<blockquote>
+<div><p>DeciderFactory$.MODULE$.DefaultDecisionMakers()))</p>
+</div></blockquote>
+<p>.build())</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>.apply();</p>
+</div></blockquote>
+<p>this.partition = partition;
+this.stratoMetaStoreWireModule = new StratoMetaStoreWireModule(this);
+if (serviceIdentifierFlag.isDefined()) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>this.serviceIdentifier =</dt><dd><p>ServiceIdentifier.flagOfServiceIdentifier().parse(serviceIdentifierFlag.get());</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>this.stratoClient = Strato.client()</dt><dd><p>.withMutualTls(serviceIdentifier)
+.withRequestTimeout(Duration.fromMilliseconds(500))
+.build();</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>public ProductionWireModule(String deciderOverlay,</dt><dd><blockquote>
+<div><p>int partition,
+PipelineExceptionHandler pipelineExceptionHandler,
+Option&lt;String&gt; serviceIdentifierFlag) {</p>
+</div></blockquote>
+<p>this(deciderOverlay, partition, serviceIdentifierFlag);
+this.pipelineExceptionHandler = pipelineExceptionHandler;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public void setPipelineExceptionHandler(PipelineExceptionHandler pipelineExceptionHandler) {</dt><dd><p>this.pipelineExceptionHandler = pipelineExceptionHandler;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;Override
+public ServiceIdentifier getServiceIdentifier() {</p>
+<blockquote>
+<div><p>return serviceIdentifier;</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public PartitionMappingManager getPartitionMappingManager() {</p>
+<blockquote>
+<div><p>return PartitionMappingManager.getInstance();</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public JavaManhattanKVEndpoint getJavaManhattanKVEndpoint() {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>Preconditions.checkNotNull(serviceIdentifier,</dt><dd><p>“Can’t create Manhattan client with S2S authentication because Service Identifier is null”);</p>
+</dd>
+<dt>LOG.info(String.format(“Service identifier for Manhattan client: %s”,</dt><dd><p>ServiceIdentifier.asString(serviceIdentifier)));</p>
+</dd>
+<dt>ManhattanKVClientMtlsParams mtlsParams = ManhattanKVClientMtlsParams.apply(serviceIdentifier,</dt><dd><p>ManhattanKVClientMtlsParams.apply$default$2(),
+OpportunisticTls.Required()</p>
+</dd>
+</dl>
+<p>);
+return ManhattanKVEndpointBuilder</p>
+<blockquote>
+<div><p>.apply(ManhattanKVClient.apply(GEOCODE_APP_ID, CLUSTER_DEST_NAME, mtlsParams))
+.buildJava();</p>
+</div></blockquote>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public Decider getDecider() {</p>
+<blockquote>
+<div><p>return decider;</p>
+</div></blockquote>
+<p>}</p>
+<p>// Since MutableDecisionMaker is needed only for production TwitterServer, this method is defined
+// only in ProductionWireModule.
+public MutableDecisionMaker getMutableDecisionMaker() {</p>
+<blockquote>
+<div><p>return mutableDecisionMaker;</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public int getPartition() {</p>
+<blockquote>
+<div><p>return partition;</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public PipelineExceptionHandler getPipelineExceptionHandler() {</p>
+<blockquote>
+<div><p>return pipelineExceptionHandler;</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public Storer.ServiceIface getStorer(Duration requestTimeout, int retries) {</p>
+<blockquote>
+<div><p>TBinaryProtocol.Factory factory = new TBinaryProtocol.Factory();</p>
+<dl>
+<dt>MtlsThriftMuxClient mtlsThriftMuxClient = new MtlsThriftMuxClient(</dt><dd><p>ThriftMux.client().withClientId(new ClientId(PINK_CLIENT_ID)));</p>
+</dd>
+<dt>ThriftMux.Client tmuxClient = mtlsThriftMuxClient</dt><dd><p>.withMutualTls(serviceIdentifier)
+.withOpportunisticTls(OpportunisticTls.Required());</p>
+</dd>
+<dt>ClientBuilder&lt;</dt><dd><p>ThriftClientRequest,
+byte[],
+ClientConfig.Yes,
+ClientConfig.Yes,
+ClientConfig.Yes&gt; builder = ClientBuilder.get()</p>
+<blockquote>
+<div><p>.dest(“”)
+.requestTimeout(requestTimeout)
+.retries(retries)
+.timeout(requestTimeout.mul(retries))
+.stack(tmuxClient)
+.name(“pinkclient”)
+.reportTo(DefaultStatsReceiver.get());</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>return new Storer.ServiceToClient(ClientBuilder.safeBuild(builder), factory);</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public MetastoreClient getMetastoreClient() throws NamingException {</p>
+<blockquote>
+<div><p>return stratoMetaStoreWireModule.getMetastoreClient(this.serviceIdentifier);</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public ExecutorService getThreadPool(int numThreads) {</p>
+<blockquote>
+<div><p>return Executors.newFixedThreadPool(numThreads);</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public TweetService.ServiceToClient getTweetyPieClient(String tweetypieClientId)</p>
+<blockquote>
+<div><blockquote>
+<div><p>throws NamingException {</p>
+</div></blockquote>
+<p>return TweetyPieWireModule.getTweetyPieClient(tweetypieClientId, serviceIdentifier);</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public UserService.ServiceToClient getGizmoduckClient(String clientId)</p>
+<blockquote>
+<div><blockquote>
+<div><p>throws NamingException {</p>
+</div></blockquote>
+<p>Context context = new InitialContext();
+String dest = (String) context.lookup(JNDI_GIZMODUCK_DEST);</p>
+<dl>
+<dt>MtlsThriftMuxClient mtlsThriftMuxClient = new MtlsThriftMuxClient(</dt><dd><p>ThriftMux.client().withClientId(new ClientId(clientId)));</p>
+</dd>
+<dt>Service&lt;ThriftClientRequest, byte[]&gt; clientBuilder =</dt><dd><dl>
+<dt>ClientBuilder.safeBuild(</dt><dd><dl>
+<dt>ClientBuilder</dt><dd><p>.get()
+.requestTimeout(Duration.fromMilliseconds(800))
+.retryPolicy(RetryPolicy.tries(3))
+.name(“search_ingester_gizmoduck_client”)
+.reportTo(DefaultStatsReceiver.get())
+.daemon(true)
+.dest(dest)
+.stack(mtlsThriftMuxClient.withMutualTls(serviceIdentifier)</p>
+<blockquote>
+<div><p>.withOpportunisticTls(OpportunisticTls.Required())));</p>
+</div></blockquote>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>return new UserService.ServiceToClient(clientBuilder, new TBinaryProtocol.Factory());</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public &lt;T extends TBase&lt;?, ?&gt;&gt; EventBusSubscriber&lt;T&gt; createEventBusSubscriber(</p>
+<blockquote>
+<div><blockquote>
+<div><p>Function&lt;T, Future&lt;?&gt;&gt; process,
+Class&lt;T&gt; thriftStructClass,
+String eventBusSubscriberId,
+int maxConcurrentEvents) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>Preconditions.checkNotNull(serviceIdentifier,</dt><dd><p>“Can’t create EventBusSubscriber with S2S auth because Service Identifier is null”);</p>
+</dd>
+<dt>LOG.info(String.format(“Service identifier for EventBusSubscriber Manhattan client: %s”,</dt><dd><p>ServiceIdentifier.asString(serviceIdentifier)));</p>
+</dd>
+</dl>
+<p>// We set the processTimeoutMs parameter here to be Duration.Top because we do not want to read
+// more events from EventBus if we are experiencing back pressure and cannot write them to the
+// downstream queue.
+return EventBusSubscriberBuilder.apply()</p>
+<blockquote>
+<div><p>.subscriberId(eventBusSubscriberId)
+.skipToLatest(false)
+.fromAllZones(true)
+.statsReceiver(DefaultStatsReceiver.get().scope(“eventbus”))
+.thriftStruct(thriftStructClass)
+.serviceIdentifier(serviceIdentifier)
+.maxConcurrentEvents(maxConcurrentEvents)
+.processTimeout(Duration.Top())
+.build(process);</p>
+</div></blockquote>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public Clock getClock() {</p>
+<blockquote>
+<div><p>return Clock.SYSTEM_CLOCK;</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public TweetOffensiveEvaluator getTweetOffensiveEvaluator() {</p>
+<blockquote>
+<div><p>return new TweetOffensiveEvaluator();</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public EarlybirdCluster getEarlybirdCluster() throws NamingException {</p>
+<blockquote>
+<div><p>Context jndiContext = new InitialContext();
+String clusterName = (String) jndiContext.lookup(CLUSTER_JNDI_NAME);
+return EarlybirdCluster.valueOf(clusterName.toUpperCase());</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public List&lt;PenguinVersion&gt; getPenguinVersions() throws NamingException {</p>
+<blockquote>
+<div><p>Context context = new InitialContext();
+String penguinVersionsStr = (String) context.lookup(PENGUIN_VERSIONS_JNDI_NAME);
+penguinVersions = new ArrayList&lt;&gt;();</p>
+<dl>
+<dt>for (String penguinVersion<span class="classifier">penguinVersionsStr.split(“,”)) {</span></dt><dd><p>PenguinVersion pv = PenguinVersion.versionFromByteValue(Byte.parseByte(penguinVersion));
+if (PenguinVersionsUtil.isPenguinVersionAvailable(pv, decider)) {</p>
+<blockquote>
+<div><p>penguinVersions.add(pv);</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>Preconditions.checkArgument(penguinVersions.size() &gt; 0,</dt><dd><p>“At least one penguin version must be specified.”);</p>
+</dd>
+</dl>
+<p>return penguinVersions;</p>
+</div></blockquote>
+<p>}</p>
+<p>// We update penguin versions via deciders in order to disable one in case of an emergency.
+&#64;Override
+public List&lt;PenguinVersion&gt; getCurrentlyEnabledPenguinVersions() {</p>
+<blockquote>
+<div><p>return PenguinVersionsUtil.filterPenguinVersionsWithDeciders(penguinVersions, decider);</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public NamedEntityFetcher getNamedEntityFetcher() {</p>
+<blockquote>
+<div><p>return new NamedEntityFetcher(stratoClient);</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public AudioSpaceParticipantsFetcher getAudioSpaceParticipantsFetcher() {</p>
+<blockquote>
+<div><p>return new AudioSpaceParticipantsFetcher(stratoClient);</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public AudioSpaceCoreFetcher getAudioSpaceCoreFetcher() {</p>
+<blockquote>
+<div><p>return new AudioSpaceCoreFetcher(stratoClient);</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public &lt;T&gt; KafkaConsumer&lt;Long, T&gt; newKafkaConsumer(</p>
+<blockquote>
+<div><blockquote>
+<div><p>String kafkaClusterPath, Deserializer&lt;T&gt; deserializer, String clientId, String groupId,
+int maxPollRecords) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>return FinagleKafkaClientUtils.newKafkaConsumer(</dt><dd><p>kafkaClusterPath, deserializer, clientId, groupId, maxPollRecords);</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public &lt;T&gt; BlockingFinagleKafkaProducer&lt;Long, T&gt; newFinagleKafkaProducer(</p>
+<blockquote>
+<div><blockquote>
+<div><p>String kafkaClusterPath, Serializer&lt;T&gt; serializer, String clientId,
+&#64;Nullable Class&lt;? extends Partitioner&gt; partitionerClass) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>return FinagleKafkaClientUtils.newFinagleKafkaProducer(</dt><dd><p>kafkaClusterPath, true, serializer, clientId, partitionerClass);</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../_sources/src/java/com/twitter/search/ingester/pipeline/wire/ProductionWireModule.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

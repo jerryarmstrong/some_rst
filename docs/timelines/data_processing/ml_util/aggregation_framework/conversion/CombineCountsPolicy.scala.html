@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../" id="documentation_options" src="../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.timelines.data_processing.ml_util.aggregation_framework.conversion</p>
+<p>import com.google.common.annotations.VisibleForTesting
+import com.twitter.ml.api.util.SRichDataRecord
+import com.twitter.ml.api.FeatureContext
+import com.twitter.ml.api._
+import com.twitter.timelines.data_processing.ml_util.aggregation_framework.metrics.AggregationMetricCommon
+import com.twitter.timelines.data_processing.ml_util.aggregation_framework.metrics.TypedCountMetric
+import java.lang.{Double =&gt; JDouble}
+import scala.collection.JavaConverters._</p>
+<dl>
+<dt>case class CombinedFeatures(</dt><dd><p>sum: Feature[JDouble],
+nonzero: Feature[JDouble],
+mean: Feature[JDouble],
+topK: Seq[Feature[JDouble]])</p>
+</dd>
+<dt>trait CombineCountsBase {</dt><dd><p>val SparseSum = “sparse_sum”
+val SparseNonzero = “sparse_nonzero”
+val SparseMean = “sparse_mean”
+val SparseTop = “sparse_top”</p>
+<p>def topK: Int
+def hardLimit: Option[Int]
+def precomputedCountFeatures: Seq[Feature[_]]</p>
+<dl>
+<dt>lazy val precomputedFeaturesMap: Map[Feature[_], CombinedFeatures] =</dt><dd><dl>
+<dt>precomputedCountFeatures.map { countFeature =&gt;</dt><dd><dl class="simple">
+<dt>val derivedPersonalDataTypes =</dt><dd><p>AggregationMetricCommon.derivePersonalDataTypes(Some(countFeature))</p>
+</dd>
+<dt>val sum = new Feature.Continuous(</dt><dd><p>countFeature.getDenseFeatureName + “.” + SparseSum,
+derivedPersonalDataTypes)</p>
+</dd>
+<dt>val nonzero = new Feature.Continuous(</dt><dd><p>countFeature.getDenseFeatureName + “.” + SparseNonzero,
+derivedPersonalDataTypes)</p>
+</dd>
+<dt>val mean = new Feature.Continuous(</dt><dd><p>countFeature.getDenseFeatureName + “.” + SparseMean,
+derivedPersonalDataTypes)</p>
+</dd>
+<dt>val topKFeatures = (1 to topK).map { k =&gt;</dt><dd><dl class="simple">
+<dt>new Feature.Continuous(</dt><dd><p>countFeature.getDenseFeatureName + “.” + SparseTop + k,
+derivedPersonalDataTypes)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+(countFeature, CombinedFeatures(sum, nonzero, mean, topKFeatures))</p>
+</dd>
+</dl>
+<p>}.toMap</p>
+</dd>
+<dt>lazy val outputFeaturesPostMerge: Set[Feature[JDouble]] =</dt><dd><dl>
+<dt>precomputedFeaturesMap.values.flatMap { combinedFeatures: CombinedFeatures =&gt;</dt><dd><dl class="simple">
+<dt>Seq(</dt><dd><p>combinedFeatures.sum,
+combinedFeatures.nonzero,
+combinedFeatures.mean</p>
+</dd>
+</dl>
+<p>) ++ combinedFeatures.topK</p>
+</dd>
+</dl>
+<p>}.toSet</p>
+</dd>
+</dl>
+<p>private case class ComputedStats(sum: Double, nonzero: Double, mean: Double)</p>
+<dl>
+<dt>private def preComputeStats(featureValues: Seq[Double]): ComputedStats = {</dt><dd><dl class="simple">
+<dt>val (sum, nonzero) = featureValues.foldLeft((0.0, 0.0)) {</dt><dd><dl class="simple">
+<dt>case ((accSum, accNonzero), value) =&gt;</dt><dd><p>(accSum + value, if (value &gt; 0.0) accNonzero + 1.0 else accNonzero)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+ComputedStats(sum, nonzero, if (nonzero &gt; 0.0) sum / nonzero else 0.0)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def computeSortedFeatureValues(featureValues: List[Double]): List[Double] =</dt><dd><p>featureValues.sortBy(-_)</p>
+</dd>
+<dt>private def extractKth(sortedFeatureValues: Seq[Double], k: Int): Double =</dt><dd><dl class="simple">
+<dt>sortedFeatureValues</dt><dd><p>.lift(k - 1)
+.getOrElse(0.0)</p>
+</dd>
+</dl>
+</dd>
+<dt>private def setContinuousFeatureIfNonZero(</dt><dd><p>record: SRichDataRecord,
+feature: Feature[JDouble],
+value: Double</p>
+</dd>
+<dt>): Unit =</dt><dd><dl class="simple">
+<dt>if (value != 0.0) {</dt><dd><p>record.setFeatureValue(feature, value)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>def hydrateCountFeatures(</dt><dd><p>richRecord: SRichDataRecord,
+features: Seq[Feature[_]],
+featureValuesMap: Map[Feature[_], List[Double]]</p>
+</dd>
+<dt>): Unit =</dt><dd><dl>
+<dt>for {</dt><dd><p>feature &lt;- features
+featureValues &lt;- featureValuesMap.get(feature)</p>
+</dd>
+<dt>} {</dt><dd><dl class="simple">
+<dt>mergeRecordFromCountFeature(</dt><dd><p>countFeature = feature,
+featureValues = featureValues,
+richInputRecord = richRecord</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>def mergeRecordFromCountFeature(</dt><dd><p>richInputRecord: SRichDataRecord,
+countFeature: Feature[_],
+featureValues: List[Double]</p>
+</dd>
+<dt>): Unit = {</dt><dd><p>// In majority of calls to this method from timeline scorer
+// the featureValues list is empty.
+// While with empty list each operation will be not that expensive, these
+// small things do add up. By adding early stop here we can avoid sorting
+// empty list, allocating several options and making multiple function
+// calls. In addition to that, we won’t iterate over [1, topK].
+if (featureValues.nonEmpty) {</p>
+<blockquote>
+<div><dl>
+<dt>val sortedFeatureValues = hardLimit</dt><dd><dl class="simple">
+<dt>.map { limit =&gt;</dt><dd><p>computeSortedFeatureValues(featureValues).take(limit)</p>
+</dd>
+</dl>
+<p>}.getOrElse(computeSortedFeatureValues(featureValues)).toIndexedSeq</p>
+</dd>
+</dl>
+<p>val computed = preComputeStats(sortedFeatureValues)</p>
+<p>val combinedFeatures = precomputedFeaturesMap(countFeature)
+setContinuousFeatureIfNonZero(</p>
+<blockquote>
+<div><p>richInputRecord,
+combinedFeatures.sum,
+computed.sum</p>
+</div></blockquote>
+<p>)
+setContinuousFeatureIfNonZero(</p>
+<blockquote>
+<div><p>richInputRecord,
+combinedFeatures.nonzero,
+computed.nonzero</p>
+</div></blockquote>
+<p>)
+setContinuousFeatureIfNonZero(</p>
+<blockquote>
+<div><p>richInputRecord,
+combinedFeatures.mean,
+computed.mean</p>
+</div></blockquote>
+<p>)
+(1 to topK).foreach { k =&gt;</p>
+<blockquote>
+<div><dl class="simple">
+<dt>setContinuousFeatureIfNonZero(</dt><dd><p>richInputRecord,
+combinedFeatures.topK(k - 1),
+extractKth(sortedFeatureValues, k)</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>object CombineCountsPolicy {</dt><dd><dl>
+<dt>def getCountFeatures(aggregateContext: FeatureContext): Seq[Feature[_]] =</dt><dd><dl>
+<dt>aggregateContext.getAllFeatures.asScala.toSeq</dt><dd><dl class="simple">
+<dt>.filter { feature =&gt;</dt><dd><p>feature.getFeatureType == FeatureType.CONTINUOUS &amp;&amp;
+feature.getDenseFeatureName.endsWith(TypedCountMetric[JDouble]().operatorName)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>&#64;VisibleForTesting
+private[conversion] def getFeatureValues(</p>
+<blockquote>
+<div><p>dataRecordsWithCounts: List[DataRecord],
+countFeature: Feature[_]</p>
+</div></blockquote>
+<dl>
+<dt>): List[Double] =</dt><dd><dl class="simple">
+<dt>dataRecordsWithCounts.map(new SRichDataRecord(_)).flatMap { record =&gt;</dt><dd><p>Option(record.getFeatureValue(countFeature)).map(_.asInstanceOf[JDouble].toDouble)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>A merge policy that works whenever all aggregate features are</p></li>
+<li><p>counts (computed using CountMetric), and typically represent</p></li>
+<li><p>either impressions or engagements. For each such input count</p></li>
+<li><p>feature, the policy outputs the following (3+k) derived features</p></li>
+<li><p>into the output data record:</p></li>
+<li></li>
+<li><p>Sum of the feature’s value across all aggregate records</p></li>
+<li><p>Number of aggregate records that have the feature set to non-zero</p></li>
+<li><p>Mean of the feature’s value across all aggregate records</p></li>
+<li><p>topK values of the feature across all aggregate records</p></li>
+<li></li>
+<li><p>&#64;param topK topK values to compute</p></li>
+<li><p>&#64;param hardLimit when set, records are sorted and only the top values will be used for aggregation if</p></li>
+<li><p>the number of records are higher than this hard limit.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>case class CombineCountsPolicy(</dt><dd><p>override val topK: Int,
+aggregateContextToPrecompute: FeatureContext,
+override val hardLimit: Option[Int] = None)</p>
+<blockquote>
+<div><p>extends SparseBinaryMergePolicy
+with CombineCountsBase {</p>
+</div></blockquote>
+<p>import CombineCountsPolicy._
+override val precomputedCountFeatures: Seq[Feature[_]] = getCountFeatures(</p>
+<blockquote>
+<div><p>aggregateContextToPrecompute)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>override def mergeRecord(</dt><dd><p>mutableInputRecord: DataRecord,
+aggregateRecords: List[DataRecord],
+aggregateContext: FeatureContext</p>
+</dd>
+<dt>): Unit = {</dt><dd><p>// Assumes aggregateContext === aggregateContextToPrecompute
+mergeRecordFromCountFeatures(mutableInputRecord, aggregateRecords, precomputedCountFeatures)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>def defaultMergeRecord(</dt><dd><p>mutableInputRecord: DataRecord,
+aggregateRecords: List[DataRecord]</p>
+</dd>
+<dt>): Unit = {</dt><dd><p>mergeRecordFromCountFeatures(mutableInputRecord, aggregateRecords, precomputedCountFeatures)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def mergeRecordFromCountFeatures(</dt><dd><p>mutableInputRecord: DataRecord,
+aggregateRecords: List[DataRecord],
+countFeatures: Seq[Feature[_]]</p>
+</dd>
+<dt>): Unit = {</dt><dd><p>val richInputRecord = new SRichDataRecord(mutableInputRecord)
+countFeatures.foreach { countFeature =&gt;</p>
+<blockquote>
+<div><dl class="simple">
+<dt>mergeRecordFromCountFeature(</dt><dd><p>richInputRecord = richInputRecord,
+countFeature = countFeature,
+featureValues = getFeatureValues(aggregateRecords, countFeature)</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>override def aggregateFeaturesPostMerge(aggregateContext: FeatureContext): Set[Feature[_]] =</dt><dd><p>outputFeaturesPostMerge.map(_.asInstanceOf[Feature[_]])</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../_sources/timelines/data_processing/ml_util/aggregation_framework/conversion/CombineCountsPolicy.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

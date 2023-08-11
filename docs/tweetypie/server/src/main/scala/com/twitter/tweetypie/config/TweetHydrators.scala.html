@@ -1,0 +1,571 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.tweetypie
+package config</p>
+<p>import com.twitter.featureswitches.v2.FeatureSwitches
+import com.twitter.servo.cache.Cached
+import com.twitter.servo.cache.LockingCache
+import com.twitter.servo.util.ExceptionCategorizer
+import com.twitter.servo.util.ExceptionCounter
+import com.twitter.servo.util.FutureEffect
+import com.twitter.servo.util.Scribe
+import com.twitter.stitch.NotFound
+import com.twitter.tweetypie.core.FilteredState
+import com.twitter.tweetypie.core.TweetData
+import com.twitter.tweetypie.core.ValueState
+import com.twitter.tweetypie.hydrator._
+import com.twitter.tweetypie.repository.TweetQuery
+import com.twitter.tweetypie.serverutil.{ExceptionCounter =&gt; TpExceptionCounter}
+import com.twitter.tweetypie.thriftscala._
+import com.twitter.tweetypie.client_id.ClientIdHelper</p>
+<p>trait TweetHydrators {</p>
+<blockquote>
+<div><dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Hydrator that has all the Tweet hydrators (entire “pipeline”) configured</p></li>
+<li><p>and wired up.</p></li>
+<li><p>This hydrator is used both on the read and write path and is</p></li>
+<li><p>customized by different TweetQuery.Options.</p></li>
+<li><p>Modifications are not automatically written back to cache.</p></li>
+<li><p><cite>cacheChanges</cite> must be used for that.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+</dl>
+<p>def hydrator: TweetDataValueHydrator</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>The <cite>Effect</cite> to use to write modified tweets back to cache.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+</dl>
+<p>def cacheChangesEffect: Effect[ValueState[TweetData]]</p>
+</div></blockquote>
+<p>}</p>
+<p>object TweetHydrators {</p>
+<blockquote>
+<div><dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Creates all the hydrators and calls TweetHydration to wire them up.</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>def apply(</dt><dd><p>stats: StatsReceiver,
+deciderGates: TweetypieDeciderGates,
+repos: LogicalRepositories,
+tweetDataCache: LockingCache[TweetId, Cached[TweetData]],
+hasMedia: Tweet =&gt; Boolean,
+featureSwitchesWithoutExperiments: FeatureSwitches,
+clientIdHelper: ClientIdHelper</p>
+</dd>
+<dt>): TweetHydrators = {</dt><dd><p>import repos._</p>
+<p>val repairStats = stats.scope(“repairs”)
+val hydratorStats = stats.scope(“hydrators”)</p>
+<dl class="simple">
+<dt>def scoped[A](stats: StatsReceiver, name: String)(f: StatsReceiver =&gt; A): A = {</dt><dd><p>val scopedStats = stats.scope(name)
+f(scopedStats)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>val isFailureException: Throwable =&gt; Boolean = {</dt><dd><p>case _: FilteredState =&gt; false
+case NotFound =&gt; false
+case _ =&gt; true</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def hydratorExceptionCategorizer(failureScope: String) =</dt><dd><dl class="simple">
+<dt>ExceptionCategorizer.const(“filtered”).onlyIf(_.isInstanceOf[FilteredState]) ++</dt><dd><p>ExceptionCategorizer.const(“not_found”).onlyIf(_ == NotFound) ++
+TpExceptionCounter.defaultCategorizer(failureScope).onlyIf(isFailureException)</p>
+</dd>
+</dl>
+</dd>
+<dt>val hydratorExceptionCounter: (StatsReceiver, String) =&gt; ExceptionCounter =</dt><dd><p>(stats, scope) =&gt; TpExceptionCounter(stats, hydratorExceptionCategorizer(scope))</p>
+</dd>
+<dt>val tweetHydrator =</dt><dd><dl>
+<dt>TweetHydration(</dt><dd><p>hydratorStats = hydratorStats,
+hydrateFeatureSwitchResults =</p>
+<blockquote>
+<div><p>FeatureSwitchResultsHydrator(featureSwitchesWithoutExperiments, clientIdHelper),</p>
+</div></blockquote>
+<dl class="simple">
+<dt>hydrateMentions = MentionEntitiesHydrator</dt><dd><p>.once(MentionEntityHydrator(userIdentityRepo))
+.observe(hydratorStats.scope(“mentions”), hydratorExceptionCounter),</p>
+</dd>
+<dt>hydrateLanguage = LanguageHydrator(languageRepo)</dt><dd><p>.observe(hydratorStats.scope(“language”), hydratorExceptionCounter),</p>
+</dd>
+<dt>hydrateUrls = scoped(hydratorStats, “url”) { stats =&gt;</dt><dd><dl class="simple">
+<dt>UrlEntitiesHydrator</dt><dd><p>.once(UrlEntityHydrator(urlRepo, stats))
+.observe(stats, hydratorExceptionCounter)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>},
+hydrateQuotedTweetRef = QuotedTweetRefHydrator</p>
+<blockquote>
+<div><dl class="simple">
+<dt>.once(</dt><dd><p>QuotedTweetRefHydrator(tweetRepo)</p>
+</dd>
+</dl>
+<p>)
+.observe(hydratorStats.scope(“quoted_tweet_ref”), hydratorExceptionCounter),</p>
+</div></blockquote>
+<dl>
+<dt>hydrateQuotedTweetRefUrls = QuotedTweetRefUrlsHydrator(userIdentityRepo)</dt><dd><p>.observe(hydratorStats.scope(“quoted_tweet_ref_urls”), hydratorExceptionCounter),</p>
+</dd>
+<dt>hydrateMediaCacheable = MediaEntitiesHydrator.Cacheable</dt><dd><dl>
+<dt>.once(</dt><dd><dl class="simple">
+<dt>MediaEntityHydrator.Cacheable(</dt><dd><dl class="simple">
+<dt>hydrateMediaUrls = MediaUrlFieldsHydrator()</dt><dd><p>.observe(hydratorStats.scope(“media_urls”), hydratorExceptionCounter),</p>
+</dd>
+<dt>hydrateMediaIsProtected = MediaIsProtectedHydrator(userProtectionRepo)</dt><dd><p>.observe(hydratorStats.scope(“media_is_protected”), hydratorExceptionCounter)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>)
+.observe(hydratorStats.scope(“media_cacheable”), hydratorExceptionCounter)
+.ifEnabled(deciderGates.hydrateMedia),</p>
+</dd>
+<dt>hydrateReplyScreenName = ReplyScreenNameHydrator</dt><dd><p>.once(ReplyScreenNameHydrator(userIdentityRepo))
+.observe(hydratorStats.scope(“in_reply_to_screen_name”), hydratorExceptionCounter),</p>
+</dd>
+<dt>hydrateConvoId = ConversationIdHydrator(conversationIdRepo)</dt><dd><p>.observe(hydratorStats.scope(“conversation_id”), hydratorExceptionCounter),</p>
+</dd>
+<dt>hydratePerspective = // Don’t cache with the tweet because it depends on the request</dt><dd><dl class="simple">
+<dt>PerspectiveHydrator(</dt><dd><p>repo = perspectiveRepo,
+shouldHydrateBookmarksPerspective = deciderGates.hydrateBookmarksPerspective,
+stats = hydratorStats.scope(“perspective_by_safety_label”)</p>
+</dd>
+<dt>).observe(hydratorStats.scope(“perspective”), hydratorExceptionCounter)</dt><dd><p>.ifEnabled(deciderGates.hydratePerspectives),</p>
+</dd>
+</dl>
+</dd>
+<dt>hydrateEditPerspective = EditPerspectiveHydrator(</dt><dd><p>repo = perspectiveRepo,
+timelinesGate = deciderGates.hydratePerspectivesEditsForTimelines,
+tweetDetailsGate = deciderGates.hydratePerspectivesEditsForTweetDetail,
+otherSafetyLevelsGate = deciderGates.hydratePerspectivesEditsForOtherSafetyLevels,
+bookmarksGate = deciderGates.hydrateBookmarksPerspective,
+stats = hydratorStats</p>
+</dd>
+</dl>
+<p>).observe(hydratorStats.scope(“edit_perspective”), hydratorExceptionCounter),
+hydrateConversationMuted = // Don’t cache because it depends on the request.  If</p>
+<blockquote>
+<div><p>// possible, this hydrator should be in the same stage as
+// PerspectiveHydrator, so that the calls can be batched
+// together.
+ConversationMutedHydrator(conversationMutedRepo)</p>
+<blockquote>
+<div><p>.observe(hydratorStats.scope(“conversation_muted”), hydratorExceptionCounter)
+.ifEnabled(deciderGates.hydrateConversationMuted),</p>
+</div></blockquote>
+</div></blockquote>
+<dl class="simple">
+<dt>hydrateContributor = ContributorHydrator</dt><dd><p>.once(ContributorHydrator(userIdentityRepo))
+.observe(hydratorStats.scope(“contributors”), hydratorExceptionCounter),</p>
+</dd>
+<dt>hydrateTakedowns = TakedownHydrator(takedownRepo)</dt><dd><p>.observe(hydratorStats.scope(“takedowns”), hydratorExceptionCounter),</p>
+</dd>
+<dt>hydrateDirectedAt = scoped(hydratorStats, “directed_at”) { stats =&gt;</dt><dd><dl class="simple">
+<dt>DirectedAtHydrator</dt><dd><p>.once(DirectedAtHydrator(userIdentityRepo, stats))
+.observe(stats, hydratorExceptionCounter)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>},
+hydrateGeoScrub = GeoScrubHydrator(</p>
+<blockquote>
+<div><p>geoScrubTimestampRepo,
+Scribe(“test_tweetypie_read_time_geo_scrubs”)</p>
+<blockquote>
+<div><p>.contramap[TweetId](_.toString)</p>
+</div></blockquote>
+</div></blockquote>
+<p>).observe(hydratorStats.scope(“geo_scrub”), hydratorExceptionCounter),
+hydrateCacheableRepairs = ValueHydrator</p>
+<blockquote>
+<div><dl>
+<dt>.fromMutation[Tweet, TweetQuery.Options](</dt><dd><dl>
+<dt>RepairMutation(</dt><dd><p>repairStats.scope(“on_read”),
+“created_at” -&gt;</p>
+<blockquote>
+<div><p>new CreatedAtRepairer(Scribe(“test_tweetypie_bad_created_at”)),</p>
+</div></blockquote>
+<p>“retweet_media” -&gt; RetweetMediaRepairer,
+“parent_status_id” -&gt; RetweetParentStatusIdRepairer.tweetMutation,
+“visible_text_range” -&gt; NegativeVisibleTextRangeRepairer.tweetMutation</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>)
+.lensed(TweetData.Lenses.tweet)
+.onlyIf((td, opts) =&gt; opts.cause.reading(td.tweet.id)),</p>
+</div></blockquote>
+<dl>
+<dt>hydrateMediaUncacheable = MediaEntityHydrator</dt><dd><dl>
+<dt>.Uncacheable(</dt><dd><dl class="simple">
+<dt>hydrateMediaKey = MediaKeyHydrator()</dt><dd><p>.observe(hydratorStats.scope(“media_key”), hydratorExceptionCounter),</p>
+</dd>
+<dt>hydrateMediaInfo = scoped(hydratorStats, “media_info”) { stats =&gt;</dt><dd><dl class="simple">
+<dt>MediaInfoHydrator(mediaMetadataRepo, stats)</dt><dd><p>.observe(stats, hydratorExceptionCounter)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>)
+.observe(hydratorStats.scope(“media_uncacheable”), hydratorExceptionCounter)
+.liftSeq
+.ifEnabled(deciderGates.hydrateMedia),</p>
+</dd>
+<dt>hydratePostCacheRepairs =</dt><dd><p>// clean-up partially hydrated entities before any of the hydrators that look at
+// url and media entities run, so that they never see bad entities.
+ValueHydrator.fromMutation[TweetData, TweetQuery.Options](</p>
+<blockquote>
+<div><dl class="simple">
+<dt>RepairMutation(</dt><dd><p>repairStats.scope(“on_read”),
+“partial_entity_cleanup” -&gt; PartialEntityCleaner(repairStats),
+“strip_not_display_coords” -&gt; StripHiddenGeoCoordinates</p>
+</dd>
+</dl>
+<p>).lensed(TweetData.Lenses.tweet)</p>
+</div></blockquote>
+<p>),</p>
+</dd>
+<dt>hydrateTweetLegacyFormat = scoped(hydratorStats, “tweet_legacy_formatter”) { stats =&gt;</dt><dd><dl class="simple">
+<dt>TweetLegacyFormatter(stats)</dt><dd><p>.observe(stats, hydratorExceptionCounter)
+.onlyIf((td, opts) =&gt; opts.cause.reading(td.tweet.id))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>},
+hydrateQuoteTweetVisibility = QuoteTweetVisibilityHydrator(quotedTweetVisibilityRepo)</p>
+<blockquote>
+<div><p>.observe(hydratorStats.scope(“quote_tweet_visibility”), hydratorExceptionCounter),</p>
+</div></blockquote>
+<dl>
+<dt>hydrateQuotedTweet = QuotedTweetHydrator(tweetResultRepo)</dt><dd><p>.observe(hydratorStats.scope(“quoted_tweet”), hydratorExceptionCounter),</p>
+</dd>
+<dt>hydratePastedMedia =</dt><dd><p>// Don’t cache with the tweet because we want to automatically drop this media if
+// the referenced tweet is deleted or becomes non-public.
+PastedMediaHydrator(pastedMediaRepo)</p>
+<blockquote>
+<div><p>.observe(hydratorStats.scope(“pasted_media”))
+.ifEnabled(deciderGates.hydratePastedMedia),</p>
+</div></blockquote>
+</dd>
+<dt>hydrateMediaRefs = MediaRefsHydrator(</dt><dd><p>optionalTweetRepo,
+deciderGates.mediaRefsHydratorIncludePastedMedia</p>
+</dd>
+<dt>).observe(hydratorStats.scope(“media_refs”))</dt><dd><p>.ifEnabled(deciderGates.hydrateMediaRefs),</p>
+</dd>
+<dt>hydrateMediaTags = // depends on AdditionalFieldsHydrator</dt><dd><dl class="simple">
+<dt>MediaTagsHydrator(userViewRepo)</dt><dd><p>.observe(hydratorStats.scope(“media_tags”), hydratorExceptionCounter)
+.ifEnabled(deciderGates.hydrateMediaTags),</p>
+</dd>
+</dl>
+</dd>
+<dt>hydrateClassicCards = CardHydrator(cardRepo)</dt><dd><p>.observe(hydratorStats.scope(“cards”), hydratorExceptionCounter),</p>
+</dd>
+<dt>hydrateCard2 = Card2Hydrator(card2Repo)</dt><dd><p>.observe(hydratorStats.scope(“card2”)),</p>
+</dd>
+<dt>hydrateContributorVisibility =</dt><dd><p>// Filter out contributors field for all but the user who owns the tweet
+ContributorVisibilityFilter()</p>
+<blockquote>
+<div><p>.observe(hydratorStats.scope(“contributor_visibility”), hydratorExceptionCounter),</p>
+</div></blockquote>
+</dd>
+<dt>hydrateHasMedia =</dt><dd><p>// Sets hasMedia. Comes after PastedMediaHydrator in order to include pasted
+// pics as well as other media &amp; urls.
+HasMediaHydrator(hasMedia)</p>
+<blockquote>
+<div><p>.observe(hydratorStats.scope(“has_media”), hydratorExceptionCounter)
+.ifEnabled(deciderGates.hydrateHasMedia),</p>
+</div></blockquote>
+</dd>
+<dt>hydrateTweetCounts = // Don’t cache counts with the tweet because it has its own cache with</dt><dd><p>// a different TTL
+TweetCountsHydrator(tweetCountsRepo, deciderGates.hydrateBookmarksCount)</p>
+<blockquote>
+<div><p>.observe(hydratorStats.scope(“tweet_counts”), hydratorExceptionCounter)
+.ifEnabled(deciderGates.hydrateCounts),</p>
+</div></blockquote>
+</dd>
+<dt>hydratePreviousTweetCounts = // previous counts are not cached</dt><dd><dl class="simple">
+<dt>scoped(hydratorStats, “previous_counts”) { stats =&gt;</dt><dd><dl class="simple">
+<dt>PreviousTweetCountsHydrator(tweetCountsRepo, deciderGates.hydrateBookmarksCount)</dt><dd><p>.observe(stats, hydratorExceptionCounter)
+.ifEnabled(deciderGates.hydratePreviousCounts)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>},</p>
+</dd>
+<dt>hydratePlace =</dt><dd><p>// Don’t cache with the tweet because Place has its own tweetypie cache keyspace
+// with a different TTL, and it’s more efficient to store separately.
+// See com.twitter.tweetypie.repository.PlaceKey
+PlaceHydrator(placeRepo)</p>
+<blockquote>
+<div><p>.observe(hydratorStats.scope(“place”), hydratorExceptionCounter)
+.ifEnabled(deciderGates.hydratePlaces),</p>
+</div></blockquote>
+</dd>
+<dt>hydrateDeviceSource = // Don’t cache with the tweet because it has its own cache,</dt><dd><p>// and it’s more efficient to cache it separately
+DeviceSourceHydrator(deviceSourceRepo)</p>
+<blockquote>
+<div><p>.observe(hydratorStats.scope(“device_source”), hydratorExceptionCounter)
+.ifEnabled(deciderGates.hydrateDeviceSources),</p>
+</div></blockquote>
+</dd>
+<dt>hydrateProfileGeo =</dt><dd><p>// Don’t cache gnip profile geo as read request volume is expected to be low
+ProfileGeoHydrator(profileGeoRepo)</p>
+<blockquote>
+<div><p>.observe(hydratorStats.scope(“profile_geo”), hydratorExceptionCounter)
+.ifEnabled(deciderGates.hydrateGnipProfileGeoEnrichment),</p>
+</div></blockquote>
+</dd>
+<dt>hydrateSourceTweet = scoped(hydratorStats, “source_tweet”) { stats =&gt;</dt><dd><dl>
+<dt>SourceTweetHydrator(</dt><dd><p>tweetResultRepo,
+stats,
+FutureEffect</p>
+<blockquote>
+<div><dl class="simple">
+<dt>.inParallel(</dt><dd><p>Scribe(DetachedRetweet, “tweetypie_detached_retweets”),
+Scribe(DetachedRetweet, “test_tweetypie_detached_retweets”),</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>).observe(stats, hydratorExceptionCounter)</p>
+</dd>
+</dl>
+<p>},
+hydrateIM1837State = IM1837FilterHydrator()</p>
+<blockquote>
+<div><p>.observe(hydratorStats.scope(“im1837_filter”), hydratorExceptionCounter)
+.onlyIf { (_, ctx) =&gt;</p>
+<blockquote>
+<div><p>ctx.opts.forExternalConsumption &amp;&amp; ctx.opts.cause.reading(ctx.tweetId)</p>
+</div></blockquote>
+<p>},</p>
+</div></blockquote>
+<dl>
+<dt>hydrateIM2884State = scoped(hydratorStats, “im2884_filter”) { stats =&gt;</dt><dd><dl>
+<dt>IM2884FilterHydrator(stats)</dt><dd><p>.observe(stats, hydratorExceptionCounter)
+.onlyIf { (_, ctx) =&gt;</p>
+<blockquote>
+<div><p>ctx.opts.forExternalConsumption &amp;&amp; ctx.opts.cause.reading(ctx.tweetId)</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>},
+hydrateIM3433State = scoped(hydratorStats, “im3433_filter”) { stats =&gt;</p>
+<blockquote>
+<div><dl>
+<dt>IM3433FilterHydrator(stats)</dt><dd><p>.observe(stats, hydratorExceptionCounter)
+.onlyIf { (_, ctx) =&gt;</p>
+<blockquote>
+<div><p>ctx.opts.forExternalConsumption &amp;&amp; ctx.opts.cause.reading(ctx.tweetId)</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>},
+hydrateTweetAuthorVisibility = TweetAuthorVisibilityHydrator(userVisibilityRepo)</p>
+<blockquote>
+<div><p>.observe(hydratorStats.scope(“tweet_author_visibility”), hydratorExceptionCounter)
+.onlyIf((_, ctx) =&gt; ctx.opts.cause.reading(ctx.tweetId)),</p>
+</div></blockquote>
+<dl>
+<dt>hydrateReportedTweetVisibility = ReportedTweetFilter()</dt><dd><p>.observe(hydratorStats.scope(“reported_tweet_filter”), hydratorExceptionCounter),</p>
+</dd>
+<dt>scrubSuperfluousUrlEntities = ValueHydrator</dt><dd><p>.fromMutation[Tweet, TweetQuery.Options](SuperfluousUrlEntityScrubber.mutation)
+.lensed(TweetData.Lenses.tweet),</p>
+</dd>
+<dt>copyFromSourceTweet = CopyFromSourceTweet.hydrator</dt><dd><p>.observe(hydratorStats.scope(“copy_from_source_tweet”), hydratorExceptionCounter),</p>
+</dd>
+<dt>hydrateTweetVisibility = scoped(hydratorStats, “tweet_visibility”) { stats =&gt;</dt><dd><dl class="simple">
+<dt>TweetVisibilityHydrator(</dt><dd><p>tweetVisibilityRepo,
+deciderGates.failClosedInVF,
+stats</p>
+</dd>
+</dl>
+<p>).observe(stats, hydratorExceptionCounter)</p>
+</dd>
+</dl>
+<p>},
+hydrateEscherbirdAnnotations = EscherbirdAnnotationHydrator(escherbirdAnnotationRepo)</p>
+<blockquote>
+<div><p>.observe(hydratorStats.scope(“escherbird_annotations”), hydratorExceptionCounter)
+.ifEnabled(deciderGates.hydrateEscherbirdAnnotations),</p>
+</div></blockquote>
+<dl>
+<dt>hydrateScrubEngagements = ScrubEngagementHydrator()</dt><dd><p>.observe(hydratorStats.scope(“scrub_engagements”), hydratorExceptionCounter)
+.ifEnabled(deciderGates.hydrateScrubEngagements),</p>
+</dd>
+<dt>hydrateConversationControl = scoped(hydratorStats, “tweet_conversation_control”) { stats =&gt;</dt><dd><dl class="simple">
+<dt>ConversationControlHydrator(</dt><dd><p>conversationControlRepo,
+deciderGates.disableInviteViaMention,
+stats</p>
+</dd>
+</dl>
+<p>).observe(stats, hydratorExceptionCounter)</p>
+</dd>
+</dl>
+<p>},
+hydrateEditControl = scoped(hydratorStats, “tweet_edit_control”) { stats =&gt;</p>
+<blockquote>
+<div><dl class="simple">
+<dt>EditControlHydrator(</dt><dd><p>tweetRepo,
+deciderGates.setEditTimeWindowToSixtyMinutes,
+stats</p>
+</dd>
+</dl>
+<p>).observe(stats, hydratorExceptionCounter)</p>
+</div></blockquote>
+<p>},
+hydrateUnmentionData = UnmentionDataHydrator(),
+hydrateNoteTweetSuffix = NoteTweetSuffixHydrator().observe(stats, hydratorExceptionCounter)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>new TweetHydrators {</dt><dd><dl>
+<dt>val hydrator: TweetDataValueHydrator =</dt><dd><dl class="simple">
+<dt>tweetHydrator.onlyIf { (tweetData, opts) =&gt;</dt><dd><p>// When the caller requests fetchStoredTweets and Tweets are fetched from Manhattan
+// irrespective of state, the stored data for some Tweets may be incomplete.
+// We skip the hydration of those Tweets.
+!opts.fetchStoredTweets ||
+tweetData.storedTweetResult.exists(_.canHydrate)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>val cacheChangesEffect: Effect[ValueState[TweetData]] =</dt><dd><dl class="simple">
+<dt>TweetHydration.cacheChanges(</dt><dd><p>tweetDataCache,
+hydratorStats.scope(“tweet_caching”)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/tweetypie/server/src/main/scala/com/twitter/tweetypie/config/TweetHydrators.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

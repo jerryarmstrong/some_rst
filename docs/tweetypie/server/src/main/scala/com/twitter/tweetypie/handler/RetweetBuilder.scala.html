@@ -1,0 +1,536 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.tweetypie
+package handler</p>
+<p>import com.twitter.flockdb.client._
+import com.twitter.snowflake.id.SnowflakeId
+import com.twitter.stitch.Stitch
+import com.twitter.tweetypie.additionalfields.AdditionalFields.setAdditionalFields
+import com.twitter.tweetypie.core._
+import com.twitter.tweetypie.repository._
+import com.twitter.tweetypie.thriftscala._
+import com.twitter.tweetypie.thriftscala.entities.EntityExtractor
+import com.twitter.tweetypie.tweettext.Truncator
+import com.twitter.tweetypie.util.CommunityUtil
+import com.twitter.tweetypie.util.EditControlUtil</p>
+<dl>
+<dt>case class SourceTweetRequest(</dt><dd><p>tweetId: TweetId,
+user: User,
+hydrateOptions: WritePathHydrationOptions)</p>
+</dd>
+<dt>object RetweetBuilder {</dt><dd><p>import TweetBuilder._
+import UpstreamFailure._</p>
+<p>type Type = FutureArrow[RetweetRequest, TweetBuilderResult]</p>
+<p>val SGSTestRole = “socialgraph”</p>
+<p>val log: Logger = Logger(getClass)</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Retweets text gets RT and username prepended</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>def composeRetweetText(text: String, sourceUser: User): String =</dt><dd><p>composeRetweetText(text, sourceUser.profile.get.screenName)</p>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Retweets text gets RT and username prepended</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>def composeRetweetText(text: String, screenName: String): String =</dt><dd><p>Truncator.truncateForRetweet(“RT &#64;” + screenName + “: “ + text)</p>
+</dd>
+</dl>
+<p>// We do not want to allow community tweets to be retweeted.
+def validateNotCommunityTweet(sourceTweet: Tweet): Future[Unit] =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (CommunityUtil.hasCommunity(sourceTweet.communities)) {</dt><dd><p>Future.exception(TweetCreateFailure.State(TweetCreateState.CommunityRetweetNotAllowed))</p>
+</dd>
+<dt>} else {</dt><dd><p>Future.Unit</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>// We do not want to allow Trusted Friends tweets to be retweeted.
+def validateNotTrustedFriendsTweet(sourceTweet: Tweet): Future[Unit] =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>sourceTweet.trustedFriendsControl match {</dt><dd><dl class="simple">
+<dt>case Some(trustedFriendsControl) =&gt;</dt><dd><p>Future.exception(TweetCreateFailure.State(TweetCreateState.TrustedFriendsRetweetNotAllowed))</p>
+</dd>
+<dt>case None =&gt;</dt><dd><p>Future.Unit</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>// We do not want to allow retweet of a stale version of a tweet in an edit chain.
+def validateStaleTweet(sourceTweet: Tweet): Future[Unit] = {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (!EditControlUtil.isLatestEdit(sourceTweet.editControl, sourceTweet.id).getOrElse(true)) {</dt><dd><p>Future.exception(TweetCreateFailure.State(TweetCreateState.StaleTweetRetweetNotAllowed))</p>
+</dd>
+<dt>} else {</dt><dd><p>// the source tweet does not have any edit control or the source tweet is the latest tweet
+Future.Unit</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Builds the RetweetBuilder</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>def apply(</dt><dd><p>validateRequest: RetweetRequest =&gt; Future[Unit],
+tweetIdGenerator: TweetIdGenerator,
+tweetRepo: TweetRepository.Type,
+userRepo: UserRepository.Type,
+tflock: TFlockClient,
+deviceSourceRepo: DeviceSourceRepository.Type,
+validateUpdateRateLimit: RateLimitChecker.Validate,
+spamChecker: Spam.Checker[RetweetSpamRequest] = Spam.DoNotCheckSpam,
+updateUserCounts: (User, Tweet) =&gt; Future[User],
+superFollowRelationsRepo: StratoSuperFollowRelationsRepository.Type,
+unretweetEdits: TweetDeletePathHandler.UnretweetEdits,
+setEditWindowToSixtyMinutes: Gate[Unit]</p>
+</dd>
+<dt>): RetweetBuilder.Type = {</dt><dd><p>val entityExtactor = EntityExtractor.mutationAll.endo</p>
+<dl>
+<dt>val sourceTweetRepo: SourceTweetRequest =&gt; Stitch[Tweet] =</dt><dd><dl>
+<dt>req =&gt; {</dt><dd><dl>
+<dt>tweetRepo(</dt><dd><p>req.tweetId,
+WritePathQueryOptions.retweetSourceTweet(req.user, req.hydrateOptions)</p>
+</dd>
+<dt>).rescue {</dt><dd><blockquote>
+<div><p>case _: FilteredState =&gt; Stitch.NotFound</p>
+</div></blockquote>
+<p>}
+.rescue {</p>
+<blockquote>
+<div><p>convertRepoExceptions(TweetCreateState.SourceTweetNotFound, TweetLookupFailure(_))</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>val getUser = userLookup(userRepo)
+val getSourceUser = sourceUserLookup(userRepo)
+val getDeviceSource = deviceSourceLookup(deviceSourceRepo)</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>We exempt SGS test users from the check to get them through Block v2 testing.</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+<dt>def isSGSTestRole(user: User): Boolean =</dt><dd><p>user.roles.exists { roles =&gt; roles.roles.contains(SGSTestRole) }</p>
+</dd>
+<dt>def validateCanRetweet(</dt><dd><p>user: User,
+sourceUser: User,
+sourceTweet: Tweet,
+request: RetweetRequest</p>
+</dd>
+<dt>): Future[Unit] =</dt><dd><dl>
+<dt>Future</dt><dd><dl>
+<dt>.join(</dt><dd><p>validateNotCommunityTweet(sourceTweet),
+validateNotTrustedFriendsTweet(sourceTweet),
+validateSourceUserRetweetable(user, sourceUser),
+validateStaleTweet(sourceTweet),
+Future.when(!request.dark) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (request.returnSuccessOnDuplicate)</dt><dd><p>failWithRetweetIdIfAlreadyRetweeted(user, sourceTweet)</p>
+</dd>
+<dt>else</dt><dd><p>validateNotAlreadyRetweeted(user, sourceTweet)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>)
+.unit</p>
+</dd>
+</dl>
+</dd>
+<dt>def validateSourceUserRetweetable(user: User, sourceUser: User): Future[Unit] =</dt><dd><dl>
+<dt>if (sourceUser.profile.isEmpty)</dt><dd><p>Future.exception(UserProfileEmptyException)</p>
+</dd>
+<dt>else if (sourceUser.safety.isEmpty)</dt><dd><p>Future.exception(UserSafetyEmptyException)</p>
+</dd>
+<dt>else if (sourceUser.view.isEmpty)</dt><dd><p>Future.exception(UserViewEmptyException)</p>
+</dd>
+<dt>else if (user.id != sourceUser.id &amp;&amp; sourceUser.safety.get.isProtected)</dt><dd><p>Future.exception(TweetCreateFailure.State(TweetCreateState.CannotRetweetProtectedTweet))</p>
+</dd>
+<dt>else if (sourceUser.safety.get.deactivated)</dt><dd><p>Future.exception(TweetCreateFailure.State(TweetCreateState.CannotRetweetDeactivatedUser))</p>
+</dd>
+<dt>else if (sourceUser.safety.get.suspended)</dt><dd><p>Future.exception(TweetCreateFailure.State(TweetCreateState.CannotRetweetSuspendedUser))</p>
+</dd>
+<dt>else if (sourceUser.view.get.blockedBy &amp;&amp; !isSGSTestRole(user))</dt><dd><p>Future.exception(TweetCreateFailure.State(TweetCreateState.CannotRetweetBlockingUser))</p>
+</dd>
+<dt>else if (sourceUser.profile.get.screenName.isEmpty)</dt><dd><dl class="simple">
+<dt>Future.exception(</dt><dd><p>TweetCreateFailure.State(TweetCreateState.CannotRetweetUserWithoutScreenName)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>else</dt><dd><p>Future.Unit</p>
+</dd>
+</dl>
+</dd>
+<dt>def tflockGraphContains(</dt><dd><p>graph: StatusGraph,
+fromId: Long,
+toId: Long,
+dir: Direction</p>
+</dd>
+<dt>): Future[Boolean] =</dt><dd><dl class="simple">
+<dt>tflock.contains(graph, fromId, toId, dir).rescue {</dt><dd><p>case ex: OverCapacity =&gt; Future.exception(ex)
+case ex =&gt; Future.exception(TFlockLookupFailure(ex))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>def getRetweetIdFromTflock(sourceTweetId: TweetId, userId: UserId): Future[Option[Long]] =</dt><dd><dl>
+<dt>tflock</dt><dd><dl>
+<dt>.selectAll(</dt><dd><dl>
+<dt>Select(</dt><dd><p>sourceId = sourceTweetId,
+graph = RetweetsGraph,
+direction = Forward</p>
+</dd>
+<dt>).intersect(</dt><dd><dl class="simple">
+<dt>Select(</dt><dd><p>sourceId = userId,
+graph = UserTimelineGraph,
+direction = Forward</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>)
+.map(_.headOption)</p>
+</dd>
+</dl>
+</dd>
+<dt>def validateNotAlreadyRetweeted(user: User, sourceTweet: Tweet): Future[Unit] =</dt><dd><p>// use the perspective object from TLS if available, otherwise, check with tflock
+(sourceTweet.perspective match {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case Some(perspective) =&gt;</dt><dd><p>Future.value(perspective.retweeted)</p>
+</dd>
+<dt>case None =&gt;</dt><dd><p>// we have to query the RetweetSourceGraph in the Reverse order because
+// it is only defined in that direction, instead of bi-directionally
+tflockGraphContains(RetweetSourceGraph, user.id, sourceTweet.id, Reverse)</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl>
+<dt>}).flatMap {</dt><dd><dl class="simple">
+<dt>case true =&gt;</dt><dd><p>Future.exception(TweetCreateFailure.State(TweetCreateState.AlreadyRetweeted))</p>
+</dd>
+</dl>
+<p>case false =&gt; Future.Unit</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>def failWithRetweetIdIfAlreadyRetweeted(user: User, sourceTweet: Tweet): Future[Unit] =</dt><dd><p>// use the perspective object from TLS if available, otherwise, check with tflock
+(sourceTweet.perspective.flatMap(_.retweetId) match {</p>
+<blockquote>
+<div><p>case Some(tweetId) =&gt; Future.value(Some(tweetId))
+case None =&gt;</p>
+<blockquote>
+<div><p>getRetweetIdFromTflock(sourceTweet.id, user.id)</p>
+</div></blockquote>
+</div></blockquote>
+<dl>
+<dt>}).flatMap {</dt><dd><p>case None =&gt; Future.Unit
+case Some(tweetId) =&gt;</p>
+<blockquote>
+<div><p>Future.exception(TweetCreateFailure.AlreadyRetweeted(tweetId))</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>def validateContributor(contributorIdOpt: Option[UserId]): Future[Unit] =</dt><dd><dl class="simple">
+<dt>if (contributorIdOpt.isDefined)</dt><dd><p>Future.exception(TweetCreateFailure.State(TweetCreateState.ContributorNotSupported))</p>
+</dd>
+<dt>else</dt><dd><p>Future.Unit</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>case class RetweetSource(sourceTweet: Tweet, parentUserId: UserId)</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Recursively follows a retweet chain to the root source tweet.  Also returns user id from the</p></li>
+<li><p>first walked tweet as the ‘parentUserId’.</p></li>
+<li><p>In practice, the depth of the chain should never be greater than 2 because</p></li>
+<li><p>share.sourceStatusId should always reference the root (unlike share.parentStatusId).</p></li>
+</ul>
+<p><a href="#id9"><span class="problematic" id="id10">*</span></a>/</p>
+</dd>
+<dt>def findRetweetSource(</dt><dd><p>tweetId: TweetId,
+forUser: User,
+hydrateOptions: WritePathHydrationOptions</p>
+</dd>
+<dt>): Future[RetweetSource] =</dt><dd><dl>
+<dt>Stitch</dt><dd><p>.run(sourceTweetRepo(SourceTweetRequest(tweetId, forUser, hydrateOptions)))
+.flatMap { tweet =&gt;</p>
+<blockquote>
+<div><dl>
+<dt>getShare(tweet) match {</dt><dd><p>case None =&gt; Future.value(RetweetSource(tweet, getUserId(tweet)))
+case Some(share) =&gt;</p>
+<blockquote>
+<div><dl class="simple">
+<dt>findRetweetSource(share.sourceStatusId, forUser, hydrateOptions)</dt><dd><p>.map(_.copy(parentUserId = getUserId(tweet)))</p>
+</dd>
+</dl>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+<dt>FutureArrow { request =&gt;</dt><dd><dl>
+<dt>for {</dt><dd><p>() &lt;- validateRequest(request)
+userFuture = Stitch.run(getUser(request.userId))
+tweetIdFuture = tweetIdGenerator()
+devsrcFuture = Stitch.run(getDeviceSource(request.createdVia))
+user &lt;- userFuture
+tweetId &lt;- tweetIdFuture
+devsrc &lt;- devsrcFuture
+rtSource &lt;- findRetweetSource(</p>
+<blockquote>
+<div><p>request.sourceStatusId,
+user,
+request.hydrationOptions.getOrElse(WritePathHydrationOptions(simpleQuotedTweet = true))</p>
+</div></blockquote>
+<p>)
+sourceTweet = rtSource.sourceTweet
+sourceUser &lt;- Stitch.run(getSourceUser(getUserId(sourceTweet), request.userId))</p>
+<p>// We want to confirm that a user is actually allowed to
+// retweet an Exclusive Tweet (only available to super followers)
+() &lt;- StratoSuperFollowRelationsRepository.Validate(</p>
+<blockquote>
+<div><p>sourceTweet.exclusiveTweetControl,
+user.id,
+superFollowRelationsRepo)</p>
+</div></blockquote>
+<p>() &lt;- validateUser(user)
+() &lt;- validateUpdateRateLimit((user.id, request.dark))
+() &lt;- validateContributor(request.contributorUserId)
+() &lt;- validateCanRetweet(user, sourceUser, sourceTweet, request)
+() &lt;- unretweetEdits(sourceTweet.editControl, sourceTweet.id, user.id)</p>
+<dl class="simple">
+<dt>spamRequest = RetweetSpamRequest(</dt><dd><p>retweetId = tweetId,
+sourceUserId = getUserId(sourceTweet),
+sourceTweetId = sourceTweet.id,
+sourceTweetText = getText(sourceTweet),
+sourceUserName = sourceUser.profile.map(_.screenName),
+safetyMetaData = request.safetyMetaData</p>
+</dd>
+</dl>
+<p>)</p>
+<p>spamResult &lt;- spamChecker(spamRequest)</p>
+<p>safety = user.safety.get</p>
+<dl class="simple">
+<dt>share = Share(</dt><dd><p>sourceStatusId = sourceTweet.id,
+sourceUserId = sourceUser.id,
+parentStatusId = request.sourceStatusId</p>
+</dd>
+</dl>
+<p>)</p>
+<p>retweetText = composeRetweetText(getText(sourceTweet), sourceUser)
+createdAt = SnowflakeId(tweetId).time</p>
+<dl class="simple">
+<dt>coreData = TweetCoreData(</dt><dd><p>userId = request.userId,
+text = retweetText,
+createdAtSecs = createdAt.inSeconds,
+createdVia = devsrc.internalName,
+share = Some(share),
+hasTakedown = safety.hasTakedown,
+trackingId = request.trackingId,
+nsfwUser = safety.nsfwUser,
+nsfwAdmin = safety.nsfwAdmin,
+narrowcast = request.narrowcast,
+nullcast = request.nullcast</p>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>retweet = Tweet(</dt><dd><p>id = tweetId,
+coreData = Some(coreData),
+contributor = getContributor(request.userId),
+editControl = Some(</p>
+<blockquote>
+<div><dl>
+<dt>EditControl.Initial(</dt><dd><dl>
+<dt>EditControlUtil</dt><dd><dl class="simple">
+<dt>.makeEditControlInitial(</dt><dd><p>tweetId = tweetId,
+createdAt = createdAt,
+setEditWindowToSixtyMinutes = setEditWindowToSixtyMinutes</p>
+</dd>
+</dl>
+<p>)
+.initial
+.copy(isEditEligible = Some(false))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<p>),</p>
+</dd>
+</dl>
+<p>)</p>
+<p>retweetWithEntities = entityExtactor(retweet)
+retweetWithAdditionalFields = setAdditionalFields(</p>
+<blockquote>
+<div><p>retweetWithEntities,
+request.additionalFields</p>
+</div></blockquote>
+<p>)
+// update the perspective and counts fields of the source tweet to reflect the effects
+// of the user performing a retweet, even though those effects haven’t happened yet.
+updatedSourceTweet = sourceTweet.copy(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>perspective = sourceTweet.perspective.map {</dt><dd><p>_.copy(retweeted = true, retweetId = Some(retweet.id))</p>
+</dd>
+</dl>
+<p>},
+counts = sourceTweet.counts.map { c =&gt; c.copy(retweetCount = c.retweetCount.map(_ + 1)) }</p>
+</div></blockquote>
+<p>)</p>
+<p>user &lt;- updateUserCounts(user, retweetWithAdditionalFields)</p>
+</dd>
+<dt>} yield {</dt><dd><dl class="simple">
+<dt>TweetBuilderResult(</dt><dd><p>tweet = retweetWithAdditionalFields,
+user = user,
+createdAt = createdAt,
+sourceTweet = Some(updatedSourceTweet),
+sourceUser = Some(sourceUser),
+parentUserId = Some(rtSource.parentUserId),
+isSilentFail = spamResult == Spam.SilentFail</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/tweetypie/server/src/main/scala/com/twitter/tweetypie/handler/RetweetBuilder.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

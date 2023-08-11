@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.usersignalservice.signals</p>
+<p>import com.twitter.bijection.Codec
+import com.twitter.bijection.scrooge.BinaryScalaCodec
+import com.twitter.dds.jobs.repeated_profile_visits.thriftscala.ProfileVisitSet
+import com.twitter.dds.jobs.repeated_profile_visits.thriftscala.ProfileVisitorInfo
+import com.twitter.experiments.general_metrics.thriftscala.IdType
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.simclusters_v2.thriftscala.InternalId
+import com.twitter.storage.client.manhattan.kv.ManhattanKVClientMtlsParams
+import com.twitter.storehaus_internal.manhattan.Apollo
+import com.twitter.storehaus_internal.manhattan.ManhattanCluster
+import com.twitter.twistly.common.UserId
+import com.twitter.usersignalservice.base.ManhattanSignalFetcher
+import com.twitter.usersignalservice.base.Query
+import com.twitter.usersignalservice.thriftscala.Signal
+import com.twitter.usersignalservice.thriftscala.SignalType
+import com.twitter.util.Future
+import com.twitter.util.Timer
+import javax.inject.Inject
+import javax.inject.Singleton</p>
+<dl class="simple">
+<dt>case class ProfileVisitMetadata(</dt><dd><p>targetId: Option[Long],
+totalTargetVisitsInLast14Days: Option[Int],
+totalTargetVisitsInLast90Days: Option[Int],
+totalTargetVisitsInLast180Days: Option[Int],
+latestTargetVisitTimestampInLast90Days: Option[Long])</p>
+</dd>
+</dl>
+<p>&#64;Singleton
+case class ProfileVisitsFetcher &#64;Inject() (</p>
+<blockquote>
+<div><p>manhattanKVClientMtlsParams: ManhattanKVClientMtlsParams,
+timer: Timer,
+stats: StatsReceiver)</p>
+<blockquote>
+<div><p>extends ManhattanSignalFetcher[ProfileVisitorInfo, ProfileVisitSet] {</p>
+</div></blockquote>
+<p>import ProfileVisitsFetcher._</p>
+<p>override type RawSignalType = ProfileVisitMetadata</p>
+<p>override val manhattanAppId: String = MHAppId
+override val manhattanDatasetName: String = MHDatasetName
+override val manhattanClusterId: ManhattanCluster = Apollo
+override val manhattanKeyCodec: Codec[ProfileVisitorInfo] = BinaryScalaCodec(ProfileVisitorInfo)
+override val manhattanRawSignalCodec: Codec[ProfileVisitSet] = BinaryScalaCodec(ProfileVisitSet)</p>
+<dl>
+<dt>override protected def toManhattanKey(userId: UserId): ProfileVisitorInfo =</dt><dd><p>ProfileVisitorInfo(userId, IdType.User)</p>
+</dd>
+<dt>override protected def toRawSignals(manhattanValue: ProfileVisitSet): Seq[ProfileVisitMetadata] =</dt><dd><dl>
+<dt>manhattanValue.profileVisitSet</dt><dd><dl>
+<dt>.map {</dt><dd><dl>
+<dt>_.collect {</dt><dd><p>// only keep the Non-NSFW and not-following profile visits
+case profileVisit</p>
+<blockquote>
+<div><blockquote>
+<div><p>if profileVisit.targetId.nonEmpty
+// The below check covers 180 days, not only 90 days as the name implies.
+// See comment on [[ProfileVisit.latestTargetVisitTimestampInLast90Days]] thrift.</p>
+<blockquote>
+<div><p>&amp;&amp; profileVisit.latestTargetVisitTimestampInLast90Days.nonEmpty
+&amp;&amp; !profileVisit.isTargetNSFW.getOrElse(false)
+&amp;&amp; !profileVisit.doesSourceIdFollowTargetId.getOrElse(false) =&gt;</p>
+</div></blockquote>
+</div></blockquote>
+<dl>
+<dt>ProfileVisitMetadata(</dt><dd><p>targetId = profileVisit.targetId,
+totalTargetVisitsInLast14Days = profileVisit.totalTargetVisitsInLast14Days,
+totalTargetVisitsInLast90Days = profileVisit.totalTargetVisitsInLast90Days,
+totalTargetVisitsInLast180Days = profileVisit.totalTargetVisitsInLast180Days,
+latestTargetVisitTimestampInLast90Days =</p>
+<blockquote>
+<div><p>profileVisit.latestTargetVisitTimestampInLast90Days</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}.toSeq</p>
+</dd>
+</dl>
+<p>}.getOrElse(Seq.empty)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>override val name: String = this.getClass.getCanonicalName</p>
+<p>override val statsReceiver: StatsReceiver = stats.scope(name)</p>
+<dl>
+<dt>override def process(</dt><dd><p>query: Query,
+rawSignals: Future[Option[Seq[ProfileVisitMetadata]]]</p>
+</dd>
+<dt>): Future[Option[Seq[Signal]]] = rawSignals.map { profiles =&gt;</dt><dd><dl>
+<dt>profiles</dt><dd><dl>
+<dt>.map {</dt><dd><dl>
+<dt>_.filter(profileVisitMetadata =&gt; visitCountFilter(profileVisitMetadata, query.signalType))</dt><dd><dl class="simple">
+<dt>.sortBy(profileVisitMetadata =&gt;</dt><dd><p>-visitCountMap(query.signalType)(profileVisitMetadata).getOrElse(0))</p>
+</dd>
+<dt>.map(profileVisitMetadata =&gt;</dt><dd><p>signalFromProfileVisit(profileVisitMetadata, query.signalType))</p>
+</dd>
+</dl>
+<p>.take(query.maxResults.getOrElse(Int.MaxValue))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>object ProfileVisitsFetcher {</dt><dd><p>private val MHAppId = “repeated_profile_visits_aggregated”
+private val MHDatasetName = “repeated_profile_visits_aggregated”</p>
+<dl class="simple">
+<dt>private val minVisitCountMap: Map[SignalType, Int] = Map(</dt><dd><p>SignalType.RepeatedProfileVisit14dMinVisit2V1 -&gt; 2,
+SignalType.RepeatedProfileVisit14dMinVisit2V1NoNegative -&gt; 2,
+SignalType.RepeatedProfileVisit90dMinVisit6V1 -&gt; 6,
+SignalType.RepeatedProfileVisit90dMinVisit6V1NoNegative -&gt; 6,
+SignalType.RepeatedProfileVisit180dMinVisit6V1 -&gt; 6,
+SignalType.RepeatedProfileVisit180dMinVisit6V1NoNegative -&gt; 6</p>
+</dd>
+</dl>
+<p>)</p>
+<dl class="simple">
+<dt>private val visitCountMap: Map[SignalType, ProfileVisitMetadata =&gt; Option[Int]] = Map(</dt><dd><dl class="simple">
+<dt>SignalType.RepeatedProfileVisit14dMinVisit2V1 -&gt;</dt><dd><dl class="simple">
+<dt>((profileVisitMetadata: ProfileVisitMetadata) =&gt;</dt><dd><p>profileVisitMetadata.totalTargetVisitsInLast14Days),</p>
+</dd>
+</dl>
+</dd>
+<dt>SignalType.RepeatedProfileVisit14dMinVisit2V1NoNegative -&gt;</dt><dd><dl class="simple">
+<dt>((profileVisitMetadata: ProfileVisitMetadata) =&gt;</dt><dd><p>profileVisitMetadata.totalTargetVisitsInLast14Days),</p>
+</dd>
+</dl>
+</dd>
+<dt>SignalType.RepeatedProfileVisit90dMinVisit6V1 -&gt;</dt><dd><dl class="simple">
+<dt>((profileVisitMetadata: ProfileVisitMetadata) =&gt;</dt><dd><p>profileVisitMetadata.totalTargetVisitsInLast90Days),</p>
+</dd>
+</dl>
+</dd>
+<dt>SignalType.RepeatedProfileVisit90dMinVisit6V1NoNegative -&gt;</dt><dd><dl class="simple">
+<dt>((profileVisitMetadata: ProfileVisitMetadata) =&gt;</dt><dd><p>profileVisitMetadata.totalTargetVisitsInLast90Days),</p>
+</dd>
+</dl>
+</dd>
+<dt>SignalType.RepeatedProfileVisit180dMinVisit6V1 -&gt;</dt><dd><dl class="simple">
+<dt>((profileVisitMetadata: ProfileVisitMetadata) =&gt;</dt><dd><p>profileVisitMetadata.totalTargetVisitsInLast180Days),</p>
+</dd>
+</dl>
+</dd>
+<dt>SignalType.RepeatedProfileVisit180dMinVisit6V1NoNegative -&gt;</dt><dd><dl class="simple">
+<dt>((profileVisitMetadata: ProfileVisitMetadata) =&gt;</dt><dd><p>profileVisitMetadata.totalTargetVisitsInLast180Days)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>def signalFromProfileVisit(</dt><dd><p>profileVisitMetadata: ProfileVisitMetadata,
+signalType: SignalType</p>
+</dd>
+<dt>): Signal = {</dt><dd><dl class="simple">
+<dt>Signal(</dt><dd><p>signalType,
+profileVisitMetadata.latestTargetVisitTimestampInLast90Days.get,
+profileVisitMetadata.targetId.map(targetId =&gt; InternalId.UserId(targetId))</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>def visitCountFilter(</dt><dd><p>profileVisitMetadata: ProfileVisitMetadata,
+signalType: SignalType</p>
+</dd>
+<dt>): Boolean = {</dt><dd><p>visitCountMap(signalType)(profileVisitMetadata).exists(_ &gt;= minVisitCountMap(signalType))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/user-signal-service/server/src/main/scala/com/twitter/usersignalservice/signals/ProfileVisitsFetcher.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

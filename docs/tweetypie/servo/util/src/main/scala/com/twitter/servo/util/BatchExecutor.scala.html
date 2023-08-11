@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../../" id="documentation_options" src="../../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.servo.util</p>
+<p>import com.twitter.logging.Logger
+import com.twitter.util.{Timer, Duration, Promise, Future, Return, Throw}
+import java.util.concurrent.CancellationException
+import scala.collection.mutable.ArrayBuffer</p>
+<p>&#64;deprecated(“Use <cite>Future.batched</cite>”, “2.6.1”)
+trait BatchExecutorFactory {</p>
+<blockquote>
+<div><p>def apply[In, Out](f: Seq[In] =&gt; Future[Seq[Out]]): BatchExecutor[In, Out]</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>A BatchExecutorFactory allows you to specify the criteria in which a batch</p></li>
+<li><p>should be flushed prior to constructing a BatchExecutor. A BatchExecutor asks for a</p></li>
+<li><p>function that takes a Seq[In] and returns a Future[Seq[Out]], in return it gives you</p></li>
+<li><p>a <cite>In =&gt; Future[Out]</cite> interface so that you can incrementally submit tasks to be</p></li>
+<li><p>performed when the criteria for batch flushing is met.</p></li>
+<li></li>
+<li><p>Examples:</p></li>
+<li><p>val batcherFactory = BatchExecutorFactory(sizeThreshold = 10)</p></li>
+<li><p>def processBatch(reqs: Seq[Request]): Future[Seq[Response]]</p></li>
+<li><p>val batcher = batcherFactory(processBatch)</p></li>
+<li></li>
+<li><p>val response: Future[Response] = batcher(new Request)</p></li>
+<li></li>
+<li><p>the batcher will wait until 10 requests have been submitted, then delegate</p></li>
+<li><p>to the processBatch method to compute the responses.</p></li>
+<li></li>
+<li><p>you can also construct a BatchExecutor that has a time-based threshold or both:</p></li>
+<li><p>val batcherFactory = BatchExecutorFactory(</p></li>
+<li><p>sizeThreshold = 10, timeThreshold = 10.milliseconds, timer = new JavaTimer(true))</p></li>
+<li></li>
+<li><p>A batcher’s size can be controlled at runtime through a bufSizeFraction function</p></li>
+<li><p>that should return a float between 0.0 and 1.0 that represents the fractional size</p></li>
+<li><p>of the sizeThreshold that should be used for the next batch to be collected.</p></li>
+<li></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+</dl>
+<p>&#64;deprecated(“Use <cite>Future.batched</cite>”, “2.6.1”)
+object BatchExecutorFactory {</p>
+<blockquote>
+<div><p>final val DefaultBufSizeFraction = 1.0f
+lazy val instant = sized(1)</p>
+<dl>
+<dt>def sized(sizeThreshold: Int): BatchExecutorFactory = new BatchExecutorFactory {</dt><dd><dl class="simple">
+<dt>override def apply[In, Out](f: Seq[In] =&gt; Future[Seq[Out]]) = {</dt><dd><p>new BatchExecutor(sizeThreshold, None, f, DefaultBufSizeFraction)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def timed(timeThreshold: Duration, timer: Timer): BatchExecutorFactory =</dt><dd><p>sizedAndTimed(Int.MaxValue, timeThreshold, timer)</p>
+</dd>
+<dt>def sizedAndTimed(</dt><dd><p>sizeThreshold: Int,
+timeThreshold: Duration,
+timer: Timer</p>
+</dd>
+<dt>): BatchExecutorFactory =</dt><dd><p>dynamicSizedAndTimed(sizeThreshold, timeThreshold, timer, DefaultBufSizeFraction)</p>
+</dd>
+<dt>def dynamicSizedAndTimed(</dt><dd><p>sizeThreshold: Int,
+timeThreshold: Duration,
+timer: Timer,
+bufSizeFraction: =&gt; Float</p>
+</dd>
+<dt>): BatchExecutorFactory = new BatchExecutorFactory {</dt><dd><dl class="simple">
+<dt>override def apply[In, Out](f: (Seq[In]) =&gt; Future[Seq[Out]]) = {</dt><dd><p>new BatchExecutor(sizeThreshold, Some(timeThreshold, timer), f, bufSizeFraction)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;deprecated(“Use <cite>Future.batched</cite>”, “2.6.1”)
+class BatchExecutor[In, Out] private[util] (</p>
+<blockquote>
+<div><p>maxSizeThreshold: Int,
+timeThreshold: Option[(Duration, Timer)],
+f: Seq[In] =&gt; Future[Seq[Out]],
+bufSizeFraction: =&gt; Float) { batcher =&gt;</p>
+<dl>
+<dt>private[this] class ScheduledFlush(after: Duration, timer: Timer) {</dt><dd><p>&#64;volatile private[this] var cancelled = false
+private[this] val task = timer.schedule(after.fromNow) { flush() }</p>
+<dl class="simple">
+<dt>def cancel(): Unit = {</dt><dd><p>cancelled = true
+task.cancel()</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private[this] def flush(): Unit = {</dt><dd><dl>
+<dt>val doAfter = batcher.synchronized {</dt><dd><dl class="simple">
+<dt>if (!cancelled) {</dt><dd><p>flushBatch()</p>
+</dd>
+<dt>} else { () =&gt;</dt><dd><p>()</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>doAfter()</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>private[this] val log = Logger.get(“BatchExecutor”)</p>
+<p>// operations on these are synchronized on <cite>this</cite>
+private[this] val buf = new ArrayBuffer[(In, Promise[Out])](maxSizeThreshold)
+private[this] var scheduled: Option[ScheduledFlush] = None
+private[this] var currentBufThreshold = newBufThreshold</p>
+<p>private[this] def shouldSchedule = timeThreshold.isDefined &amp;&amp; scheduled.isEmpty</p>
+<dl>
+<dt>private[this] def currentBufFraction = {</dt><dd><p>val fract = bufSizeFraction</p>
+<dl>
+<dt>if (fract &gt; 1.0f) {</dt><dd><dl class="simple">
+<dt>log.warning(</dt><dd><p>“value returned for BatchExecutor.bufSizeFraction (%f) was &gt; 1.0f, using 1.0”,
+fract</p>
+</dd>
+</dl>
+<p>)
+1.0f</p>
+</dd>
+<dt>} else if (fract &lt; 0.0f) {</dt><dd><dl class="simple">
+<dt>log.warning(</dt><dd><p>“value returned for BatchExecutor.bufSizeFraction (%f) was negative, using 0.0f”,
+fract</p>
+</dd>
+</dl>
+<p>)
+0.0f</p>
+</dd>
+<dt>} else {</dt><dd><p>fract</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private[this] def newBufThreshold = {</dt><dd><p>val size: Int = math.round(currentBufFraction * maxSizeThreshold)</p>
+<dl class="simple">
+<dt>if (size &lt; 1) {</dt><dd><p>1</p>
+</dd>
+<dt>} else if (size &gt;= maxSizeThreshold) {</dt><dd><p>maxSizeThreshold</p>
+</dd>
+<dt>} else {</dt><dd><p>size</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>def apply(t: In): Future[Out] = {</dt><dd><p>enqueue(t)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private[this] def enqueue(t: In): Future[Out] = {</dt><dd><p>val promise = new Promise[Out]
+val doAfter = synchronized {</p>
+<blockquote>
+<div><p>buf.append((t, promise))
+if (buf.size &gt;= currentBufThreshold) {</p>
+<blockquote>
+<div><p>flushBatch()</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>scheduleFlushIfNecessary()
+() =&gt; ()</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>doAfter()
+promise</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private[this] def scheduleFlushIfNecessary(): Unit = {</dt><dd><dl>
+<dt>timeThreshold foreach {</dt><dd><dl>
+<dt>case (duration, timer) =&gt;</dt><dd><dl class="simple">
+<dt>if (shouldSchedule) {</dt><dd><p>scheduled = Some(new ScheduledFlush(duration, timer))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private[this] def flushBatch(): () =&gt; Unit = {</dt><dd><p>// this must be executed within a synchronize block
+val prevBatch = new ArrayBuffer[(In, Promise[Out])](buf.length)
+buf.copyToBuffer(prevBatch)
+buf.clear()</p>
+<p>scheduled foreach { _.cancel() }
+scheduled = None
+currentBufThreshold = newBufThreshold // set the next batch’s size</p>
+<dl>
+<dt>() =&gt;</dt><dd><dl class="simple">
+<dt>try {</dt><dd><p>executeBatch(prevBatch)</p>
+</dd>
+<dt>} catch {</dt><dd><dl class="simple">
+<dt>case e: Throwable =&gt;</dt><dd><p>log.warning(e, “unhandled exception caught in BatchExecutor: %s”, e.toString)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private[this] def executeBatch(batch: Seq[(In, Promise[Out])]): Unit = {</dt><dd><dl>
+<dt>val uncancelled = batch filter {</dt><dd><dl>
+<dt>case (in, p) =&gt;</dt><dd><dl>
+<dt>p.isInterrupted match {</dt><dd><dl class="simple">
+<dt>case Some(_cause) =&gt;</dt><dd><p>p.setException(new CancellationException)
+false</p>
+</dd>
+</dl>
+<p>case None =&gt; true</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>val ins = uncancelled map { case (in, _) =&gt; in }
+// N.B. intentionally not linking cancellation of these promises to the execution of the batch
+// because it seems that in most cases you would be canceling mostly uncanceled work for an
+// outlier.
+val promises = uncancelled map { case (_, promise) =&gt; promise }</p>
+<dl>
+<dt>f(ins) respond {</dt><dd><dl>
+<dt>case Return(outs) =&gt;</dt><dd><dl class="simple">
+<dt>(outs zip promises) foreach {</dt><dd><dl class="simple">
+<dt>case (out, p) =&gt;</dt><dd><p>p() = Return(out)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>case Throw(e) =&gt;</dt><dd><p>val t = Throw(e)
+promises foreach { _() = t }</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../../_sources/tweetypie/servo/util/src/main/scala/com/twitter/servo/util/BatchExecutor.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

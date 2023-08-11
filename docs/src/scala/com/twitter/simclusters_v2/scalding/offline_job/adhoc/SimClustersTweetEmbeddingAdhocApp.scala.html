@@ -1,0 +1,397 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../" id="documentation_options" src="../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.simclusters_v2.scalding.offline_job.adhoc</p>
+<p>import com.twitter.bijection.{Bufferable, Injection}
+import com.twitter.scalding._
+import com.twitter.scalding.commons.source.VersionedKeyValSource
+import com.twitter.scalding_internal.dalv2.DAL
+import com.twitter.scalding_internal.dalv2.remote_access.{ExplicitLocation, ProcAtla}
+import com.twitter.scalding_internal.multiformat.format.keyval.KeyVal
+import com.twitter.simclusters_v2.common.{ClusterId, TweetId, UserId}
+import com.twitter.simclusters_v2.hdfs_sources.SimclustersV2InterestedIn20M145KUpdatedScalaDataset
+import com.twitter.simclusters_v2.scalding.common.matrix.{SparseMatrix, SparseRowMatrix}
+import com.twitter.simclusters_v2.scalding.offline_job.SimClustersOfflineJobUtil
+import com.twitter.simclusters_v2.summingbird.common.{Configs, SimClustersInterestedInUtil}
+import com.twitter.simclusters_v2.thriftscala.ClustersUserIsInterestedIn
+import com.twitter.wtf.scalding.jobs.common.AdhocExecutionApp
+import java.util.TimeZone</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Adhoc job for computing Tweet SimClusters embeddings.</p></li>
+<li><p>The output of this job includes two data sets: tweet -&gt; top clusters (or Tweet Embedding), and cluster -&gt; top tweets.</p></li>
+<li><p>These data sets are supposed to be the snapshot of the two index at the end of the dataRange you run.</p></li>
+<li></li>
+<li><p>Note that you can also use the output from SimClustersOfflineJobScheduledApp for analysis purpose.</p></li>
+<li><p>The outputs from that job might be more close to the data we use in production.</p></li>
+<li><p>The benefit of having this job is to keep the flexibility of experiment different ideas.</p></li>
+<li></li>
+<li><p>It is recommended to put at least 2 days in the –date (dataRange in the code) in order to make sure</p></li>
+<li><p>we have enough engagement data for tweets have more engagements in the last 1+ days.</p></li>
+<li></li>
+<li></li>
+<li><p>There are several parameters to tune in the job. They are explained in the inline comments.</p></li>
+<li></li>
+<li></li>
+<li><dl class="simple">
+<dt>To run the job:</dt><dd><p>scalding remote run –target src/scala/com/twitter/simclusters_v2/scalding/offline_job/adhoc:tweet_embedding-adhoc –user recos-platform –reducers 1000 –main-class com.twitter.simclusters_v2.scalding.offline_job.adhoc.SimClustersTweetEmbeddingAdhocApp – –date 2021-01-27 2021-01-28 –score_type logFav –output_dir /user/recos-platform/adhoc/tweet_embedding_01_27_28_unnormalized_t9</p>
+</dd>
+</dl>
+</li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+</dl>
+<p>object SimClustersTweetEmbeddingAdhocApp extends AdhocExecutionApp {</p>
+<blockquote>
+<div><p>import SimClustersOfflineJobUtil._</p>
+<dl class="simple">
+<dt>override def runOnDateRange(</dt><dd><p>args: Args</p>
+</dd>
+<dt>)(</dt><dd><p>implicit dateRange: DateRange,
+timeZone: TimeZone,
+uniqueID: UniqueID</p>
+</dd>
+</dl>
+<p>): Execution[Unit] = {</p>
+<blockquote>
+<div><p>val outputDir = args(“output_dir”)</p>
+<p>// what interestedIn score to use. logFav is what we use in production
+val scoringMethod = args.getOrElse(“score_type”, “logFav”)</p>
+<p>// whether to use normalized score in the cluster -&gt; top tweets.
+// Currently, we do not do this in production. DONOT turn it on unless you know what you are doing.
+// NOTE that for scalding args, “–run_normalized” will just set the arg to be true, and
+// even you use “–run_normalized false”, it will still be true.
+val usingNormalizedScoringFunction = args.boolean(“run_normalized”)</p>
+<p>// filter out tweets that has less than X favs in the dateRange.
+val tweetFavThreshold = args.long(“tweet_fav_threshold”, 0L)</p>
+<p>// tweet -&gt; top clusters will be saved in this subfolder
+val tweetTopKClustersOutputPath: String = outputDir + “/tweet_top_k_clusters”</p>
+<p>// cluster -&gt; top tweets will be saved in this subfolder
+val clusterTopKTweetsOutputPath: String = outputDir + “/cluster_top_k_tweets”</p>
+<dl>
+<dt>val interestedInData: TypedPipe[(Long, ClustersUserIsInterestedIn)] =</dt><dd><dl>
+<dt>DAL</dt><dd><dl class="simple">
+<dt>.readMostRecentSnapshot(</dt><dd><p>SimclustersV2InterestedIn20M145KUpdatedScalaDataset,
+dateRange.embiggen(Days(14))</p>
+</dd>
+</dl>
+<p>)
+.withRemoteReadPolicy(ExplicitLocation(ProcAtla))
+.toTypedPipe
+.map {</p>
+<blockquote>
+<div><p>case KeyVal(key, value) =&gt; (key, value)</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>// read user-tweet fav data. set the weight to be a decayed value. they will be decayed to the dateRang.end
+val userTweetFavData: SparseMatrix[UserId, TweetId, Double] =</p>
+<blockquote>
+<div><dl>
+<dt>SparseMatrix(readTimelineFavoriteData(dateRange)).tripleApply {</dt><dd><dl>
+<dt>case (userId, tweetId, timestamp) =&gt;</dt><dd><dl>
+<dt>(</dt><dd><p>userId,
+tweetId,
+thriftDecayedValueMonoid</p>
+<blockquote>
+<div><dl class="simple">
+<dt>.plus(</dt><dd><p>thriftDecayedValueMonoid.build(1.0, timestamp),
+thriftDecayedValueMonoid.build(0.0, dateRange.end.timestamp)</p>
+</dd>
+</dl>
+<p>)
+.value)</p>
+</div></blockquote>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>// filter out tweets without x favs
+val tweetSubset =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>userTweetFavData.colNnz.filter(</dt><dd><p>_._2 &gt; tweetFavThreshold.toDouble</p>
+</dd>
+</dl>
+<p>) // keep tweets with at least x favs</p>
+</div></blockquote>
+<p>val userTweetFavDataSubset = userTweetFavData.filterCols(tweetSubset.keys)</p>
+<p>// construct user-simclusters matrix
+val userSimClustersInterestedInData: SparseRowMatrix[UserId, ClusterId, Double] =</p>
+<blockquote>
+<div><dl>
+<dt>SparseRowMatrix(</dt><dd><dl>
+<dt>interestedInData.map {</dt><dd><dl>
+<dt>case (userId, clusters) =&gt;</dt><dd><dl>
+<dt>val topClustersWithScores =</dt><dd><dl>
+<dt>SimClustersInterestedInUtil</dt><dd><p>.topClustersWithScores(clusters)
+.collect {</p>
+<blockquote>
+<div><dl>
+<dt>case (clusterId, scores)</dt><dd><blockquote>
+<div><dl>
+<dt>if scores.favScore &gt; Configs</dt><dd><dl class="simple">
+<dt>.favScoreThresholdForUserInterest(</dt><dd><p>clusters.knownForModelVersion</p>
+</dd>
+</dl>
+<p>) =&gt; // this is the same threshold used in the summingbird job</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl class="simple">
+<dt>scoringMethod match {</dt><dd><dl class="simple">
+<dt>case “fav” =&gt;</dt><dd><p>clusterId -&gt; scores.clusterNormalizedFavScore</p>
+</dd>
+<dt>case “follow” =&gt;</dt><dd><p>clusterId -&gt; scores.clusterNormalizedFollowScore</p>
+</dd>
+<dt>case “logFav” =&gt;</dt><dd><p>clusterId -&gt; scores.clusterNormalizedLogFavScore</p>
+</dd>
+<dt>case _ =&gt;</dt><dd><dl class="simple">
+<dt>throw new IllegalArgumentException(</dt><dd><p>“score_type can only be fav, follow or logFav”)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+.filter(_._2 &gt; 0.0)
+.toMap</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>userId -&gt; topClustersWithScores</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>},
+isSkinnyMatrix = true</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<p>// multiply tweet -&gt; user matrix with user -&gt; cluster matrix to get tweet -&gt; cluster matrix
+val tweetClusterScoreMatrix = if (usingNormalizedScoringFunction) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>userTweetFavDataSubset.transpose.rowL2Normalize</dt><dd><p>.multiplySkinnySparseRowMatrix(userSimClustersInterestedInData)</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><dl class="simple">
+<dt>userTweetFavDataSubset.transpose.multiplySkinnySparseRowMatrix(</dt><dd><p>userSimClustersInterestedInData)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>// get the tweet -&gt; top clusters by taking top K in each row
+val tweetTopClusters = tweetClusterScoreMatrix</p>
+<blockquote>
+<div><p>.sortWithTakePerRow(Configs.topKClustersPerTweet)(Ordering.by(-_._2))
+.fork</p>
+</div></blockquote>
+<p>// get the cluster -&gt; top tweets by taking top K in each colum
+val clusterTopTweets = tweetClusterScoreMatrix</p>
+<blockquote>
+<div><p>.sortWithTakePerCol(Configs.topKTweetsPerCluster)(Ordering.by(-_._2))
+.fork</p>
+</div></blockquote>
+<p>// injections for saving a list
+implicit val inj1: Injection[List[(Int, Double)], Array[Byte]] =</p>
+<blockquote>
+<div><p>Bufferable.injectionOf[List[(Int, Double)]]</p>
+</div></blockquote>
+<dl class="simple">
+<dt>implicit val inj2: Injection[List[(Long, Double)], Array[Byte]] =</dt><dd><p>Bufferable.injectionOf[List[(Long, Double)]]</p>
+</dd>
+</dl>
+<p>// save the data sets and also output to some tsv files for eyeballing the results
+Execution</p>
+<blockquote>
+<div><dl>
+<dt>.zip(</dt><dd><dl>
+<dt>tweetTopClusters</dt><dd><p>.mapValues(_.toList)
+.writeExecution(</p>
+<blockquote>
+<div><p>VersionedKeyValSource[TweetId, List[(ClusterId, Double)]](tweetTopKClustersOutputPath)</p>
+</div></blockquote>
+<p>),</p>
+</dd>
+<dt>tweetTopClusters</dt><dd><dl>
+<dt>.map {</dt><dd><dl>
+<dt>case (tweetId, topKClusters) =&gt;</dt><dd><dl>
+<dt>tweetId -&gt; topKClusters</dt><dd><dl class="simple">
+<dt>.map {</dt><dd><dl class="simple">
+<dt>case (clusterId, score) =&gt;</dt><dd><p>s”$clusterId:” + “%.3g”.format(score)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+.mkString(“,”)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+.writeExecution(</p>
+<blockquote>
+<div><p>TypedTsv(tweetTopKClustersOutputPath + “_tsv”)</p>
+</div></blockquote>
+<p>),</p>
+</dd>
+</dl>
+<p>tweetSubset.writeExecution(TypedTsv(tweetTopKClustersOutputPath + “_tweet_favs”)),
+clusterTopTweets</p>
+<blockquote>
+<div><p>.mapValues(_.toList)
+.writeExecution(</p>
+<blockquote>
+<div><p>VersionedKeyValSource[ClusterId, List[(TweetId, Double)]](clusterTopKTweetsOutputPath)</p>
+</div></blockquote>
+<p>),</p>
+</div></blockquote>
+<dl>
+<dt>clusterTopTweets</dt><dd><dl>
+<dt>.map {</dt><dd><dl>
+<dt>case (clusterId, topKTweets) =&gt;</dt><dd><dl>
+<dt>clusterId -&gt; topKTweets</dt><dd><dl class="simple">
+<dt>.map {</dt><dd><p>case (tweetId, score) =&gt; s”$tweetId:” + “%.3g”.format(score)</p>
+</dd>
+</dl>
+<p>}
+.mkString(“,”)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+.writeExecution(</p>
+<blockquote>
+<div><p>TypedTsv(clusterTopKTweetsOutputPath + “_tsv”)</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>)
+.unit</p>
+</div></blockquote>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../_sources/src/scala/com/twitter/simclusters_v2/scalding/offline_job/adhoc/SimClustersTweetEmbeddingAdhocApp.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

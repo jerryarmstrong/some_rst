@@ -1,0 +1,628 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../" id="documentation_options" src="../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.earlybird.index;</p>
+<p>import java.io.IOException;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Map.Entry;</p>
+<p>import com.google.common.base.Preconditions;</p>
+<p>import org.apache.lucene.index.LeafReaderContext;
+import org.apache.lucene.index.Term;
+import org.apache.lucene.search.CollectionStatistics;
+import org.apache.lucene.search.Collector;
+import org.apache.lucene.search.DocIdSetIterator;
+import org.apache.lucene.search.Explanation;
+import org.apache.lucene.search.LeafCollector;
+import org.apache.lucene.search.Scorer;
+import org.apache.lucene.search.ScoreMode;
+import org.apache.lucene.search.TermStatistics;
+import org.apache.lucene.search.Weight;
+import org.apache.lucene.util.BytesRef;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;</p>
+<p>import com.twitter.common.util.Clock;
+import com.twitter.search.common.constants.thriftjava.ThriftLanguage;
+import com.twitter.search.common.relevance.features.EarlybirdDocumentFeatures;
+import com.twitter.search.common.results.thriftjava.FieldHitAttribution;
+import com.twitter.search.common.schema.base.ImmutableSchemaInterface;
+import com.twitter.search.common.schema.base.Schema;
+import com.twitter.search.common.schema.earlybird.EarlybirdFieldConstants.EarlybirdFieldConstant;
+import com.twitter.search.common.search.TwitterCollector;
+import com.twitter.search.common.search.TwitterIndexSearcher;
+import com.twitter.search.common.util.analysis.LongTermAttributeImpl;
+import com.twitter.search.common.util.lang.ThriftLanguageUtil;
+import com.twitter.search.core.earlybird.facets.FacetLabelProvider;
+import com.twitter.search.core.earlybird.index.DocIDToTweetIDMapper;
+import com.twitter.search.core.earlybird.index.EarlybirdIndexSegmentAtomicReader;
+import com.twitter.search.core.earlybird.index.EarlybirdIndexSegmentData;
+import com.twitter.search.earlybird.EarlybirdSearcher;
+import com.twitter.search.earlybird.common.config.EarlybirdConfig;
+import com.twitter.search.earlybird.common.userupdates.UserTable;
+import com.twitter.search.earlybird.search.EarlybirdLuceneSearcher;
+import com.twitter.search.earlybird.search.Hit;
+import com.twitter.search.earlybird.search.SearchRequestInfo;
+import com.twitter.search.earlybird.search.SimpleSearchResults;
+import com.twitter.search.earlybird.search.facets.AbstractFacetTermCollector;
+import com.twitter.search.earlybird.search.facets.TermStatisticsCollector;
+import com.twitter.search.earlybird.search.facets.TermStatisticsRequestInfo;
+import com.twitter.search.earlybird.search.relevance.scoring.RelevanceQuery;
+import com.twitter.search.earlybird.stats.EarlybirdSearcherStats;
+import com.twitter.search.earlybird.thrift.ThriftFacetCount;
+import com.twitter.search.earlybird.thrift.ThriftFacetCountMetadata;
+import com.twitter.search.earlybird.thrift.ThriftSearchResult;
+import com.twitter.search.earlybird.thrift.ThriftSearchResultMetadata;
+import com.twitter.search.earlybird.thrift.ThriftSearchResults;
+import com.twitter.search.earlybird.thrift.ThriftTermRequest;
+import com.twitter.search.earlybird.thrift.ThriftTermResults;
+import com.twitter.search.earlybird.thrift.ThriftTermStatisticsResults;</p>
+<dl>
+<dt>public class EarlybirdSingleSegmentSearcher extends EarlybirdLuceneSearcher {</dt><dd><p>private static final Logger LOG = LoggerFactory.getLogger(EarlybirdSingleSegmentSearcher.class);</p>
+<p>private final EarlybirdIndexSegmentAtomicReader twitterReader;
+private final ImmutableSchemaInterface schema;
+private final UserTable userTable;
+private final long timeSliceID;</p>
+<p>private final EarlybirdSearcherStats searcherStats;
+private Clock clock;</p>
+<dl>
+<dt>public EarlybirdSingleSegmentSearcher(</dt><dd><blockquote>
+<div><p>ImmutableSchemaInterface schema,
+EarlybirdIndexSegmentAtomicReader reader,
+UserTable userTable,
+EarlybirdSearcherStats searcherStats,
+Clock clock) {</p>
+</div></blockquote>
+<p>super(reader);
+this.schema = schema;
+this.twitterReader = reader;
+this.userTable = userTable;
+this.timeSliceID = reader.getSegmentData().getTimeSliceID();
+this.searcherStats = searcherStats;
+this.clock = clock;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public final long getTimeSliceID() {</dt><dd><p>return timeSliceID;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public EarlybirdIndexSegmentAtomicReader getTwitterIndexReader() {</dt><dd><p>return twitterReader;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>search() main loop.</p></li>
+<li><p>This behaves exactly like IndexSearcher.search() if a stock Lucene collector passed in.</p></li>
+<li><p>However, if a TwitterCollector is passed in, this class performs Twitter style early</p></li>
+<li><p>termination without relying on</p></li>
+<li><p><a class="reference external" href="mailto:{&#37;&#52;&#48;link">{<span>&#64;</span>link</a> org.apache.lucene.search.CollectionTerminatedException}.</p></li>
+<li><p>This method is nearly identical to TwitterIndexSearcher.search() with two differences:</p></li>
+<li><ol class="arabic simple">
+<li><p>advances to smallest docID before searching.  Important to skip incomplete docs in</p></li>
+</ol>
+</li>
+<li><p>realtime segments.</p></li>
+<li><ol class="arabic simple" start="2">
+<li><p>skips deletes using twitterReader</p></li>
+</ol>
+</li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+</dl>
+<p>&#64;Override
+protected void search(List&lt;LeafReaderContext&gt; leaves, Weight weight, Collector coll)</p>
+<blockquote>
+<div><blockquote>
+<div><p>throws IOException {</p>
+</div></blockquote>
+<p>// If an TwitterCollector is passed in, we can do a few extra things in here, such
+// as early termination.  Otherwise we can just fall back to IndexSearcher.search().
+if (!(coll instanceof TwitterCollector)) {</p>
+<blockquote>
+<div><p>super.search(leaves, weight, coll);
+return;</p>
+</div></blockquote>
+<p>}</p>
+<p>TwitterCollector collector = (TwitterCollector) coll;
+if (collector.isTerminated()) {</p>
+<blockquote>
+<div><p>return;</p>
+</div></blockquote>
+<p>}</p>
+<p>LOG.debug(“Starting segment {}”, timeSliceID);</p>
+<p>// Notify the collector that we’re starting this segment, and check for early
+// termination criteria again.  setNextReader() performs ‘expensive’ early
+// termination checks in some implementations such as TwitterEarlyTerminationCollector.
+LeafCollector leafCollector = collector.getLeafCollector(twitterReader.getContext());
+if (collector.isTerminated()) {</p>
+<blockquote>
+<div><p>return;</p>
+</div></blockquote>
+<p>}</p>
+<p>// Initialize the scorer:
+// Note that constructing the scorer may actually do real work, such as advancing to the
+// first hit.
+// The scorer may be null if we can tell right away that the query has no hits: e.g. if the
+// first hit does not actually exist.
+Scorer scorer = weight.scorer(twitterReader.getContext());
+if (scorer == null) {</p>
+<blockquote>
+<div><p>LOG.debug(“Scorer was null, not searching segment {}”, timeSliceID);
+collector.finishSegment(DocIdSetIterator.NO_MORE_DOCS);
+return;</p>
+</div></blockquote>
+<p>}
+leafCollector.setScorer(scorer);</p>
+<p>// Make sure to start searching at the smallest docID.
+DocIdSetIterator docIdSetIterator = scorer.iterator();
+int smallestDocId = twitterReader.getSmallestDocID();
+int docID = docIdSetIterator.advance(smallestDocId);</p>
+<p>// Collect results.
+while (docID != DocIdSetIterator.NO_MORE_DOCS) {</p>
+<blockquote>
+<div><p>// Exclude deleted docs.
+if (!twitterReader.getDeletesView().isDeleted(docID)) {</p>
+<blockquote>
+<div><p>leafCollector.collect(docID);</p>
+</div></blockquote>
+<p>}</p>
+<p>// Check if we’re done after we consumed the document.
+if (collector.isTerminated()) {</p>
+<blockquote>
+<div><p>break;</p>
+</div></blockquote>
+<p>}</p>
+<p>docID = docIdSetIterator.nextDoc();</p>
+</div></blockquote>
+<p>}</p>
+<p>// Always finish the segment, providing the last docID advanced to.
+collector.finishSegment(docID);</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public void fillFacetResults(</p>
+<blockquote>
+<div><blockquote>
+<div><p>AbstractFacetTermCollector collector, ThriftSearchResults searchResults)
+throws IOException {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>if (searchResults == null || searchResults.getResultsSize() == 0) {</dt><dd><p>return;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>EarlybirdIndexSegmentData segmentData = twitterReader.getSegmentData();
+collector.resetFacetLabelProviders(</p>
+<blockquote>
+<div><p>segmentData.getFacetLabelProviders(), segmentData.getFacetIDMap());</p>
+</div></blockquote>
+<p>DocIDToTweetIDMapper docIdMapper = segmentData.getDocIDToTweetIDMapper();
+for (ThriftSearchResult result : searchResults.getResults()) {</p>
+<blockquote>
+<div><p>int docId = docIdMapper.getDocID(result.getId());
+if (docId &lt; 0) {</p>
+<blockquote>
+<div><p>continue;</p>
+</div></blockquote>
+<p>}</p>
+<p>segmentData.getFacetCountingArray().collectForDocId(docId, collector);
+collector.fillResultAndClear(result);</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public TermStatisticsCollector.TermStatisticsSearchResults collectTermStatistics(</p>
+<blockquote>
+<div><blockquote>
+<div><p>TermStatisticsRequestInfo searchRequestInfo,
+EarlybirdSearcher searcher, int requestDebugMode) throws IOException {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>TermStatisticsCollector collector = new TermStatisticsCollector(</dt><dd><p>schema, searchRequestInfo, searcherStats, clock, requestDebugMode);</p>
+</dd>
+</dl>
+<p>search(searchRequestInfo.getLuceneQuery(), collector);
+searcher.maybeSetCollectorDebugInfo(collector);
+return collector.getResults();</p>
+</div></blockquote>
+<p>}</p>
+<p>/** This method is only used for debugging, so it’s not optimized for speed <a href="#id3"><span class="problematic" id="id4">*</span></a>/
+&#64;Override
+public void explainSearchResults(SearchRequestInfo searchRequestInfo,</p>
+<blockquote>
+<div><blockquote>
+<div><p>SimpleSearchResults hits,
+ThriftSearchResults searchResults) throws IOException {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>Weight weight =</dt><dd><p>createWeight(rewrite(searchRequestInfo.getLuceneQuery()), ScoreMode.COMPLETE, 1.0f);</p>
+</dd>
+</dl>
+<p>DocIDToTweetIDMapper docIdMapper = twitterReader.getSegmentData().getDocIDToTweetIDMapper();
+for (int i = 0; i &lt; hits.numHits(); i++) {</p>
+<blockquote>
+<div><p>final Hit hit = hits.getHit(i);
+Preconditions.checkState(hit.getTimeSliceID() == timeSliceID,</p>
+<blockquote>
+<div><p>“hit: “ + hit.toString() + “ is not in timeslice: “ + timeSliceID);</p>
+</div></blockquote>
+<p>final ThriftSearchResult result = searchResults.getResults().get(i);
+if (!result.isSetMetadata()) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>result.setMetadata(new ThriftSearchResultMetadata()</dt><dd><p>.setPenguinVersion(EarlybirdConfig.getPenguinVersionByte()));</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<p>final int docIdToExplain = docIdMapper.getDocID(hit.getStatusID());
+if (docIdToExplain == DocIDToTweetIDMapper.ID_NOT_FOUND) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>result.getMetadata().setExplanation(</dt><dd><p>“ERROR: Could not find doc ID to explain for “ + hit.toString());</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl>
+<dt>} else {</dt><dd><p>Explanation explanation;
+FieldHitAttribution fieldHitAttribution = result.getMetadata().getFieldHitAttribution();
+if (weight instanceof RelevanceQuery.RelevanceWeight &amp;&amp; fieldHitAttribution != null) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>RelevanceQuery.RelevanceWeight relevanceWeight =</dt><dd><p>(RelevanceQuery.RelevanceWeight) weight;</p>
+</dd>
+<dt>explanation = relevanceWeight.explain(</dt><dd><p>twitterReader.getContext(), docIdToExplain, fieldHitAttribution);</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>explanation = weight.explain(twitterReader.getContext(), docIdToExplain);</p>
+</dd>
+</dl>
+<p>}
+hit.setHasExplanation(true);
+result.getMetadata().setExplanation(explanation.toString());</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public void fillFacetResultMetadata(Map&lt;Term, ThriftFacetCount&gt; facetResults,</p>
+<blockquote>
+<div><blockquote>
+<div><p>ImmutableSchemaInterface documentSchema,
+byte debugMode) throws IOException {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>FacetLabelProvider provider = twitterReader.getFacetLabelProviders(</dt><dd><p>documentSchema.getFacetFieldByFacetName(EarlybirdFieldConstant.TWIMG_FACET));</p>
+</dd>
+</dl>
+<p>FacetLabelProvider.FacetLabelAccessor photoAccessor = null;</p>
+<dl class="simple">
+<dt>if (provider != null) {</dt><dd><p>photoAccessor = provider.getLabelAccessor();</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>for (Entry&lt;Term, ThriftFacetCount&gt; facetResult<span class="classifier">facetResults.entrySet()) {</span></dt><dd><p>Term term = facetResult.getKey();
+ThriftFacetCount facetCount = facetResult.getValue();</p>
+<p>ThriftFacetCountMetadata metadata = facetCount.getMetadata();
+if (metadata == null) {</p>
+<blockquote>
+<div><p>metadata = new ThriftFacetCountMetadata();
+facetCount.setMetadata(metadata);</p>
+</div></blockquote>
+<p>}</p>
+<p>fillTermMetadata(term, metadata, photoAccessor, debugMode);</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public void fillTermStatsMetadata(ThriftTermStatisticsResults termStatsResults,</p>
+<blockquote>
+<div><blockquote>
+<div><p>ImmutableSchemaInterface documentSchema,
+byte debugMode) throws IOException {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>FacetLabelProvider provider = twitterReader.getFacetLabelProviders(</dt><dd><p>documentSchema.getFacetFieldByFacetName(EarlybirdFieldConstant.TWIMG_FACET));</p>
+</dd>
+</dl>
+<p>FacetLabelProvider.FacetLabelAccessor photoAccessor = null;</p>
+<dl class="simple">
+<dt>if (provider != null) {</dt><dd><p>photoAccessor = provider.getLabelAccessor();</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>for (Map.Entry&lt;ThriftTermRequest, ThriftTermResults&gt; entry</dt><dd><blockquote>
+<div><p>: termStatsResults.termResults.entrySet()) {</p>
+</div></blockquote>
+<p>ThriftTermRequest termRequest = entry.getKey();
+if (termRequest.getFieldName().isEmpty()) {</p>
+<blockquote>
+<div><p>continue;</p>
+</div></blockquote>
+<p>}
+Schema.FieldInfo facetField = schema.getFacetFieldByFacetName(termRequest.getFieldName());
+Term term = null;
+if (facetField != null) {</p>
+<blockquote>
+<div><p>term = new Term(facetField.getName(), termRequest.getTerm());</p>
+</div></blockquote>
+<p>}
+if (term == null) {</p>
+<blockquote>
+<div><p>continue;</p>
+</div></blockquote>
+<p>}</p>
+<p>ThriftFacetCountMetadata metadata = entry.getValue().getMetadata();
+if (metadata == null) {</p>
+<blockquote>
+<div><p>metadata = new ThriftFacetCountMetadata();
+entry.getValue().setMetadata(metadata);</p>
+</div></blockquote>
+<p>}</p>
+<p>fillTermMetadata(term, metadata, photoAccessor, debugMode);</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>private void fillTermMetadata(Term term, ThriftFacetCountMetadata metadata,</dt><dd><blockquote>
+<div><p>FacetLabelProvider.FacetLabelAccessor photoAccessor,
+byte debugMode) throws IOException {</p>
+</div></blockquote>
+<p>boolean isTwimg = term.field().equals(EarlybirdFieldConstant.TWIMG_LINKS_FIELD.getFieldName());
+int internalDocID = DocIDToTweetIDMapper.ID_NOT_FOUND;
+long statusID = -1;
+long userID = -1;
+Term facetTerm = term;</p>
+<p>// Deal with the from_user_id facet.
+if (term.field().equals(EarlybirdFieldConstant.FROM_USER_ID_CSF.getFieldName())) {</p>
+<blockquote>
+<div><p>userID = Long.parseLong(term.text());
+facetTerm = new Term(EarlybirdFieldConstant.FROM_USER_ID_FIELD.getFieldName(),</p>
+<blockquote>
+<div><p>LongTermAttributeImpl.copyIntoNewBytesRef(userID));</p>
+</div></blockquote>
+</div></blockquote>
+<dl class="simple">
+<dt>} else if (isTwimg) {</dt><dd><p>statusID = Long.parseLong(term.text());
+internalDocID = twitterReader.getSegmentData().getDocIDToTweetIDMapper().getDocID(statusID);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>if (internalDocID == DocIDToTweetIDMapper.ID_NOT_FOUND) {</dt><dd><p>// If this is not a twimg, this is how statusID should be looked up
+//
+// If this is a twimg but we couldn’t find the internalDocID, that means this segment,
+// or maybe even this earlybird, does not contain the original tweet. Then we treat this as
+// a normal facet for now
+internalDocID = twitterReader.getOldestDocID(facetTerm);
+if (internalDocID &gt;= 0) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>statusID =</dt><dd><p>twitterReader.getSegmentData().getDocIDToTweetIDMapper().getTweetID(internalDocID);</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>statusID = -1;</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// make sure tweet is not deleted
+if (internalDocID &lt; 0 || twitterReader.getDeletesView().isDeleted(internalDocID)) {</p>
+<blockquote>
+<div><p>return;</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>if (metadata.isSetStatusId()</dt><dd><blockquote>
+<div><p>&amp;&amp; metadata.getStatusId() &gt; 0
+&amp;&amp; metadata.getStatusId() &lt;= statusID) {</p>
+</div></blockquote>
+<p>// we already have the metadata for this facet from an earlier tweet
+return;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// now check if this tweet is offensive, e.g. antisocial, nsfw, sensitive
+EarlybirdDocumentFeatures documentFeatures = new EarlybirdDocumentFeatures(twitterReader);
+documentFeatures.advance(internalDocID);
+boolean isOffensiveFlagSet =</p>
+<blockquote>
+<div><p>documentFeatures.isFlagSet(EarlybirdFieldConstant.IS_OFFENSIVE_FLAG);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>boolean isSensitiveFlagSet =</dt><dd><p>documentFeatures.isFlagSet(EarlybirdFieldConstant.IS_SENSITIVE_CONTENT);</p>
+</dd>
+</dl>
+<p>boolean offensive = isOffensiveFlagSet || isSensitiveFlagSet;</p>
+<p>// also, user should not be marked as antisocial, nsfw or offensive
+if (userID &lt; 0) {</p>
+<blockquote>
+<div><p>userID = documentFeatures.getFeatureValue(EarlybirdFieldConstant.FROM_USER_ID_CSF);</p>
+</div></blockquote>
+<p>}
+offensive <a href="#id5"><span class="problematic" id="id6">|</span></a>= userTable.isSet(userID,</p>
+<blockquote>
+<div><p>UserTable.ANTISOCIAL_BIT
+| UserTable.OFFENSIVE_BIT
+| UserTable.NSFW_BIT);</p>
+</div></blockquote>
+<p>metadata.setStatusId(statusID);
+metadata.setTwitterUserId(userID);
+metadata.setCreated_at(twitterReader.getSegmentData().getTimeMapper().getTime(internalDocID));
+int langId = (int) documentFeatures.getFeatureValue(EarlybirdFieldConstant.LANGUAGE);
+Locale lang = ThriftLanguageUtil.getLocaleOf(ThriftLanguage.findByValue(langId));
+metadata.setStatusLanguage(ThriftLanguageUtil.getThriftLanguageOf(lang));
+metadata.setStatusPossiblySensitive(offensive);
+if (isTwimg &amp;&amp; photoAccessor != null &amp;&amp; !metadata.isSetNativePhotoUrl()) {</p>
+<blockquote>
+<div><p>int termID = twitterReader.getTermID(term);
+if (termID != EarlybirdIndexSegmentAtomicReader.TERM_NOT_FOUND) {</p>
+<blockquote>
+<div><p>BytesRef termPayload = photoAccessor.getTermPayload(termID);
+if (termPayload != null) {</p>
+<blockquote>
+<div><p>metadata.setNativePhotoUrl(termPayload.utf8ToString());</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>if (debugMode &gt; 3) {</dt><dd><p>StringBuilder sb = new StringBuilder(256);
+if (metadata.isSetExplanation()) {</p>
+<blockquote>
+<div><p>sb.append(metadata.getExplanation());</p>
+</div></blockquote>
+<p>}
+sb.append(String.format(“TweetId=%d (%s %s), UserId=%d (%s %s), Term=%sn”,</p>
+<blockquote>
+<div><p>statusID,
+isOffensiveFlagSet ? “OFFENSIVE” : “”,
+isSensitiveFlagSet ? “SENSITIVE” : “”,
+userID,
+userTable.isSet(userID, UserTable.ANTISOCIAL_BIT) ? “ANTISOCIAL” : “”,
+userTable.isSet(userID, UserTable.NSFW_BIT) ? “NSFW” : “”,
+term.toString()));</p>
+</div></blockquote>
+<p>metadata.setExplanation(sb.toString());</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public ImmutableSchemaInterface getSchemaSnapshot() {</dt><dd><p>return schema;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;Override
+public CollectionStatistics collectionStatistics(String field) throws IOException {</p>
+<blockquote>
+<div><p>return TwitterIndexSearcher.collectionStatistics(field, getIndexReader());</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public TermStatistics termStatistics(Term term, int docFreq, long totalTermFreq) {</p>
+<blockquote>
+<div><p>return TwitterIndexSearcher.termStats(term, docFreq, totalTermFreq);</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../_sources/src/java/com/twitter/search/earlybird/index/EarlybirdSingleSegmentSearcher.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

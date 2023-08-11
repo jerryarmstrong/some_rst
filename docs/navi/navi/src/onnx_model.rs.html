@@ -1,0 +1,499 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../" id="documentation_options" src="../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>#[cfg(feature = “onnx”)]
+pub mod onnx {</p>
+<blockquote>
+<div><p>use crate::TensorReturnEnum;
+use crate::bootstrap::{TensorInput, TensorInputEnum};
+use crate::cli_args::{</p>
+<blockquote>
+<div><p>Args, ARGS, INPUTS, MODEL_SPECS, OUTPUTS,</p>
+</div></blockquote>
+<p>};
+use crate::metrics::{self, CONVERTER_TIME_COLLECTOR};
+use crate::predict_service::Model;
+use crate::{MAX_NUM_INPUTS, MAX_NUM_OUTPUTS, META_INFO, utils};
+use anyhow::Result;
+use arrayvec::ArrayVec;
+use dr_transform::converter::{BatchPredictionRequestToTorchTensorConverter, Converter};
+use itertools::Itertools;
+use log::{debug, info};
+use dr_transform::ort::environment::Environment;
+use dr_transform::ort::session::Session;
+use dr_transform::ort::tensor::InputTensor;
+use dr_transform::ort::{ExecutionProvider, GraphOptimizationLevel, SessionBuilder};
+use dr_transform::ort::LoggingLevel;
+use serde_json::Value;
+use std::fmt::{Debug, Display};
+use std::sync::Arc;
+use std::{fmt, fs};
+use tokio::time::Instant;
+lazy_static! {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>pub static ref ENVIRONMENT: Arc&lt;Environment&gt; = Arc::new(</dt><dd><dl class="simple">
+<dt>Environment::builder()</dt><dd><p>.with_name(“onnx home”)
+.with_log_level(LoggingLevel::Error)
+.with_global_thread_pool(ARGS.onnx_global_thread_pool_options.clone())
+.build()
+.unwrap()</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>);</p>
+</div></blockquote>
+<p>}
+#[derive(Debug)]
+pub struct OnnxModel {</p>
+<blockquote>
+<div><p>pub session: Session,
+pub model_idx: usize,
+pub version: i64,
+pub export_dir: String,
+pub output_filters: ArrayVec&lt;usize, MAX_NUM_OUTPUTS&gt;,
+pub input_converter: Box&lt;dyn Converter&gt;,</p>
+</div></blockquote>
+<p>}
+impl Display for OnnxModel {</p>
+<blockquote>
+<div><dl>
+<dt>fn fmt(&amp;self, f: &amp;mut fmt::Formatter) -&gt; fmt::Result {</dt><dd><dl class="simple">
+<dt>write!(</dt><dd><p>f,
+“idx: {}, onnx model_name:{}, version:{}, output_filters:{:?}, converter:{:}”,
+self.model_idx,
+MODEL_SPECS[self.model_idx],
+self.version,
+self.output_filters,
+self.input_converter</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}
+impl Drop for OnnxModel {</p>
+<blockquote>
+<div><dl>
+<dt>fn drop(&amp;mut self) {</dt><dd><dl>
+<dt>if ARGS.profiling != None {</dt><dd><dl>
+<dt>self.session.end_profiling().map_or_else(</dt><dd><dl class="simple">
+<dt><a href="#id9"><span class="problematic" id="id10">|e|</span></a> {</dt><dd><p>info!(“end profiling with some error:{:?}”, e);</p>
+</dd>
+</dl>
+<p>},
+<a href="#id11"><span class="problematic" id="id12">|f|</span></a> {</p>
+<blockquote>
+<div><p>info!(“profiling ended with file:{}”, f);</p>
+</div></blockquote>
+<p>},</p>
+</dd>
+</dl>
+<p>);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}
+impl OnnxModel {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>fn get_output_filters(session: &amp;Session, idx: usize) -&gt; ArrayVec&lt;usize, MAX_NUM_OUTPUTS&gt; {</dt><dd><dl class="simple">
+<dt>OUTPUTS[idx]</dt><dd><p>.iter()
+.map(<a href="#id13"><span class="problematic" id="id14">|output|</span></a> session.outputs.iter().position(<a href="#id15"><span class="problematic" id="id16">|o|</span></a> o.name == <a href="#id1"><span class="problematic" id="id2">*</span></a>output))
+.flatten()
+.collect::&lt;ArrayVec&lt;usize, MAX_NUM_OUTPUTS&gt;&gt;()</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+#[cfg(target_os = “linux”)]
+fn ep_choices() -&gt; Vec&lt;ExecutionProvider&gt; {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>match ARGS.onnx_gpu_ep.as_ref().map(<a href="#id17"><span class="problematic" id="id18">|e|</span></a> e.as_str()) {</dt><dd><p>Some(“onednn”) =&gt; vec![Self::ep_with_options(ExecutionProvider::onednn())],
+Some(“tensorrt”) =&gt; vec![Self::ep_with_options(ExecutionProvider::tensorrt())],
+Some(“cuda”) =&gt; vec![Self::ep_with_options(ExecutionProvider::cuda())],
+_ =&gt; vec![Self::ep_with_options(ExecutionProvider::cpu())],</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}
+fn ep_with_options(mut ep: ExecutionProvider) -&gt; ExecutionProvider {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>for (ref k, ref v) in ARGS.onnx_ep_options.clone() {</dt><dd><p>ep = ep.with(k, v);
+info!(“setting option:{} -&gt; {} and now ep is:{:?}”, k, v, ep);</p>
+</dd>
+</dl>
+<p>}
+ep</p>
+</div></blockquote>
+<p>}
+#[cfg(target_os = “macos”)]
+fn ep_choices() -&gt; Vec&lt;ExecutionProvider&gt; {</p>
+<blockquote>
+<div><p>vec![Self::ep_with_options(ExecutionProvider::cpu())]</p>
+</div></blockquote>
+<p>}
+pub fn new(idx: usize, version: String, model_config: &amp;Value) -&gt; Result&lt;OnnxModel&gt; {</p>
+<blockquote>
+<div><p>let export_dir = format!(“{}/{}/model.onnx”, ARGS.model_dir[idx], version);
+let meta_info = format!(“{}/{}/{}”, ARGS.model_dir[idx], version, META_INFO);
+let mut builder = SessionBuilder::new(&amp;ENVIRONMENT)?</p>
+<blockquote>
+<div><p>.with_optimization_level(GraphOptimizationLevel::Level3)?
+.with_parallel_execution(ARGS.onnx_use_parallel_mode == “true”)?;</p>
+</div></blockquote>
+<dl>
+<dt>if ARGS.onnx_global_thread_pool_options.is_empty() {</dt><dd><dl>
+<dt>builder = builder</dt><dd><dl>
+<dt>.with_inter_threads(</dt><dd><dl class="simple">
+<dt>utils::get_config_or(</dt><dd><p>model_config,
+“inter_op_parallelism”,
+&amp;ARGS.inter_op_parallelism[idx],</p>
+</dd>
+</dl>
+<dl class="simple">
+<dt>)</dt><dd><p>.parse()?,</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>)?
+.with_intra_threads(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>utils::get_config_or(</dt><dd><p>model_config,
+“intra_op_parallelism”,
+&amp;ARGS.intra_op_parallelism[idx],</p>
+</dd>
+</dl>
+<dl class="simple">
+<dt>)</dt><dd><p>.parse()?,</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>)?;</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+else {</p>
+<blockquote>
+<div><p>builder = builder.with_disable_per_session_threads()?;</p>
+</div></blockquote>
+<p>}
+builder = builder</p>
+<blockquote>
+<div><p>.with_memory_pattern(ARGS.onnx_use_memory_pattern == “true”)?
+.with_execution_providers(&amp;OnnxModel::ep_choices())?;</p>
+</div></blockquote>
+<dl>
+<dt>match &amp;ARGS.profiling {</dt><dd><dl class="simple">
+<dt>Some(p) =&gt; {</dt><dd><p>debug!(“Enable profiling, writing to {}”, <a href="#id3"><span class="problematic" id="id4">*</span></a>p);
+builder = builder.with_profiling(p)?</p>
+</dd>
+</dl>
+<p>}
+_ =&gt; {}</p>
+</dd>
+</dl>
+<p>}
+let session = builder.with_model_from_file(&amp;export_dir)?;</p>
+<dl class="simple">
+<dt>info!(</dt><dd><p>“inputs: {:?}, outputs: {:?}”,
+session.inputs.iter().format(“,”),
+session.outputs.iter().format(“,”)</p>
+</dd>
+</dl>
+<p>);</p>
+<dl class="simple">
+<dt>fs::read_to_string(&amp;meta_info)</dt><dd><p>.ok()
+.map(<a href="#id19"><span class="problematic" id="id20">|info|</span></a> info!(“meta info:{}”, info));</p>
+</dd>
+</dl>
+<p>let output_filters = OnnxModel::get_output_filters(&amp;session, idx);
+let mut reporting_feature_ids: Vec&lt;(i64, &amp;str)&gt; = vec![];</p>
+<p>let input_spec_cell = &amp;INPUTS[idx];
+if input_spec_cell.get().is_none() {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>let input_spec = session</dt><dd><p>.inputs
+.iter()
+.map(<a href="#id21"><span class="problematic" id="id22">|input|</span></a> input.name.clone())
+.collect::&lt;ArrayVec&lt;String, MAX_NUM_INPUTS&gt;&gt;();</p>
+</dd>
+<dt>input_spec_cell.set(input_spec.clone()).map_or_else(</dt><dd><p><a href="#id23"><span class="problematic" id="id24">|_|</span></a> info!(“unable to set the input_spec for model {}”, idx),
+<a href="#id25"><span class="problematic" id="id26">|_|</span></a> info!(“auto detect and set the inputs: {:?}”, input_spec),</p>
+</dd>
+</dl>
+<p>);</p>
+</div></blockquote>
+<p>}
+ARGS.onnx_report_discrete_feature_ids</p>
+<blockquote>
+<div><p>.iter()
+.for_each(<a href="#id27"><span class="problematic" id="id28">|ids|</span></a> {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>ids.split(“,”)</dt><dd><p>.filter(<a href="#id29"><span class="problematic" id="id30">|s|</span></a> !s.is_empty())
+.map(<a href="#id31"><span class="problematic" id="id32">|s|</span></a> s.parse::&lt;i64&gt;().unwrap())
+.for_each(<a href="#id33"><span class="problematic" id="id34">|id|</span></a> reporting_feature_ids.push((id, “discrete”)))</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>});</p>
+</div></blockquote>
+<dl>
+<dt>ARGS.onnx_report_continuous_feature_ids</dt><dd><p>.iter()
+.for_each(<a href="#id35"><span class="problematic" id="id36">|ids|</span></a> {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>ids.split(“,”)</dt><dd><p>.filter(<a href="#id37"><span class="problematic" id="id38">|s|</span></a> !s.is_empty())
+.map(<a href="#id39"><span class="problematic" id="id40">|s|</span></a> s.parse::&lt;i64&gt;().unwrap())
+.for_each(<a href="#id41"><span class="problematic" id="id42">|id|</span></a> reporting_feature_ids.push((id, “continuous”)))</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>});</p>
+</dd>
+<dt>let onnx_model = OnnxModel {</dt><dd><p>session,
+model_idx: idx,
+version: Args::version_str_to_epoch(&amp;version)?,
+export_dir,
+output_filters,
+input_converter: Box::new(BatchPredictionRequestToTorchTensorConverter::new(</p>
+<blockquote>
+<div><p>&amp;ARGS.model_dir[idx],
+&amp;version,
+reporting_feature_ids,
+Some(metrics::register_dynamic_metrics),</p>
+</div></blockquote>
+<p>)?),</p>
+</dd>
+</dl>
+<p>};
+onnx_model.warmup()?;
+Ok(onnx_model)</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}
+///Currently we only assume the input as just one string tensor.
+///The string tensor will be be converted to the actual raw tensors.
+/// The converter we are using is very specific to home.
+/// It reads a BatchDataRecord thrift and decode it to a batch of raw input tensors.
+/// Navi will then do server side batching and feed it to ONNX runtime
+impl Model for OnnxModel {</p>
+<blockquote>
+<div><p>//TODO: implement a generic online warmup for all runtimes
+fn warmup(&amp;self) -&gt; Result&lt;()&gt; {</p>
+<blockquote>
+<div><p>Ok(())</p>
+</div></blockquote>
+<p>}</p>
+<p>#[inline(always)]
+fn do_predict(</p>
+<blockquote>
+<div><p>&amp;self,
+input_tensors: Vec&lt;Vec&lt;TensorInput&gt;&gt;,
+_: u64,</p>
+</div></blockquote>
+<dl>
+<dt>) -&gt; (Vec&lt;TensorReturnEnum&gt;, Vec&lt;Vec&lt;usize&gt;&gt;) {</dt><dd><p>let batched_tensors = TensorInputEnum::merge_batch(input_tensors);
+let (inputs, batch_ends): (Vec&lt;Vec&lt;InputTensor&gt;&gt;, Vec&lt;Vec&lt;usize&gt;&gt;) = batched_tensors</p>
+<blockquote>
+<div><p>.into_iter()
+.map(<a href="#id43"><span class="problematic" id="id44">|batched_tensor|</span></a> {</p>
+<blockquote>
+<div><dl>
+<dt>match batched_tensor.tensor_data {</dt><dd><dl>
+<dt>TensorInputEnum::String(t) if ARGS.onnx_use_converter.is_some() =&gt; {</dt><dd><p>let start = Instant::now();
+let (inputs, batch_ends) = self.input_converter.convert(t);
+// info!(“batch_ends:{:?}”, batch_ends);
+CONVERTER_TIME_COLLECTOR</p>
+<blockquote>
+<div><p>.with_label_values(&amp;[&amp;MODEL_SPECS[self.model_idx()]])
+.observe(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>start.elapsed().as_micros() as f64</dt><dd><p>/ (<a href="#id5"><span class="problematic" id="id6">*</span></a>batch_ends.last().unwrap() as f64),</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>);</p>
+</div></blockquote>
+<p>(inputs, batch_ends)</p>
+</dd>
+</dl>
+<p>}
+_ =&gt; unimplemented!(),</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>})
+.unzip();</p>
+</div></blockquote>
+<p>//invariant we only support one input as string. will relax later
+assert_eq!(inputs.len(), 1);
+let output_tensors = self</p>
+<blockquote>
+<div><p>.session
+.run(inputs.into_iter().flatten().collect::&lt;Vec&lt;_&gt;&gt;())
+.unwrap();</p>
+</div></blockquote>
+<dl>
+<dt>self.output_filters</dt><dd><p>.iter()
+.map(<a href="#id45"><span class="problematic" id="id46">|&amp;idx|</span></a> {</p>
+<blockquote>
+<div><p>let mut size = 1usize;
+let output = output_tensors[idx].try_extract::&lt;f32&gt;().unwrap();
+for &amp;dim in self.session.outputs[idx].dimensions.iter().flatten() {</p>
+<blockquote>
+<div><p>size <a href="#id7"><span class="problematic" id="id8">*</span></a>= dim as usize;</p>
+</div></blockquote>
+<p>}
+let tensor_ends = batch_ends[0]</p>
+<blockquote>
+<div><p>.iter()
+.map(<a href="#id47"><span class="problematic" id="id48">|&amp;batch|</span></a> batch * size)
+.collect::&lt;Vec&lt;_&gt;&gt;();</p>
+</div></blockquote>
+<dl class="simple">
+<dt>(</dt><dd><p>//only works for batch major
+//TODO: to_vec() obviously wasteful, especially for large batches(GPU) . Will refactor to
+//break up output and return Vec&lt;Vec&lt;TensorScore&gt;&gt; here
+TensorReturnEnum::FloatTensorReturn(Box::new(output.view().as_slice().unwrap().to_vec(),
+)),
+tensor_ends,</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<p>})
+.unzip()</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+#[inline(always)]
+fn model_idx(&amp;self) -&gt; usize {</p>
+<blockquote>
+<div><p>self.model_idx</p>
+</div></blockquote>
+<p>}
+#[inline(always)]
+fn version(&amp;self) -&gt; i64 {</p>
+<blockquote>
+<div><p>self.version</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../_sources/navi/navi/src/onnx_model.rs.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

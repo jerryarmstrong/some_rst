@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.tweetypie.serverutil</p>
+<p>import com.github.benmanes.caffeine.cache.stats.CacheStats
+import com.github.benmanes.caffeine.cache.stats.StatsCounter
+import com.github.benmanes.caffeine.cache.AsyncCacheLoader
+import com.github.benmanes.caffeine.cache.AsyncLoadingCache
+import com.github.benmanes.caffeine.cache.Caffeine
+import com.twitter.finagle.memcached.protocol.Value
+import com.twitter.finagle.memcached.Client
+import com.twitter.finagle.memcached.GetResult
+import com.twitter.finagle.memcached.ProxyClient
+import com.twitter.finagle.stats.NullStatsReceiver
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.util.Duration
+import com.twitter.util.Future
+import com.twitter.util.Return
+import com.twitter.util.Throw
+import com.twitter.util.{Promise =&gt; TwitterPromise}
+import com.twitter.util.logging.Logger
+import java.util.concurrent.TimeUnit.NANOSECONDS
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.Executor
+import java.util.concurrent.TimeUnit
+import java.util.function.BiConsumer
+import java.util.function.Supplier
+import java.lang
+import java.util
+import scala.collection.JavaConverters._</p>
+<dl>
+<dt>object CaffeineMemcacheClient {</dt><dd><p>val logger: Logger = Logger(getClass)</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Helper method to convert between Java 8’s CompletableFuture and Twitter’s Future.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>private def toTwitterFuture[T](cf: CompletableFuture[T]): Future[T] = {</dt><dd><dl>
+<dt>if (cf.isDone &amp;&amp; !cf.isCompletedExceptionally &amp;&amp; !cf.isCancelled) {</dt><dd><p>Future.const(Return(cf.get()))</p>
+</dd>
+<dt>} else {</dt><dd><dl class="simple">
+<dt>val p = new TwitterPromise[T] with TwitterPromise.InterruptHandler {</dt><dd><p>override protected def onInterrupt(t: Throwable): Unit = cf.cancel(true)</p>
+</dd>
+</dl>
+<p>}
+cf.whenComplete(new BiConsumer[T, Throwable] {</p>
+<blockquote>
+<div><dl>
+<dt>override def accept(result: T, exception: Throwable): Unit = {</dt><dd><dl class="simple">
+<dt>if (exception != null) {</dt><dd><p>p.updateIfEmpty(Throw(exception))</p>
+</dd>
+<dt>} else {</dt><dd><p>p.updateIfEmpty(Return(result))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>})
+p</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>class CaffeineMemcacheClient(</dt><dd><p>override val proxyClient: Client,
+val maximumSize: Int = 1000,
+val ttl: Duration = Duration.fromSeconds(10),
+stats: StatsReceiver = NullStatsReceiver)</p>
+<blockquote>
+<div><p>extends ProxyClient {</p>
+</div></blockquote>
+<p>import CaffeineMemcacheClient._</p>
+<dl>
+<dt>private[this] object Stats extends StatsCounter {</dt><dd><p>private val hits = stats.counter(“hits”)
+private val miss = stats.counter(“misses”)
+private val totalLoadTime = stats.stat(“loads”)
+private val loadSuccess = stats.counter(“loads-success”)
+private val loadFailure = stats.counter(“loads-failure”)
+private val eviction = stats.counter(“evictions”)
+private val evictionWeight = stats.counter(“evictions-weight”)</p>
+<p>override def recordHits(i: Int): Unit = hits.incr(i)
+override def recordMisses(i: Int): Unit = miss.incr(i)
+override def recordLoadSuccess(l: Long): Unit = {</p>
+<blockquote>
+<div><p>loadSuccess.incr()
+totalLoadTime.add(NANOSECONDS.toMillis(l))</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>override def recordLoadFailure(l: Long): Unit = {</dt><dd><p>loadFailure.incr()
+totalLoadTime.add(NANOSECONDS.toMillis(l))</p>
+</dd>
+</dl>
+<p>}</p>
+<p>override def recordEviction(): Unit = recordEviction(1)
+override def recordEviction(weight: Int): Unit = {</p>
+<blockquote>
+<div><p>eviction.incr()
+evictionWeight.incr(weight)</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>We are currently not using this method.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>override def snapshot(): CacheStats = {</dt><dd><p>new CacheStats(0, 0, 0, 0, 0, 0, 0)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private[this] object MemcachedAsyncCacheLoader extends AsyncCacheLoader[String, GetResult] {</dt><dd><p>private[this] val EmptyMisses: Set[String] = Set.empty
+private[this] val EmptyFailures: Map[String, Throwable] = Map.empty
+private[this] val EmptyHits: Map[String, Value] = Map.empty</p>
+<dl>
+<dt>override def asyncLoad(key: String, executor: Executor): CompletableFuture[GetResult] = {</dt><dd><dl class="simple">
+<dt>val f = new util.function.Function[util.Map[String, GetResult], GetResult] {</dt><dd><p>override def apply(r: util.Map[String, GetResult]): GetResult = r.get(key)</p>
+</dd>
+</dl>
+<p>}
+asyncLoadAll(Seq(key).asJava, executor).thenApply(f)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Converts response from multi-key to single key. Memcache returns the result</p></li>
+<li><p>in one struct that contains all the hits, misses and exceptions. Caffeine</p></li>
+<li><p>requires a map from a key to the result, so we do that conversion here.</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>override def asyncLoadAll(</dt><dd><p>keys: lang.Iterable[_ &lt;: String],
+executor: Executor</p>
+</dd>
+<dt>): CompletableFuture[util.Map[String, GetResult]] = {</dt><dd><p>val result = new CompletableFuture[util.Map[String, GetResult]]()
+proxyClient.getResult(keys.asScala).respond {</p>
+<blockquote>
+<div><dl>
+<dt>case Return(r) =&gt;</dt><dd><p>val map = new util.HashMap[String, GetResult]()
+r.hits.foreach {</p>
+<blockquote>
+<div><dl>
+<dt>case (key, value) =&gt;</dt><dd><dl class="simple">
+<dt>map.put(</dt><dd><p>key,
+r.copy(hits = Map(key -&gt; value), misses = EmptyMisses, failures = EmptyFailures)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+r.misses.foreach { key =&gt;</p>
+<blockquote>
+<div><p>map.put(key, r.copy(hits = EmptyHits, misses = Set(key), failures = EmptyFailures))</p>
+</div></blockquote>
+<p>}
+// We are passing through failures so that we maintain the contract expected by clients.
+// Without passing through the failures, several metrics get lost. Some of these failures
+// might get cached. The cache is short-lived, so we are not worried when it does
+// get cached.
+r.failures.foreach {</p>
+<blockquote>
+<div><dl>
+<dt>case (key, value) =&gt;</dt><dd><dl class="simple">
+<dt>map.put(</dt><dd><p>key,
+r.copy(hits = EmptyHits, misses = EmptyMisses, failures = Map(key -&gt; value))</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+result.complete(map)</p>
+</dd>
+<dt>case Throw(ex) =&gt;</dt><dd><p>logger.warn(“Error loading keys from memcached”, ex)
+result.completeExceptionally(ex)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+result</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private[this] val cache: AsyncLoadingCache[String, GetResult] =</dt><dd><dl>
+<dt>Caffeine</dt><dd><p>.newBuilder()
+.maximumSize(maximumSize)
+.refreshAfterWrite(ttl.inMilliseconds * 3 / 4, TimeUnit.MILLISECONDS)
+.expireAfterWrite(ttl.inMilliseconds, TimeUnit.MILLISECONDS)
+.recordStats(new Supplier[StatsCounter] {</p>
+<blockquote>
+<div><p>override def get(): StatsCounter = Stats</p>
+</div></blockquote>
+<p>})
+.buildAsync(MemcachedAsyncCacheLoader)</p>
+</dd>
+</dl>
+</dd>
+<dt>override def getResult(keys: Iterable[String]): Future[GetResult] = {</dt><dd><p>val twitterFuture = toTwitterFuture(cache.getAll(keys.asJava))
+twitterFuture</p>
+<blockquote>
+<div><dl class="simple">
+<dt>.map { result =&gt;</dt><dd><p>val values = result.values().asScala
+values.reduce(_ ++ _)</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/tweetypie/server/src/main/scala/com/twitter/tweetypie/serverutil/CaffeineMemcacheClient.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

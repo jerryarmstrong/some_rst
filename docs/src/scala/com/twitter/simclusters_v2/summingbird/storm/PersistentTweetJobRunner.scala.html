@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../" id="documentation_options" src="../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.simclusters_v2.summingbird.storm</p>
+<p>import com.twitter.conversions.DurationOps._
+import com.twitter.finagle.stats.NullStatsReceiver
+import com.twitter.hermit.store.common.ObservedCachedReadableStore
+import com.twitter.scalding.Args
+import com.twitter.simclusters_v2.common.SimClustersEmbedding
+import com.twitter.simclusters_v2.common.TweetId
+import com.twitter.simclusters_v2.summingbird.common.Monoids.PersistentSimClustersEmbeddingLongestL2NormMonoid
+import com.twitter.simclusters_v2.summingbird.common.SimClustersProfile.AltSetting
+import com.twitter.simclusters_v2.summingbird.common.SimClustersProfile.Environment
+import com.twitter.simclusters_v2.summingbird.common.ClientConfigs
+import com.twitter.simclusters_v2.summingbird.common.Implicits
+import com.twitter.simclusters_v2.summingbird.common.SimClustersProfile
+import com.twitter.simclusters_v2.summingbird.stores.PersistentTweetEmbeddingStore.PersistentTweetEmbeddingId
+import com.twitter.simclusters_v2.summingbird.stores.PersistentTweetEmbeddingStore
+import com.twitter.simclusters_v2.summingbird.stores.TopKClustersForTweetKeyReadableStore
+import com.twitter.simclusters_v2.summingbird.stores.TweetKey
+import com.twitter.simclusters_v2.summingbird.stores.TweetStatusCountsStore
+import com.twitter.simclusters_v2.thriftscala.PersistentSimClustersEmbedding
+import com.twitter.simclusters_v2.thriftscala.{SimClustersEmbedding =&gt; ThriftSimClustersEmbedding}
+import com.twitter.storehaus.FutureCollector
+import com.twitter.summingbird.online.option._
+import com.twitter.summingbird.option._
+import com.twitter.summingbird.storm.Storm
+import com.twitter.summingbird.Options
+import com.twitter.summingbird.TailProducer
+import com.twitter.summingbird_internal.runner.common.JobName
+import com.twitter.summingbird_internal.runner.common.SBRunConfig
+import com.twitter.summingbird_internal.runner.storm.GenericRunner
+import com.twitter.summingbird_internal.runner.storm.StormConfig
+import com.twitter.tormenta_internal.spout.eventbus.SubscriberId
+import com.twitter.tweetypie.thriftscala.StatusCounts
+import com.twitter.wtf.summingbird.sources.storm.TimelineEventSource
+import java.lang
+import java.util.{HashMap =&gt; JMap}
+import org.apache.heron.api.{Config =&gt; HeronConfig}
+import org.apache.storm.{Config =&gt; BTConfig}</p>
+<dl>
+<dt>object PersistentTweetJobRunner {</dt><dd><dl class="simple">
+<dt>def main(args: Array[String]): Unit = {</dt><dd><p>GenericRunner(args, PersistentTweetStormJob(_))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>object PersistentTweetStormJob {</p>
+<blockquote>
+<div><p>import com.twitter.simclusters_v2.summingbird.common.Implicits._</p>
+<p>def jLong(num: Long): lang.Long = java.lang.Long.valueOf(num)
+def jInt(num: Int): Integer = java.lang.Integer.valueOf(num)
+def jFloat(num: Float): lang.Float = java.lang.Float.valueOf(num)</p>
+<p>def apply(args: Args): StormConfig = {</p>
+<blockquote>
+<div><p>lazy val env: String = args.getOrElse(“env”, “prod”)
+lazy val zone: String = args.getOrElse(“dc”, “atla”)
+lazy val alt: String = args.getOrElse(“alt”, default = “normal”)</p>
+<dl class="simple">
+<dt>lazy val profile =</dt><dd><p>SimClustersProfile.fetchPersistentJobProfile(Environment(env), AltSetting(alt))</p>
+</dd>
+</dl>
+<p>lazy val stratoClient = ClientConfigs.stratoClient(profile.serviceIdentifier(zone))</p>
+<dl class="simple">
+<dt>lazy val favoriteEventSource = TimelineEventSource(</dt><dd><p>// Note: do not share the same subsriberId with other jobs. Apply a new one if needed
+SubscriberId(profile.timelineEventSourceSubscriberId)</p>
+</dd>
+</dl>
+<p>).kafkaSource</p>
+<dl>
+<dt>lazy val persistentTweetEmbeddingStore =</dt><dd><dl class="simple">
+<dt>PersistentTweetEmbeddingStore</dt><dd><p>.persistentTweetEmbeddingStore(stratoClient, profile.persistentTweetStratoPath)</p>
+</dd>
+</dl>
+</dd>
+<dt>lazy val persistentTweetEmbeddingStoreWithLatestAggregation: Storm#Store[</dt><dd><p>PersistentTweetEmbeddingId,
+PersistentSimClustersEmbedding</p>
+</dd>
+<dt>] = {</dt><dd><p>import com.twitter.storehaus.algebra.StoreAlgebra._</p>
+<dl class="simple">
+<dt>lazy val mergeableStore =</dt><dd><dl class="simple">
+<dt>persistentTweetEmbeddingStore.toMergeable(</dt><dd><p>mon = Implicits.persistentSimClustersEmbeddingMonoid,
+fc = implicitly[FutureCollector])</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>Storm.onlineOnlyStore(mergeableStore)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>lazy val persistentTweetEmbeddingStoreWithLongestL2NormAggregation: Storm#Store[</dt><dd><p>PersistentTweetEmbeddingId,
+PersistentSimClustersEmbedding</p>
+</dd>
+<dt>] = {</dt><dd><p>import com.twitter.storehaus.algebra.StoreAlgebra._</p>
+<p>val longestL2NormMonoid = new PersistentSimClustersEmbeddingLongestL2NormMonoid()
+lazy val mergeableStore =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>persistentTweetEmbeddingStore.toMergeable(</dt><dd><p>mon = longestL2NormMonoid,
+fc = implicitly[FutureCollector])</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>Storm.onlineOnlyStore(mergeableStore)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>lazy val tweetStatusCountsService: Storm#Service[TweetId, StatusCounts] =</dt><dd><dl>
+<dt>Storm.service(</dt><dd><dl class="simple">
+<dt>ObservedCachedReadableStore.from[TweetId, StatusCounts](</dt><dd><p>TweetStatusCountsStore.tweetStatusCountsStore(stratoClient, “tweetypie/core.Tweet”),
+ttl = 1.minute,
+maxKeys = 10000, // 10K is enough for Heron Job.
+cacheName = “tweet_status_count”,
+windowSize = 10000L</p>
+</dd>
+</dl>
+<p>)(NullStatsReceiver)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>lazy val tweetEmbeddingService: Storm#Service[TweetId, ThriftSimClustersEmbedding] =</dt><dd><dl>
+<dt>Storm.service(</dt><dd><dl>
+<dt>TopKClustersForTweetKeyReadableStore</dt><dd><p>.overrideLimitDefaultStore(50, profile.serviceIdentifier(zone))
+.composeKeyMapping { tweetId: TweetId =&gt;</p>
+<blockquote>
+<div><p>TweetKey(tweetId, profile.modelVersionStr, profile.coreEmbeddingType)</p>
+</div></blockquote>
+<p>}.mapValues { value =&gt; SimClustersEmbedding(value).toThrift })</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>new StormConfig {</p>
+<blockquote>
+<div><p>val jobName: JobName = JobName(profile.jobName)</p>
+<p>implicit val jobID: JobId = JobId(jobName.toString)</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Add registrars for chill serialization for user-defined types.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>override def registrars =</dt><dd><dl class="simple">
+<dt>List(</dt><dd><p>SBRunConfig.register[StatusCounts],
+SBRunConfig.register[ThriftSimClustersEmbedding],
+SBRunConfig.register[PersistentSimClustersEmbedding]</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>/<strong>*</strong> Job configuration settings <strong>*</strong>/
+/**</p>
+<blockquote>
+<div><ul class="simple">
+<li><p>Use vmSettings to configure the VM</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</div></blockquote>
+<p>override def vmSettings: Seq[String] = Seq()</p>
+<p>private val SourcePerWorker = 1
+private val FlatMapPerWorker = 1
+private val SummerPerWorker = 1</p>
+<p>private val TotalWorker = 60</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Use transformConfig to set Heron options.</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+</dl>
+<p>override def transformConfig(config: Map[String, AnyRef]): Map[String, AnyRef] = {</p>
+<blockquote>
+<div><p>val heronJvmOptions = new JMap[String, AnyRef]()</p>
+<p>val MetaspaceSize = jLong(256L * 1024 * 1024)
+val DefaultHeapSize = jLong(2L * 1024 * 1024 * 1024)
+val HighHeapSize = jLong(4L * 1024 * 1024 * 1024)</p>
+<dl class="simple">
+<dt>val TotalCPU = jLong(</dt><dd><p>SourcePerWorker * 1 + FlatMapPerWorker * 4 + SummerPerWorker * 3 + 1</p>
+</dd>
+</dl>
+<p>)</p>
+<p>// reserve 4GB for the StreamMgr
+val TotalRam = jLong(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>DefaultHeapSize * (SourcePerWorker * 1 + FlatMapPerWorker * 4)</dt><dd><ul class="simple">
+<li><p>HighHeapSize * SummerPerWorker * 3</p></li>
+<li><p>MetaspaceSize * 8 // Applies to all workers</p></li>
+<li><p>4L * 1024 * 1024 * 1024)</p></li>
+</ul>
+</dd>
+</dl>
+</div></blockquote>
+<p>// These settings help prevent GC issues in the most memory intensive steps of the job by
+// dedicating more memory to the new gen heap designated by the -Xmn flag.
+Map(</p>
+<blockquote>
+<div><p>“Tail” -&gt; HighHeapSize</p>
+</div></blockquote>
+<dl>
+<dt>).foreach {</dt><dd><dl>
+<dt>case (stage, heap) =&gt;</dt><dd><dl class="simple">
+<dt>HeronConfig.setComponentJvmOptions(</dt><dd><p>heronJvmOptions,
+stage,
+s”-Xmx$heap -Xms$heap -Xmn${heap / 2}”</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>super.transformConfig(config) ++ List(</dt><dd><p>BTConfig.TOPOLOGY_TEAM_NAME -&gt; “cassowary”,
+BTConfig.TOPOLOGY_TEAM_EMAIL -&gt; “<a class="reference external" href="mailto:no-reply&#37;&#52;&#48;twitter&#46;com">no-reply<span>&#64;</span>twitter<span>&#46;</span>com</a>”,
+BTConfig.TOPOLOGY_WORKERS -&gt; jInt(TotalWorker),
+BTConfig.TOPOLOGY_ACKER_EXECUTORS -&gt; jInt(0),
+BTConfig.TOPOLOGY_MESSAGE_TIMEOUT_SECS -&gt; jInt(30),
+BTConfig.TOPOLOGY_WORKER_CHILDOPTS -&gt; List(</p>
+<blockquote>
+<div><p>“-Djava.security.auth.login.config=config/jaas.conf”,
+“-Dsun.security.krb5.debug=true”,
+“-Dcom.twitter.eventbus.client.EnableKafkaSaslTls=true”,
+“-Dcom.twitter.eventbus.client.zoneName=” + zone,
+s”-XX:MaxMetaspaceSize=$MetaspaceSize”</p>
+</div></blockquote>
+<p>).mkString(” “),
+HeronConfig.TOPOLOGY_CONTAINER_CPU_REQUESTED -&gt; TotalCPU,
+HeronConfig.TOPOLOGY_CONTAINER_RAM_REQUESTED -&gt; TotalRam,
+“storm.job.uniqueId” -&gt; jobID.get</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Use getNamedOptions to set Summingbird runtime options</p></li>
+<li><p>The list of available options: com.twitter.summingbird.online.option</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+<dt>override def getNamedOptions: Map[String, Options] = Map(</dt><dd><dl class="simple">
+<dt>“DEFAULT” -&gt; Options()</dt><dd><p>.set(SummerParallelism(TotalWorker * SummerPerWorker))
+.set(FlatMapParallelism(TotalWorker * FlatMapPerWorker))
+.set(SourceParallelism(TotalWorker * SourcePerWorker))
+.set(CacheSize(10000))
+.set(FlushFrequency(30.seconds))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>)</p>
+<p>/** Required job generation call for your job, defined in Job.scala <a href="#id9"><span class="problematic" id="id10">*</span></a>/
+override def graph: TailProducer[Storm, Any] = PersistentTweetJob.generate[Storm](</p>
+<blockquote>
+<div><p>favoriteEventSource,
+tweetStatusCountsService,
+tweetEmbeddingService,
+persistentTweetEmbeddingStoreWithLatestAggregation,
+persistentTweetEmbeddingStoreWithLongestL2NormAggregation</p>
+</div></blockquote>
+<p>)</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../_sources/src/scala/com/twitter/simclusters_v2/summingbird/storm/PersistentTweetJobRunner.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

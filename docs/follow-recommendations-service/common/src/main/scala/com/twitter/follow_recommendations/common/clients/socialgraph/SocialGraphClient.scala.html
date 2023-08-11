@@ -1,0 +1,680 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../../../" id="documentation_options" src="../../../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.follow_recommendations.common.clients.socialgraph</p>
+<p>import com.twitter.escherbird.util.stitchcache.StitchCache
+import com.twitter.finagle.stats.NullStatsReceiver
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.follow_recommendations.common.base.StatsUtil
+import com.twitter.follow_recommendations.common.models.FollowProof
+import com.twitter.follow_recommendations.common.models.UserIdWithTimestamp
+import com.twitter.inject.Logging
+import com.twitter.socialgraph.thriftscala.EdgesRequest
+import com.twitter.socialgraph.thriftscala.IdsRequest
+import com.twitter.socialgraph.thriftscala.IdsResult
+import com.twitter.socialgraph.thriftscala.LookupContext
+import com.twitter.socialgraph.thriftscala.OverCapacity
+import com.twitter.socialgraph.thriftscala.PageRequest
+import com.twitter.socialgraph.thriftscala.RelationshipType
+import com.twitter.socialgraph.thriftscala.SrcRelationship
+import com.twitter.socialgraph.util.ByteBufferUtil
+import com.twitter.stitch.Stitch
+import com.twitter.stitch.socialgraph.SocialGraph
+import com.twitter.strato.client.Fetcher
+import com.twitter.strato.generated.client.onboarding.socialGraphService.IdsClientColumn
+import com.twitter.util.Duration
+import com.twitter.util.Time
+import java.nio.ByteBuffer
+import javax.inject.Inject
+import javax.inject.Singleton</p>
+<dl class="simple">
+<dt>case class RecentEdgesQuery(</dt><dd><p>userId: Long,
+relations: Seq[RelationshipType],
+// prefer to default value to better utilize the caching function of stitch
+count: Option[Int] = Some(SocialGraphClient.MaxQuerySize),
+performUnion: Boolean = true,
+recentEdgesWindowOpt: Option[Duration] = None,
+targets: Option[Seq[Long]] = None)</p>
+</dd>
+<dt>case class EdgeRequestQuery(</dt><dd><p>userId: Long,
+relation: RelationshipType,
+count: Option[Int] = Some(SocialGraphClient.MaxQuerySize),
+performUnion: Boolean = true,
+recentEdgesWindowOpt: Option[Duration] = None,
+targets: Option[Seq[Long]] = None)</p>
+</dd>
+</dl>
+<p>&#64;Singleton
+class SocialGraphClient &#64;Inject() (</p>
+<blockquote>
+<div><p>socialGraph: SocialGraph,
+idsClientColumn: IdsClientColumn,
+statsReceiver: StatsReceiver = NullStatsReceiver)</p>
+<blockquote>
+<div><p>extends Logging {</p>
+</div></blockquote>
+<p>private val stats = statsReceiver.scope(this.getClass.getSimpleName)
+private val cacheStats = stats.scope(“cache”)
+private val getIntersectionsStats = stats.scope(“getIntersections”)
+private val getIntersectionsFromCachedColumnStats =</p>
+<blockquote>
+<div><p>stats.scope(“getIntersectionsFromCachedColumn”)</p>
+</div></blockquote>
+<p>private val getRecentEdgesStats = stats.scope(“getRecentEdges”)
+private val getRecentEdgesCachedStats = stats.scope(“getRecentEdgesCached”)
+private val getRecentEdgesFromCachedColumnStats = stats.scope(“getRecentEdgesFromCachedColumn”)
+private val getRecentEdgesCachedInternalStats = stats.scope(“getRecentEdgesCachedInternal”)
+private val getRecentEdgesWithTimeStats = stats.scope(“getRecentEdgesWithTime”)</p>
+<p>val sgsIdsFetcher: Fetcher[IdsRequest, Unit, IdsResult] = idsClientColumn.fetcher</p>
+<dl class="simple">
+<dt>private val recentEdgesCache = StitchCache[RecentEdgesQuery, Seq[Long]](</dt><dd><p>maxCacheSize = SocialGraphClient.MaxCacheSize,
+ttl = SocialGraphClient.CacheTTL,
+statsReceiver = cacheStats,
+underlyingCall = getRecentEdges</p>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>def getRecentEdgesCached(</dt><dd><p>rq: RecentEdgesQuery,
+useCachedStratoColumn: Boolean = true</p>
+</dd>
+<dt>): Stitch[Seq[Long]] = {</dt><dd><p>getRecentEdgesCachedStats.counter(“requests”).incr()
+if (useCachedStratoColumn) {</p>
+<blockquote>
+<div><p>getRecentEdgesFromCachedColumn(rq)</p>
+</div></blockquote>
+<dl>
+<dt>} else {</dt><dd><dl class="simple">
+<dt>StatsUtil.profileStitch(</dt><dd><p>getRecentEdgesCachedInternal(rq),
+getRecentEdgesCachedInternalStats</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>def getRecentEdgesCachedInternal(rq: RecentEdgesQuery): Stitch[Seq[Long]] = {</dt><dd><p>recentEdgesCache.readThrough(rq)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def getRecentEdgesFromCachedColumn(rq: RecentEdgesQuery): Stitch[Seq[Long]] = {</dt><dd><dl>
+<dt>val pageRequest = rq.recentEdgesWindowOpt match {</dt><dd><dl>
+<dt>case Some(recentEdgesWindow) =&gt;</dt><dd><dl class="simple">
+<dt>PageRequest(</dt><dd><p>count = rq.count,
+cursor = Some(getEdgeCursor(recentEdgesWindow)),
+selectAll = Some(true)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>case _ =&gt; PageRequest(count = rq.count)</p>
+</dd>
+</dl>
+<p>}
+val idsRequest = IdsRequest(</p>
+<blockquote>
+<div><dl>
+<dt>rq.relations.map { relationshipType =&gt;</dt><dd><dl class="simple">
+<dt>SrcRelationship(</dt><dd><p>source = rq.userId,
+relationshipType = relationshipType,
+targets = rq.targets</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>},
+pageRequest = Some(pageRequest),
+context = Some(LookupContext(performUnion = Some(rq.performUnion)))</p>
+</div></blockquote>
+<p>)</p>
+<dl>
+<dt>val socialGraphStitch = sgsIdsFetcher</dt><dd><p>.fetch(idsRequest, Unit)
+.map(_.v)
+.map { result =&gt;</p>
+<blockquote>
+<div><dl>
+<dt>result</dt><dd><dl class="simple">
+<dt>.map { idResult =&gt;</dt><dd><p>val userIds: Seq[Long] = idResult.ids
+getRecentEdgesFromCachedColumnStats.stat(“num_edges”).add(userIds.size)
+userIds</p>
+</dd>
+</dl>
+<p>}.getOrElse(Seq.empty)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+.rescue {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case e: Exception =&gt;</dt><dd><p>stats.counter(e.getClass.getSimpleName).incr()
+Stitch.Nil</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+<dt>StatsUtil.profileStitch(</dt><dd><p>socialGraphStitch,
+getRecentEdgesFromCachedColumnStats</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def getRecentEdges(rq: RecentEdgesQuery): Stitch[Seq[Long]] = {</dt><dd><dl>
+<dt>val pageRequest = rq.recentEdgesWindowOpt match {</dt><dd><dl>
+<dt>case Some(recentEdgesWindow) =&gt;</dt><dd><dl class="simple">
+<dt>PageRequest(</dt><dd><p>count = rq.count,
+cursor = Some(getEdgeCursor(recentEdgesWindow)),
+selectAll = Some(true)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>case _ =&gt; PageRequest(count = rq.count)</p>
+</dd>
+</dl>
+<p>}
+val socialGraphStitch = socialGraph</p>
+<blockquote>
+<div><dl>
+<dt>.ids(</dt><dd><dl>
+<dt>IdsRequest(</dt><dd><dl>
+<dt>rq.relations.map { relationshipType =&gt;</dt><dd><dl class="simple">
+<dt>SrcRelationship(</dt><dd><p>source = rq.userId,
+relationshipType = relationshipType,
+targets = rq.targets</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>},
+pageRequest = Some(pageRequest),
+context = Some(LookupContext(performUnion = Some(rq.performUnion)))</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>)
+.map { idsResult =&gt;</p>
+<blockquote>
+<div><p>val userIds: Seq[Long] = idsResult.ids
+getRecentEdgesStats.stat(“num_edges”).add(userIds.size)
+userIds</p>
+</div></blockquote>
+<p>}
+.rescue {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case e: OverCapacity =&gt;</dt><dd><p>stats.counter(e.getClass.getSimpleName).incr()
+logger.warn(“SGS Over Capacity”, e)
+Stitch.Nil</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<dl class="simple">
+<dt>StatsUtil.profileStitch(</dt><dd><p>socialGraphStitch,
+getRecentEdgesStats</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// This method return recent edges of (userId, timeInMs)
+def getRecentEdgesWithTime(rq: EdgeRequestQuery): Stitch[Seq[UserIdWithTimestamp]] = {</p>
+<blockquote>
+<div><dl>
+<dt>val pageRequest = rq.recentEdgesWindowOpt match {</dt><dd><dl>
+<dt>case Some(recentEdgesWindow) =&gt;</dt><dd><dl class="simple">
+<dt>PageRequest(</dt><dd><p>count = rq.count,
+cursor = Some(getEdgeCursor(recentEdgesWindow)),
+selectAll = Some(true)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>case _ =&gt; PageRequest(count = rq.count)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>val socialGraphStitch = socialGraph</dt><dd><dl>
+<dt>.edges(</dt><dd><dl>
+<dt>EdgesRequest(</dt><dd><dl class="simple">
+<dt>SrcRelationship(</dt><dd><p>source = rq.userId,
+relationshipType = rq.relation,
+targets = rq.targets</p>
+</dd>
+</dl>
+<p>),
+pageRequest = Some(pageRequest),
+context = Some(LookupContext(performUnion = Some(rq.performUnion)))</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>)
+.map { edgesResult =&gt;</p>
+<blockquote>
+<div><dl class="simple">
+<dt>val userIds = edgesResult.edges.map { socialEdge =&gt;</dt><dd><p>UserIdWithTimestamp(socialEdge.target, socialEdge.updatedAt)</p>
+</dd>
+</dl>
+<p>}
+getRecentEdgesWithTimeStats.stat(“num_edges”).add(userIds.size)
+userIds</p>
+</div></blockquote>
+<p>}
+.rescue {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case e: OverCapacity =&gt;</dt><dd><p>stats.counter(e.getClass.getSimpleName).incr()
+logger.warn(“SGS Over Capacity”, e)
+Stitch.Nil</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+<dt>StatsUtil.profileStitch(</dt><dd><p>socialGraphStitch,
+getRecentEdgesWithTimeStats</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<p>}</p>
+<p>// This method returns the cursor for a time duration, such that all the edges returned by SGS will be created
+// in the range (now-window, now)
+def getEdgeCursor(window: Duration): ByteBuffer = {</p>
+<blockquote>
+<div><p>val cursorInLong = (-(Time.now - window).inMilliseconds) &lt;&lt; 20
+ByteBufferUtil.fromLong(cursorInLong)</p>
+</div></blockquote>
+<p>}</p>
+<p>// notice that this is more expensive but more realtime than the GFS one
+def getIntersections(</p>
+<blockquote>
+<div><p>userId: Long,
+candidateIds: Seq[Long],
+numIntersectionIds: Int</p>
+</div></blockquote>
+<dl>
+<dt>): Stitch[Map[Long, FollowProof]] = {</dt><dd><dl>
+<dt>val socialGraphStitch: Stitch[Map[Long, FollowProof]] = Stitch</dt><dd><dl>
+<dt>.collect(candidateIds.map { candidateId =&gt;</dt><dd><dl>
+<dt>socialGraph</dt><dd><dl>
+<dt>.ids(</dt><dd><dl>
+<dt>IdsRequest(</dt><dd><dl class="simple">
+<dt>Seq(</dt><dd><p>SrcRelationship(userId, RelationshipType.Following),
+SrcRelationship(candidateId, RelationshipType.FollowedBy)</p>
+</dd>
+</dl>
+<p>),
+pageRequest = Some(PageRequest(count = Some(numIntersectionIds)))</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>).map { idsResult =&gt;</dt><dd><p>getIntersectionsStats.stat(“num_edges”).add(idsResult.ids.size)
+(candidateId -&gt; FollowProof(idsResult.ids, idsResult.ids.size))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}).map(_.toMap)
+.rescue {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case e: OverCapacity =&gt;</dt><dd><p>stats.counter(e.getClass.getSimpleName).incr()
+logger.warn(“social graph over capacity in hydrating social proof”, e)
+Stitch.value(Map.empty)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+<dt>StatsUtil.profileStitch(</dt><dd><p>socialGraphStitch,
+getIntersectionsStats</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def getIntersectionsFromCachedColumn(</dt><dd><p>userId: Long,
+candidateIds: Seq[Long],
+numIntersectionIds: Int</p>
+</dd>
+<dt>): Stitch[Map[Long, FollowProof]] = {</dt><dd><dl>
+<dt>val socialGraphStitch: Stitch[Map[Long, FollowProof]] = Stitch</dt><dd><dl>
+<dt>.collect(candidateIds.map { candidateId =&gt;</dt><dd><dl>
+<dt>val idsRequest = IdsRequest(</dt><dd><dl class="simple">
+<dt>Seq(</dt><dd><p>SrcRelationship(userId, RelationshipType.Following),
+SrcRelationship(candidateId, RelationshipType.FollowedBy)</p>
+</dd>
+</dl>
+<p>),
+pageRequest = Some(PageRequest(count = Some(numIntersectionIds)))</p>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>sgsIdsFetcher</dt><dd><p>.fetch(idsRequest, Unit)
+.map(_.v)
+.map { resultOpt =&gt;</p>
+<blockquote>
+<div><dl class="simple">
+<dt>resultOpt.map { idsResult =&gt;</dt><dd><p>getIntersectionsFromCachedColumnStats.stat(“num_edges”).add(idsResult.ids.size)
+candidateId -&gt; FollowProof(idsResult.ids, idsResult.ids.size)</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}).map(_.flatten.toMap)
+.rescue {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case e: Exception =&gt;</dt><dd><p>stats.counter(e.getClass.getSimpleName).incr()
+Stitch.value(Map.empty)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+<dt>StatsUtil.profileStitch(</dt><dd><p>socialGraphStitch,
+getIntersectionsFromCachedColumnStats</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def getInvalidRelationshipUserIds(</dt><dd><p>userId: Long,
+maxNumRelationship: Int = SocialGraphClient.MaxNumInvalidRelationship</p>
+</dd>
+<dt>): Stitch[Seq[Long]] = {</dt><dd><dl>
+<dt>getRecentEdges(</dt><dd><dl class="simple">
+<dt>RecentEdgesQuery(</dt><dd><p>userId,
+SocialGraphClient.InvalidRelationshipTypes,
+Some(maxNumRelationship)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def getInvalidRelationshipUserIdsFromCachedColumn(</dt><dd><p>userId: Long,
+maxNumRelationship: Int = SocialGraphClient.MaxNumInvalidRelationship</p>
+</dd>
+<dt>): Stitch[Seq[Long]] = {</dt><dd><dl>
+<dt>getRecentEdgesFromCachedColumn(</dt><dd><dl class="simple">
+<dt>RecentEdgesQuery(</dt><dd><p>userId,
+SocialGraphClient.InvalidRelationshipTypes,
+Some(maxNumRelationship)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def getRecentFollowedUserIds(userId: Long): Stitch[Seq[Long]] = {</dt><dd><dl>
+<dt>getRecentEdges(</dt><dd><dl class="simple">
+<dt>RecentEdgesQuery(</dt><dd><p>userId,
+Seq(RelationshipType.Following)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def getRecentFollowedUserIdsFromCachedColumn(userId: Long): Stitch[Seq[Long]] = {</dt><dd><dl>
+<dt>getRecentEdgesFromCachedColumn(</dt><dd><dl class="simple">
+<dt>RecentEdgesQuery(</dt><dd><p>userId,
+Seq(RelationshipType.Following)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def getRecentFollowedUserIdsWithTime(userId: Long): Stitch[Seq[UserIdWithTimestamp]] = {</dt><dd><dl>
+<dt>getRecentEdgesWithTime(</dt><dd><dl class="simple">
+<dt>EdgeRequestQuery(</dt><dd><p>userId,
+RelationshipType.Following</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def getRecentFollowedByUserIds(userId: Long): Stitch[Seq[Long]] = {</dt><dd><dl>
+<dt>getRecentEdges(</dt><dd><dl class="simple">
+<dt>RecentEdgesQuery(</dt><dd><p>userId,
+Seq(RelationshipType.FollowedBy)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def getRecentFollowedByUserIdsFromCachedColumn(userId: Long): Stitch[Seq[Long]] = {</dt><dd><dl>
+<dt>getRecentEdgesFromCachedColumn(</dt><dd><dl class="simple">
+<dt>RecentEdgesQuery(</dt><dd><p>userId,
+Seq(RelationshipType.FollowedBy)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def getRecentFollowedUserIdsWithTimeWindow(</dt><dd><p>userId: Long,
+timeWindow: Duration</p>
+</dd>
+<dt>): Stitch[Seq[Long]] = {</dt><dd><dl>
+<dt>getRecentEdges(</dt><dd><dl class="simple">
+<dt>RecentEdgesQuery(</dt><dd><p>userId,
+Seq(RelationshipType.Following),
+recentEdgesWindowOpt = Some(timeWindow)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>object SocialGraphClient {</p>
+<blockquote>
+<div><p>val MaxQuerySize: Int = 500
+val MaxCacheSize: Int = 5000000
+// Ref: src/thrift/com/twitter/socialgraph/social_graph_service.thrift
+val MaxNumInvalidRelationship: Int = 5000
+val CacheTTL: Duration = Duration.fromHours(24)</p>
+<dl class="simple">
+<dt>val InvalidRelationshipTypes: Seq[RelationshipType] = Seq(</dt><dd><p>RelationshipType.HideRecommendations,
+RelationshipType.Blocking,
+RelationshipType.BlockedBy,
+RelationshipType.Muting,
+RelationshipType.MutedBy,
+RelationshipType.ReportedAsSpam,
+RelationshipType.ReportedAsSpamBy,
+RelationshipType.ReportedAsAbuse,
+RelationshipType.ReportedAsAbuseBy,
+RelationshipType.FollowRequestOutgoing,
+RelationshipType.Following,
+RelationshipType.UsedToFollow,</p>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li></li>
+<li><p>Whether to call SGS to validate each candidate based on the number of invalid relationship users</p></li>
+<li><p>prefetched during request building step. This aims to not omit any invalid candidates that are</p></li>
+<li><p>not filtered out in previous steps.</p></li>
+<li><p>If the number is 0, this might be a fail-opened SGS call.</p></li>
+<li><p>If the number is larger or equal to 5000, this could hit SGS page size limit.</p></li>
+<li><p>Both cases account for a small percentage of the total traffic (&lt;5%).</p></li>
+<li></li>
+<li><p>&#64;param numInvalidRelationshipUsers number of invalid relationship users fetched from getInvalidRelationshipUserIds</p></li>
+<li><p>&#64;return whether to enable post-ranker SGS predicate</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>def enablePostRankerSgsPredicate(numInvalidRelationshipUsers: Int): Boolean = {</dt><dd><p>numInvalidRelationshipUsers == 0 || numInvalidRelationshipUsers &gt;= MaxNumInvalidRelationship</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../../../_sources/follow-recommendations-service/common/src/main/scala/com/twitter/follow_recommendations/common/clients/socialgraph/SocialGraphClient.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

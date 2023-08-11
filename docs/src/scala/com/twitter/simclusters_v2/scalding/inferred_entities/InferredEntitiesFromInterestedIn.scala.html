@@ -1,0 +1,585 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../" id="documentation_options" src="../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.simclusters_v2.scalding.inferred_entities</p>
+<p>import com.twitter.algebird.Max
+import com.twitter.scalding.Args
+import com.twitter.scalding.DateRange
+import com.twitter.scalding.Days
+import com.twitter.scalding.Duration
+import com.twitter.scalding.Execution
+import com.twitter.scalding.RichDate
+import com.twitter.scalding.TypedPipe
+import com.twitter.scalding.TypedTsv
+import com.twitter.scalding.UniqueID
+import com.twitter.scalding_internal.dalv2.DAL
+import com.twitter.scalding_internal.dalv2.DALWrite._
+import com.twitter.scalding_internal.dalv2.remote_access.ExplicitLocation
+import com.twitter.scalding_internal.dalv2.remote_access.ProcAtla
+import com.twitter.scalding_internal.multiformat.format.keyval.KeyVal
+import com.twitter.simclusters_v2.common.ClusterId
+import com.twitter.simclusters_v2.common.UTTEntityId
+import com.twitter.simclusters_v2.common.UserId
+import com.twitter.simclusters_v2.hdfs_sources._
+import com.twitter.simclusters_v2.scalding.common.TypedRichPipe._
+import com.twitter.simclusters_v2.scalding.common.Util
+import com.twitter.simclusters_v2.thriftscala.ClustersUserIsInterestedIn
+import com.twitter.simclusters_v2.thriftscala.EntitySource
+import com.twitter.simclusters_v2.thriftscala.InferredEntity
+import com.twitter.simclusters_v2.thriftscala.SemanticCoreEntityWithScore
+import com.twitter.simclusters_v2.thriftscala.SimClustersInferredEntities
+import com.twitter.simclusters_v2.thriftscala.SimClustersSource
+import com.twitter.simclusters_v2.thriftscala.UserAndNeighbors
+import com.twitter.wtf.scalding.jobs.common.AdhocExecutionApp
+import com.twitter.wtf.scalding.jobs.common.ScheduledExecutionApp
+import java.util.TimeZone
+import com.twitter.onboarding.relevance.source.UttAccountRecommendationsScalaDataset
+import com.twitter.scalding_internal.dalv2.DALWrite.D
+import com.twitter.wtf.entity_real_graph.scalding.common.SemanticCoreFilters.getValidSemanticCoreEntities
+import com.twitter.wtf.entity_real_graph.scalding.common.DataSources</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Infer interested-in entities for a given user. Depending on how and where the entity source comes</p></li>
+<li><p>from, this can be achieve a number of ways. For example, we can use user-&gt;interested-in clusters</p></li>
+<li><p>and cluster-&gt; semanticcore entity embeddings to derive user-&gt;entity. Or, we can use a producers’</p></li>
+<li><p>UTT embeddings and user-user engagement graph to aggregate UTT engagement history.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+</dl>
+<p>object InferredEntitiesFromInterestedIn {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>def getUserToKnownForUttEntities(</dt><dd><p>dateRange: DateRange,
+maxUttEntitiesPerUser: Int</p>
+</dd>
+<dt>)(</dt><dd><p>implicit timeZone: TimeZone</p>
+</dd>
+</dl>
+<p>): TypedPipe[(UserId, Seq[(Long, Double)])] = {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>val validEntities = getValidSemanticCoreEntities(</dt><dd><p>DataSources.semanticCoreMetadataSource(dateRange, timeZone)).distinct.map { entityId =&gt;
+Set(entityId)</p>
+</dd>
+</dl>
+<p>}.sum</p>
+<dl>
+<dt>DAL</dt><dd><p>.readMostRecentSnapshot(UttAccountRecommendationsScalaDataset, dateRange)
+.withRemoteReadPolicy(ExplicitLocation(ProcAtla))
+.toTypedPipe
+.flatMapWithValue(validEntities) {</p>
+<blockquote>
+<div><p>// Keep only valid Entities
+case (KeyVal(interest, candidates), Some(validUTTEntities))</p>
+<blockquote>
+<div><blockquote>
+<div><p>if validUTTEntities.contains(interest.uttID) =&gt;</p>
+</div></blockquote>
+<dl class="simple">
+<dt>candidates.recommendations.map { rec =&gt;</dt><dd><p>(rec.candidateUserID, (interest.uttID, rec.score.getOrElse(0.0)))</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>case _ =&gt; None</p>
+</div></blockquote>
+<p>}
+.group
+.sortedReverseTake(maxUttEntitiesPerUser)(Ordering.by(_._2))
+.toTypedPipe</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>def filterUTTEntities(</dt><dd><p>interestedInEntities: TypedPipe[(UserId, Seq[(UTTEntityId, Int)])],
+minSocialProofThreshold: Int,
+maxInterestsPerUser: Int</p>
+</dd>
+</dl>
+<p>): TypedPipe[(UserId, Seq[UTTEntityId])] = {</p>
+<blockquote>
+<div><dl>
+<dt>interestedInEntities</dt><dd><dl>
+<dt>.map {</dt><dd><dl>
+<dt>case (userId, entities) =&gt;</dt><dd><dl class="simple">
+<dt>val topEntities = entities</dt><dd><p>.filter(_._2 &gt;= minSocialProofThreshold)
+.sortBy(-_._2)
+.take(maxInterestsPerUser)
+.map(_._1)</p>
+</dd>
+</dl>
+<p>(userId, topEntities)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+.filter(_._2.nonEmpty)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>def getUserToUTTEntities(</dt><dd><p>userUserGraph: TypedPipe[UserAndNeighbors],
+knownForEntities: TypedPipe[(UserId, Seq[UTTEntityId])]</p>
+</dd>
+<dt>)(</dt><dd><p>implicit uniqueId: UniqueID</p>
+</dd>
+<dt>): TypedPipe[(UserId, Seq[(UTTEntityId, Int)])] = {</dt><dd><dl>
+<dt>val flatEngagementGraph =</dt><dd><dl>
+<dt>userUserGraph</dt><dd><p>.count(“num_user_user_graph_records”)
+.flatMap { userAndNeighbors =&gt;</p>
+<blockquote>
+<div><dl>
+<dt>userAndNeighbors.neighbors.flatMap { neighbor =&gt;</dt><dd><p>val producerId = neighbor.neighborId
+val hasFav = neighbor.favScoreHalfLife100Days.exists(_ &gt; 0)
+val hasFollow = neighbor.isFollowed.contains(true)</p>
+<dl class="simple">
+<dt>if (hasFav || hasFollow) {</dt><dd><p>Some((producerId, userAndNeighbors.userId))</p>
+</dd>
+<dt>} else {</dt><dd><p>None</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}
+.count(“num_flat_user_user_graph_edges”)</p>
+</dd>
+</dl>
+</dd>
+<dt>flatEngagementGraph</dt><dd><p>.join(knownForEntities.count(“num_producer_to_entities”))
+.withReducers(3000)
+.flatMap {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case (producerId, (userId, entities)) =&gt;</dt><dd><p>entities.map { entityId =&gt; ((userId, entityId), 1) }</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+.count(“num_flat_user_to_entity”)
+.sumByKey
+.withReducers(2999)
+.toTypedPipe
+.count(“num_user_with_entities”)
+.collect {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case ((userId, uttEntityId), numEngagements) =&gt;</dt><dd><p>(userId, Seq((uttEntityId, numEngagements)))</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+.sumByKey</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Infer entities using user-interestedIn clusters and entity embeddings for those clusters,</p></li>
+<li><p>based on a threshold</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>def getInterestedInFromEntityEmbeddings(</dt><dd><p>userToInterestedIn: TypedPipe[(UserId, ClustersUserIsInterestedIn)],
+clusterToEntities: TypedPipe[(ClusterId, Seq[SemanticCoreEntityWithScore])],
+inferredFromCluster: Option[SimClustersSource],
+inferredFromEntity: Option[EntitySource]</p>
+</dd>
+<dt>)(</dt><dd><p>implicit uniqueId: UniqueID</p>
+</dd>
+<dt>): TypedPipe[(UserId, Seq[InferredEntity])] = {</dt><dd><dl>
+<dt>val clusterToUsers = userToInterestedIn</dt><dd><dl>
+<dt>.flatMap {</dt><dd><dl>
+<dt>case (userId, clusters) =&gt;</dt><dd><dl class="simple">
+<dt>clusters.clusterIdToScores.map {</dt><dd><dl class="simple">
+<dt>case (clusterId, score) =&gt;</dt><dd><p>(clusterId, (userId, score))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+.count(“num_flat_user_to_interested_in_cluster”)</p>
+</dd>
+<dt>clusterToUsers</dt><dd><p>.join(clusterToEntities)
+.withReducers(3000)
+.map {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case (clusterId, ((userId, interestedInScore), entitiesWithScores)) =&gt;</dt><dd><p>(userId, entitiesWithScores)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+.flatMap {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case (userId, entitiesWithScore) =&gt;</dt><dd><p>// Dedup by entityIds in case user is associated with an entity from different clusters
+entitiesWithScore.map { entity =&gt; (userId, Map(entity.entityId -&gt; Max(entity.score))) }</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+.sumByKey
+.map {</p>
+<blockquote>
+<div><dl>
+<dt>case (userId, entitiesWithMaxScore) =&gt;</dt><dd><dl>
+<dt>val inferredEntities = entitiesWithMaxScore.map { entityWithScore =&gt;</dt><dd><dl class="simple">
+<dt>InferredEntity(</dt><dd><p>entityId = entityWithScore._1,
+score = entityWithScore._2.get,
+simclusterSource = inferredFromCluster,
+entitySource = inferredFromEntity</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}.toSeq
+(userId, inferredEntities)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+.count(“num_user_with_inferred_entities”)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>/**
+capesospy-v2 update –build_locally –start_cron </p>
+<blockquote>
+<div><blockquote>
+<div><p>–start_cron inferred_entities_from_interested_in src/scala/com/twitter/simclusters_v2/capesos_config/atla_proc.yaml</p>
+</div></blockquote>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</div></blockquote>
+<p>object InferredInterestedInSemanticCoreEntitiesBatchApp extends ScheduledExecutionApp {</p>
+<blockquote>
+<div><p>override def firstTime: RichDate = RichDate(“2023-01-01”)</p>
+<p>override def batchIncrement: Duration = Days(1)</p>
+<p>private val outputPath = InferredEntities.MHRootPath + “/interested_in”</p>
+<dl class="simple">
+<dt>private val outputPathKeyedByCluster =</dt><dd><p>InferredEntities.MHRootPath + “/interested_in_keyed_by_cluster”</p>
+</dd>
+</dl>
+<p>import InferredEntitiesFromInterestedIn._</p>
+<dl>
+<dt>override def runOnDateRange(</dt><dd><p>args: Args</p>
+</dd>
+<dt>)(</dt><dd><p>implicit dateRange: DateRange,
+timeZone: TimeZone,
+uniqueID: UniqueID</p>
+</dd>
+<dt>): Execution[Unit] = {</dt><dd><p>Execution.unit</p>
+<dl class="simple">
+<dt>val clusterToEntities = InferredEntities</dt><dd><p>.getLegibleEntityEmbeddings(dateRange, timeZone)
+.count(“num_legible_cluster_to_entities”)
+.forceToDisk</p>
+</dd>
+</dl>
+<p>// inferred interests. Only support 2020 model version
+val userToClusters2020 =</p>
+<blockquote>
+<div><p>InterestedInSources.simClustersInterestedIn2020Source(dateRange, timeZone)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>val inferredEntities2020 = getInterestedInFromEntityEmbeddings(</dt><dd><p>userToInterestedIn = userToClusters2020,
+clusterToEntities = clusterToEntities,
+inferredFromCluster = Some(InferredEntities.InterestedIn2020),
+inferredFromEntity = Some(EntitySource.SimClusters20M145K2020EntityEmbeddingsByFavScore)</p>
+</dd>
+<dt>)(uniqueID)</dt><dd><p>.count(“num_user_with_inferred_entities_2020”)</p>
+</dd>
+<dt>val combinedInferredInterests =</dt><dd><p>InferredEntities.combineResults(inferredEntities2020)</p>
+</dd>
+</dl>
+<p>// output cluster -&gt; entity mapping
+val clusterToEntityExec = clusterToEntities</p>
+<blockquote>
+<div><dl>
+<dt>.map {</dt><dd><dl>
+<dt>case (clusterId, entities) =&gt;</dt><dd><dl class="simple">
+<dt>val inferredEntities = SimClustersInferredEntities(</dt><dd><p>entities.map(entity =&gt; InferredEntity(entity.entityId, entity.score))</p>
+</dd>
+</dl>
+<p>)
+KeyVal(clusterId, inferredEntities)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+.writeDALVersionedKeyValExecution(</p>
+<blockquote>
+<div><p>SimclustersInferredEntitiesFromInterestedInKeyedByClusterScalaDataset,
+D.Suffix(outputPathKeyedByCluster)</p>
+</div></blockquote>
+<p>)</p>
+</div></blockquote>
+<p>// output user -&gt; entity mapping
+val userToEntityExec = combinedInferredInterests</p>
+<blockquote>
+<div><p>.map { case (userId, entities) =&gt; KeyVal(userId, entities) }
+.writeDALVersionedKeyValExecution(</p>
+<blockquote>
+<div><p>SimclustersInferredEntitiesFromInterestedInScalaDataset,
+D.Suffix(outputPath)</p>
+</div></blockquote>
+<p>)</p>
+</div></blockquote>
+<p>Execution.zip(clusterToEntityExec, userToEntityExec).unit</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>/**
+Adhob debugging job. Uses Entity Embeddings dataset to infer user interests</p>
+<p>./bazel bundle src/scala/com/twitter/simclusters_v2/scalding/inferred_entities/ &amp;&amp;scalding remote run </p>
+<blockquote>
+<div><blockquote>
+<div><p>–main-class com.twitter.simclusters_v2.scalding.inferred_entities.InferredInterestedInSemanticCoreEntitiesAdhocApp –target src/scala/com/twitter/simclusters_v2/scalding/inferred_entities:inferred_entities_from_interested_in-adhoc –user recos-platform – –date 2019-11-11 –email <a class="reference external" href="mailto:your_ldap&#37;&#52;&#48;twitter&#46;com">your_ldap<span>&#64;</span>twitter<span>&#46;</span>com</a></p>
+</div></blockquote>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</div></blockquote>
+<dl>
+<dt>object InferredInterestedInSemanticCoreEntitiesAdhocApp extends AdhocExecutionApp {</dt><dd><p>import InferredEntitiesFromInterestedIn._
+override def runOnDateRange(</p>
+<blockquote>
+<div><p>args: Args</p>
+</div></blockquote>
+<dl class="simple">
+<dt>)(</dt><dd><p>implicit dateRange: DateRange,
+timeZone: TimeZone,
+uniqueID: UniqueID</p>
+</dd>
+</dl>
+<p>): Execution[Unit] = {</p>
+<blockquote>
+<div><p>val interestedIn = InterestedInSources.simClustersInterestedIn2020Source(dateRange, timeZone)</p>
+<dl class="simple">
+<dt>val clusterToEntities = InferredEntities</dt><dd><p>.getLegibleEntityEmbeddings(dateRange, timeZone)
+.count(“num_legible_cluster_to_entities”)</p>
+</dd>
+</dl>
+<p>// Debugging InterestedIn -&gt; EntityEmbeddings approach
+val interestedInFromEntityEmbeddings = getInterestedInFromEntityEmbeddings(</p>
+<blockquote>
+<div><p>interestedIn,
+clusterToEntities,
+None,
+None</p>
+</div></blockquote>
+<p>)(uniqueID)</p>
+<dl>
+<dt>val distribution = Util</dt><dd><dl class="simple">
+<dt>.printSummaryOfNumericColumn(</dt><dd><p>interestedInFromEntityEmbeddings.map { case (k, v) =&gt; v.size },
+Some(”# of interestedIn entities per user”)</p>
+</dd>
+<dt>).map { results =&gt;</dt><dd><p>Util.sendEmail(results, “# of interestedIn entities per user”, args.getOrElse(“email”, “”))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>Execution</dt><dd><dl>
+<dt>.zip(</dt><dd><p>distribution,
+interestedInFromEntityEmbeddings</p>
+<blockquote>
+<div><dl class="simple">
+<dt>.writeExecution(</dt><dd><p>TypedTsv(“/user/recos-platform/adhoc/debug/interested_in_from_entity_embeddings”))</p>
+</dd>
+</dl>
+</div></blockquote>
+</dd>
+</dl>
+<p>).unit</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>/**</dt><dd><p>Adhob debuggingjob. Runs through the UTT interest inference, analyze the size &amp; distribution of
+interests per user.</p>
+</dd>
+</dl>
+<p>./bazel bundle src/scala/com/twitter/simclusters_v2/scalding/inferred_entities/ &amp;&amp;scalding remote run </p>
+<blockquote>
+<div><blockquote>
+<div><p>–main-class com.twitter.simclusters_v2.scalding.inferred_entities.InferredUTTEntitiesFromInterestedInAdhocApp –target src/scala/com/twitter/simclusters_v2/scalding/inferred_entities:inferred_entities_from_interested_in-adhoc –user recos-platform – –date 2019-11-03 –email <a class="reference external" href="mailto:your_ldap&#37;&#52;&#48;twitter&#46;com">your_ldap<span>&#64;</span>twitter<span>&#46;</span>com</a></p>
+</div></blockquote>
+<p><a href="#id9"><span class="problematic" id="id10">*</span></a>/</p>
+</div></blockquote>
+<dl>
+<dt>object InferredUTTEntitiesFromInterestedInAdhocApp extends AdhocExecutionApp {</dt><dd><p>import InferredEntitiesFromInterestedIn._</p>
+<dl class="simple">
+<dt>override def runOnDateRange(</dt><dd><p>args: Args</p>
+</dd>
+<dt>)(</dt><dd><p>implicit dateRange: DateRange,
+timeZone: TimeZone,
+uniqueID: UniqueID</p>
+</dd>
+</dl>
+<p>): Execution[Unit] = {</p>
+<blockquote>
+<div><p>val employeeGraphPath = “/user/recos-platform/adhoc/employee_graph_from_user_user/”
+val employeeGraph = TypedPipe.from(UserAndNeighborsFixedPathSource(employeeGraphPath))</p>
+<p>val maxKnownForUttsPerProducer = 100
+val minSocialProofThreshold = 10
+val maxInferredInterestsPerUser = 500</p>
+<p>// KnownFor UTT entities
+val userToUttEntities = getUserToKnownForUttEntities(</p>
+<blockquote>
+<div><p>dateRange.embiggen(Days(7)),
+maxKnownForUttsPerProducer</p>
+</div></blockquote>
+<p>).map { case (userId, entities) =&gt; (userId, entities.map(_._1)) }</p>
+<p>val userToInterestsEngagementCounts = getUserToUTTEntities(employeeGraph, userToUttEntities)</p>
+<dl class="simple">
+<dt>val topInterests = filterUTTEntities(</dt><dd><p>userToInterestsEngagementCounts,
+minSocialProofThreshold,
+maxInferredInterestsPerUser</p>
+</dd>
+</dl>
+<p>).count(“num_users_with_inferred_interests”)</p>
+<p>// Debugging UTT entities
+val analysis = Util</p>
+<blockquote>
+<div><dl>
+<dt>.printSummaryOfNumericColumn(</dt><dd><p>topInterests.map { case (k, v) =&gt; v.size },
+Some(</p>
+<blockquote>
+<div><p>“# of UTT entities per user, maxKnownForUtt=100, minSocialProof=10, maxInferredPerUser=500”)</p>
+</div></blockquote>
+</dd>
+<dt>).map { results =&gt;</dt><dd><p>Util.sendEmail(results, “# of UTT entities per user”, args.getOrElse(“email”, “”))</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>val outputPath = “/user/recos-platform/adhoc/inferred_utt_interests”</p>
+<dl>
+<dt>Execution</dt><dd><dl class="simple">
+<dt>.zip(</dt><dd><p>topInterests.writeExecution(TypedTsv(outputPath)),
+analysis</p>
+</dd>
+</dl>
+<p>).unit</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../_sources/src/scala/com/twitter/simclusters_v2/scalding/inferred_entities/InferredEntitiesFromInterestedIn.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

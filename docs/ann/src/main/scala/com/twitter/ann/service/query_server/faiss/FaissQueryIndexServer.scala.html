@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../../" id="documentation_options" src="../../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.ann.service.query_server.faiss</p>
+<p>import com.twitter.ann.common.Distance
+import com.twitter.ann.common.QueryableOperations.Map
+import com.twitter.ann.common._
+import com.twitter.ann.common.thriftscala.{RuntimeParams =&gt; ServiceRuntimeParams}
+import com.twitter.ann.faiss.FaissCommon
+import com.twitter.ann.faiss.FaissIndex
+import com.twitter.ann.faiss.FaissParams
+import com.twitter.ann.faiss.HourlyShardedIndex
+import com.twitter.ann.service.query_server.common.QueryableProvider
+import com.twitter.ann.service.query_server.common.RefreshableQueryable
+import com.twitter.ann.service.query_server.common.UnsafeQueryIndexServer
+import com.twitter.ann.service.query_server.common.FaissIndexPathProvider
+import com.twitter.ann.service.query_server.common.throttling.ThrottlingBasedQualityTask
+import com.twitter.ann.service.query_server.common.warmup.Warmup
+import com.twitter.bijection.Injection
+import com.twitter.conversions.DurationOps.richDurationFromInt
+import com.twitter.search.common.file.AbstractFile
+import com.twitter.search.common.file.FileUtils
+import com.twitter.util.Duration
+import java.util.concurrent.TimeUnit</p>
+<p>object FaissQueryIndexServer extends FaissQueryableServer</p>
+<dl>
+<dt>class FaissQueryableServer extends UnsafeQueryIndexServer[FaissParams] {</dt><dd><p>// given a directory, how to load it as a queryable index
+def queryableProvider[T, D &lt;: Distance[D]]: QueryableProvider[T, FaissParams, D] =</p>
+<blockquote>
+<div><dl>
+<dt>new QueryableProvider[T, FaissParams, D] {</dt><dd><dl>
+<dt>override def provideQueryable(</dt><dd><p>directory: AbstractFile</p>
+</dd>
+<dt>): Queryable[T, FaissParams, D] = {</dt><dd><dl class="simple">
+<dt>FaissIndex.loadIndex[T, D](</dt><dd><p>dimension(),
+unsafeMetric.asInstanceOf[Metric[D]],
+directory</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<dl>
+<dt>private def buildSimpleQueryable[T, D &lt;: Distance[D]](</dt><dd><p>dir: AbstractFile</p>
+</dd>
+<dt>): Queryable[T, FaissParams, D] = {</dt><dd><dl>
+<dt>val queryable = if (refreshable()) {</dt><dd><p>logger.info(s”build refreshable queryable”)
+val updatableQueryable = new RefreshableQueryable(</p>
+<blockquote>
+<div><p>false,
+dir,
+queryableProvider.asInstanceOf[QueryableProvider[T, FaissParams, D]],
+FaissIndexPathProvider(</p>
+<blockquote>
+<div><p>minIndexSizeBytes(),
+maxIndexSizeBytes(),
+statsReceiver.scope(“validated_index_provider”)</p>
+</div></blockquote>
+<p>),
+statsReceiver.scope(“refreshable_queryable”),
+updateInterval = refreshableInterval().minutes</p>
+</div></blockquote>
+<p>)
+// init first load of index and also schedule the following reloads
+updatableQueryable.start()
+updatableQueryable.asInstanceOf[QueryableGrouped[T, FaissParams, D]]</p>
+</dd>
+<dt>} else {</dt><dd><p>logger.info(s”build non-refreshable queryable”)</p>
+<p>logger.info(s”Loading ${dir}”)
+queryableProvider.provideQueryable(dir).asInstanceOf[Queryable[T, FaissParams, D]]</p>
+</dd>
+</dl>
+<p>}</p>
+<p>logger.info(“Faiss queryable created….”)
+queryable</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def buildShardedQueryable[T, D &lt;: Distance[D]](</dt><dd><p>dir: AbstractFile</p>
+</dd>
+<dt>): Queryable[T, FaissParams, D] = {</dt><dd><p>logger.info(s”build sharded queryable”)</p>
+<dl class="simple">
+<dt>val queryable = HourlyShardedIndex.loadIndex[T, D](</dt><dd><p>dimension(),
+unsafeMetric.asInstanceOf[Metric[D]],
+dir,
+shardedHours(),
+Duration(shardedWatchIntervalMinutes(), TimeUnit.MINUTES),
+shardedWatchLookbackIndexes(),
+statsReceiver.scope(“hourly_sharded_index”)</p>
+</dd>
+</dl>
+<p>)</p>
+<p>logger.info(“Faiss sharded queryable created….”)</p>
+<p>closeOnExit(queryable)
+queryable.startImmediately()</p>
+<p>logger.info(“Directory watching is scheduled”)</p>
+<p>queryable</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// Readings come incorrect if reader is created too early in the lifecycle of a server
+// hence lazy
+private lazy val throttleSamplingTask = new ThrottlingBasedQualityTask(</p>
+<blockquote>
+<div><p>statsReceiver.scope(“throttling_task”))</p>
+</div></blockquote>
+<dl>
+<dt>override def unsafeQueryableMap[T, D &lt;: Distance[D]]: Queryable[T, FaissParams, D] = {</dt><dd><p>val dir = FileUtils.getFileHandle(indexDirectory())</p>
+<dl class="simple">
+<dt>val queryable = if (sharded()) {</dt><dd><p>require(shardedHours() &gt; 0, “Number of hourly shards must be specified”)
+require(shardedWatchIntervalMinutes() &gt; 0, “Shard watch interval must be specified”)
+require(shardedWatchLookbackIndexes() &gt; 0, “Index lookback must be specified”)
+buildShardedQueryable[T, D](dir)</p>
+</dd>
+<dt>} else {</dt><dd><p>buildSimpleQueryable[T, D](dir)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>if (qualityFactorEnabled()) {</dt><dd><p>logger.info(“Quality Factor throttling is enabled”)
+closeOnExit(throttleSamplingTask)
+throttleSamplingTask.jitteredStart()</p>
+<p>queryable.mapRuntimeParameters(throttleSamplingTask.discountParams)</p>
+</dd>
+<dt>} else {</dt><dd><p>queryable</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>override val runtimeInjection: Injection[FaissParams, ServiceRuntimeParams] =</dt><dd><p>FaissCommon.RuntimeParamsInjection</p>
+</dd>
+<dt>protected override def warmup(): Unit =</dt><dd><dl class="simple">
+<dt>if (warmup_enabled())</dt><dd><p>new FaissWarmup(unsafeQueryableMap, dimension()).warmup()</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>class FaissWarmup(faiss: Queryable[_, FaissParams, _], dimension: Int) extends Warmup {</dt><dd><p>protected def minSuccessfulTries: Int = 100
+protected def maxTries: Int = 1000
+protected def timeout: Duration = 50.milliseconds
+protected def randomQueryDimension: Int = dimension</p>
+<dl>
+<dt>def warmup(): Unit = {</dt><dd><dl>
+<dt>run(</dt><dd><p>name = “queryWithDistance”,
+f = faiss</p>
+<blockquote>
+<div><dl class="simple">
+<dt>.queryWithDistance(</dt><dd><p>randomQuery(),
+100,
+FaissParams(nprobe = Some(128), None, None, None, None))</p>
+</dd>
+</dl>
+</div></blockquote>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../../_sources/ann/src/main/scala/com/twitter/ann/service/query_server/faiss/FaissQueryIndexServer.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

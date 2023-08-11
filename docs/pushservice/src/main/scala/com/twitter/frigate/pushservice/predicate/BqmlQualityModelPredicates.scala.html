@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.frigate.pushservice.predicate</p>
+<p>import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.frigate.common.base._
+import com.twitter.frigate.common.rec_types.RecTypes
+import com.twitter.frigate.pushservice.model.PushTypes.PushCandidate
+import com.twitter.frigate.pushservice.params.PushFeatureSwitchParams
+import com.twitter.hermit.predicate.NamedPredicate
+import com.twitter.hermit.predicate.Predicate
+import com.twitter.frigate.pushservice.ml.PushMLModelScorer
+import com.twitter.frigate.pushservice.params.PushConstants.TweetMediaEmbeddingBQKeyIds
+import com.twitter.frigate.pushservice.params.PushMLModel
+import com.twitter.frigate.pushservice.params.PushParams
+import com.twitter.frigate.pushservice.util.CandidateUtil
+import com.twitter.util.Future
+import com.twitter.frigate.pushservice.util.CandidateUtil._</p>
+<p>object BqmlQualityModelPredicates {</p>
+<blockquote>
+<div><dl>
+<dt>def ingestExtraFeatures(cand: PushCandidate): Unit = {</dt><dd><p>val tagsCRCountFeature = “tagsCR_count”
+val hasPushOpenOrNtabClickFeature = “has_PushOpenOrNtabClick”
+val onlyPushOpenOrNtabClickFeature = “only_PushOpenOrNtabClick”
+val firstTweetMediaEmbeddingFeature = “media_embedding_0”
+val tweetMediaEmbeddingFeature =</p>
+<blockquote>
+<div><p>“media.mediaunderstanding.media_embeddings.twitter_clip_as_sparse_continuous_feature”</p>
+</div></blockquote>
+<dl class="simple">
+<dt>if (!cand.numericFeatures.contains(tagsCRCountFeature)) {</dt><dd><p>cand.numericFeatures(tagsCRCountFeature) = getTagsCRCount(cand)</p>
+</dd>
+</dl>
+<p>}
+if (!cand.booleanFeatures.contains(hasPushOpenOrNtabClickFeature)) {</p>
+<blockquote>
+<div><p>cand.booleanFeatures(hasPushOpenOrNtabClickFeature) = isRelatedToMrTwistlyCandidate(cand)</p>
+</div></blockquote>
+<p>}
+if (!cand.booleanFeatures.contains(onlyPushOpenOrNtabClickFeature)) {</p>
+<blockquote>
+<div><p>cand.booleanFeatures(onlyPushOpenOrNtabClickFeature) = isMrTwistlyCandidate(cand)</p>
+</div></blockquote>
+<p>}
+if (!cand.numericFeatures.contains(firstTweetMediaEmbeddingFeature)) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>val tweetMediaEmbedding = cand.sparseContinuousFeatures</dt><dd><p>.getOrElse(tweetMediaEmbeddingFeature, Map.empty[String, Double])</p>
+</dd>
+<dt>Seq.range(0, TweetMediaEmbeddingBQKeyIds.size).foreach { i =&gt;</dt><dd><dl class="simple">
+<dt>cand.numericFeatures(s”media_embedding_$i”) =</dt><dd><p>tweetMediaEmbedding.getOrElse(TweetMediaEmbeddingBQKeyIds(i).toString, 0.0)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>def BqmlQualityModelOonPredicate(</dt><dd><p>bqmlQualityModelScorer: PushMLModelScorer</p>
+</dd>
+<dt>)(</dt><dd><p>implicit stats: StatsReceiver</p>
+</dd>
+<dt>): NamedPredicate[</dt><dd><p>PushCandidate with TweetCandidate with RecommendationType</p>
+</dd>
+</dl>
+<p>] = {</p>
+<blockquote>
+<div><p>val name = “bqml_quality_model_based_predicate”
+val scopedStatsReceiver = stats.scope(name)
+val oonCandidatesCounter = scopedStatsReceiver.counter(“oon_candidates”)
+val inCandidatesCounter = scopedStatsReceiver.counter(“in_candidates”)
+val filteredOonCandidatesCounter =</p>
+<blockquote>
+<div><p>scopedStatsReceiver.counter(“filtered_oon_candidates”)</p>
+</div></blockquote>
+<p>val bucketedCandidatesCounter = scopedStatsReceiver.counter(“bucketed_oon_candidates”)
+val emptyScoreCandidatesCounter = scopedStatsReceiver.counter(“empty_score_candidates”)
+val histogramBinSize = 0.05</p>
+<dl>
+<dt>Predicate</dt><dd><dl>
+<dt>.fromAsync { candidate: PushCandidate with TweetCandidate with RecommendationType =&gt;</dt><dd><p>val target = candidate.target
+val crt = candidate.commonRecType
+val isOonCandidate = RecTypes.isOutOfNetworkTweetRecType(crt) ||</p>
+<blockquote>
+<div><p>RecTypes.outOfNetworkTopicTweetTypes.contains(crt)</p>
+</div></blockquote>
+<dl>
+<dt>lazy val enableBqmlQualityModelScoreHistogramParam =</dt><dd><p>target.params(PushFeatureSwitchParams.EnableBqmlQualityModelScoreHistogramParam)</p>
+</dd>
+<dt>lazy val qualityCandidateScoreHistogramCounters =</dt><dd><dl class="simple">
+<dt>bqmlQualityModelScorer.getScoreHistogramCounters(</dt><dd><p>scopedStatsReceiver,
+“quality_score_histogram”,
+histogramBinSize)</p>
+</dd>
+</dl>
+</dd>
+<dt>if (CandidateUtil.shouldApplyHealthQualityFilters(candidate) &amp;&amp; (isOonCandidate || target</dt><dd><blockquote>
+<div><p>.params(PushParams.EnableBqmlReportModelPredictionForF1Tweets))</p>
+</div></blockquote>
+<p>&amp;&amp; target.params(PushFeatureSwitchParams.EnableBqmlQualityModelPredicateParam)) {
+ingestExtraFeatures(candidate)</p>
+<dl>
+<dt>lazy val shouldFilterFutSeq =</dt><dd><dl>
+<dt>target</dt><dd><p>.params(PushFeatureSwitchParams.BqmlQualityModelBucketModelIdListParam)
+.zip(target.params(PushFeatureSwitchParams.BqmlQualityModelBucketThresholdListParam))
+.map {</p>
+<blockquote>
+<div><dl>
+<dt>case (modelId, bucketThreshold) =&gt;</dt><dd><dl class="simple">
+<dt>val scoreFutOpt =</dt><dd><p>bqmlQualityModelScorer.singlePredicationForModelVersion(modelId, candidate)</p>
+</dd>
+<dt>candidate.populateQualityModelScore(</dt><dd><p>PushMLModel.FilteringProbability,
+modelId,
+scoreFutOpt</p>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>if (isOonCandidate) {</dt><dd><p>oonCandidatesCounter.incr()
+scoreFutOpt.map {</p>
+<blockquote>
+<div><dl>
+<dt>case Some(score) =&gt;</dt><dd><dl>
+<dt>if (score &gt;= bucketThreshold) {</dt><dd><p>bucketedCandidatesCounter.incr()
+if (modelId == target.params(</p>
+<blockquote>
+<div><blockquote>
+<div><p>PushFeatureSwitchParams.BqmlQualityModelTypeParam)) {</p>
+</div></blockquote>
+<dl>
+<dt>if (enableBqmlQualityModelScoreHistogramParam) {</dt><dd><dl class="simple">
+<dt>val scoreHistogramBinId =</dt><dd><p>math.ceil(score / histogramBinSize).toInt</p>
+</dd>
+</dl>
+<p>qualityCandidateScoreHistogramCounters(scoreHistogramBinId).incr()</p>
+</dd>
+</dl>
+<p>}
+if (score &gt;= target.params(</p>
+<blockquote>
+<div><blockquote>
+<div><p>PushFeatureSwitchParams.BqmlQualityModelPredicateThresholdParam)) {</p>
+</div></blockquote>
+<p>filteredOonCandidatesCounter.incr()
+true</p>
+</div></blockquote>
+<p>} else false</p>
+</div></blockquote>
+<p>} else false</p>
+</dd>
+</dl>
+<p>} else false</p>
+</dd>
+<dt>case _ =&gt;</dt><dd><p>emptyScoreCandidatesCounter.incr()
+false</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+<dt>} else {</dt><dd><p>inCandidatesCounter.incr()
+Future.False</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+<dt>Future.collect(shouldFilterFutSeq).flatMap { shouldFilterSeq =&gt;</dt><dd><dl class="simple">
+<dt>if (shouldFilterSeq.contains(true)) {</dt><dd><p>Future.False</p>
+</dd>
+</dl>
+<p>} else Future.True</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>} else Future.True</p>
+</dd>
+</dl>
+<p>}
+.withStats(stats.scope(name))
+.withName(name)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/pushservice/src/main/scala/com/twitter/frigate/pushservice/predicate/BqmlQualityModelPredicates.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

@@ -1,0 +1,1194 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.representation_manager.migration</p>
+<p>import com.twitter.bijection.Injection
+import com.twitter.bijection.scrooge.BinaryScalaCodec
+import com.twitter.contentrecommender.store.ApeEntityEmbeddingStore
+import com.twitter.contentrecommender.store.InterestsOptOutStore
+import com.twitter.contentrecommender.store.SemanticCoreTopicSeedStore
+import com.twitter.contentrecommender.twistly
+import com.twitter.conversions.DurationOps._
+import com.twitter.decider.Decider
+import com.twitter.escherbird.util.uttclient.CacheConfigV2
+import com.twitter.escherbird.util.uttclient.CachedUttClientV2
+import com.twitter.escherbird.util.uttclient.UttClientCacheConfigsV2
+import com.twitter.escherbird.utt.strato.thriftscala.Environment
+import com.twitter.finagle.ThriftMux
+import com.twitter.finagle.memcached.Client
+import com.twitter.finagle.mtls.authentication.ServiceIdentifier
+import com.twitter.finagle.mtls.client.MtlsStackClient.MtlsThriftMuxClientSyntax
+import com.twitter.finagle.mux.ClientDiscardedRequestException
+import com.twitter.finagle.service.ReqRep
+import com.twitter.finagle.service.ResponseClass
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.finagle.thrift.ClientId
+import com.twitter.frigate.common.store.strato.StratoFetchableStore
+import com.twitter.frigate.common.util.SeqLongInjection
+import com.twitter.hashing.KeyHasher
+import com.twitter.hermit.store.common.DeciderableReadableStore
+import com.twitter.hermit.store.common.ObservedCachedReadableStore
+import com.twitter.hermit.store.common.ObservedMemcachedReadableStore
+import com.twitter.hermit.store.common.ObservedReadableStore
+import com.twitter.interests.thriftscala.InterestsThriftService
+import com.twitter.relevance_platform.common.injection.LZ4Injection
+import com.twitter.relevance_platform.common.readablestore.ReadableStoreWithTimeout
+import com.twitter.representation_manager.common.RepresentationManagerDecider
+import com.twitter.representation_manager.store.DeciderConstants
+import com.twitter.representation_manager.store.DeciderKey
+import com.twitter.simclusters_v2.common.ModelVersions
+import com.twitter.simclusters_v2.common.SimClustersEmbedding
+import com.twitter.simclusters_v2.common.SimClustersEmbeddingIdCacheKeyBuilder
+import com.twitter.simclusters_v2.stores.SimClustersEmbeddingStore
+import com.twitter.simclusters_v2.summingbird.stores.PersistentTweetEmbeddingStore
+import com.twitter.simclusters_v2.summingbird.stores.ProducerClusterEmbeddingReadableStores
+import com.twitter.simclusters_v2.summingbird.stores.UserInterestedInReadableStore
+import com.twitter.simclusters_v2.thriftscala.ClustersUserIsInterestedIn
+import com.twitter.simclusters_v2.thriftscala.EmbeddingType
+import com.twitter.simclusters_v2.thriftscala.EmbeddingType._
+import com.twitter.simclusters_v2.thriftscala.InternalId
+import com.twitter.simclusters_v2.thriftscala.ModelVersion
+import com.twitter.simclusters_v2.thriftscala.ModelVersion.Model20m145k2020
+import com.twitter.simclusters_v2.thriftscala.ModelVersion.Model20m145kUpdated
+import com.twitter.simclusters_v2.thriftscala.SimClustersEmbeddingId
+import com.twitter.simclusters_v2.thriftscala.SimClustersMultiEmbedding
+import com.twitter.simclusters_v2.thriftscala.SimClustersMultiEmbeddingId
+import com.twitter.simclusters_v2.thriftscala.{SimClustersEmbedding =&gt; ThriftSimClustersEmbedding}
+import com.twitter.storage.client.manhattan.kv.ManhattanKVClientMtlsParams
+import com.twitter.storehaus.ReadableStore
+import com.twitter.storehaus_internal.manhattan.Athena
+import com.twitter.storehaus_internal.manhattan.ManhattanRO
+import com.twitter.storehaus_internal.manhattan.ManhattanROConfig
+import com.twitter.storehaus_internal.util.ApplicationID
+import com.twitter.storehaus_internal.util.DatasetName
+import com.twitter.storehaus_internal.util.HDFSPath
+import com.twitter.strato.client.Strato
+import com.twitter.strato.client.{Client =&gt; StratoClient}
+import com.twitter.strato.thrift.ScroogeConvImplicits._
+import com.twitter.tweetypie.util.UserId
+import com.twitter.util.Duration
+import com.twitter.util.Future
+import com.twitter.util.Throw
+import com.twitter.util.Timer
+import javax.inject.Inject
+import javax.inject.Named
+import scala.reflect.ClassTag</p>
+<dl>
+<dt>class LegacyRMS &#64;Inject() (</dt><dd><p>serviceIdentifier: ServiceIdentifier,
+cacheClient: Client,
+stats: StatsReceiver,
+decider: Decider,
+clientId: ClientId,
+timer: Timer,
+&#64;Named(“cacheHashKeyPrefix”) val cacheHashKeyPrefix: String = “RMS”,
+&#64;Named(“useContentRecommenderConfiguration”) val useContentRecommenderConfiguration: Boolean =</p>
+<blockquote>
+<div><p>false) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>private val mhMtlsParams: ManhattanKVClientMtlsParams = ManhattanKVClientMtlsParams(</dt><dd><p>serviceIdentifier)</p>
+</dd>
+</dl>
+<p>private val rmsDecider = RepresentationManagerDecider(decider)
+val keyHasher: KeyHasher = KeyHasher.FNV1A_64</p>
+<dl class="simple">
+<dt>private val embeddingCacheKeyBuilder =</dt><dd><p>SimClustersEmbeddingIdCacheKeyBuilder(keyHasher.hashKey, cacheHashKeyPrefix)</p>
+</dd>
+</dl>
+<p>private val statsReceiver = stats.scope(“representation_management”)</p>
+<p>// Strato client, default timeout = 280ms
+val stratoClient: StratoClient =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>Strato.client</dt><dd><p>.withMutualTls(serviceIdentifier)
+.build()</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>// Builds ThriftMux client builder for Content-Recommender service
+private def makeThriftClientBuilder(</p>
+<blockquote>
+<div><p>requestTimeout: Duration</p>
+</div></blockquote>
+<dl>
+<dt>): ThriftMux.Client = {</dt><dd><dl>
+<dt>ThriftMux.client</dt><dd><p>.withClientId(clientId)
+.withMutualTls(serviceIdentifier)
+.withRequestTimeout(requestTimeout)
+.withStatsReceiver(statsReceiver.scope(“clnt”))
+.withResponseClassifier {</p>
+<blockquote>
+<div><p>case ReqRep(_, Throw(_: ClientDiscardedRequestException)) =&gt; ResponseClass.Ignorable</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private def makeThriftClient[ThriftServiceType: ClassTag](</dt><dd><p>dest: String,
+label: String,
+requestTimeout: Duration = 450.milliseconds</p>
+</dd>
+<dt>): ThriftServiceType = {</dt><dd><dl class="simple">
+<dt>makeThriftClientBuilder(requestTimeout)</dt><dd><p>.build[ThriftServiceType](dest, label)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>/** <strong>* SimCluster Embedding Stores ****</strong>/
+implicit val simClustersEmbeddingIdInjection: Injection[SimClustersEmbeddingId, Array[Byte]] =</p>
+<blockquote>
+<div><p>BinaryScalaCodec(SimClustersEmbeddingId)</p>
+</div></blockquote>
+<dl>
+<dt>implicit val simClustersEmbeddingInjection: Injection[ThriftSimClustersEmbedding, Array[Byte]] =</dt><dd><p>BinaryScalaCodec(ThriftSimClustersEmbedding)</p>
+</dd>
+<dt>implicit val simClustersMultiEmbeddingInjection: Injection[SimClustersMultiEmbedding, Array[</dt><dd><p>Byte</p>
+</dd>
+<dt>]] =</dt><dd><p>BinaryScalaCodec(SimClustersMultiEmbedding)</p>
+</dd>
+<dt>implicit val simClustersMultiEmbeddingIdInjection: Injection[SimClustersMultiEmbeddingId, Array[</dt><dd><p>Byte</p>
+</dd>
+<dt>]] =</dt><dd><p>BinaryScalaCodec(SimClustersMultiEmbeddingId)</p>
+</dd>
+<dt>def getEmbeddingsDataset(</dt><dd><p>mhMtlsParams: ManhattanKVClientMtlsParams,
+datasetName: String</p>
+</dd>
+<dt>): ReadableStore[SimClustersEmbeddingId, ThriftSimClustersEmbedding] = {</dt><dd><dl>
+<dt>ManhattanRO.getReadableStoreWithMtls[SimClustersEmbeddingId, ThriftSimClustersEmbedding](</dt><dd><dl class="simple">
+<dt>ManhattanROConfig(</dt><dd><p>HDFSPath(“”), // not needed
+ApplicationID(“content_recommender_athena”),
+DatasetName(datasetName), // this should be correct
+Athena</p>
+</dd>
+</dl>
+<p>),
+mhMtlsParams</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>lazy val logFavBasedLongestL2Tweet20M145K2020EmbeddingStore: ReadableStore[</dt><dd><p>SimClustersEmbeddingId,
+SimClustersEmbedding</p>
+</dd>
+<dt>] = {</dt><dd><dl>
+<dt>val rawStore =</dt><dd><dl>
+<dt>PersistentTweetEmbeddingStore</dt><dd><dl class="simple">
+<dt>.longestL2NormTweetEmbeddingStoreManhattan(</dt><dd><p>mhMtlsParams,
+PersistentTweetEmbeddingStore.LogFavBased20m145k2020Dataset,
+statsReceiver,
+maxLength = 10,</p>
+</dd>
+</dl>
+<p>).mapValues(_.toThrift)</p>
+</dd>
+</dl>
+</dd>
+<dt>val memcachedStore = ObservedMemcachedReadableStore.fromCacheClient(</dt><dd><p>backingStore = rawStore,
+cacheClient = cacheClient,
+ttl = 15.minutes</p>
+</dd>
+<dt>)(</dt><dd><p>valueInjection = LZ4Injection.compose(BinaryScalaCodec(ThriftSimClustersEmbedding)),
+statsReceiver =</p>
+<blockquote>
+<div><p>statsReceiver.scope(“log_fav_based_longest_l2_tweet_embedding_20m145k2020_mem_cache”),</p>
+</div></blockquote>
+<dl class="simple">
+<dt>keyToString = { k =&gt;</dt><dd><p>s”scez_l2:${LogFavBasedTweet}_${ModelVersions.Model20M145K2020}_$k”</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>val inMemoryCacheStore: ReadableStore[SimClustersEmbeddingId, SimClustersEmbedding] =</dt><dd><dl>
+<dt>memcachedStore</dt><dd><dl>
+<dt>.composeKeyMapping[SimClustersEmbeddingId] {</dt><dd><dl>
+<dt>case SimClustersEmbeddingId(</dt><dd><blockquote>
+<div><p>LogFavLongestL2EmbeddingTweet,
+Model20m145k2020,
+InternalId.TweetId(tweetId)) =&gt;</p>
+</div></blockquote>
+<p>tweetId</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+.mapValues(SimClustersEmbedding(_))</p>
+</dd>
+</dl>
+</dd>
+<dt>ObservedCachedReadableStore.from[SimClustersEmbeddingId, SimClustersEmbedding](</dt><dd><p>inMemoryCacheStore,
+ttl = 12.minute,
+maxKeys = 1048575,
+cacheName = “log_fav_based_longest_l2_tweet_embedding_20m145k2020_cache”,
+windowSize = 10000L</p>
+</dd>
+</dl>
+<p>)(statsReceiver.scope(“log_fav_based_longest_l2_tweet_embedding_20m145k2020_store”))</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>lazy val logFavBased20M145KUpdatedTweetEmbeddingStore: ReadableStore[</dt><dd><p>SimClustersEmbeddingId,
+SimClustersEmbedding</p>
+</dd>
+<dt>] = {</dt><dd><dl>
+<dt>val rawStore =</dt><dd><dl>
+<dt>PersistentTweetEmbeddingStore</dt><dd><dl class="simple">
+<dt>.mostRecentTweetEmbeddingStoreManhattan(</dt><dd><p>mhMtlsParams,
+PersistentTweetEmbeddingStore.LogFavBased20m145kUpdatedDataset,
+statsReceiver</p>
+</dd>
+</dl>
+<p>).mapValues(_.toThrift)</p>
+</dd>
+</dl>
+</dd>
+<dt>val memcachedStore = ObservedMemcachedReadableStore.fromCacheClient(</dt><dd><p>backingStore = rawStore,
+cacheClient = cacheClient,
+ttl = 10.minutes</p>
+</dd>
+<dt>)(</dt><dd><p>valueInjection = LZ4Injection.compose(BinaryScalaCodec(ThriftSimClustersEmbedding)),
+statsReceiver = statsReceiver.scope(“log_fav_based_tweet_embedding_mem_cache”),
+keyToString = { k =&gt;</p>
+<blockquote>
+<div><p>// SimClusters_embedding_LZ4/embeddingType_modelVersion_tweetId
+s”scez:${LogFavBasedTweet}_${ModelVersions.Model20M145KUpdated}_$k”</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>val inMemoryCacheStore: ReadableStore[SimClustersEmbeddingId, SimClustersEmbedding] = {</dt><dd><dl>
+<dt>memcachedStore</dt><dd><dl>
+<dt>.composeKeyMapping[SimClustersEmbeddingId] {</dt><dd><dl>
+<dt>case SimClustersEmbeddingId(</dt><dd><blockquote>
+<div><p>LogFavBasedTweet,
+Model20m145kUpdated,
+InternalId.TweetId(tweetId)) =&gt;</p>
+</div></blockquote>
+<p>tweetId</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+.mapValues(SimClustersEmbedding(_))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>ObservedCachedReadableStore.from[SimClustersEmbeddingId, SimClustersEmbedding](</dt><dd><p>inMemoryCacheStore,
+ttl = 5.minute,
+maxKeys = 1048575, // 200MB
+cacheName = “log_fav_based_tweet_embedding_cache”,
+windowSize = 10000L</p>
+</dd>
+</dl>
+<p>)(statsReceiver.scope(“log_fav_based_tweet_embedding_store”))</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>lazy val logFavBased20M145K2020TweetEmbeddingStore: ReadableStore[</dt><dd><p>SimClustersEmbeddingId,
+SimClustersEmbedding</p>
+</dd>
+<dt>] = {</dt><dd><dl>
+<dt>val rawStore =</dt><dd><dl>
+<dt>PersistentTweetEmbeddingStore</dt><dd><dl class="simple">
+<dt>.mostRecentTweetEmbeddingStoreManhattan(</dt><dd><p>mhMtlsParams,
+PersistentTweetEmbeddingStore.LogFavBased20m145k2020Dataset,
+statsReceiver,
+maxLength = 10,</p>
+</dd>
+</dl>
+<p>).mapValues(_.toThrift)</p>
+</dd>
+</dl>
+</dd>
+<dt>val memcachedStore = ObservedMemcachedReadableStore.fromCacheClient(</dt><dd><p>backingStore = rawStore,
+cacheClient = cacheClient,
+ttl = 15.minutes</p>
+</dd>
+<dt>)(</dt><dd><p>valueInjection = LZ4Injection.compose(BinaryScalaCodec(ThriftSimClustersEmbedding)),
+statsReceiver = statsReceiver.scope(“log_fav_based_tweet_embedding_20m145k2020_mem_cache”),
+keyToString = { k =&gt;</p>
+<blockquote>
+<div><p>// SimClusters_embedding_LZ4/embeddingType_modelVersion_tweetId
+s”scez:${LogFavBasedTweet}_${ModelVersions.Model20M145K2020}_$k”</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>val inMemoryCacheStore: ReadableStore[SimClustersEmbeddingId, SimClustersEmbedding] =</dt><dd><dl>
+<dt>memcachedStore</dt><dd><dl>
+<dt>.composeKeyMapping[SimClustersEmbeddingId] {</dt><dd><dl>
+<dt>case SimClustersEmbeddingId(</dt><dd><blockquote>
+<div><p>LogFavBasedTweet,
+Model20m145k2020,
+InternalId.TweetId(tweetId)) =&gt;</p>
+</div></blockquote>
+<p>tweetId</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+.mapValues(SimClustersEmbedding(_))</p>
+</dd>
+</dl>
+</dd>
+<dt>ObservedCachedReadableStore.from[SimClustersEmbeddingId, SimClustersEmbedding](</dt><dd><p>inMemoryCacheStore,
+ttl = 12.minute,
+maxKeys = 16777215,
+cacheName = “log_fav_based_tweet_embedding_20m145k2020_cache”,
+windowSize = 10000L</p>
+</dd>
+</dl>
+<p>)(statsReceiver.scope(“log_fav_based_tweet_embedding_20m145k2020_store”))</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>lazy val favBasedTfgTopicEmbedding2020Store: ReadableStore[</dt><dd><p>SimClustersEmbeddingId,
+SimClustersEmbedding</p>
+</dd>
+<dt>] = {</dt><dd><dl class="simple">
+<dt>val stratoStore =</dt><dd><dl class="simple">
+<dt>StratoFetchableStore</dt><dd><dl class="simple">
+<dt>.withUnitView[SimClustersEmbeddingId, ThriftSimClustersEmbedding](</dt><dd><p>stratoClient,
+“recommendations/simclusters_v2/embeddings/favBasedTFGTopic20M145K2020”)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+<dt>val truncatedStore = stratoStore.mapValues { embedding =&gt;</dt><dd><p>SimClustersEmbedding(embedding, truncate = 50)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>ObservedCachedReadableStore.from(</dt><dd><dl class="simple">
+<dt>ObservedReadableStore(truncatedStore)(</dt><dd><p>statsReceiver.scope(“fav_tfg_topic_embedding_2020_cache_backing_store”)),</p>
+</dd>
+</dl>
+<p>ttl = 12.hours,
+maxKeys = 262143, // 200MB
+cacheName = “fav_tfg_topic_embedding_2020_cache”,
+windowSize = 10000L</p>
+</dd>
+</dl>
+<p>)(statsReceiver.scope(“fav_tfg_topic_embedding_2020_cache”))</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>lazy val logFavBasedApe20M145K2020EmbeddingStore: ReadableStore[</dt><dd><p>SimClustersEmbeddingId,
+SimClustersEmbedding</p>
+</dd>
+<dt>] = {</dt><dd><dl>
+<dt>ObservedReadableStore(</dt><dd><dl>
+<dt>StratoFetchableStore</dt><dd><dl>
+<dt>.withUnitView[SimClustersEmbeddingId, ThriftSimClustersEmbedding](</dt><dd><p>stratoClient,
+“recommendations/simclusters_v2/embeddings/logFavBasedAPE20M145K2020”)</p>
+</dd>
+<dt>.composeKeyMapping[SimClustersEmbeddingId] {</dt><dd><dl>
+<dt>case SimClustersEmbeddingId(</dt><dd><blockquote>
+<div><p>AggregatableLogFavBasedProducer,
+Model20m145k2020,
+internalId) =&gt;</p>
+</div></blockquote>
+<p>SimClustersEmbeddingId(AggregatableLogFavBasedProducer, Model20m145k2020, internalId)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+.mapValues(embedding =&gt; SimClustersEmbedding(embedding, 50))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>)(statsReceiver.scope(“aggregatable_producer_embeddings_by_logfav_score_2020”))</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>val interestService: InterestsThriftService.MethodPerEndpoint =</dt><dd><dl class="simple">
+<dt>makeThriftClient[InterestsThriftService.MethodPerEndpoint](</dt><dd><p>“/s/interests-thrift-service/interests-thrift-service”,
+“interests_thrift_service”</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>val interestsOptOutStore: InterestsOptOutStore = InterestsOptOutStore(interestService)</p>
+<p>// Save 2 ^ 18 UTTs. Promising 100% cache rate
+lazy val defaultCacheConfigV2: CacheConfigV2 = CacheConfigV2(262143)
+lazy val uttClientCacheConfigsV2: UttClientCacheConfigsV2 = UttClientCacheConfigsV2(</p>
+<blockquote>
+<div><p>getTaxonomyConfig = defaultCacheConfigV2,
+getUttTaxonomyConfig = defaultCacheConfigV2,
+getLeafIds = defaultCacheConfigV2,
+getLeafUttEntities = defaultCacheConfigV2</p>
+</div></blockquote>
+<p>)</p>
+<p>// CachedUttClient to use StratoClient
+lazy val cachedUttClientV2: CachedUttClientV2 = new CachedUttClientV2(</p>
+<blockquote>
+<div><p>stratoClient = stratoClient,
+env = Environment.Prod,
+cacheConfigs = uttClientCacheConfigsV2,
+statsReceiver = statsReceiver.scope(“cached_utt_client”)</p>
+</div></blockquote>
+<p>)</p>
+<dl>
+<dt>lazy val semanticCoreTopicSeedStore: ReadableStore[</dt><dd><p>SemanticCoreTopicSeedStore.Key,
+Seq[UserId]</p>
+</dd>
+<dt>] = {</dt><dd><dl>
+<dt>/*</dt><dd><blockquote>
+<div><p>Up to 1000 Long seeds per topic/language = 62.5kb per topic/language (worst case)
+Assume ~10k active topic/languages ~= 650MB (worst case)</p>
+</div></blockquote>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>val underlying = new SemanticCoreTopicSeedStore(cachedUttClientV2, interestsOptOutStore)(</dt><dd><p>statsReceiver.scope(“semantic_core_topic_seed_store”))</p>
+</dd>
+<dt>val memcacheStore = ObservedMemcachedReadableStore.fromCacheClient(</dt><dd><p>backingStore = underlying,
+cacheClient = cacheClient,
+ttl = 12.hours</p>
+</dd>
+<dt>)(</dt><dd><p>valueInjection = SeqLongInjection,
+statsReceiver = statsReceiver.scope(“topic_producer_seed_store_mem_cache”),
+keyToString = { k =&gt; s”tpss:${k.entityId}_${k.languageCode}” }</p>
+</dd>
+</dl>
+<p>)</p>
+<dl class="simple">
+<dt>ObservedCachedReadableStore.from[SemanticCoreTopicSeedStore.Key, Seq[UserId]](</dt><dd><p>store = memcacheStore,
+ttl = 6.hours,
+maxKeys = 20e3.toInt,
+cacheName = “topic_producer_seed_store_cache”,
+windowSize = 5000</p>
+</dd>
+</dl>
+<p>)(statsReceiver.scope(“topic_producer_seed_store_cache”))</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>lazy val logFavBasedApeEntity20M145K2020EmbeddingStore: ApeEntityEmbeddingStore = {</dt><dd><dl class="simple">
+<dt>val apeStore = logFavBasedApe20M145K2020EmbeddingStore.composeKeyMapping[UserId]({ id =&gt;</dt><dd><dl class="simple">
+<dt>SimClustersEmbeddingId(</dt><dd><p>AggregatableLogFavBasedProducer,
+Model20m145k2020,
+InternalId.UserId(id))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>})</p>
+<dl class="simple">
+<dt>new ApeEntityEmbeddingStore(</dt><dd><p>semanticCoreSeedStore = semanticCoreTopicSeedStore,
+aggregatableProducerEmbeddingStore = apeStore,
+statsReceiver = statsReceiver.scope(“log_fav_based_ape_entity_2020_embedding_store”))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>lazy val logFavBasedApeEntity20M145K2020EmbeddingCachedStore: ReadableStore[</dt><dd><p>SimClustersEmbeddingId,
+SimClustersEmbedding</p>
+</dd>
+<dt>] = {</dt><dd><dl>
+<dt>val truncatedStore =</dt><dd><p>logFavBasedApeEntity20M145K2020EmbeddingStore.mapValues(_.truncate(50).toThrift)</p>
+</dd>
+<dt>val memcachedStore = ObservedMemcachedReadableStore</dt><dd><dl class="simple">
+<dt>.fromCacheClient(</dt><dd><p>backingStore = truncatedStore,
+cacheClient = cacheClient,
+ttl = 12.hours</p>
+</dd>
+<dt>)(</dt><dd><p>valueInjection = LZ4Injection.compose(BinaryScalaCodec(ThriftSimClustersEmbedding)),
+statsReceiver = statsReceiver.scope(“log_fav_based_ape_entity_2020_embedding_mem_cache”),
+keyToString = { k =&gt; embeddingCacheKeyBuilder.apply(k) }</p>
+</dd>
+</dl>
+<p>).mapValues(SimClustersEmbedding(_))</p>
+</dd>
+<dt>val inMemoryCachedStore =</dt><dd><dl class="simple">
+<dt>ObservedCachedReadableStore.from[SimClustersEmbeddingId, SimClustersEmbedding](</dt><dd><p>memcachedStore,
+ttl = 6.hours,
+maxKeys = 262143,
+cacheName = “log_fav_based_ape_entity_2020_embedding_cache”,
+windowSize = 10000L</p>
+</dd>
+</dl>
+<p>)(statsReceiver.scope(“log_fav_based_ape_entity_2020_embedding_cached_store”))</p>
+</dd>
+<dt>DeciderableReadableStore(</dt><dd><p>inMemoryCachedStore,
+rmsDecider.deciderGateBuilder.idGateWithHashing[SimClustersEmbeddingId](</p>
+<blockquote>
+<div><p>DeciderKey.enableLogFavBasedApeEntity20M145K2020EmbeddingCachedStore),</p>
+</div></blockquote>
+<p>statsReceiver.scope(“log_fav_based_ape_entity_2020_embedding_deciderable_store”)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>lazy val relaxedLogFavBasedApe20M145K2020EmbeddingStore: ReadableStore[</dt><dd><p>SimClustersEmbeddingId,
+SimClustersEmbedding</p>
+</dd>
+<dt>] = {</dt><dd><dl>
+<dt>ObservedReadableStore(</dt><dd><dl>
+<dt>StratoFetchableStore</dt><dd><dl>
+<dt>.withUnitView[SimClustersEmbeddingId, ThriftSimClustersEmbedding](</dt><dd><p>stratoClient,
+“recommendations/simclusters_v2/embeddings/logFavBasedAPERelaxedFavEngagementThreshold20M145K2020”)</p>
+</dd>
+<dt>.composeKeyMapping[SimClustersEmbeddingId] {</dt><dd><dl>
+<dt>case SimClustersEmbeddingId(</dt><dd><blockquote>
+<div><p>RelaxedAggregatableLogFavBasedProducer,
+Model20m145k2020,
+internalId) =&gt;</p>
+</div></blockquote>
+<dl class="simple">
+<dt>SimClustersEmbeddingId(</dt><dd><p>RelaxedAggregatableLogFavBasedProducer,
+Model20m145k2020,
+internalId)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+.mapValues(embedding =&gt; SimClustersEmbedding(embedding).truncate(50))</p>
+</dd>
+</dl>
+</dd>
+<dt>)(statsReceiver.scope(</dt><dd><p>“aggregatable_producer_embeddings_by_logfav_score_relaxed_fav_engagement_threshold_2020”))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>lazy val relaxedLogFavBasedApe20M145K2020EmbeddingCachedStore: ReadableStore[</dt><dd><p>SimClustersEmbeddingId,
+SimClustersEmbedding</p>
+</dd>
+<dt>] = {</dt><dd><dl>
+<dt>val truncatedStore =</dt><dd><p>relaxedLogFavBasedApe20M145K2020EmbeddingStore.mapValues(_.truncate(50).toThrift)</p>
+</dd>
+<dt>val memcachedStore = ObservedMemcachedReadableStore</dt><dd><dl>
+<dt>.fromCacheClient(</dt><dd><p>backingStore = truncatedStore,
+cacheClient = cacheClient,
+ttl = 12.hours</p>
+</dd>
+<dt>)(</dt><dd><p>valueInjection = LZ4Injection.compose(BinaryScalaCodec(ThriftSimClustersEmbedding)),
+statsReceiver =</p>
+<blockquote>
+<div><p>statsReceiver.scope(“relaxed_log_fav_based_ape_entity_2020_embedding_mem_cache”),</p>
+</div></blockquote>
+<p>keyToString = { k: SimClustersEmbeddingId =&gt; embeddingCacheKeyBuilder.apply(k) }</p>
+</dd>
+</dl>
+<p>).mapValues(SimClustersEmbedding(_))</p>
+</dd>
+<dt>ObservedCachedReadableStore.from[SimClustersEmbeddingId, SimClustersEmbedding](</dt><dd><p>memcachedStore,
+ttl = 6.hours,
+maxKeys = 262143,
+cacheName = “relaxed_log_fav_based_ape_entity_2020_embedding_cache”,
+windowSize = 10000L</p>
+</dd>
+</dl>
+<p>)(statsReceiver.scope(“relaxed_log_fav_based_ape_entity_2020_embedding_cache_store”))</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>lazy val favBasedProducer20M145K2020EmbeddingStore: ReadableStore[</dt><dd><p>SimClustersEmbeddingId,
+SimClustersEmbedding</p>
+</dd>
+<dt>] = {</dt><dd><dl>
+<dt>val underlyingStore = ProducerClusterEmbeddingReadableStores</dt><dd><dl>
+<dt>.getProducerTopKSimClusters2020EmbeddingsStore(</dt><dd><p>mhMtlsParams</p>
+</dd>
+<dt>).composeKeyMapping[SimClustersEmbeddingId] {</dt><dd><dl>
+<dt>case SimClustersEmbeddingId(</dt><dd><blockquote>
+<div><p>FavBasedProducer,
+Model20m145k2020,
+InternalId.UserId(userId)) =&gt;</p>
+</div></blockquote>
+<p>userId</p>
+</dd>
+</dl>
+</dd>
+<dt>}.mapValues { topSimClustersWithScore =&gt;</dt><dd><p>ThriftSimClustersEmbedding(topSimClustersWithScore.topClusters.take(10))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>// same memcache config as for favBasedUserInterestedIn20M145K2020Store
+val memcachedStore = ObservedMemcachedReadableStore</p>
+<blockquote>
+<div><dl class="simple">
+<dt>.fromCacheClient(</dt><dd><p>backingStore = underlyingStore,
+cacheClient = cacheClient,
+ttl = 24.hours</p>
+</dd>
+<dt>)(</dt><dd><p>valueInjection = LZ4Injection.compose(BinaryScalaCodec(ThriftSimClustersEmbedding)),
+statsReceiver = statsReceiver.scope(“fav_based_producer_embedding_20M_145K_2020_mem_cache”),
+keyToString = { k =&gt; embeddingCacheKeyBuilder.apply(k) }</p>
+</dd>
+</dl>
+<p>).mapValues(SimClustersEmbedding(_))</p>
+</div></blockquote>
+<dl class="simple">
+<dt>ObservedCachedReadableStore.from[SimClustersEmbeddingId, SimClustersEmbedding](</dt><dd><p>memcachedStore,
+ttl = 12.hours,
+maxKeys = 16777215,
+cacheName = “fav_based_producer_embedding_20M_145K_2020_embedding_cache”,
+windowSize = 10000L</p>
+</dd>
+</dl>
+<p>)(statsReceiver.scope(“fav_based_producer_embedding_20M_145K_2020_embedding_store”))</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// Production
+lazy val interestedIn20M145KUpdatedStore: ReadableStore[UserId, ClustersUserIsInterestedIn] = {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>UserInterestedInReadableStore.defaultStoreWithMtls(</dt><dd><p>mhMtlsParams,
+modelVersion = ModelVersions.Model20M145KUpdated</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<p>}</p>
+<p>// Production
+lazy val interestedIn20M145K2020Store: ReadableStore[UserId, ClustersUserIsInterestedIn] = {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>UserInterestedInReadableStore.defaultStoreWithMtls(</dt><dd><p>mhMtlsParams,
+modelVersion = ModelVersions.Model20M145K2020</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<p>}</p>
+<p>// Production
+lazy val InterestedInFromPE20M145KUpdatedStore: ReadableStore[</p>
+<blockquote>
+<div><p>UserId,
+ClustersUserIsInterestedIn</p>
+</div></blockquote>
+<dl class="simple">
+<dt>] = {</dt><dd><dl class="simple">
+<dt>UserInterestedInReadableStore.defaultIIPEStoreWithMtls(</dt><dd><p>mhMtlsParams,
+modelVersion = ModelVersions.Model20M145KUpdated)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>lazy val simClustersInterestedInStore: ReadableStore[</dt><dd><p>(UserId, ModelVersion),
+ClustersUserIsInterestedIn</p>
+</dd>
+<dt>] = {</dt><dd><dl>
+<dt>new ReadableStore[(UserId, ModelVersion), ClustersUserIsInterestedIn] {</dt><dd><dl>
+<dt>override def get(k: (UserId, ModelVersion)): Future[Option[ClustersUserIsInterestedIn]] = {</dt><dd><dl class="simple">
+<dt>k match {</dt><dd><dl class="simple">
+<dt>case (userId, Model20m145kUpdated) =&gt;</dt><dd><p>interestedIn20M145KUpdatedStore.get(userId)</p>
+</dd>
+<dt>case (userId, Model20m145k2020) =&gt;</dt><dd><p>interestedIn20M145K2020Store.get(userId)</p>
+</dd>
+<dt>case _ =&gt;</dt><dd><p>Future.None</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>lazy val simClustersInterestedInFromProducerEmbeddingsStore: ReadableStore[</dt><dd><p>(UserId, ModelVersion),
+ClustersUserIsInterestedIn</p>
+</dd>
+<dt>] = {</dt><dd><dl>
+<dt>new ReadableStore[(UserId, ModelVersion), ClustersUserIsInterestedIn] {</dt><dd><dl>
+<dt>override def get(k: (UserId, ModelVersion)): Future[Option[ClustersUserIsInterestedIn]] = {</dt><dd><dl class="simple">
+<dt>k match {</dt><dd><dl class="simple">
+<dt>case (userId, ModelVersion.Model20m145kUpdated) =&gt;</dt><dd><p>InterestedInFromPE20M145KUpdatedStore.get(userId)</p>
+</dd>
+<dt>case _ =&gt;</dt><dd><p>Future.None</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>lazy val userInterestedInStore =</dt><dd><dl class="simple">
+<dt>new twistly.interestedin.EmbeddingStore(</dt><dd><p>interestedInStore = simClustersInterestedInStore,
+interestedInFromProducerEmbeddingStore = simClustersInterestedInFromProducerEmbeddingsStore,
+statsReceiver = statsReceiver</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>// Production
+lazy val favBasedUserInterestedIn20M145KUpdatedStore: ReadableStore[</p>
+<blockquote>
+<div><p>SimClustersEmbeddingId,
+SimClustersEmbedding</p>
+</div></blockquote>
+<dl>
+<dt>] = {</dt><dd><dl>
+<dt>val underlyingStore =</dt><dd><dl>
+<dt>UserInterestedInReadableStore</dt><dd><dl class="simple">
+<dt>.defaultSimClustersEmbeddingStoreWithMtls(</dt><dd><p>mhMtlsParams,
+EmbeddingType.FavBasedUserInterestedIn,
+ModelVersion.Model20m145kUpdated)</p>
+</dd>
+</dl>
+<p>.mapValues(_.toThrift)</p>
+</dd>
+</dl>
+</dd>
+<dt>val memcachedStore = ObservedMemcachedReadableStore</dt><dd><dl class="simple">
+<dt>.fromCacheClient(</dt><dd><p>backingStore = underlyingStore,
+cacheClient = cacheClient,
+ttl = 12.hours</p>
+</dd>
+<dt>)(</dt><dd><p>valueInjection = LZ4Injection.compose(BinaryScalaCodec(ThriftSimClustersEmbedding)),
+statsReceiver = statsReceiver.scope(“fav_based_user_interested_in_mem_cache”),
+keyToString = { k =&gt; embeddingCacheKeyBuilder.apply(k) }</p>
+</dd>
+</dl>
+<p>).mapValues(SimClustersEmbedding(_))</p>
+</dd>
+<dt>ObservedCachedReadableStore.from[SimClustersEmbeddingId, SimClustersEmbedding](</dt><dd><p>memcachedStore,
+ttl = 6.hours,
+maxKeys = 262143,
+cacheName = “fav_based_user_interested_in_cache”,
+windowSize = 10000L</p>
+</dd>
+</dl>
+<p>)(statsReceiver.scope(“fav_based_user_interested_in_store”))</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// Production
+lazy val LogFavBasedInterestedInFromAPE20M145K2020Store: ReadableStore[</p>
+<blockquote>
+<div><p>SimClustersEmbeddingId,
+SimClustersEmbedding</p>
+</div></blockquote>
+<dl>
+<dt>] = {</dt><dd><dl>
+<dt>val underlyingStore =</dt><dd><dl>
+<dt>UserInterestedInReadableStore</dt><dd><dl class="simple">
+<dt>.defaultIIAPESimClustersEmbeddingStoreWithMtls(</dt><dd><p>mhMtlsParams,
+EmbeddingType.LogFavBasedUserInterestedInFromAPE,
+ModelVersion.Model20m145k2020)</p>
+</dd>
+</dl>
+<p>.mapValues(_.toThrift)</p>
+</dd>
+</dl>
+</dd>
+<dt>val memcachedStore = ObservedMemcachedReadableStore</dt><dd><dl class="simple">
+<dt>.fromCacheClient(</dt><dd><p>backingStore = underlyingStore,
+cacheClient = cacheClient,
+ttl = 12.hours</p>
+</dd>
+<dt>)(</dt><dd><p>valueInjection = LZ4Injection.compose(BinaryScalaCodec(ThriftSimClustersEmbedding)),
+statsReceiver = statsReceiver.scope(“log_fav_based_user_interested_in_from_ape_mem_cache”),
+keyToString = { k =&gt; embeddingCacheKeyBuilder.apply(k) }</p>
+</dd>
+</dl>
+<p>).mapValues(SimClustersEmbedding(_))</p>
+</dd>
+<dt>ObservedCachedReadableStore.from[SimClustersEmbeddingId, SimClustersEmbedding](</dt><dd><p>memcachedStore,
+ttl = 6.hours,
+maxKeys = 262143,
+cacheName = “log_fav_based_user_interested_in_from_ape_cache”,
+windowSize = 10000L</p>
+</dd>
+</dl>
+<p>)(statsReceiver.scope(“log_fav_based_user_interested_in_from_ape_store”))</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// Production
+lazy val FollowBasedInterestedInFromAPE20M145K2020Store: ReadableStore[</p>
+<blockquote>
+<div><p>SimClustersEmbeddingId,
+SimClustersEmbedding</p>
+</div></blockquote>
+<dl>
+<dt>] = {</dt><dd><dl>
+<dt>val underlyingStore =</dt><dd><dl>
+<dt>UserInterestedInReadableStore</dt><dd><dl class="simple">
+<dt>.defaultIIAPESimClustersEmbeddingStoreWithMtls(</dt><dd><p>mhMtlsParams,
+EmbeddingType.FollowBasedUserInterestedInFromAPE,
+ModelVersion.Model20m145k2020)</p>
+</dd>
+</dl>
+<p>.mapValues(_.toThrift)</p>
+</dd>
+</dl>
+</dd>
+<dt>val memcachedStore = ObservedMemcachedReadableStore</dt><dd><dl class="simple">
+<dt>.fromCacheClient(</dt><dd><p>backingStore = underlyingStore,
+cacheClient = cacheClient,
+ttl = 12.hours</p>
+</dd>
+<dt>)(</dt><dd><p>valueInjection = LZ4Injection.compose(BinaryScalaCodec(ThriftSimClustersEmbedding)),
+statsReceiver = statsReceiver.scope(“follow_based_user_interested_in_from_ape_mem_cache”),
+keyToString = { k =&gt; embeddingCacheKeyBuilder.apply(k) }</p>
+</dd>
+</dl>
+<p>).mapValues(SimClustersEmbedding(_))</p>
+</dd>
+<dt>ObservedCachedReadableStore.from[SimClustersEmbeddingId, SimClustersEmbedding](</dt><dd><p>memcachedStore,
+ttl = 6.hours,
+maxKeys = 262143,
+cacheName = “follow_based_user_interested_in_from_ape_cache”,
+windowSize = 10000L</p>
+</dd>
+</dl>
+<p>)(statsReceiver.scope(“follow_based_user_interested_in_from_ape_store”))</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// production
+lazy val favBasedUserInterestedIn20M145K2020Store: ReadableStore[</p>
+<blockquote>
+<div><p>SimClustersEmbeddingId,
+SimClustersEmbedding</p>
+</div></blockquote>
+<dl>
+<dt>] = {</dt><dd><dl>
+<dt>val underlyingStore: ReadableStore[SimClustersEmbeddingId, ThriftSimClustersEmbedding] =</dt><dd><dl class="simple">
+<dt>UserInterestedInReadableStore</dt><dd><dl class="simple">
+<dt>.defaultSimClustersEmbeddingStoreWithMtls(</dt><dd><p>mhMtlsParams,
+EmbeddingType.FavBasedUserInterestedIn,
+ModelVersion.Model20m145k2020).mapValues(_.toThrift)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+<dt>ObservedMemcachedReadableStore</dt><dd><dl class="simple">
+<dt>.fromCacheClient(</dt><dd><p>backingStore = underlyingStore,
+cacheClient = cacheClient,
+ttl = 12.hours</p>
+</dd>
+<dt>)(</dt><dd><p>valueInjection = LZ4Injection.compose(BinaryScalaCodec(ThriftSimClustersEmbedding)),
+statsReceiver = statsReceiver.scope(“fav_based_user_interested_in_2020_mem_cache”),
+keyToString = { k =&gt; embeddingCacheKeyBuilder.apply(k) }</p>
+</dd>
+</dl>
+<p>).mapValues(SimClustersEmbedding(_))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>// Production
+lazy val logFavBasedUserInterestedIn20M145K2020Store: ReadableStore[</p>
+<blockquote>
+<div><p>SimClustersEmbeddingId,
+SimClustersEmbedding</p>
+</div></blockquote>
+<dl>
+<dt>] = {</dt><dd><dl>
+<dt>val underlyingStore =</dt><dd><dl class="simple">
+<dt>UserInterestedInReadableStore</dt><dd><dl class="simple">
+<dt>.defaultSimClustersEmbeddingStoreWithMtls(</dt><dd><p>mhMtlsParams,
+EmbeddingType.LogFavBasedUserInterestedIn,
+ModelVersion.Model20m145k2020)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+<dt>val memcachedStore = ObservedMemcachedReadableStore</dt><dd><dl class="simple">
+<dt>.fromCacheClient(</dt><dd><p>backingStore = underlyingStore.mapValues(_.toThrift),
+cacheClient = cacheClient,
+ttl = 12.hours</p>
+</dd>
+<dt>)(</dt><dd><p>valueInjection = LZ4Injection.compose(BinaryScalaCodec(ThriftSimClustersEmbedding)),
+statsReceiver = statsReceiver.scope(“log_fav_based_user_interested_in_2020_store”),
+keyToString = { k =&gt; embeddingCacheKeyBuilder.apply(k) }</p>
+</dd>
+</dl>
+<p>).mapValues(SimClustersEmbedding(_))</p>
+</dd>
+<dt>ObservedCachedReadableStore.from[SimClustersEmbeddingId, SimClustersEmbedding](</dt><dd><p>memcachedStore,
+ttl = 6.hours,
+maxKeys = 262143,
+cacheName = “log_fav_based_user_interested_in_2020_cache”,
+windowSize = 10000L</p>
+</dd>
+</dl>
+<p>)(statsReceiver.scope(“log_fav_based_user_interested_in_2020_store”))</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// Production
+lazy val favBasedUserInterestedInFromPE20M145KUpdatedStore: ReadableStore[</p>
+<blockquote>
+<div><p>SimClustersEmbeddingId,
+SimClustersEmbedding</p>
+</div></blockquote>
+<dl>
+<dt>] = {</dt><dd><dl>
+<dt>val underlyingStore =</dt><dd><dl>
+<dt>UserInterestedInReadableStore</dt><dd><dl class="simple">
+<dt>.defaultIIPESimClustersEmbeddingStoreWithMtls(</dt><dd><p>mhMtlsParams,
+EmbeddingType.FavBasedUserInterestedInFromPE,
+ModelVersion.Model20m145kUpdated)</p>
+</dd>
+</dl>
+<p>.mapValues(_.toThrift)</p>
+</dd>
+</dl>
+</dd>
+<dt>val memcachedStore = ObservedMemcachedReadableStore</dt><dd><dl class="simple">
+<dt>.fromCacheClient(</dt><dd><p>backingStore = underlyingStore,
+cacheClient = cacheClient,
+ttl = 12.hours</p>
+</dd>
+<dt>)(</dt><dd><p>valueInjection = LZ4Injection.compose(BinaryScalaCodec(ThriftSimClustersEmbedding)),
+statsReceiver = statsReceiver.scope(“fav_based_user_interested_in_from_pe_mem_cache”),
+keyToString = { k =&gt; embeddingCacheKeyBuilder.apply(k) }</p>
+</dd>
+</dl>
+<p>).mapValues(SimClustersEmbedding(_))</p>
+</dd>
+<dt>ObservedCachedReadableStore.from[SimClustersEmbeddingId, SimClustersEmbedding](</dt><dd><p>memcachedStore,
+ttl = 6.hours,
+maxKeys = 262143,
+cacheName = “fav_based_user_interested_in_from_pe_cache”,
+windowSize = 10000L</p>
+</dd>
+</dl>
+<p>)(statsReceiver.scope(“fav_based_user_interested_in_from_pe_cache”))</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private val underlyingStores: Map[</dt><dd><p>(EmbeddingType, ModelVersion),
+ReadableStore[SimClustersEmbeddingId, SimClustersEmbedding]</p>
+</dd>
+<dt>] = Map(</dt><dd><p>// Tweet Embeddings
+(LogFavBasedTweet, Model20m145kUpdated) -&gt; logFavBased20M145KUpdatedTweetEmbeddingStore,
+(LogFavBasedTweet, Model20m145k2020) -&gt; logFavBased20M145K2020TweetEmbeddingStore,
+(</p>
+<blockquote>
+<div><p>LogFavLongestL2EmbeddingTweet,
+Model20m145k2020) -&gt; logFavBasedLongestL2Tweet20M145K2020EmbeddingStore,</p>
+</div></blockquote>
+<p>// Entity Embeddings
+(FavTfgTopic, Model20m145k2020) -&gt; favBasedTfgTopicEmbedding2020Store,
+(</p>
+<blockquote>
+<div><p>LogFavBasedKgoApeTopic,
+Model20m145k2020) -&gt; logFavBasedApeEntity20M145K2020EmbeddingCachedStore,</p>
+</div></blockquote>
+<p>// KnownFor Embeddings
+(FavBasedProducer, Model20m145k2020) -&gt; favBasedProducer20M145K2020EmbeddingStore,
+(</p>
+<blockquote>
+<div><p>RelaxedAggregatableLogFavBasedProducer,
+Model20m145k2020) -&gt; relaxedLogFavBasedApe20M145K2020EmbeddingCachedStore,</p>
+</div></blockquote>
+<p>// InterestedIn Embeddings
+(</p>
+<blockquote>
+<div><p>LogFavBasedUserInterestedInFromAPE,
+Model20m145k2020) -&gt; LogFavBasedInterestedInFromAPE20M145K2020Store,</p>
+</div></blockquote>
+<dl class="simple">
+<dt>(</dt><dd><p>FollowBasedUserInterestedInFromAPE,
+Model20m145k2020) -&gt; FollowBasedInterestedInFromAPE20M145K2020Store,</p>
+</dd>
+</dl>
+<p>(FavBasedUserInterestedIn, Model20m145kUpdated) -&gt; favBasedUserInterestedIn20M145KUpdatedStore,
+(FavBasedUserInterestedIn, Model20m145k2020) -&gt; favBasedUserInterestedIn20M145K2020Store,
+(LogFavBasedUserInterestedIn, Model20m145k2020) -&gt; logFavBasedUserInterestedIn20M145K2020Store,
+(</p>
+<blockquote>
+<div><p>FavBasedUserInterestedInFromPE,
+Model20m145kUpdated) -&gt; favBasedUserInterestedInFromPE20M145KUpdatedStore,</p>
+</div></blockquote>
+<p>(FilteredUserInterestedIn, Model20m145kUpdated) -&gt; userInterestedInStore,
+(FilteredUserInterestedIn, Model20m145k2020) -&gt; userInterestedInStore,
+(FilteredUserInterestedInFromPE, Model20m145kUpdated) -&gt; userInterestedInStore,
+(UnfilteredUserInterestedIn, Model20m145kUpdated) -&gt; userInterestedInStore,
+(UnfilteredUserInterestedIn, Model20m145k2020) -&gt; userInterestedInStore,</p>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>val simClustersEmbeddingStore: ReadableStore[SimClustersEmbeddingId, SimClustersEmbedding] = {</dt><dd><dl>
+<dt>val underlying: ReadableStore[SimClustersEmbeddingId, SimClustersEmbedding] =</dt><dd><dl class="simple">
+<dt>SimClustersEmbeddingStore.buildWithDecider(</dt><dd><p>underlyingStores = underlyingStores,
+decider = rmsDecider.decider,
+statsReceiver = statsReceiver.scope(“simClusters_embeddings_store_deciderable”)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>val underlyingWithTimeout: ReadableStore[SimClustersEmbeddingId, SimClustersEmbedding] =</dt><dd><dl class="simple">
+<dt>new ReadableStoreWithTimeout(</dt><dd><p>rs = underlying,
+decider = rmsDecider.decider,
+enableTimeoutDeciderKey = DeciderConstants.enableSimClustersEmbeddingStoreTimeouts,
+timeoutValueKey = DeciderConstants.simClustersEmbeddingStoreTimeoutValueMillis,
+timer = timer,
+statsReceiver = statsReceiver.scope(“simClusters_embedding_store_timeouts”)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>ObservedReadableStore(</dt><dd><p>store = underlyingWithTimeout</p>
+</dd>
+</dl>
+<p>)(statsReceiver.scope(“simClusters_embeddings_store”))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/representation-manager/server/src/main/scala/com/twitter/representation_manager/migration/LegacyRMS.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.tweetypie.hydrator</p>
+<p>import com.twitter.servo.util.Gate
+import com.twitter.spam.rtf.thriftscala.SafetyLevel
+import com.twitter.stitch.Stitch
+import com.twitter.tweetypie.StatsReceiver
+import com.twitter.tweetypie.Tweet
+import com.twitter.tweetypie.core.ValueState
+import com.twitter.tweetypie.repository.TweetQuery
+import com.twitter.tweetypie.repository.TweetRepository
+import com.twitter.tweetypie.util.EditControlUtil
+import com.twitter.tweetypie.serverutil.ExceptionCounter
+import com.twitter.tweetypie.thriftscala.EditControl
+import com.twitter.tweetypie.thriftscala.EditControlInitial
+import com.twitter.tweetypie.thriftscala.FieldByPath
+import com.twitter.tweetypie.util.TweetEditFailure.TweetEditGetInitialEditControlException
+import com.twitter.tweetypie.util.TweetEditFailure.TweetEditInvalidEditControlException</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>EditControlHydrator is used to hydrate the EditControlEdit arm of the editControl field.</p></li>
+<li></li>
+<li><p>For Tweets without edits and for initial Tweets with subsequent edit(s), this hydrator</p></li>
+<li><p>passes through the existing editControl (either None or EditControlInitial).</p></li>
+<li></li>
+<li><p>For edit Tweets, it hydrates the initial Tweet’s edit control, set as a field on</p></li>
+<li><p>the edit control of the edit Tweet and returns the new edit control.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>object EditControlHydrator {</dt><dd><p>type Type = ValueHydrator[Option[EditControl], TweetCtx]</p>
+<p>val hydratedField: FieldByPath = fieldByPath(Tweet.EditControlField)</p>
+<dl>
+<dt>def apply(</dt><dd><p>repo: TweetRepository.Type,
+setEditTimeWindowToSixtyMinutes: Gate[Unit],
+stats: StatsReceiver</p>
+</dd>
+<dt>): Type = {</dt><dd><p>val exceptionCounter = ExceptionCounter(stats)</p>
+<p>// Count hydration of edit control for tweets that were written before writing edit control initial.
+val noEditControlHydration = stats.counter(“noEditControlHydration”)
+// Count hydration of edit control edit tweets
+val editControlEditHydration = stats.counter(“editControlEditHydration”)
+// Count edit control edit hydration which successfully found an edit control initial
+val editControlEditHydrationSuccessful = stats.counter(“editControlEditHydration”, “success”)
+// Count of initial tweets being hydrated.
+val editControlInitialHydration = stats.counter(“editControlInitialHydration”)
+// Count of edits loaded where the ID of edit is not present in the initial tweet
+val editTweetIdsMissingAnEdit = stats.counter(“editTweetIdsMissingAnEdit”)
+// Count hydrated tweets where edit control is set, but neither initial nor edit
+val unknownUnionVariant = stats.counter(“unknownEditControlUnionVariant”)</p>
+<dl>
+<dt>ValueHydrator[Option[EditControl], TweetCtx] { (curr, ctx) =&gt;</dt><dd><dl>
+<dt>curr match {</dt><dd><p>// Tweet was created before we write edit control - hydrate the value at read.
+case None =&gt;</p>
+<blockquote>
+<div><p>noEditControlHydration.incr()
+val editControl = EditControlUtil.makeEditControlInitial(</p>
+<blockquote>
+<div><p>ctx.tweetId,
+ctx.createdAt,
+setEditTimeWindowToSixtyMinutes)</p>
+</div></blockquote>
+<p>Stitch.value(ValueState.delta(curr, Some(editControl)))</p>
+</div></blockquote>
+<p>// Tweet is an initial tweet
+case Some(EditControl.Initial(_)) =&gt;</p>
+<blockquote>
+<div><p>editControlInitialHydration.incr()
+Stitch.value(ValueState.unmodified(curr))</p>
+</div></blockquote>
+<p>// Tweet is an edited version
+case Some(EditControl.Edit(edit)) =&gt;</p>
+<blockquote>
+<div><p>editControlEditHydration.incr()
+getInitialTweet(repo, edit.initialTweetId, ctx)</p>
+<blockquote>
+<div><p>.flatMap(getEditControlInitial(ctx))
+.map { initial: Option[EditControlInitial] =&gt;</p>
+<blockquote>
+<div><p>editControlEditHydrationSuccessful.incr()</p>
+<dl>
+<dt>initial.foreach { initialTweet =&gt;</dt><dd><p>// We are able to fetch the initial tweet for this edit but this edit tweet is
+// not present in the initial’s editTweetIds list
+if (!initialTweet.editTweetIds.contains(ctx.tweetId)) {</p>
+<blockquote>
+<div><p>editTweetIdsMissingAnEdit.incr()</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>val updated = edit.copy(editControlInitial = initial)
+ValueState.delta(curr, Some(EditControl.Edit(updated)))</p>
+</div></blockquote>
+<p>}
+.onFailure(exceptionCounter(_))</p>
+</div></blockquote>
+</div></blockquote>
+<dl class="simple">
+<dt>case Some(_) =&gt; // Unknown union variant</dt><dd><p>unknownUnionVariant.incr()
+Stitch.exception(TweetEditInvalidEditControlException)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}.onlyIf { (_, ctx) =&gt; ctx.opts.enableEditControlHydration }</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def getInitialTweet(</dt><dd><p>repo: TweetRepository.Type,
+initialTweetId: Long,
+ctx: TweetCtx,</p>
+</dd>
+<dt>): Stitch[Tweet] = {</dt><dd><dl class="simple">
+<dt>val options = TweetQuery.Options(</dt><dd><p>include = TweetQuery.Include(Set(Tweet.EditControlField.id)),
+cacheControl = ctx.opts.cacheControl,
+enforceVisibilityFiltering = false,
+safetyLevel = SafetyLevel.FilterNone,
+fetchStoredTweets = ctx.opts.fetchStoredTweets</p>
+</dd>
+</dl>
+<p>)
+repo(initialTweetId, options)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def getEditControlInitial(ctx: TweetCtx): Tweet =&gt; Stitch[Option[EditControlInitial]] = {</dt><dd><dl>
+<dt>initialTweet: Tweet =&gt;</dt><dd><dl>
+<dt>initialTweet.editControl match {</dt><dd><dl>
+<dt>case Some(EditControl.Initial(initial)) =&gt;</dt><dd><dl>
+<dt>Stitch.value(</dt><dd><dl class="simple">
+<dt>if (ctx.opts.cause.writing(ctx.tweetId)) {</dt><dd><p>// On the write path we hydrate edit control initial
+// as if the initial tweet is already updated.
+Some(EditControlUtil.plusEdit(initial, ctx.tweetId))</p>
+</dd>
+<dt>} else {</dt><dd><p>Some(initial)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>case _ if ctx.opts.fetchStoredTweets =&gt;</dt><dd><p>// If the fetchStoredTweets parameter is set to true, it means we’re fetching
+// and hydrating tweets regardless of state. In this case, if the initial tweet
+// doesn’t exist, we return None here to ensure we still hydrate and return the
+// current edit tweet.
+Stitch.None</p>
+</dd>
+</dl>
+<p>case _ =&gt; Stitch.exception(TweetEditGetInitialEditControlException)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/tweetypie/server/src/main/scala/com/twitter/tweetypie/hydrator/EditControlHydrator.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

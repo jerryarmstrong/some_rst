@@ -1,0 +1,474 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../" id="documentation_options" src="../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../_static/doctools.js?v=888ff710"></script>
+    <script src="../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+   
+  <link rel="stylesheet" href="../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>“””Torch and torchrec specific training and evaluation loops.</p>
+<dl class="simple">
+<dt>Features (go/100_enablements):</dt><dd><ul class="simple">
+<li><p>CUDA data-fetch, compute, gradient-push overlap</p></li>
+<li><p>Large learnable embeddings through torchrec</p></li>
+<li><p>On/off-chief evaluation</p></li>
+<li><p>Warmstart/checkpoint management</p></li>
+<li><p>go/dataset-service 0-copy integration</p></li>
+</ul>
+</dd>
+</dl>
+<p>“””
+import datetime
+import os
+from typing import Callable, Dict, Iterable, List, Mapping, Optional</p>
+<p>from tml.common import log_weights
+import tml.common.checkpointing.snapshot as snapshot_lib
+from tml.core.losses import get_global_loss_detached
+from tml.ml_logging.torch_logging import logging  # type: ignore[attr-defined]
+from tml.core.train_pipeline import TrainPipelineSparseDist</p>
+<p>import tree
+import torch
+import torch.distributed as dist
+from torch.optim.lr_scheduler import _LRScheduler
+import torchmetrics as tm</p>
+<dl>
+<dt>def get_new_iterator(iterable: Iterable):</dt><dd><p>“””
+This obtain a new iterator from the iterable. If the iterable uses tf.data.Dataset internally,</p>
+<blockquote>
+<div><p>getting a new iterator each N steps will avoid memory leak. To avoid the memory leak
+calling iter(iterable) should return a “fresh” iterator using a fresh
+(new instance of) tf.data.Iterator.
+In particular, iterable can be a torch.utils.data.IterableDataset or a
+torch.utils.data.DataLoader.</p>
+</div></blockquote>
+<dl class="simple">
+<dt>When using DDS, performing this reset does not change the order in which elements are received</dt><dd><p>(excluding elements already prefetched) provided that iter(iterable) internally uses
+a new instance of tf.data.Dataset created by calling from_dataset_id.
+This requirement is satisfied by RecapDataset.</p>
+</dd>
+</dl>
+<dl class="field-list simple">
+<dt class="field-odd">param iterable<span class="colon">:</span></dt>
+<dd class="field-odd"><p></p></dd>
+<dt class="field-even">return<span class="colon">:</span></dt>
+<dd class="field-even"><p></p></dd>
+</dl>
+<p>“””
+return iter(iterable)</p>
+</dd>
+<dt>def _get_step_fn(pipeline, data_iterator, training: bool):</dt><dd><dl>
+<dt>def step_fn():</dt><dd><p># It turns out that model.train() and model.eval() simply switch a single field inside the model
+# class,so it’s somewhat safer to wrap in here.
+if training:</p>
+<blockquote>
+<div><p>pipeline._model.train()</p>
+</div></blockquote>
+<dl class="simple">
+<dt>else:</dt><dd><p>pipeline._model.eval()</p>
+</dd>
+</dl>
+<p>outputs = pipeline.progress(data_iterator)
+return tree.map_structure(lambda elem: elem.detach(), outputs)</p>
+</dd>
+</dl>
+<p>return step_fn</p>
+</dd>
+</dl>
+<p>&#64;torch.no_grad()
+def _run_evaluation(</p>
+<blockquote>
+<div><p>pipeline,
+dataset,
+eval_steps: int,
+metrics: tm.MetricCollection,
+eval_batch_size: int,
+logger=None,</p>
+</div></blockquote>
+<dl>
+<dt>):</dt><dd><p>“””Runs the evaluation loop over all evaluation iterators.”””
+dataset = get_new_iterator(dataset)
+step_fn = _get_step_fn(pipeline, dataset, training=False)
+last_time = datetime.datetime.now()
+logging.info(f”Starting {eval_steps} steps of evaluation.”)
+for _ in range(eval_steps):</p>
+<blockquote>
+<div><p>outputs = step_fn()
+metrics.update(outputs)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>eval_ex_per_s = (</dt><dd><p>eval_batch_size * eval_steps / (datetime.datetime.now() - last_time).total_seconds()</p>
+</dd>
+</dl>
+<p>)
+logging.info(f”eval examples_per_s : {eval_ex_per_s}”)
+metrics_result = metrics.compute()
+# Resetting at end to release metrics memory not in use.
+# Reset metrics to prevent accumulation between multiple evaluation splits and not report a
+# running average.
+metrics.reset()
+return metrics_result</p>
+</dd>
+<dt>def train(</dt><dd><p>model: torch.nn.Module,
+optimizer: torch.optim.Optimizer,
+device: str,
+save_dir: str,
+logging_interval: int,
+train_steps: int,
+checkpoint_frequency: int,
+dataset: Iterable,
+worker_batch_size: int,
+num_workers: Optional[int] = 0,
+enable_amp: bool = False,
+initial_checkpoint_dir: Optional[str] = None,
+gradient_accumulation: Optional[int] = None,
+logger_initializer: Optional[Callable] = None,
+scheduler: _LRScheduler = None,
+metrics: Optional[tm.MetricCollection] = None,
+parameters_to_log: Optional[Dict[str, Callable]] = None,
+tables_to_log: Optional[List[str]] = None,</p>
+</dd>
+<dt>) -&gt; None:</dt><dd><p>“””Runs training and eval on the given TrainPipeline</p>
+<dl>
+<dt>Args:</dt><dd><p>dataset: data iterator for the training set
+evaluation_iterators: data iterators for the different evaluation sets
+scheduler: optional learning rate scheduler
+output_transform_for_metrics: optional transformation functions to transorm the model</p>
+<blockquote>
+<div><p>output and labels into a format the metrics can understand</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>“””</p>
+<dl class="simple">
+<dt>train_pipeline = TrainPipelineSparseDist(</dt><dd><p>model=model,
+optimizer=optimizer,
+device=device,
+enable_amp=enable_amp,
+grad_accum=gradient_accumulation,</p>
+</dd>
+</dl>
+<p>)  # type: ignore[var-annotated]</p>
+<p># We explicitly initialize optimizer state here so that checkpoint will work properly.
+if hasattr(train_pipeline._optimizer, “init_state”):</p>
+<blockquote>
+<div><p>train_pipeline._optimizer.init_state()</p>
+</div></blockquote>
+<dl class="simple">
+<dt>save_state = {</dt><dd><p>“model”: train_pipeline._model,
+“optimizer”: train_pipeline._optimizer,
+“scaler”: train_pipeline._grad_scaler,</p>
+</dd>
+</dl>
+<p>}</p>
+<p>chosen_checkpoint = None
+checkpoint_handler = snapshot_lib.Snapshot(</p>
+<blockquote>
+<div><p>save_dir=save_dir,
+state=save_state,</p>
+</div></blockquote>
+<p>)</p>
+<dl class="simple">
+<dt>if save_dir:</dt><dd><p>chosen_checkpoint = snapshot_lib.get_checkpoint(save_dir=save_dir, missing_ok=True)</p>
+</dd>
+</dl>
+<p>start_step = 0
+start_walltime = 0.0
+if chosen_checkpoint:</p>
+<blockquote>
+<div><p># Skip restoration and exit if we should be finished.
+chosen_checkpoint_global_step = snapshot_lib.step_from_checkpoint(chosen_checkpoint)
+if not chosen_checkpoint_global_step &lt; dist.get_world_size() * train_steps:</p>
+<blockquote>
+<div><dl class="simple">
+<dt>logging.info(</dt><dd><p>“Not restoring and finishing training as latest checkpoint ”
+f”{chosen_checkpoint} found ”
+f”at global_step ({chosen_checkpoint_global_step}) &gt;= ”
+f”train_steps ({dist.get_world_size() * train_steps})”</p>
+</dd>
+</dl>
+<p>)
+return</p>
+</div></blockquote>
+<p>logging.info(f”Restoring latest checkpoint from global_step {chosen_checkpoint_global_step}”)
+checkpoint_handler.restore(chosen_checkpoint)
+start_step = checkpoint_handler.step
+start_walltime = checkpoint_handler.walltime</p>
+</div></blockquote>
+<dl>
+<dt>elif initial_checkpoint_dir:</dt><dd><p>base, ckpt_step = os.path.split(initial_checkpoint_dir)
+warmstart_handler = snapshot_lib.Snapshot(</p>
+<blockquote>
+<div><p>save_dir=base,
+state=save_state,</p>
+</div></blockquote>
+<p>)
+ckpt = snapshot_lib.get_checkpoint(save_dir=base, missing_ok=False, global_step=int(ckpt_step))
+logging.info(</p>
+<blockquote>
+<div><p>f”Restoring from initial_checkpoint_dir: {initial_checkpoint_dir}, but keeping starting step as 0.”</p>
+</div></blockquote>
+<p>)
+warmstart_handler.restore(ckpt)</p>
+</dd>
+</dl>
+<p>train_logger = logger_initializer(mode=”train”) if logger_initializer else None
+train_step_fn = _get_step_fn(train_pipeline, get_new_iterator(dataset), training=True)</p>
+<p># Counting number of parameters in the model directly when creating it.
+nb_param = 0
+for p in model.parameters():</p>
+<blockquote>
+<div><p>nb_param += p.numel()</p>
+</div></blockquote>
+<p>logging.info(f”Model has {nb_param} parameters”)</p>
+<p>last_time = datetime.datetime.now()
+start_time = last_time
+last_pending_snapshot = None
+for step in range(start_step, train_steps + 1):</p>
+<blockquote>
+<div><p>checkpoint_handler.step = step
+outputs = train_step_fn()
+step_done_time = datetime.datetime.now()
+checkpoint_handler.walltime = (step_done_time - start_time).total_seconds() + start_walltime</p>
+<dl>
+<dt>if scheduler:</dt><dd><p>scheduler.step()</p>
+</dd>
+<dt>if step % logging_interval == 0:</dt><dd><p>interval_time = (step_done_time - last_time).total_seconds()
+steps_per_s = logging_interval / interval_time
+worker_example_per_s = steps_per_s * worker_batch_size
+global_example_per_s = worker_example_per_s * (1 + (num_workers or 0))
+global_step = step</p>
+<dl class="simple">
+<dt>log_values = {</dt><dd><p>“global_step”: global_step,
+“loss”: get_global_loss_detached(outputs[“loss”]),
+“steps_per_s”: steps_per_s,
+“global_example_per_s”: global_example_per_s,
+“worker_examples_per_s”: worker_example_per_s,
+“active_training_walltime”: checkpoint_handler.walltime,</p>
+</dd>
+</dl>
+<p>}
+if parameters_to_log:</p>
+<blockquote>
+<div><dl>
+<dt>log_values.update(</dt><dd><dl class="simple">
+<dt>log_weights.weights_to_log(</dt><dd><p>model=model,
+how_to_log=parameters_to_log,</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<p>log_values = tree.map_structure(lambda elem: torch.as_tensor(elem).cpu(), log_values)</p>
+<dl>
+<dt>if tables_to_log:</dt><dd><dl>
+<dt>log_values.update(</dt><dd><dl class="simple">
+<dt>log_weights.log_ebc_norms(</dt><dd><p>model_state_dict=train_pipeline._model.state_dict(),
+ebc_keys=tables_to_log,</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>if train_logger:</dt><dd><p>train_logger.log(log_values, step=global_step)</p>
+</dd>
+</dl>
+<p>log_line = “, “.join(f”{name}: {value}” for name, value in log_values.items())
+logging.info(f”Step: {step}, training. {log_line}”)
+last_time = step_done_time</p>
+<p># If we just restored, do not save again.
+if checkpoint_frequency and step &gt; start_step and step % checkpoint_frequency == 0:</p>
+<blockquote>
+<div><dl>
+<dt>if last_pending_snapshot and not last_pending_snapshot.done():</dt><dd><dl class="simple">
+<dt>logging.warning(</dt><dd><p>“Begin a new snapshot and the last one hasn’t finished. That probably indicates ”
+“either you’re snapshotting really often or something is wrong. Will now block and ”
+“wait for snapshot to finish before beginning the next one.”</p>
+</dd>
+</dl>
+<p>)
+last_pending_snapshot.wait()</p>
+</dd>
+</dl>
+<p>last_pending_snapshot = checkpoint_handler.save(global_step=step * dist.get_world_size())</p>
+</div></blockquote>
+</dd>
+</dl>
+</div></blockquote>
+<p># Save if we did not just save.
+if checkpoint_frequency and step % checkpoint_frequency != 0:</p>
+<blockquote>
+<div><p># For the final save, wait for the checkpoint to write to make sure the process doesn’t finish
+# before its completed.
+last_pending_snapshot = checkpoint_handler.save(global_step=step * dist.get_world_size())</p>
+</div></blockquote>
+<p>logging.info(f”Finished training steps: {step}, global_steps: {step * dist.get_world_size()}”)</p>
+<dl class="simple">
+<dt>if last_pending_snapshot:</dt><dd><p>logging.info(f”Waiting for any checkpoints to finish.”)
+last_pending_snapshot.wait()</p>
+</dd>
+</dl>
+</dd>
+<dt>def log_eval_results(</dt><dd><p>results,
+eval_logger,
+partition_name: str,
+step: int,</p>
+</dd>
+<dt>):</dt><dd><p>results = tree.map_structure(lambda elem: torch.as_tensor(elem).cpu(), results)
+logging.info(f”Step: {step}, evaluation ({partition_name}).”)
+for metric_name, metric_value in results.items():</p>
+<blockquote>
+<div><p>logging.info(f”t{metric_name}: {metric_value:1.4e}”)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>if eval_logger:</dt><dd><p>eval_logger.log(results, step=step, commit=True)</p>
+</dd>
+</dl>
+</dd>
+<dt>def only_evaluate(</dt><dd><p>model: torch.nn.Module,
+optimizer: torch.optim.Optimizer,
+device: str,
+save_dir: str,
+num_train_steps: int,
+dataset: Iterable,
+eval_batch_size: int,
+num_eval_steps: int,
+eval_timeout_in_s: int,
+eval_logger: Callable,
+partition_name: str,
+metrics: Optional[tm.MetricCollection] = None,</p>
+</dd>
+<dt>):</dt><dd><p>logging.info(f”Evaluating on partition {partition_name}.”)
+logging.info(“Computing metrics:”)
+logging.info(metrics)
+eval_pipeline = TrainPipelineSparseDist(model, optimizer, device)  # type: ignore[var-annotated]
+save_state = {</p>
+<blockquote>
+<div><p>“model”: eval_pipeline._model,
+“optimizer”: eval_pipeline._optimizer,</p>
+</div></blockquote>
+<p>}
+checkpoint_handler = snapshot_lib.Snapshot(</p>
+<blockquote>
+<div><p>save_dir=save_dir,
+state=save_state,</p>
+</div></blockquote>
+<p>)
+for checkpoint_path in snapshot_lib.checkpoints_iterator(save_dir, timeout=eval_timeout_in_s):</p>
+<blockquote>
+<div><p>checkpoint_handler.restore(checkpoint_path)
+step = checkpoint_handler.step
+dataset = get_new_iterator(dataset)
+results = _run_evaluation(</p>
+<blockquote>
+<div><p>pipeline=eval_pipeline,
+dataset=dataset,
+eval_steps=num_eval_steps,
+eval_batch_size=eval_batch_size,
+metrics=metrics,</p>
+</div></blockquote>
+<p>)
+log_eval_results(results, eval_logger, partition_name, step=step)
+rank = dist.get_rank() if dist.is_initialized() else 0
+if rank == 0:</p>
+<blockquote>
+<div><p>snapshot_lib.mark_done_eval(checkpoint_path, partition_name)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>if step &gt;= num_train_steps:</dt><dd><p>return</p>
+</dd>
+</dl>
+</div></blockquote>
+</dd>
+</dl>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../_sources/core/custom_training_loop.py.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

@@ -1,0 +1,2392 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../" id="documentation_options" src="../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.earlybird.queryparser;</p>
+<p>import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.TreeSet;
+import javax.annotation.Nullable;</p>
+<p>import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Functions;
+import com.google.common.base.Optional;
+import com.google.common.base.Preconditions;
+import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.Lists;
+import com.google.common.collect.Sets;</p>
+<p>import org.apache.lucene.search.BooleanClause;
+import org.apache.lucene.search.BooleanClause.Occur;
+import org.apache.lucene.search.BooleanQuery;
+import org.apache.lucene.search.BoostQuery;
+import org.apache.lucene.search.MatchNoDocsQuery;
+import org.apache.lucene.search.PhraseQuery;
+import org.apache.lucene.search.Query;
+import org.apache.lucene.search.TermQuery;
+import org.locationtech.spatial4j.shape.Point;
+import org.locationtech.spatial4j.shape.Rectangle;
+import org.locationtech.spatial4j.shape.impl.PointImpl;
+import org.locationtech.spatial4j.shape.impl.RectangleImpl;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;</p>
+<p>import com.twitter.decider.Decider;
+import com.twitter.search.common.constants.QueryCacheConstants;
+import com.twitter.search.common.decider.DeciderUtil;
+import com.twitter.search.common.encoding.features.ByteNormalizer;
+import com.twitter.search.common.indexing.thriftjava.ThriftGeoLocationSource;
+import com.twitter.search.common.metrics.SearchCounter;
+import com.twitter.search.common.query.BoostUtils;
+import com.twitter.search.common.query.FieldWeightUtil;
+import com.twitter.search.common.query.FilteredQuery;
+import com.twitter.search.common.query.HitAttributeHelper;
+import com.twitter.search.common.query.MappableField;
+import com.twitter.search.common.schema.ImmutableSchema;
+import com.twitter.search.common.schema.SchemaUtil;
+import com.twitter.search.common.schema.base.FieldWeightDefault;
+import com.twitter.search.common.schema.base.ImmutableSchemaInterface;
+import com.twitter.search.common.schema.base.Schema;
+import com.twitter.search.common.schema.earlybird.EarlybirdCluster;
+import com.twitter.search.common.schema.earlybird.EarlybirdFieldConstants;
+import com.twitter.search.common.schema.earlybird.EarlybirdFieldConstants.EarlybirdFieldConstant;
+import com.twitter.search.common.schema.earlybird.EarlybirdThriftDocumentBuilder;
+import com.twitter.search.common.schema.earlybird.EarlybirdThriftDocumentUtil;
+import com.twitter.search.common.schema.thriftjava.ThriftCSFType;
+import com.twitter.search.common.search.TerminationTracker;
+import com.twitter.search.common.search.termination.QueryTimeout;
+import com.twitter.search.common.util.analysis.IntTermAttributeImpl;
+import com.twitter.search.common.util.analysis.LongTermAttributeImpl;
+import com.twitter.search.common.util.spatial.GeohashChunkImpl;
+import com.twitter.search.common.util.text.HighFrequencyTermPairs;
+import com.twitter.search.common.util.text.NormalizerHelper;
+import com.twitter.search.earlybird.common.config.EarlybirdConfig;
+import com.twitter.search.earlybird.common.userupdates.UserScrubGeoMap;
+import com.twitter.search.earlybird.common.userupdates.UserTable;
+import com.twitter.search.earlybird.partition.MultiSegmentTermDictionaryManager;
+import com.twitter.search.earlybird.querycache.CachedFilterQuery;
+import com.twitter.search.earlybird.querycache.QueryCacheManager;
+import com.twitter.search.earlybird.search.queries.CSFDisjunctionFilter;
+import com.twitter.search.earlybird.search.queries.DocValRangeFilter;
+import com.twitter.search.earlybird.search.queries.FeatureValueInAcceptListOrUnsetFilter;
+import com.twitter.search.earlybird.search.GeoQuadTreeQueryBuilder;
+import com.twitter.search.earlybird.search.queries.MatchAllDocsQuery;
+import com.twitter.search.earlybird.search.queries.RequiredStatusIDsFilter;
+import com.twitter.search.earlybird.search.queries.SinceMaxIDFilter;
+import com.twitter.search.earlybird.search.queries.SinceUntilFilter;
+import com.twitter.search.earlybird.search.queries.TermQueryWithSafeToString;
+import com.twitter.search.earlybird.search.queries.UserFlagsExcludeFilter;
+import com.twitter.search.earlybird.search.queries.UserScrubGeoFilter;
+import com.twitter.search.earlybird.search.queries.UserIdMultiSegmentQuery;
+import com.twitter.search.earlybird.search.relevance.MinFeatureValueFilter;
+import com.twitter.search.earlybird.search.relevance.ScoreFilterQuery;
+import com.twitter.search.earlybird.search.relevance.scoring.ScoringFunctionProvider;
+import com.twitter.search.queryparser.query.Conjunction;
+import com.twitter.search.queryparser.query.Disjunction;
+import com.twitter.search.queryparser.query.Phrase;
+import com.twitter.search.queryparser.query.QueryNodeUtils;
+import com.twitter.search.queryparser.query.QueryParserException;
+import com.twitter.search.queryparser.query.SpecialTerm;
+import com.twitter.search.queryparser.query.Term;
+import com.twitter.search.queryparser.query.annotation.Annotation;
+import com.twitter.search.queryparser.query.annotation.FloatAnnotation;
+import com.twitter.search.queryparser.query.search.Link;
+import com.twitter.search.queryparser.query.search.SearchOperator;
+import com.twitter.search.queryparser.query.search.SearchOperatorConstants;
+import com.twitter.search.queryparser.query.search.SearchQueryVisitor;
+import com.twitter.search.queryparser.util.GeoCode;
+import com.twitter.service.spiderduck.gen.LinkCategory;
+import com.twitter.tweetypie.thriftjava.ComposerSource;</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Visitor for <a class="reference external" href="mailto:{&#37;&#52;&#48;link">{<span>&#64;</span>link</a> com.twitter.search.queryparser.query.Query}, which produces a Lucene</p></li>
+<li><p>Query (<a class="reference external" href="mailto:{&#37;&#52;&#48;link">{<span>&#64;</span>link</a> Query}).</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>public class EarlybirdLuceneQueryVisitor extends SearchQueryVisitor&lt;Query&gt; {</dt><dd><p>private static final Logger LOG = LoggerFactory.getLogger(EarlybirdLuceneQueryVisitor.class);</p>
+<p>&#64;VisibleForTesting
+static final String UNSUPPORTED_OPERATOR_PREFIX = “<a href="#id11"><span class="problematic" id="id12">unsupported_query_operator_</span></a>”;</p>
+<p>private static final String SMILEY_FORMAT_STRING = “__has_%s_smiley”;
+private static final String PHRASE_WILDCARD = “*”;
+private static final float DEFAULT_FIELD_WEIGHT = 1.0f;</p>
+<dl>
+<dt>private static final SearchCounter SINCE_TIME_INVALID_INT_COUNTER =</dt><dd><p>SearchCounter.export(“EarlybirdLuceneQueryVisitor_since_time_invalid_int”);</p>
+</dd>
+<dt>private static final SearchCounter UNTIL_TIME_INVALID_INT_COUNTER =</dt><dd><p>SearchCounter.export(“EarlybirdLuceneQueryVisitor_until_time_invalid_int”);</p>
+</dd>
+<dt>private static final SearchCounter NUM_QUERIES_BELOW_MIN_ENGAGEMENT_THRESHOLD =</dt><dd><dl class="simple">
+<dt>SearchCounter.export(</dt><dd><p>“EarlybirdLuceneQueryVisitor_num_queries_below_min_engagement_threshold”);</p>
+</dd>
+</dl>
+</dd>
+<dt>private static final SearchCounter NUM_QUERIES_ABOVE_MIN_ENGAGEMENT_THRESHOLD =</dt><dd><dl class="simple">
+<dt>SearchCounter.export(</dt><dd><p>“EarlybirdLuceneQueryVisitor_num_queries_above_min_engagement_threshold”);</p>
+</dd>
+</dl>
+</dd>
+<dt>private static final SearchOperator OPERATOR_CACHED_EXCLUDE_ANTISOCIAL_AND_NATIVERETWEETS =</dt><dd><dl class="simple">
+<dt>new SearchOperator(SearchOperator.Type.CACHED_FILTER,</dt><dd><p>QueryCacheConstants.EXCLUDE_ANTISOCIAL_AND_NATIVERETWEETS);</p>
+</dd>
+</dl>
+</dd>
+<dt>private static final Map&lt;String, List&lt;SearchOperator&gt;&gt; OPERATORS_BY_SAFE_EXCLUDE_OPERAND =</dt><dd><dl class="simple">
+<dt>ImmutableMap.of(</dt><dd><dl class="simple">
+<dt>SearchOperatorConstants.TWEET_SPAM, ImmutableList.of(</dt><dd><dl class="simple">
+<dt>new SearchOperator(SearchOperator.Type.DOCVAL_RANGE_FILTER,</dt><dd><p>“extended_encoded_tweet_features.label_spam_flag”, “0”, “1”),</p>
+</dd>
+<dt>new SearchOperator(SearchOperator.Type.DOCVAL_RANGE_FILTER,</dt><dd><p>“extended_encoded_tweet_features.label_spam_hi_rcl_flag”, “0”, “1”),</p>
+</dd>
+<dt>new SearchOperator(SearchOperator.Type.DOCVAL_RANGE_FILTER,</dt><dd><p>“extended_encoded_tweet_features.label_dup_content_flag”, “0”, “1”)),</p>
+</dd>
+</dl>
+</dd>
+<dt>SearchOperatorConstants.TWEET_ABUSIVE, ImmutableList.of(</dt><dd><dl class="simple">
+<dt>new SearchOperator(SearchOperator.Type.DOCVAL_RANGE_FILTER,</dt><dd><p>“extended_encoded_tweet_features.label_abusive_flag”, “0”, “1”)),</p>
+</dd>
+</dl>
+</dd>
+<dt>SearchOperatorConstants.TWEET_UNSAFE, ImmutableList.of(</dt><dd><dl class="simple">
+<dt>new SearchOperator(SearchOperator.Type.DOCVAL_RANGE_FILTER,</dt><dd><p>“extended_encoded_tweet_features.label_nsfw_hi_prc_flag”, “0”, “1”))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>);</p>
+</dd>
+<dt>private static final ImmutableMap&lt;String, FieldWeightDefault&gt; DEFAULT_FIELDS =</dt><dd><dl class="simple">
+<dt>ImmutableMap.of(EarlybirdFieldConstant.TEXT_FIELD.getFieldName(),</dt><dd><p>new FieldWeightDefault(true, DEFAULT_FIELD_WEIGHT));</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>// All Earlybird fields that should have geo scrubbed tweets filtered out when searched.
+// See go/realtime-geo-filtering
+&#64;VisibleForTesting
+public static final List&lt;String&gt; GEO_FIELDS_TO_BE_SCRUBBED = Arrays.asList(</p>
+<blockquote>
+<div><p>EarlybirdFieldConstant.GEO_HASH_FIELD.getFieldName(),
+EarlybirdFieldConstant.PLACE_FIELD.getFieldName(),
+EarlybirdFieldConstant.PLACE_ID_FIELD.getFieldName(),
+EarlybirdFieldConstant.PLACE_FULL_NAME_FIELD.getFieldName(),
+EarlybirdFieldConstant.PLACE_COUNTRY_CODE_FIELD.getFieldName());</p>
+</div></blockquote>
+<p>// Geo scrubbing doesn’t remove user profile location, so when using the geo location type filters
+// we only need to filter out geo scrubbed tweets for the geo location types other than
+// ThriftGeoLocationSource.USER_PROFILE.
+// Separately, we also need to filter out geo scrubbed tweets for the place_id filter.
+private static final List&lt;String&gt; GEO_FILTERS_TO_BE_SCRUBBED = Arrays.asList(</p>
+<blockquote>
+<div><p>EarlybirdFieldConstants.formatGeoType(ThriftGeoLocationSource.GEOTAG),
+EarlybirdFieldConstants.formatGeoType(ThriftGeoLocationSource.TWEET_TEXT),
+EarlybirdThriftDocumentUtil.formatFilter(</p>
+<blockquote>
+<div><p>EarlybirdFieldConstant.PLACE_ID_FIELD.getFieldName()));</p>
+</div></blockquote>
+</div></blockquote>
+<p>// queries whose parents are negated.
+// used to decide if a negated query is within a negated parent or not.
+private final Set&lt;com.twitter.search.queryparser.query.Query&gt; parentNegatedQueries =</p>
+<blockquote>
+<div><p>Sets.newIdentityHashSet();</p>
+</div></blockquote>
+<p>private final ImmutableSchemaInterface schemaSnapshot;
+private final ImmutableMap&lt;String, FieldWeightDefault&gt; defaultFieldWeightMap;
+private final QueryCacheManager queryCacheManager;
+private final UserTable userTable;
+private final UserScrubGeoMap userScrubGeoMap;</p>
+<p>&#64;Nullable
+private final TerminationTracker terminationTracker;
+private final Map&lt;MappableField, String&gt; mappableFieldMap;
+private final MultiSegmentTermDictionaryManager multiSegmentTermDictionaryManager;
+private final Decider decider;
+private final EarlybirdCluster earlybirdCluster;</p>
+<p>private float proximityPhraseWeight = 1.0f;
+private int proximityPhraseSlop = 255;
+private ImmutableMap&lt;String, Float&gt; enabledFieldWeightMap;
+private Set&lt;String&gt; queriedFields;</p>
+<p>// If we need to accumulate and collect per-field and per query node hit attribution information,
+// this will have a mapping between the query nodes and their unique ranks, as well as the
+// attribute collector.
+&#64;Nullable
+private HitAttributeHelper hitAttributeHelper;</p>
+<p>&#64;Nullable
+private QueryTimeout queryTimeout;</p>
+<dl>
+<dt>public EarlybirdLuceneQueryVisitor(</dt><dd><blockquote>
+<div><p>ImmutableSchemaInterface schemaSnapshot,
+QueryCacheManager queryCacheManager,
+UserTable userTable,
+UserScrubGeoMap userScrubGeoMap,
+EarlybirdCluster earlybirdCluster,
+Decider decider) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>this(schemaSnapshot, queryCacheManager, userTable, userScrubGeoMap, null, DEFAULT_FIELDS,</dt><dd><p>Collections.emptyMap(), null, decider, earlybirdCluster, null);</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>public EarlybirdLuceneQueryVisitor(</dt><dd><blockquote>
+<div><p>ImmutableSchemaInterface schemaSnapshot,
+QueryCacheManager queryCacheManager,
+UserTable userTable,
+UserScrubGeoMap userScrubGeoMap,
+&#64;Nullable TerminationTracker terminationTracker,
+Map&lt;String, FieldWeightDefault&gt; fieldWeightMap,
+Map&lt;MappableField, String&gt; mappableFieldMap,
+MultiSegmentTermDictionaryManager multiSegmentTermDictionaryManager,
+Decider decider,
+EarlybirdCluster earlybirdCluster,
+QueryTimeout queryTimeout) {</p>
+</div></blockquote>
+<p>this.schemaSnapshot = schemaSnapshot;
+this.defaultFieldWeightMap = ImmutableMap.copyOf(fieldWeightMap);
+this.enabledFieldWeightMap = FieldWeightDefault.getOnlyEnabled(defaultFieldWeightMap);
+this.queryCacheManager = queryCacheManager;
+this.userTable = userTable;
+this.userScrubGeoMap = userScrubGeoMap;
+this.mappableFieldMap = Preconditions.checkNotNull(mappableFieldMap);
+this.terminationTracker = terminationTracker;
+this.multiSegmentTermDictionaryManager = multiSegmentTermDictionaryManager;
+this.decider = decider;
+this.earlybirdCluster = earlybirdCluster;
+this.queryTimeout = queryTimeout;
+this.queriedFields = new TreeSet&lt;&gt;();</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public ImmutableMap&lt;String, Float&gt; getEnabledFieldWeightMap() {</dt><dd><p>return enabledFieldWeightMap;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public ImmutableMap&lt;String, FieldWeightDefault&gt; getDefaultFieldWeightMap() {</dt><dd><p>return defaultFieldWeightMap;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public EarlybirdLuceneQueryVisitor setProximityPhraseWeight(float weight) {</dt><dd><p>this.proximityPhraseWeight = weight;
+return this;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public EarlybirdLuceneQueryVisitor setProximityPhraseSlop(int slop) {</dt><dd><p>this.proximityPhraseSlop = slop;
+return this;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public void setFieldHitAttributeHelper(HitAttributeHelper newHitAttributeHelper) {</dt><dd><p>this.hitAttributeHelper = newHitAttributeHelper;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;Override
+public final Query visit(Disjunction disjunction) throws QueryParserException {</p>
+<blockquote>
+<div><p>BooleanQuery.Builder bqBuilder = new BooleanQuery.Builder();
+List&lt;com.twitter.search.queryparser.query.Query&gt; children = disjunction.getChildren();
+// Do a final round of check, if all nodes under a disjunction are MUST,
+// treat them all as DEFAULT (SHOULD in Lucene).
+boolean allMust = true;
+for (com.twitter.search.queryparser.query.Query child : children) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (!child.mustOccur()) {</dt><dd><p>allMust = false;
+break;</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}
+if (allMust) {</p>
+<blockquote>
+<div><p>children = Lists.transform(children, QueryNodeUtils.MAKE_QUERY_DEFAULT);</p>
+</div></blockquote>
+<p>}
+// Actually converting all children now.
+for (com.twitter.search.queryparser.query.Query child : children) {</p>
+<blockquote>
+<div><p>final Query q = child.accept(this);
+if (q != null) {</p>
+<blockquote>
+<div><p>// if a node is marked with MUSTHAVE annotation, we set it to must even if it’s a
+// disjunction.
+if (child.mustOccur()) {</p>
+<blockquote>
+<div><p>bqBuilder.add(q, Occur.MUST);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>bqBuilder.add(q, Occur.SHOULD);</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>Query bq = bqBuilder.build();
+float boost = (float) getBoostFromAnnotations(disjunction.getAnnotations());
+if (boost &gt;= 0) {</p>
+<blockquote>
+<div><p>bq = BoostUtils.maybeWrapInBoostQuery(bq, boost);</p>
+</div></blockquote>
+<p>}
+return bq;</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public Query visit(Conjunction conjunction) throws QueryParserException {</p>
+<blockquote>
+<div><p>BooleanQuery.Builder bqBuilder = new BooleanQuery.Builder();
+List&lt;com.twitter.search.queryparser.query.Query&gt; children = conjunction.getChildren();
+boolean hasPositiveTerms = false;
+for (com.twitter.search.queryparser.query.Query child : children) {</p>
+<blockquote>
+<div><p>boolean childMustNotOccur = child.mustNotOccur();
+boolean childAdded = addQuery(bqBuilder, child);
+if (childAdded &amp;&amp; !childMustNotOccur) {</p>
+<blockquote>
+<div><p>hasPositiveTerms = true;</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}
+if (!children.isEmpty() &amp;&amp; !hasPositiveTerms) {</p>
+<blockquote>
+<div><p>bqBuilder.add(new MatchAllDocsQuery(), Occur.MUST);</p>
+</div></blockquote>
+<p>}</p>
+<p>Query bq = bqBuilder.build();
+float boost = (float) getBoostFromAnnotations(conjunction.getAnnotations());
+if (boost &gt;= 0) {</p>
+<blockquote>
+<div><p>bq = BoostUtils.maybeWrapInBoostQuery(bq, boost);</p>
+</div></blockquote>
+<p>}
+return bq;</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public Query visit(Phrase phrase) throws QueryParserException {</p>
+<blockquote>
+<div><p>return visit(phrase, false);</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public Query visit(Term term) throws QueryParserException {</p>
+<blockquote>
+<div><p>return finalizeQuery(createTermQueryDisjunction(term), term);</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public Query visit(SpecialTerm special) throws QueryParserException {</p>
+<blockquote>
+<div><p>String field;</p>
+<dl class="simple">
+<dt>switch (special.getType()) {</dt><dd><dl class="simple">
+<dt>case HASHTAG:</dt><dd><p>field = EarlybirdFieldConstant.HASHTAGS_FIELD.getFieldName();
+break;</p>
+</dd>
+<dt>case STOCK:</dt><dd><p>field = EarlybirdFieldConstant.STOCKS_FIELD.getFieldName();
+break;</p>
+</dd>
+<dt>case MENTION:</dt><dd><p>field = EarlybirdFieldConstant.MENTIONS_FIELD.getFieldName();
+break;</p>
+</dd>
+<dt>default:</dt><dd><p>field = EarlybirdFieldConstant.TEXT_FIELD.getFieldName();</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>String termText = special.getSpecialChar() + special.getValue();
+Query q = createSimpleTermQuery(special, field, termText);</p>
+<p>float boost = (float) getBoostFromAnnotations(special.getAnnotations());
+if (boost &gt;= 0) {</p>
+<blockquote>
+<div><p>q = BoostUtils.maybeWrapInBoostQuery(q, boost);</p>
+</div></blockquote>
+<p>}</p>
+<p>return negateQueryIfNodeNegated(special, q);</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public Query visit(Link link) throws QueryParserException {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>Query q = createSimpleTermQuery(</dt><dd><p>link, EarlybirdFieldConstant.LINKS_FIELD.getFieldName(), link.getOperand());</p>
+</dd>
+</dl>
+<p>float boost = (float) getBoostFromAnnotations(link.getAnnotations());
+if (boost &gt;= 0) {</p>
+<blockquote>
+<div><p>q = BoostUtils.maybeWrapInBoostQuery(q, boost);</p>
+</div></blockquote>
+<p>}</p>
+<p>return negateQueryIfNodeNegated(link, q);</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public Query visit(final SearchOperator op) throws QueryParserException {</p>
+<blockquote>
+<div><p>final Query query;
+SearchOperator.Type type = op.getOperatorType();</p>
+<dl>
+<dt>switch (type) {</dt><dd><dl>
+<dt>case TO:</dt><dd><p>query = visitToOperator(op);
+break;</p>
+</dd>
+<dt>case FROM:</dt><dd><p>query = visitFromOperator(op);
+break;</p>
+</dd>
+<dt>case FILTER:</dt><dd><p>query = visitFilterOperator(op);
+break;</p>
+</dd>
+<dt>case INCLUDE:</dt><dd><p>query = visitIncludeOperator(op);
+break;</p>
+</dd>
+<dt>case EXCLUDE:</dt><dd><p>query = visitExcludeOperator(op);
+break;</p>
+</dd>
+<dt>case LANG:</dt><dd><p>query = visitLangOperator(op);
+break;</p>
+</dd>
+<dt>case SOURCE:</dt><dd><p>query = visitSourceOperator(op);
+break;</p>
+</dd>
+<dt>case SMILEY:</dt><dd><p>query = visitSmileyOperator(op);
+break;</p>
+</dd>
+<dt>case DOCVAL_RANGE_FILTER:</dt><dd><p>query = visitDocValRangeFilterOperator(op);
+break;</p>
+</dd>
+<dt>case CACHED_FILTER:</dt><dd><p>query = visitCachedFilterOperator(op);
+break;</p>
+</dd>
+<dt>case SCORE_FILTER:</dt><dd><p>query = visitScoredFilterOperator(op);
+break;</p>
+</dd>
+<dt>case SINCE_TIME:</dt><dd><p>query = visitSinceTimeOperator(op);
+break;</p>
+</dd>
+<dt>case UNTIL_TIME:</dt><dd><p>query = visitUntilTimeOperator(op);
+break;</p>
+</dd>
+<dt>case SINCE_ID:</dt><dd><p>query = visitSinceIDOperator(op);
+break;</p>
+</dd>
+<dt>case MAX_ID:</dt><dd><p>query = visitMaxIDOperator(op);
+break;</p>
+</dd>
+<dt>case GEOLOCATION_TYPE:</dt><dd><p>query = visitGeoLocationTypeOperator(op);
+break;</p>
+</dd>
+<dt>case GEOCODE:</dt><dd><p>query = visitGeocodeOperator(op);
+break;</p>
+</dd>
+<dt>case GEO_BOUNDING_BOX:</dt><dd><p>query = visitGeoBoundingBoxOperator(op);
+break;</p>
+</dd>
+<dt>case PLACE:</dt><dd><p>query = visitPlaceOperator(op);
+break;</p>
+</dd>
+<dt>case LINK:</dt><dd><p>// This should never be called - the Link visitor (visitor(Link link)) should be.
+query = visitLinkOperator(op);
+break;</p>
+</dd>
+<dt>case ENTITY_ID:</dt><dd><p>query = visitEntityIdOperator(op);
+break;</p>
+</dd>
+<dt>case FROM_USER_ID:</dt><dd><p>query = visitFromUserIDOperator(op);
+break;</p>
+</dd>
+<dt>case IN_REPLY_TO_TWEET_ID:</dt><dd><p>query = visitInReplyToTweetIdOperator(op);
+break;</p>
+</dd>
+<dt>case IN_REPLY_TO_USER_ID:</dt><dd><p>query = visitInReplyToUserIdOperator(op);
+break;</p>
+</dd>
+<dt>case LIKED_BY_USER_ID:</dt><dd><p>query = visitLikedByUserIdOperator(op);
+break;</p>
+</dd>
+<dt>case RETWEETED_BY_USER_ID:</dt><dd><p>query = visitRetweetedByUserIdOperator(op);
+break;</p>
+</dd>
+<dt>case REPLIED_TO_BY_USER_ID:</dt><dd><p>query = visitRepliedToByUserIdOperator(op);
+break;</p>
+</dd>
+<dt>case QUOTED_USER_ID:</dt><dd><p>query = visitQuotedUserIdOperator(op);
+break;</p>
+</dd>
+<dt>case QUOTED_TWEET_ID:</dt><dd><p>query = visitQuotedTweetIdOperator(op);
+break;</p>
+</dd>
+<dt>case DIRECTED_AT_USER_ID:</dt><dd><p>query = visitDirectedAtUserIdOperator(op);
+break;</p>
+</dd>
+<dt>case CONVERSATION_ID:</dt><dd><p>query = visitConversationIdOperator(op);
+break;</p>
+</dd>
+<dt>case COMPOSER_SOURCE:</dt><dd><p>query = visitComposerSourceOperator(op);
+break;</p>
+</dd>
+<dt>case RETWEETS_OF_TWEET_ID:</dt><dd><p>query = visitRetweetsOfTweetIdOperator(op);
+break;</p>
+</dd>
+<dt>case RETWEETS_OF_USER_ID:</dt><dd><p>query = visitRetweetsOfUserIdOperator(op);
+break;</p>
+</dd>
+<dt>case LINK_CATEGORY:</dt><dd><p>query = visitLinkCategoryOperator(op);
+break;</p>
+</dd>
+<dt>case CARD_NAME:</dt><dd><p>query = visitCardNameOperator(op);
+break;</p>
+</dd>
+<dt>case CARD_DOMAIN:</dt><dd><p>query = visitCardDomainOperator(op);
+break;</p>
+</dd>
+<dt>case CARD_LANG:</dt><dd><p>query = visitCardLangOperator(op);
+break;</p>
+</dd>
+<dt>case HF_TERM_PAIR:</dt><dd><p>query = visitHFTermPairOperator(op);
+break;</p>
+</dd>
+<dt>case HF_PHRASE_PAIR:</dt><dd><p>query = visitHFTermPhrasePairOperator(op);
+break;</p>
+</dd>
+<dt>case PROXIMITY_GROUP:</dt><dd><dl class="simple">
+<dt>Phrase phrase = new Phrase(</dt><dd><dl class="simple">
+<dt>Lists.transform(op.getOperands(),</dt><dd><dl class="simple">
+<dt>s -&gt; NormalizerHelper.normalizeWithUnknownLocale(</dt><dd><p>s, EarlybirdConfig.getPenguinVersion())));</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>query = visit(phrase, true);
+break;</p>
+</dd>
+<dt>case MULTI_TERM_DISJUNCTION:</dt><dd><p>query = visitMultiTermDisjunction(op);
+break;</p>
+</dd>
+<dt>case CSF_DISJUNCTION_FILTER:</dt><dd><p>query = visitCSFDisjunctionFilter(op);
+break;</p>
+</dd>
+<dt>case SAFETY_EXCLUDE:</dt><dd><p>query = visitSafetyExclude(op);
+break;</p>
+</dd>
+<dt>case SPACE_ID:</dt><dd><p>query = visitSpaceId(op);
+break;</p>
+</dd>
+<dt>case NAMED_ENTITY:</dt><dd><p>query = visitNamedEntity(op);
+break;</p>
+</dd>
+<dt>case NAMED_ENTITY_WITH_TYPE:</dt><dd><p>query = visitNamedEntityWithType(op);
+break;</p>
+</dd>
+</dl>
+<p>case MIN_FAVES:
+case MIN_QUALITY_SCORE:
+case MIN_REPLIES:
+case MIN_RETWEETS:
+case MIN_REPUTATION:</p>
+<blockquote>
+<div><p>query = visitMinFeatureValueOperator(type, op);
+break;</p>
+</div></blockquote>
+<dl class="simple">
+<dt>case FEATURE_VALUE_IN_ACCEPT_LIST_OR_UNSET:</dt><dd><p>query = visitFeatureValueInAcceptListOrUnsetFilterOperator(op);
+break;</p>
+</dd>
+</dl>
+<p>case NEAR:
+case RELATED_TO_TWEET_ID:
+case SINCE:
+case SITE:
+case UNTIL:
+case WITHIN:
+case WITHIN_TIME:</p>
+<blockquote>
+<div><p>query = createUnsupportedOperatorQuery(op);
+break;</p>
+</div></blockquote>
+<p>case NAMED_CSF_DISJUNCTION_FILTER:
+case NAMED_MULTI_TERM_DISJUNCTION:</p>
+<blockquote>
+<div><dl class="simple">
+<dt>query = logAndThrowQueryParserException(</dt><dd><p>“Named disjunction operator could not be converted to a disjunction operator.”);</p>
+</dd>
+</dl>
+<p>break;</p>
+</div></blockquote>
+<dl class="simple">
+<dt>default:</dt><dd><p>query = logAndThrowQueryParserException(“Unknown operator “ + op.toString());</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>return negateQueryIfNodeNegated(op, query);</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>protected Query visitToOperator(SearchOperator op) throws QueryParserException {</dt><dd><dl class="simple">
+<dt>return createNormalizedTermQuery(</dt><dd><p>op, EarlybirdFieldConstant.TO_USER_FIELD.getFieldName(), op.getOperand());</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>protected Query visitFromOperator(SearchOperator op) throws QueryParserException {</dt><dd><dl class="simple">
+<dt>return createNormalizedTermQuery(</dt><dd><p>op, EarlybirdFieldConstant.FROM_USER_FIELD.getFieldName(), op.getOperand());</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>protected Query visitFilterOperator(SearchOperator op) throws QueryParserException {</dt><dd><p>return visitFilterOperator(op, false);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>protected Query visitIncludeOperator(SearchOperator op) throws QueryParserException {</dt><dd><p>// Include is a bit funny.  If we have [include retweets] we are saying
+// do include retweets, which is the default.  Also conjunctions re-negate
+// whatever node we emit from the visitor.
+if (!isParentNegated(op) &amp;&amp; !nodeIsNegated(op)) {</p>
+<blockquote>
+<div><p>// positive include - no-op.
+return null;</p>
+</div></blockquote>
+<p>}
+return visitFilterOperator(op, false);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>protected Query visitExcludeOperator(SearchOperator op) throws QueryParserException {</dt><dd><p>// Exclude is a bit funny.  If we have -[exclude retweets] we are saying
+// dont exclude retweets, which is the default.
+if (isParentNegated(op) || nodeIsNegated(op)) {</p>
+<blockquote>
+<div><p>// Negative exclude.  Do nothing - parent will not add this to the list of children.
+return null;</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>// Positive exclude.
+return visitFilterOperator(op, true);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>protected Query visitFilterOperator(SearchOperator op, boolean negate)</dt><dd><blockquote>
+<div><p>throws QueryParserException {</p>
+</div></blockquote>
+<p>Query q;
+boolean negateQuery = negate;</p>
+<dl>
+<dt>if (op.getOperand().equals(SearchOperatorConstants.ANTISOCIAL)) {</dt><dd><p>// Since the object we use to implement these filters is actually an
+// EXCLUDE filter, we need to negate it to get it to work as a regular filter.
+q = UserFlagsExcludeFilter.getUserFlagsExcludeFilter(userTable, true, false, false);
+negateQuery = !negateQuery;</p>
+</dd>
+<dt>} else if (op.getOperand().equals(SearchOperatorConstants.OFFENSIVE_USER)) {</dt><dd><p>q = UserFlagsExcludeFilter.getUserFlagsExcludeFilter(userTable, false, true, false);
+negateQuery = !negateQuery;</p>
+</dd>
+<dt>} else if (op.getOperand().equals(SearchOperatorConstants.ANTISOCIAL_OFFENSIVE_USER)) {</dt><dd><p>q = UserFlagsExcludeFilter.getUserFlagsExcludeFilter(userTable, true, true, false);
+negateQuery = !negateQuery;</p>
+</dd>
+<dt>} else if (op.getOperand().equals(SearchOperatorConstants.PROTECTED)) {</dt><dd><p>q = UserFlagsExcludeFilter.getUserFlagsExcludeFilter(userTable, false, false, true);
+negateQuery = !negateQuery;</p>
+</dd>
+<dt>} else if (op.getOperand().equals(SearchOperatorConstants.HAS_ENGAGEMENT)) {</dt><dd><p>return buildHasEngagementsQuery();</p>
+</dd>
+<dt>} else if (op.getOperand().equals(SearchOperatorConstants.SAFE_SEARCH_FILTER)) {</dt><dd><p>BooleanQuery.Builder bqBuilder = new BooleanQuery.Builder();
+bqBuilder.add(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>createNoScoreTermQuery(</dt><dd><p>op,
+EarlybirdFieldConstant.INTERNAL_FIELD.getFieldName(),
+EarlybirdFieldConstant.IS_OFFENSIVE),</p>
+</dd>
+</dl>
+<p>Occur.SHOULD);</p>
+</div></blockquote>
+<p>// The following internal field __filter_sensitive_content
+// is not currently built by earlybird.
+// This means the safe search filter soley operates on the is_offensive bit
+bqBuilder.add(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>createNoScoreTermQuery(</dt><dd><p>op,
+EarlybirdFieldConstant.INTERNAL_FIELD.getFieldName(),
+EarlybirdThriftDocumentUtil.formatFilter(SearchOperatorConstants.SENSITIVE_CONTENT)),</p>
+</dd>
+</dl>
+<p>Occur.SHOULD);</p>
+</div></blockquote>
+<p>q = bqBuilder.build();
+negateQuery = !negateQuery;</p>
+</dd>
+<dt>} else if (op.getOperand().equals(SearchOperatorConstants.RETWEETS)) {</dt><dd><p>// Special case for filter:retweets - we use the text field search “-rt”
+// mostly for legacy reasons.
+q = createSimpleTermQuery(</p>
+<blockquote>
+<div><p>op,
+EarlybirdFieldConstant.TEXT_FIELD.getFieldName(),
+EarlybirdThriftDocumentBuilder.RETWEET_TERM);</p>
+</div></blockquote>
+</dd>
+<dt>} else if (schemaSnapshot.getFacetFieldByFacetName(op.getOperand()) != null) {</dt><dd><p>Schema.FieldInfo facetField = schemaSnapshot.getFacetFieldByFacetName(op.getOperand());
+if (facetField.getFieldType().isStoreFacetSkiplist()) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>q = createSimpleTermQuery(</dt><dd><p>op,
+EarlybirdFieldConstant.INTERNAL_FIELD.getFieldName(),
+EarlybirdFieldConstant.getFacetSkipFieldName(facetField.getName()));</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>// return empty BQ that doesn’t match anything
+q = new BooleanQuery.Builder().build();</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>} else if (op.getOperand().equals(SearchOperatorConstants.VINE_LINK)) {</dt><dd><p>// Temporary special case for filter:vine_link. The filter is called “vine_link”, but it
+// should use the internal field “__filter_vine”. We need this special case because otherwise
+// it would look for the non-existing “__filter_vine_link” field. See SEARCH-9390
+q = createNoScoreTermQuery(</p>
+<blockquote>
+<div><p>op,
+EarlybirdFieldConstant.INTERNAL_FIELD.getFieldName(),
+EarlybirdThriftDocumentUtil.formatFilter(“vine”));</p>
+</div></blockquote>
+</dd>
+<dt>} else {</dt><dd><p>// The default vanilla filters just uses the filter format string and the
+// operand text.
+q = createNoScoreTermQuery(</p>
+<blockquote>
+<div><p>op,
+EarlybirdFieldConstant.INTERNAL_FIELD.getFieldName(),
+EarlybirdThriftDocumentUtil.formatFilter(op.getOperand()));</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}
+// Double check: no filters should have any score contribution.
+q = new BoostQuery(q, 0.0f);
+return negateQuery ? negateQuery(q) : q;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private Query buildHasEngagementsQuery() {</dt><dd><dl class="simple">
+<dt>if (earlybirdCluster == EarlybirdCluster.PROTECTED) {</dt><dd><p>// Engagements and engagement counts are not indexed on Earlybirds, so there is no need to
+// traverse the entire segment with the MinFeatureValueFilter. See SEARCH-28120
+return new MatchNoDocsQuery();</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>Query favFilter = MinFeatureValueFilter.getMinFeatureValueFilter(</dt><dd><p>EarlybirdFieldConstant.FAVORITE_COUNT.getFieldName(), 1);</p>
+</dd>
+<dt>Query retweetFilter = MinFeatureValueFilter.getMinFeatureValueFilter(</dt><dd><p>EarlybirdFieldConstant.RETWEET_COUNT.getFieldName(), 1);</p>
+</dd>
+<dt>Query replyFilter = MinFeatureValueFilter.getMinFeatureValueFilter(</dt><dd><p>EarlybirdFieldConstant.REPLY_COUNT.getFieldName(), 1);</p>
+</dd>
+<dt>return new BooleanQuery.Builder()</dt><dd><p>.add(favFilter, Occur.SHOULD)
+.add(retweetFilter, Occur.SHOULD)
+.add(replyFilter, Occur.SHOULD)
+.build();</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>protected Query visitLangOperator(SearchOperator op) throws QueryParserException {</dt><dd><dl class="simple">
+<dt>return createNoScoreTermQuery(</dt><dd><p>op, EarlybirdFieldConstant.ISO_LANGUAGE_FIELD.getFieldName(), op.getOperand());</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>protected Query visitSourceOperator(SearchOperator op) throws QueryParserException {</dt><dd><dl class="simple">
+<dt>return createNoScoreTermQuery(</dt><dd><p>op, EarlybirdFieldConstant.NORMALIZED_SOURCE_FIELD.getFieldName(), op.getOperand());</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>protected Query visitSmileyOperator(SearchOperator op) throws QueryParserException {</dt><dd><dl class="simple">
+<dt>return createSimpleTermQuery(</dt><dd><p>op,
+EarlybirdFieldConstant.INTERNAL_FIELD.getFieldName(),
+String.format(SMILEY_FORMAT_STRING, op.getOperand()));</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>protected Query visitDocValRangeFilterOperator(SearchOperator op) throws QueryParserException {</dt><dd><p>String csfFieldName = op.getOperands().get(0).toLowerCase();</p>
+<p>ThriftCSFType csfFieldType = schemaSnapshot.getCSFFieldType(csfFieldName);
+if (csfFieldType == null) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>throw new QueryParserException(“invalid csf field name “ + op.getOperands().get(0)</dt><dd><ul class="simple">
+<li><p>“ used in “ + op.serialize());</p></li>
+</ul>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>try {</dt><dd><dl>
+<dt>if (csfFieldType == ThriftCSFType.DOUBLE</dt><dd><blockquote>
+<div><p>|| csfFieldType == ThriftCSFType.FLOAT) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>return DocValRangeFilter.getDocValRangeQuery(csfFieldName, csfFieldType,</dt><dd><p>Double.parseDouble(op.getOperands().get(1)),
+Double.parseDouble(op.getOperands().get(2)));</p>
+</dd>
+</dl>
+</dd>
+<dt>} else if (csfFieldType == ThriftCSFType.LONG</dt><dd><blockquote>
+<div><p>|| csfFieldType == ThriftCSFType.INT
+|| csfFieldType == ThriftCSFType.BYTE) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>Query query = DocValRangeFilter.getDocValRangeQuery(csfFieldName, csfFieldType,</dt><dd><p>Long.parseLong(op.getOperands().get(1)),
+Long.parseLong(op.getOperands().get(2)));</p>
+</dd>
+<dt>if (csfFieldName.equals(EarlybirdFieldConstant.LAT_LON_CSF_FIELD.getFieldName())) {</dt><dd><p>return wrapQueryInUserScrubGeoFilter(query);</p>
+</dd>
+</dl>
+<p>}
+return query;</p>
+</dd>
+<dt>} else {</dt><dd><p>throw new QueryParserException(“invalid ThriftCSFType. drop this op: “ + op.serialize());</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>} catch (NumberFormatException e) {</dt><dd><p>throw new QueryParserException(“invalid range numeric type used in “ + op.serialize());</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>protected final Query visitCachedFilterOperator(SearchOperator op) throws QueryParserException {</dt><dd><dl class="simple">
+<dt>try {</dt><dd><p>return CachedFilterQuery.getCachedFilterQuery(op.getOperand(), queryCacheManager);</p>
+</dd>
+<dt>} catch (CachedFilterQuery.NoSuchFilterException e) {</dt><dd><p>throw new QueryParserException(e.getMessage(), e);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>protected final Query visitScoredFilterOperator(SearchOperator op) throws QueryParserException {</dt><dd><p>final List&lt;String&gt; operands = op.getOperands();
+final String scoreFunction = operands.get(0);
+ScoringFunctionProvider.NamedScoringFunctionProvider scoringFunctionProvider =</p>
+<blockquote>
+<div><p>ScoringFunctionProvider.getScoringFunctionProviderByName(scoreFunction, schemaSnapshot);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>if (scoringFunctionProvider == null) {</dt><dd><dl class="simple">
+<dt>throw new QueryParserException(“Unknown scoring function name [” + scoreFunction</dt><dd><ul class="simple">
+<li><p>“ ] used as score_filter’s operand”);</p></li>
+</ul>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>return ScoreFilterQuery.getScoreFilterQuery(</dt><dd><p>schemaSnapshot,
+scoringFunctionProvider,
+Float.parseFloat(operands.get(1)),
+Float.parseFloat(operands.get(2)));</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>protected Query visitSinceTimeOperator(SearchOperator op) {</dt><dd><dl>
+<dt>try {</dt><dd><p>return SinceUntilFilter.getSinceQuery(Integer.parseInt(op.getOperand()));</p>
+</dd>
+<dt>} catch (NumberFormatException e) {</dt><dd><dl class="simple">
+<dt>LOG.warn(“since time is not a valid integer, the date isn’t reasonable. drop this op: “</dt><dd><ul class="simple">
+<li><p>op.serialize());</p></li>
+</ul>
+</dd>
+</dl>
+<p>SINCE_TIME_INVALID_INT_COUNTER.increment();
+return null;</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>protected Query visitUntilTimeOperator(SearchOperator op) {</dt><dd><dl>
+<dt>try {</dt><dd><p>return SinceUntilFilter.getUntilQuery(Integer.parseInt(op.getOperand()));</p>
+</dd>
+<dt>} catch (NumberFormatException e) {</dt><dd><dl class="simple">
+<dt>LOG.warn(“until time is not a valid integer, the date isn’t reasonable. drop this op: “</dt><dd><ul class="simple">
+<li><p>op.serialize());</p></li>
+</ul>
+</dd>
+</dl>
+<p>UNTIL_TIME_INVALID_INT_COUNTER.increment();
+return null;</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>protected Query visitSinceIDOperator(SearchOperator op) {</dt><dd><p>long id = Long.parseLong(op.getOperand());
+return SinceMaxIDFilter.getSinceIDQuery(id);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>protected Query visitMaxIDOperator(SearchOperator op) {</dt><dd><p>long id = Long.parseLong(op.getOperand());
+return SinceMaxIDFilter.getMaxIDQuery(id);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>protected Query visitGeoLocationTypeOperator(SearchOperator op) throws QueryParserException {</dt><dd><p>String operand = op.getOperand();
+ThriftGeoLocationSource source = ThriftGeoLocationSource.valueOf(operand.toUpperCase());
+// If necessary, this query will be wrapped by the UserScrubGeoFilter within
+// the createSimpleTermQuery() helper method
+return createNoScoreTermQuery(</p>
+<blockquote>
+<div><p>op,
+EarlybirdFieldConstant.INTERNAL_FIELD.getFieldName(),
+EarlybirdFieldConstants.formatGeoType(source));</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>protected Query visitGeocodeOperator(SearchOperator op) throws QueryParserException {</dt><dd><p>return visitGeocodeOrGeocodePrivateOperator(op);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>protected Query visitGeoBoundingBoxOperator(SearchOperator op) throws QueryParserException {</dt><dd><p>Rectangle rectangle = boundingBoxFromSearchOperator(op);
+return wrapQueryInUserScrubGeoFilter(</p>
+<blockquote>
+<div><p>GeoQuadTreeQueryBuilder.buildGeoQuadTreeQuery(rectangle, terminationTracker));</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>protected Query visitPlaceOperator(SearchOperator op) throws QueryParserException {</dt><dd><p>// This query will be wrapped by the UserScrubGeoFilter within the createSimpleTermQuery()
+// helper method
+return createSimpleTermQuery(</p>
+<blockquote>
+<div><p>op, EarlybirdFieldConstant.PLACE_FIELD.getFieldName(), op.getOperand());</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>protected Query visitLinkOperator(SearchOperator op) throws QueryParserException {</dt><dd><p>// This should never be called - the Link visitor (visitor(Link link)) should be.
+if (op instanceof Link) {</p>
+<blockquote>
+<div><p>LOG.warn(“Unexpected Link operator “ + op.serialize());
+return visit((Link) op);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><dl class="simple">
+<dt>throw new QueryParserException(“Operator type set to “ + op.getOperatorName()</dt><dd><ul class="simple">
+<li><p>“ but it is not an instance of Link [” + op.toString() + “]”);</p></li>
+</ul>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>protected Query visitEntityIdOperator(SearchOperator op) throws QueryParserException {</dt><dd><dl class="simple">
+<dt>return createSimpleTermQuery(</dt><dd><p>op, EarlybirdFieldConstant.ENTITY_ID_FIELD.getFieldName(), op.getOperand());</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>protected Query visitFromUserIDOperator(SearchOperator op) {</dt><dd><dl class="simple">
+<dt>return buildLongTermAttributeQuery(</dt><dd><p>op, EarlybirdFieldConstant.FROM_USER_ID_FIELD.getFieldName());</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>protected Query visitInReplyToTweetIdOperator(SearchOperator op) {</dt><dd><dl class="simple">
+<dt>return buildLongTermAttributeQuery(</dt><dd><p>op, EarlybirdFieldConstant.IN_REPLY_TO_TWEET_ID_FIELD.getFieldName());</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>protected Query visitInReplyToUserIdOperator(SearchOperator op) {</dt><dd><dl class="simple">
+<dt>return buildLongTermAttributeQuery(</dt><dd><p>op, EarlybirdFieldConstant.IN_REPLY_TO_USER_ID_FIELD.getFieldName());</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>protected Query visitLikedByUserIdOperator(SearchOperator op) throws QueryParserException {</dt><dd><dl class="simple">
+<dt>return buildLongTermAttributeQuery(op,</dt><dd><p>EarlybirdFieldConstant.LIKED_BY_USER_ID_FIELD.getFieldName());</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>protected Query visitRetweetedByUserIdOperator(SearchOperator op) throws QueryParserException {</dt><dd><dl class="simple">
+<dt>return buildLongTermAttributeQuery(op,</dt><dd><p>EarlybirdFieldConstant.RETWEETED_BY_USER_ID.getFieldName());</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>protected Query visitRepliedToByUserIdOperator(SearchOperator op) throws QueryParserException {</dt><dd><dl class="simple">
+<dt>return buildLongTermAttributeQuery(op,</dt><dd><p>EarlybirdFieldConstant.REPLIED_TO_BY_USER_ID.getFieldName());</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>protected Query visitQuotedUserIdOperator(SearchOperator op) throws QueryParserException {</dt><dd><dl class="simple">
+<dt>return buildLongTermAttributeQuery(op,</dt><dd><p>EarlybirdFieldConstant.QUOTED_USER_ID_FIELD.getFieldName());</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>protected Query visitQuotedTweetIdOperator(SearchOperator op) throws QueryParserException {</dt><dd><dl class="simple">
+<dt>return buildLongTermAttributeQuery(op,</dt><dd><p>EarlybirdFieldConstant.QUOTED_TWEET_ID_FIELD.getFieldName());</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>protected Query visitDirectedAtUserIdOperator(SearchOperator op) throws QueryParserException {</dt><dd><dl class="simple">
+<dt>return buildLongTermAttributeQuery(op,</dt><dd><p>EarlybirdFieldConstant.DIRECTED_AT_USER_ID_FIELD.getFieldName());</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>protected Query visitConversationIdOperator(SearchOperator op) throws QueryParserException {</dt><dd><dl class="simple">
+<dt>return buildLongTermAttributeQuery(</dt><dd><p>op, EarlybirdFieldConstant.CONVERSATION_ID_FIELD.getFieldName());</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>protected Query visitComposerSourceOperator(SearchOperator op) throws QueryParserException {</dt><dd><p>Preconditions.checkNotNull(op.getOperand(), “composer_source requires operand”);
+try {</p>
+<blockquote>
+<div><p>ComposerSource composerSource = ComposerSource.valueOf(op.getOperand().toUpperCase());
+return buildNoScoreIntTermQuery(</p>
+<blockquote>
+<div><p>op, EarlybirdFieldConstant.COMPOSER_SOURCE, composerSource.getValue());</p>
+</div></blockquote>
+</div></blockquote>
+<dl class="simple">
+<dt>} catch (IllegalArgumentException e) {</dt><dd><p>throw new QueryParserException(“Invalid operand for composer_source: “ + op.getOperand(), e);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>protected Query visitRetweetsOfTweetIdOperator(SearchOperator op) {</dt><dd><dl class="simple">
+<dt>return buildLongTermAttributeQuery(</dt><dd><p>op, EarlybirdFieldConstant.RETWEET_SOURCE_TWEET_ID_FIELD.getFieldName());</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>protected Query visitRetweetsOfUserIdOperator(SearchOperator op) {</dt><dd><dl class="simple">
+<dt>return buildLongTermAttributeQuery(</dt><dd><p>op, EarlybirdFieldConstant.RETWEET_SOURCE_USER_ID_FIELD.getFieldName());</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>protected Query visitLinkCategoryOperator(SearchOperator op) {</dt><dd><p>int linkCategory;
+try {</p>
+<blockquote>
+<div><p>linkCategory = LinkCategory.valueOf(op.getOperand()).getValue();</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} catch (IllegalArgumentException e) {</dt><dd><p>linkCategory = Integer.parseInt(op.getOperand());</p>
+</dd>
+</dl>
+<p>}</p>
+<p>String fieldName = EarlybirdFieldConstant.LINK_CATEGORY_FIELD.getFieldName();
+org.apache.lucene.index.Term term = new org.apache.lucene.index.Term(</p>
+<blockquote>
+<div><p>fieldName, IntTermAttributeImpl.copyIntoNewBytesRef(linkCategory));</p>
+</div></blockquote>
+<dl class="simple">
+<dt>return wrapQuery(</dt><dd><p>new TermQueryWithSafeToString(term, Integer.toString(linkCategory)), op, fieldName);</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>protected Query visitCardNameOperator(SearchOperator op) throws QueryParserException {</dt><dd><dl class="simple">
+<dt>return createNoScoreTermQuery(</dt><dd><p>op, EarlybirdFieldConstant.CARD_NAME_FIELD.getFieldName(), op.getOperand());</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>protected Query visitCardDomainOperator(SearchOperator op) throws QueryParserException {</dt><dd><dl class="simple">
+<dt>return createNoScoreTermQuery(</dt><dd><p>op, EarlybirdFieldConstant.CARD_DOMAIN_FIELD.getFieldName(), op.getOperand());</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>protected Query visitCardLangOperator(SearchOperator op) throws QueryParserException {</dt><dd><dl class="simple">
+<dt>return createNoScoreTermQuery(</dt><dd><p>op, EarlybirdFieldConstant.CARD_LANG.getFieldName(), op.getOperand());</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>protected Query visitHFTermPairOperator(SearchOperator op) throws QueryParserException {</dt><dd><p>final List&lt;String&gt; operands = op.getOperands();
+String termPair = HighFrequencyTermPairs.createPair(op.getOperands().get(0),</p>
+<blockquote>
+<div><p>op.getOperands().get(1));</p>
+</div></blockquote>
+<p>Query q = createSimpleTermQuery(op, ImmutableSchema.HF_TERM_PAIRS_FIELD, termPair);
+float boost = Float.parseFloat(operands.get(2));
+if (boost &gt;= 0) {</p>
+<blockquote>
+<div><p>q = BoostUtils.maybeWrapInBoostQuery(q, boost);</p>
+</div></blockquote>
+<p>}
+return q;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>protected Query visitHFTermPhrasePairOperator(SearchOperator op) throws QueryParserException {</dt><dd><p>final List&lt;String&gt; operands = op.getOperands();
+String termPair = HighFrequencyTermPairs.createPhrasePair(op.getOperands().get(0),</p>
+<blockquote>
+<div><p>op.getOperands().get(1));</p>
+</div></blockquote>
+<p>Query q = createSimpleTermQuery(op, ImmutableSchema.HF_PHRASE_PAIRS_FIELD, termPair);
+float boost = Float.parseFloat(operands.get(2));
+if (boost &gt;= 0) {</p>
+<blockquote>
+<div><p>q = BoostUtils.maybeWrapInBoostQuery(q, boost);</p>
+</div></blockquote>
+<p>}
+return q;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private Query logAndThrowQueryParserException(String message) throws QueryParserException {</dt><dd><p>LOG.error(message);
+throw new QueryParserException(message);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private Query logMissingEntriesAndThrowQueryParserException(String field, SearchOperator op)</dt><dd><blockquote>
+<div><p>throws QueryParserException {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>return logAndThrowQueryParserException(</dt><dd><p>String.format(“Missing required %s entries for %s”, field, op.serialize()));</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>// previous implementation of this operator allowed insertion of
+// operands from the thrift search query.  This was reverted to ensure simplicity
+// of the api, and to keep the serialized query self contained.
+protected final Query visitMultiTermDisjunction(SearchOperator op) throws QueryParserException {</p>
+<blockquote>
+<div><p>final List&lt;String&gt; operands = op.getOperands();
+final String field = operands.get(0);</p>
+<dl>
+<dt>if (isUserIdField(field)) {</dt><dd><p>List&lt;Long&gt; ids = Lists.newArrayList();
+parseLongArgs(operands.subList(1, operands.size()), ids, op);
+if (ids.size() &gt; 0) {</p>
+<blockquote>
+<div><p>// Try to get ranks for ids if exist from hitAttributeHelper.
+// Otherwise just pass in a empty list.
+List&lt;Integer&gt; ranks;
+if (hitAttributeHelper != null</p>
+<blockquote>
+<div><blockquote>
+<div><p>&amp;&amp; hitAttributeHelper.getExpandedNodeToRankMap().containsKey(op)) {</p>
+</div></blockquote>
+<p>ranks = hitAttributeHelper.getExpandedNodeToRankMap().get(op);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>ranks = Lists.newArrayList();</p>
+</dd>
+</dl>
+<p>}
+return UserIdMultiSegmentQuery.createIdDisjunctionQuery(</p>
+<blockquote>
+<div><p>“<a href="#id13"><span class="problematic" id="id14">multi_term_disjunction_</span></a>” + field,
+ids,
+field,
+schemaSnapshot,
+multiSegmentTermDictionaryManager,
+decider,
+earlybirdCluster,
+ranks,
+hitAttributeHelper,
+queryTimeout);</p>
+</div></blockquote>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>return logMissingEntriesAndThrowQueryParserException(field, op);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>} else if (EarlybirdFieldConstant.ID_FIELD.getFieldName().equals(field)) {</dt><dd><p>List&lt;Long&gt; ids = Lists.newArrayList();
+parseLongArgs(operands.subList(1, operands.size()), ids, op);
+if (ids.size() &gt; 0) {</p>
+<blockquote>
+<div><p>return RequiredStatusIDsFilter.getRequiredStatusIDsQuery(ids);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>return logMissingEntriesAndThrowQueryParserException(field, op);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>} else if (isTweetIdField(field)) {</dt><dd><p>List&lt;Long&gt; ids = Lists.newArrayList();
+parseLongArgs(operands.subList(1, operands.size()), ids, op);
+if (ids.size() &gt; 0) {</p>
+<blockquote>
+<div><p>BooleanQuery.Builder bqBuilder = new BooleanQuery.Builder();
+int numClauses = 0;
+for (long id : ids) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (numClauses &gt;= BooleanQuery.getMaxClauseCount()) {</dt><dd><p>BooleanQuery saved = bqBuilder.build();
+bqBuilder = new BooleanQuery.Builder();
+bqBuilder.add(saved, BooleanClause.Occur.SHOULD);
+numClauses = 1;</p>
+</dd>
+</dl>
+<p>}
+bqBuilder.add(buildLongTermAttributeQuery(op, field, id), Occur.SHOULD);
+++numClauses;</p>
+</div></blockquote>
+<p>}
+return bqBuilder.build();</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>return logMissingEntriesAndThrowQueryParserException(field, op);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>} else {</dt><dd><p>return createUnsupportedOperatorQuery(op);</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>protected final Query visitCSFDisjunctionFilter(SearchOperator op)</dt><dd><blockquote>
+<div><p>throws QueryParserException {</p>
+</div></blockquote>
+<p>List&lt;String&gt; operands = op.getOperands();
+String field = operands.get(0);</p>
+<p>ThriftCSFType csfType = schemaSnapshot.getCSFFieldType(field);
+if (csfType == null) {</p>
+<blockquote>
+<div><p>throw new QueryParserException(“Field must be a CSF”);</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>if (csfType != ThriftCSFType.LONG) {</dt><dd><p>throw new QueryParserException(“csf_disjunction_filter only works with long fields”);</p>
+</dd>
+</dl>
+<p>}</p>
+<p>Set&lt;Long&gt; values = new HashSet&lt;&gt;();
+parseLongArgs(operands.subList(1, operands.size()), values, op);</p>
+<p>Query query = CSFDisjunctionFilter.getCSFDisjunctionFilter(field, values);
+if (field.equals(EarlybirdFieldConstant.LAT_LON_CSF_FIELD.getFieldName())) {</p>
+<blockquote>
+<div><p>return wrapQueryInUserScrubGeoFilter(query);</p>
+</div></blockquote>
+<p>}
+return query;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>protected Query visitSafetyExclude(SearchOperator op) throws QueryParserException {</dt><dd><p>// We do not allow negating safety_exclude operator. Note the operator is internal so if we
+// get here, it means there’s a bug in the query construction side.
+if (isParentNegated(op) || nodeIsNegated(op)) {</p>
+<blockquote>
+<div><p>throw new QueryParserException(“Negating safety_exclude operator is not allowed: “ + op);</p>
+</div></blockquote>
+<p>}</p>
+<p>// Convert the safety filter to other operators depending on cluster setting
+// The safety filter is interpreted differently on archive because the underlying safety labels
+// in extended encoded field are not available on archive.
+if (EarlybirdCluster.isArchive(earlybirdCluster)) {</p>
+<blockquote>
+<div><p>return visit(OPERATOR_CACHED_EXCLUDE_ANTISOCIAL_AND_NATIVERETWEETS);</p>
+</div></blockquote>
+<dl>
+<dt>} else {</dt><dd><p>List&lt;com.twitter.search.queryparser.query.Query&gt; children = Lists.newArrayList();
+for (String filterName : op.getOperands()) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>children.addAll(</dt><dd><p>OPERATORS_BY_SAFE_EXCLUDE_OPERAND.getOrDefault(filterName, ImmutableList.of()));</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+return visit(new Conjunction(children));</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>protected Query visitNamedEntity(SearchOperator op) throws QueryParserException {</dt><dd><p>List&lt;String&gt; operands = op.getOperands();
+Preconditions.checkState(operands.size() == 1,</p>
+<blockquote>
+<div><p>“named_entity: wrong number of operands”);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>return createDisjunction(</dt><dd><p>operands.get(0).toLowerCase(),
+op,
+EarlybirdFieldConstant.NAMED_ENTITY_FROM_TEXT_FIELD,
+EarlybirdFieldConstant.NAMED_ENTITY_FROM_URL_FIELD);</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>protected Query visitSpaceId(SearchOperator op) throws QueryParserException {</dt><dd><p>List&lt;String&gt; operands = op.getOperands();
+Preconditions.checkState(operands.size() == 1,</p>
+<blockquote>
+<div><p>“space_id: wrong number of operands”);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>return createSimpleTermQuery(</dt><dd><p>op,
+EarlybirdFieldConstant.SPACE_ID_FIELD.getFieldName(),
+op.getOperand()</p>
+</dd>
+</dl>
+<p>);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>protected Query visitNamedEntityWithType(SearchOperator op) throws QueryParserException {</dt><dd><p>List&lt;String&gt; operands = op.getOperands();
+Preconditions.checkState(operands.size() == 2,</p>
+<blockquote>
+<div><p>“named_entity_with_type: wrong number of operands”);</p>
+</div></blockquote>
+<p>String name = operands.get(0);
+String type = operands.get(1);
+return createDisjunction(</p>
+<blockquote>
+<div><p>String.format(“%s:%s”, name, type).toLowerCase(),
+op,
+EarlybirdFieldConstant.NAMED_ENTITY_WITH_TYPE_FROM_TEXT_FIELD,
+EarlybirdFieldConstant.NAMED_ENTITY_WITH_TYPE_FROM_URL_FIELD);</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<p>// Create a disjunction query for a given value in one of the given fields
+private Query createDisjunction(</p>
+<blockquote>
+<div><blockquote>
+<div><p>String value, SearchOperator operator, EarlybirdFieldConstant… fields)
+throws QueryParserException {</p>
+</div></blockquote>
+<p>BooleanQuery.Builder booleanQueryBuilder = new BooleanQuery.Builder();
+for (EarlybirdFieldConstant field : fields) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>booleanQueryBuilder.add(</dt><dd><p>createSimpleTermQuery(operator, field.getFieldName(), value), Occur.SHOULD);</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+return booleanQueryBuilder.build();</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>protected Query visitMinFeatureValueOperator(SearchOperator.Type type, SearchOperator op) {</dt><dd><p>final List&lt;String&gt; operands = op.getOperands();</p>
+<p>String featureName;
+switch (type) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case MIN_FAVES:</dt><dd><p>featureName = EarlybirdFieldConstant.FAVORITE_COUNT.getFieldName();
+break;</p>
+</dd>
+<dt>case MIN_QUALITY_SCORE:</dt><dd><p>featureName = EarlybirdFieldConstant.PARUS_SCORE.getFieldName();
+break;</p>
+</dd>
+<dt>case MIN_REPLIES:</dt><dd><p>featureName = EarlybirdFieldConstant.REPLY_COUNT.getFieldName();
+break;</p>
+</dd>
+<dt>case MIN_REPUTATION:</dt><dd><p>featureName = EarlybirdFieldConstant.USER_REPUTATION.getFieldName();
+break;</p>
+</dd>
+<dt>case MIN_RETWEETS:</dt><dd><p>featureName = EarlybirdFieldConstant.RETWEET_COUNT.getFieldName();
+break;</p>
+</dd>
+<dt>default:</dt><dd><p>throw new IllegalArgumentException(“Unknown min feature type “ + type);</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<p>double operand = Double.parseDouble(operands.get(0));</p>
+<p>// SEARCH-16751: Because we use QueryCacheConstants.HAS_ENGAGEMENT as a driving query below, we
+// won’t return tweets with 0 engagements when we handle a query with a [min_X 0] filter (e.g.
+// (* cat [min_faves 0] ). Thus we need to return a MatchAllDocsQuery in that case.
+if (operand == 0) {</p>
+<blockquote>
+<div><p>return new MatchAllDocsQuery();</p>
+</div></blockquote>
+<p>}</p>
+<p>// Only perform the rewrite if the operator is a min engagement operator.
+if (isOperatorTypeEngagementFilter(type)) {</p>
+<blockquote>
+<div><p>return buildQueryForEngagementOperator(op, operands, featureName);</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>if (type == SearchOperator.Type.MIN_REPUTATION) {</dt><dd><p>return buildQueryForMinReputationOperator(operands, featureName);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>return MinFeatureValueFilter.getMinFeatureValueFilter(</dt><dd><p>featureName, Double.parseDouble(operands.get(0)));</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>protected Query visitFeatureValueInAcceptListOrUnsetFilterOperator(SearchOperator op)</dt><dd><blockquote>
+<div><p>throws QueryParserException {</p>
+</div></blockquote>
+<p>final List&lt;String&gt; operands = op.getOperands();
+final String field = operands.get(0);</p>
+<dl>
+<dt>if (isIdCSFField(field)) {</dt><dd><p>Set&lt;Long&gt; ids = Sets.newHashSet();
+parseLongArgs(operands.subList(1, operands.size()), ids, op);
+return FeatureValueInAcceptListOrUnsetFilter.getFeatureValueInAcceptListOrUnsetFilter(</p>
+<blockquote>
+<div><p>field, ids);</p>
+</div></blockquote>
+</dd>
+<dt>} else {</dt><dd><dl class="simple">
+<dt>return logAndThrowQueryParserException(</dt><dd><p>“Invalid CSF field passed to operator “ + op.toString());</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Creates a Lucene query for an operator that’s not supported by the search service.</p></li>
+<li></li>
+<li><p>NOTE: Developer, if you are writing a class to extends this class, make sure the</p></li>
+<li><p>behaviour of this function makes sense for your search service.</p></li>
+<li></li>
+<li><p>&#64;param op The operator that’s not supported by the search service.</p></li>
+<li><p>&#64;return The Lucene query for this operator</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>protected Query createUnsupportedOperatorQuery(SearchOperator op) throws QueryParserException {</dt><dd><dl class="simple">
+<dt>SearchCounter</dt><dd><p>.export(UNSUPPORTED_OPERATOR_PREFIX + op.getOperatorType().getOperatorName())
+.increment();</p>
+</dd>
+</dl>
+<p>return visit(op.toPhrase());</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private Query buildNoScoreIntTermQuery(</dt><dd><blockquote>
+<div><p>SearchOperator op,
+EarlybirdFieldConstant field,
+int termValue) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>org.apache.lucene.index.Term term = new org.apache.lucene.index.Term(</dt><dd><p>field.getFieldName(), IntTermAttributeImpl.copyIntoNewBytesRef(termValue));</p>
+</dd>
+<dt>return wrapQuery(</dt><dd><p>new TermQueryWithSafeToString(term, Integer.toString(termValue)), op, field.getFieldName());</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private Query buildQueryForMinReputationOperator(List&lt;String&gt; operands, String featureName) {</dt><dd><p>int operand = (int) Double.parseDouble(operands.get(0));
+// Driving by MinFeatureValueFilter’s DocIdSetIterator is very slow, because we have to
+// perform an expensive check for all doc IDs in the segment, so we use a cached result to
+// drive the query, and use MinFeatureValueFilter as a secondary filter.
+String queryCacheFilterName;
+if (operand &gt;= 50) {</p>
+<blockquote>
+<div><p>queryCacheFilterName = QueryCacheConstants.MIN_REPUTATION_50;</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else if (operand &gt;= 36) {</dt><dd><p>queryCacheFilterName = QueryCacheConstants.MIN_REPUTATION_36;</p>
+</dd>
+<dt>} else if (operand &gt;= 30) {</dt><dd><p>queryCacheFilterName = QueryCacheConstants.MIN_REPUTATION_30;</p>
+</dd>
+<dt>} else {</dt><dd><p>return MinFeatureValueFilter.getMinFeatureValueFilter(featureName, operand);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>try {</dt><dd><dl class="simple">
+<dt>Query drivingQuery = CachedFilterQuery.getCachedFilterQuery(</dt><dd><p>queryCacheFilterName, queryCacheManager);</p>
+</dd>
+<dt>return new FilteredQuery(</dt><dd><p>drivingQuery, MinFeatureValueFilter.getDocIdFilterFactory(featureName, operand));</p>
+</dd>
+</dl>
+</dd>
+<dt>} catch (Exception e) {</dt><dd><p>// If the filter is not found, that’s OK, it might be our first time running the query cache,
+// or there may be no tweets with that high reputation.
+return MinFeatureValueFilter.getMinFeatureValueFilter(featureName, operand);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private Query buildQueryForEngagementOperator(</dt><dd><blockquote>
+<div><p>SearchOperator op, List&lt;String&gt; operands, String featureName) {</p>
+</div></blockquote>
+<p>// Engagements and engagement counts are not indexed on Protected Earlybirds, so there is no
+// need to traverse the entire segment with the MinFeatureValueFilter. SEARCH-28120
+if (earlybirdCluster == EarlybirdCluster.PROTECTED) {</p>
+<blockquote>
+<div><p>return new MatchNoDocsQuery();</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>EarlybirdFieldConstant field =</dt><dd><p>EarlybirdFieldConstants.CSF_NAME_TO_MIN_ENGAGEMENT_FIELD_MAP.get(featureName);</p>
+</dd>
+<dt>if (field == null) {</dt><dd><dl class="simple">
+<dt>throw new IllegalArgumentException(String.format(“Expected the feature to be “</dt><dd><ul class="simple">
+<li><p>“FAVORITE_COUNT, REPLY_COUNT, or RETWEET_COUNT. Got %s.”, featureName));</p></li>
+</ul>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+int operand = (int) Double.parseDouble(operands.get(0));
+ByteNormalizer normalizer = MinFeatureValueFilter.getMinFeatureValueNormalizer(featureName);
+int minValue = normalizer.unsignedByteToInt(normalizer.normalize(operand));</p>
+<p>// We default to the old behavior of filtering posts instead of consulting the min engagement
+// field if the operand is less than some threshold value because it seems, empirically, that
+// the old method results in lower query latencies for lower values of the filter operand.
+// This threshold can be controlled by the “use_min_engagement_field_threshold” decider. The
+// current default value is 90. SEARCH-16102
+int useMinEngagementFieldThreshold = decider.getAvailability(</p>
+<blockquote>
+<div><p>“use_min_engagement_field_threshold”).getOrElse(() -&gt; 0);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>if (operand &gt;= useMinEngagementFieldThreshold) {</dt><dd><p>NUM_QUERIES_ABOVE_MIN_ENGAGEMENT_THRESHOLD.increment();</p>
+</dd>
+<dt>} else {</dt><dd><p>NUM_QUERIES_BELOW_MIN_ENGAGEMENT_THRESHOLD.increment();</p>
+</dd>
+</dl>
+<p>}
+if (schemaHasField(field) &amp;&amp; operand &gt;= useMinEngagementFieldThreshold) {</p>
+<blockquote>
+<div><p>return buildNoScoreIntTermQuery(op, field, minValue);</p>
+</div></blockquote>
+<p>}
+// Driving by MinFeatureValueFilter’s DocIdSetIterator is very slow, because we have to
+// perform an expensive check for all doc IDs in the segment, so we use a cached result to
+// drive the query, and use MinFeatureValueFilter as a secondary filter.
+try {</p>
+<blockquote>
+<div><p>Query drivingQuery = minEngagmentsDrivingQuery(op, operand);
+return new FilteredQuery(</p>
+<blockquote>
+<div><p>drivingQuery, MinFeatureValueFilter.getDocIdFilterFactory(featureName, operand));</p>
+</div></blockquote>
+</div></blockquote>
+<dl class="simple">
+<dt>} catch (Exception e) {</dt><dd><p>// If the filter is not found, that’s OK, it might be our first time running the query cache,
+// or there may be no Tweets with that many engagements (we would only expect this in tests).
+return MinFeatureValueFilter.getMinFeatureValueFilter(featureName, operand);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private Query minEngagmentsDrivingQuery(SearchOperator operator, int minValue)</dt><dd><blockquote>
+<div><p>throws CachedFilterQuery.NoSuchFilterException, QueryParserException {</p>
+</div></blockquote>
+<p>// If the min engagements value is large, then many of the hits that have engagement will still
+// not match the query, leading to extremely slow queries. Therefore, if there is more than 100
+// engagements, we drive by a more restricted filter. See SEARCH-33740
+String filter;
+if (minValue &lt; 100) {</p>
+<blockquote>
+<div><p>filter = QueryCacheConstants.HAS_ENGAGEMENT;</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else if (operator.getOperatorType() == SearchOperator.Type.MIN_FAVES) {</dt><dd><p>filter = QueryCacheConstants.MIN_FAVES_100;</p>
+</dd>
+<dt>} else if (operator.getOperatorType() == SearchOperator.Type.MIN_REPLIES) {</dt><dd><p>filter = QueryCacheConstants.MIN_REPLIES_100;</p>
+</dd>
+<dt>} else if (operator.getOperatorType() == SearchOperator.Type.MIN_RETWEETS) {</dt><dd><p>filter = QueryCacheConstants.MIN_RETWEETS_100;</p>
+</dd>
+<dt>} else {</dt><dd><p>throw new QueryParserException(“Missing engagement filter.”);</p>
+</dd>
+</dl>
+<p>}
+return CachedFilterQuery.getCachedFilterQuery(filter, queryCacheManager);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private boolean isOperatorTypeEngagementFilter(SearchOperator.Type type) {</dt><dd><dl class="simple">
+<dt>return type == SearchOperator.Type.MIN_FAVES</dt><dd><p>|| type == SearchOperator.Type.MIN_RETWEETS
+|| type == SearchOperator.Type.MIN_REPLIES;</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private boolean schemaHasField(EarlybirdFieldConstant field) {</dt><dd><p>return schemaSnapshot.hasField(field.getFieldId());</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// Helper functions
+private Query createSimpleTermQuery(</p>
+<blockquote>
+<div><blockquote>
+<div><p>com.twitter.search.queryparser.query.Query node, String field, String text)
+throws QueryParserException {</p>
+</div></blockquote>
+<p>Query baseQuery = new TermQuery(createTerm(field, text));
+if (isGeoFieldThatShouldBeScrubbed(field, text)) {</p>
+<blockquote>
+<div><p>baseQuery = wrapQueryInUserScrubGeoFilter(baseQuery);</p>
+</div></blockquote>
+<p>}
+return wrapQuery(baseQuery, node, field);</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>private boolean isGeoFieldThatShouldBeScrubbed(String field, String text) {</dt><dd><dl class="simple">
+<dt>if (field.equals(EarlybirdFieldConstant.INTERNAL_FIELD.getFieldName())) {</dt><dd><p>// the internal field is used for the place id filter and the geo location type filters, some
+// of which should be scrubbed
+return GEO_FILTERS_TO_BE_SCRUBBED.contains(text);</p>
+</dd>
+</dl>
+<p>}
+return GEO_FIELDS_TO_BE_SCRUBBED.contains(field);</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// Like above, but sets boost to 0 to disable scoring component.  This should be used
+// for filters that do not impact scoring (such as filter:images).
+private Query createNoScoreTermQuery(com.twitter.search.queryparser.query.Query node,</p>
+<blockquote>
+<div><blockquote>
+<div><blockquote>
+<div><p>String field, String text)</p>
+</div></blockquote>
+<p>throws QueryParserException {</p>
+</div></blockquote>
+<p>Query query = createSimpleTermQuery(node, field, text);
+return new BoostQuery(query, 0.0f);  // No score contribution.</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>private Query createNormalizedTermQuery(com.twitter.search.queryparser.query.Query node,</dt><dd><blockquote>
+<div><blockquote>
+<div><p>String field, String text)</p>
+</div></blockquote>
+<p>throws QueryParserException {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>return createSimpleTermQuery(</dt><dd><p>node,
+field,
+NormalizerHelper.normalizeWithUnknownLocale(text, EarlybirdConfig.getPenguinVersion()));</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Get the boost from the annotation list of a query node.</p></li>
+<li><p>Right now this is very simple, we simple extract the value of some annotations and ignore all</p></li>
+<li><p>others, also, if there are multiple annotations that have values, we only use the first one we</p></li>
+<li><p>see in the list (although the rewritten query EB receives should have this).</p></li>
+<li><p>NOTE: we use simple weight selection logic here based on the assumption that the annotator</p></li>
+<li><p>and rewriter will not produce ambiguous weight information. There should always be only one</p></li>
+<li><p>weight-bearing annotation for a specific node.</p></li>
+<li></li>
+<li><p>&#64;param annotations The list of annotations of the query node.</p></li>
+<li><p>&#64;return The boost for this query node, 0 if there is no boost, in which case you shouldn’t</p></li>
+<li><p>apply it at all.</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>private static double getBoostFromAnnotations(List&lt;Annotation&gt; annotations) {</dt><dd><dl>
+<dt>if (annotations != null) {</dt><dd><dl>
+<dt>for (Annotation anno<span class="classifier">annotations) {</span></dt><dd><dl>
+<dt>switch (anno.getType()) {</dt><dd><p>case VARIANT:
+case SPELLING:
+case WEIGHT:
+case OPTIONAL:</p>
+<blockquote>
+<div><p>return ((FloatAnnotation) anno).getValue();</p>
+</div></blockquote>
+<p>default:</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}
+return -1;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private static double getPhraseProximityFromAnnotations(List&lt;Annotation&gt; annotations) {</dt><dd><dl>
+<dt>if (annotations != null) {</dt><dd><dl>
+<dt>for (Annotation anno<span class="classifier">annotations) {</span></dt><dd><dl class="simple">
+<dt>if (anno.getType() == Annotation.Type.PROXIMITY) {</dt><dd><p>return ((FloatAnnotation) anno).getValue();</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}
+return -1;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private static boolean isOptional(com.twitter.search.queryparser.query.Query node) {</dt><dd><p>return node.hasAnnotationType(Annotation.Type.OPTIONAL);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private static boolean isProximityGroup(com.twitter.search.queryparser.query.Query node) {</dt><dd><dl>
+<dt>if (node.isTypeOf(com.twitter.search.queryparser.query.Query.QueryType.OPERATOR)) {</dt><dd><p>SearchOperator op = (SearchOperator) node;
+if (op.getOperatorType() == SearchOperator.Type.PROXIMITY_GROUP) {</p>
+<blockquote>
+<div><p>return true;</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}
+return false;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private final Query simplifyBooleanQuery(BooleanQuery q) {</dt><dd><dl class="simple">
+<dt>if (q.clauses() == null || q.clauses().size() != 1) {</dt><dd><p>return q;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>return q.clauses().get(0).getQuery();</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private Query visit(final Phrase phrase, boolean sloppy) throws QueryParserException {</dt><dd><p>Optional&lt;Annotation&gt; fieldOpt = phrase.getAnnotationOf(Annotation.Type.FIELD);
+if (fieldOpt.isPresent()) {</p>
+<blockquote>
+<div><p>String field = fieldOpt.get().valueToString();
+Schema.FieldInfo fieldInfo = schemaSnapshot.getFieldInfo(field);
+if (fieldInfo != null &amp;&amp; !fieldInfo.getFieldType().hasPositions()) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>throw new QueryParserException(String.format(“Field %s does not support phrase queries “</dt><dd><ul class="simple">
+<li><p>“because it does not have position information.”, field));</p></li>
+</ul>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}
+BooleanQuery.Builder queryBuilder = new BooleanQuery.Builder();
+Map&lt;String, Float&gt; actualFieldWeights = getFieldWeightMapForNode(phrase);
+for (Map.Entry&lt;String, Float&gt; entry : actualFieldWeights.entrySet()) {</p>
+<blockquote>
+<div><p>PhraseQuery.Builder phraseQueryBuilder = new PhraseQuery.Builder();
+int curPos = 0;
+for (String term : phrase.getTerms()) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (!term.equals(PHRASE_WILDCARD)) {</dt><dd><p>phraseQueryBuilder.add(createTerm(entry.getKey(), term), curPos);
+curPos++;</p>
+</dd>
+<dt>} else if (curPos != 0) { //”*” at the beggining of a phrase has no effect/meaning</dt><dd><p>curPos++;</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>// No actual terms added to query
+if (curPos == 0) {</p>
+<blockquote>
+<div><p>break;</p>
+</div></blockquote>
+<p>}
+int annotatedSloppiness = (int) getPhraseProximityFromAnnotations(phrase.getAnnotations());
+if (annotatedSloppiness &gt; 0) {</p>
+<blockquote>
+<div><p>phraseQueryBuilder.setSlop(annotatedSloppiness);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else if (sloppy) {</dt><dd><p>phraseQueryBuilder.setSlop(proximityPhraseSlop);</p>
+</dd>
+</dl>
+<p>}
+float fieldWeight = entry.getValue();
+float boost = (float) getBoostFromAnnotations(phrase.getAnnotations());
+Query query = phraseQueryBuilder.build();
+if (boost &gt;= 0) {</p>
+<blockquote>
+<div><p>query = BoostUtils.maybeWrapInBoostQuery(query, boost * fieldWeight);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else if (fieldWeight != DEFAULT_FIELD_WEIGHT) {</dt><dd><p>query = BoostUtils.maybeWrapInBoostQuery(query, fieldWeight);</p>
+</dd>
+<dt>} else {</dt><dd><p>query = BoostUtils.maybeWrapInBoostQuery(query, proximityPhraseWeight);</p>
+</dd>
+</dl>
+<p>}
+Occur occur = actualFieldWeights.size() &gt; 1 ? Occur.SHOULD : Occur.MUST;
+queryBuilder.add(wrapQuery(query, phrase, entry.getKey()), occur);</p>
+</div></blockquote>
+<p>}
+Query q = simplifyBooleanQuery(queryBuilder.build());
+return negateQueryIfNodeNegated(phrase, q);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private Query wrapQuery(</dt><dd><blockquote>
+<div><p>org.apache.lucene.search.Query query,
+com.twitter.search.queryparser.query.Query node,
+String fieldName) {</p>
+</div></blockquote>
+<dl>
+<dt>return EarlybirdQueryHelper.maybeWrapWithTimeout(</dt><dd><dl class="simple">
+<dt>EarlybirdQueryHelper.maybeWrapWithHitAttributionCollector(</dt><dd><p>query, node, schemaSnapshot.getFieldInfo(fieldName), hitAttributeHelper),</p>
+</dd>
+</dl>
+<p>node, queryTimeout);</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private final boolean nodeIsNegated(com.twitter.search.queryparser.query.Query node) {</dt><dd><dl class="simple">
+<dt>if (isParentNegated(node)) {</dt><dd><p>return !node.mustNotOccur();</p>
+</dd>
+<dt>} else {</dt><dd><p>return node.mustNotOccur();</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private final Query negateQuery(Query q) {</dt><dd><dl class="simple">
+<dt>return new BooleanQuery.Builder()</dt><dd><p>.add(q, Occur.MUST_NOT)
+.add(new MatchAllDocsQuery(), Occur.MUST)
+.build();</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>// Simple helper to examine node, and negate the lucene query if necessary.
+private final Query negateQueryIfNodeNegated(com.twitter.search.queryparser.query.Query node,</p>
+<blockquote>
+<div><blockquote>
+<div><p>Query query) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>if (query == null) {</dt><dd><p>return null;</p>
+</dd>
+</dl>
+<p>}
+return nodeIsNegated(node) ? negateQuery(query) : query;</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>private boolean isParentNegated(com.twitter.search.queryparser.query.Query query) {</dt><dd><p>return parentNegatedQueries.contains(query);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private org.apache.lucene.index.Term createTerm(String field, String text)</dt><dd><blockquote>
+<div><p>throws QueryParserException {</p>
+</div></blockquote>
+<p>Schema.FieldInfo fieldInfo = schemaSnapshot.getFieldInfo(field);
+if (fieldInfo == null) {</p>
+<blockquote>
+<div><p>throw new QueryParserException(“Unknown field: “ + field);</p>
+</div></blockquote>
+<p>}</p>
+<p>queriedFields.add(field);</p>
+<dl class="simple">
+<dt>try {</dt><dd><p>return new org.apache.lucene.index.Term(field, SchemaUtil.toBytesRef(fieldInfo, text));</p>
+</dd>
+<dt>} catch (UnsupportedOperationException e) {</dt><dd><p>throw new QueryParserException(e.getMessage(), e.getCause());</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Get field weight map for a node, combing default values and its annotations.</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+<dt>private Map&lt;String, Float&gt; getFieldWeightMapForNode(</dt><dd><blockquote>
+<div><p>com.twitter.search.queryparser.query.Query query) throws QueryParserException {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>return FieldWeightUtil.combineDefaultWithAnnotation(</dt><dd><p>query,
+defaultFieldWeightMap,
+enabledFieldWeightMap,
+Functions.&lt;String&gt;identity(),
+mappableFieldMap,
+Functions.&lt;String&gt;identity());</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private boolean addQuery(</dt><dd><blockquote>
+<div><p>BooleanQuery.Builder bqBuilder,
+com.twitter.search.queryparser.query.Query child) throws QueryParserException {</p>
+</div></blockquote>
+<p>Occur occur = Occur.MUST;
+if (child.mustNotOccur()) {</p>
+<blockquote>
+<div><p>// To build a conjunction, we will not rely on the negation in the child visitor.
+// Instead we will add the term as MUST_NOT occur.
+// Store this in parentNegatedQueries so the child visitor can do the right thing.
+occur = Occur.MUST_NOT;
+parentNegatedQueries.add(child);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else if (isOptional(child) || isProximityGroup(child)) {</dt><dd><p>occur = Occur.SHOULD;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>Query q = child.accept(this);
+if (q != null) {</p>
+<blockquote>
+<div><p>bqBuilder.add(q, occur);
+return true;</p>
+</div></blockquote>
+<p>}
+return false;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Constructs a BooleanQuery from a queryparser Query node.</p></li>
+<li><p>Adds fields as configured in the fieldWeightMap and specified by termQueryDisjunctionType</p></li>
+<li><ul>
+<li><p>TermQueryDisjunctionType.ONLY_OPTIONALIZED adds optional fields</p></li>
+</ul>
+</li>
+<li><p>(only resolved_links_text for now),</p></li>
+<li><ul>
+<li><p>TermQueryDisjunctionType.DROP_OPTIONALIZED adds all other valid fields expect</p></li>
+</ul>
+</li>
+<li><p>resolved_links_text (for now),</p></li>
+<li><ul>
+<li><p>TermQueryDisjunctionType.NORMAL adds all valid fields</p></li>
+</ul>
+</li>
+<li><p>&#64;param query an instance of com.twitter.search.queryparser.query.Query or</p></li>
+<li><p>com.twitter.search.queryparser.query.Term</p></li>
+<li><p>&#64;return a BooleanQuery consists of fields from query</p></li>
+</ul>
+<p><a href="#id9"><span class="problematic" id="id10">*</span></a>/</p>
+</dd>
+<dt>private BooleanQuery createTermQueryDisjunction(</dt><dd><blockquote>
+<div><p>com.twitter.search.queryparser.query.Query query) throws QueryParserException {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>String normTerm = query.isTypeOf(com.twitter.search.queryparser.query.Query.QueryType.TERM)</dt><dd><p>? ((Term) query).getValue() : query.toString(false);</p>
+</dd>
+</dl>
+<p>BooleanQuery.Builder booleanQueryBuilder = new BooleanQuery.Builder();
+Map&lt;String, Float&gt; actualFieldWeightMap = getFieldWeightMapForNode(query);
+Set&lt;String&gt; fieldsToUse = Sets.newLinkedHashSet(actualFieldWeightMap.keySet());
+Occur occur = fieldsToUse.size() &gt; 1 ? Occur.SHOULD : Occur.MUST;
+for (String field : fieldsToUse) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>addTermQueryWithField(booleanQueryBuilder, query, normTerm, field, occur,</dt><dd><p>actualFieldWeightMap.get(field));</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+return booleanQueryBuilder.build();</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private void addTermQueryWithField(</dt><dd><blockquote>
+<div><p>BooleanQuery.Builder bqBuilder,
+com.twitter.search.queryparser.query.Query term,
+String normTerm,
+String fieldName,
+Occur occur,
+float fieldWeight) throws QueryParserException {</p>
+</div></blockquote>
+<p>float boost = (float) getBoostFromAnnotations(term.getAnnotations());
+Query query = createSimpleTermQuery(term, fieldName, normTerm);
+if (boost &gt;= 0) {</p>
+<blockquote>
+<div><p>query = BoostUtils.maybeWrapInBoostQuery(query, boost * fieldWeight);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>query = BoostUtils.maybeWrapInBoostQuery(query, fieldWeight);</p>
+</dd>
+</dl>
+<p>}
+bqBuilder.add(query, occur);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private Query finalizeQuery(BooleanQuery bq, Term term) {</dt><dd><p>Query q = simplifyBooleanQuery(bq);
+return negateQueryIfNodeNegated(term, q);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private Rectangle boundingBoxFromSearchOperator(SearchOperator op) throws QueryParserException {</dt><dd><p>Preconditions.checkArgument(op.getOperatorType() == SearchOperator.Type.GEO_BOUNDING_BOX);
+Preconditions.checkNotNull(op.getOperands());
+Preconditions.checkState(op.getOperands().size() == 4);</p>
+<p>List&lt;String&gt; operands = op.getOperands();
+try {</p>
+<blockquote>
+<div><p>// Unfortunately, we store coordinates as floats in our index, which causes a lot of precision
+// loss. On the query side, we have to cast into floats to match.
+float minLat = (float) Double.parseDouble(operands.get(0));
+float minLon = (float) Double.parseDouble(operands.get(1));
+float maxLat = (float) Double.parseDouble(operands.get(2));
+float maxLon = (float) Double.parseDouble(operands.get(3));</p>
+<p>Point lowerLeft = new PointImpl(minLon, minLat, GeohashChunkImpl.getSpatialContext());
+Point upperRight = new PointImpl(maxLon, maxLat, GeohashChunkImpl.getSpatialContext());
+return new RectangleImpl(lowerLeft, upperRight, GeohashChunkImpl.getSpatialContext());</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} catch (NumberFormatException e) {</dt><dd><p>// consider operator invalid if any of the coordinate cannot be parsed.
+throw new QueryParserException(“Malformed bounding box operator.” + op.serialize());</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private Query visitGeocodeOrGeocodePrivateOperator(SearchOperator op)</dt><dd><blockquote>
+<div><p>throws QueryParserException {</p>
+</div></blockquote>
+<p>GeoCode geoCode = GeoCode.fromOperator(op);
+if (geoCode == null) {</p>
+<blockquote>
+<div><p>throw new QueryParserException(“Invalid GeoCode operator:” + op.serialize());</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>return wrapQueryInUserScrubGeoFilter(</dt><dd><p>GeoQuadTreeQueryBuilder.buildGeoQuadTreeQuery(geoCode, terminationTracker));</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private Query wrapQueryInUserScrubGeoFilter(Query baseQuery) {</dt><dd><dl>
+<dt>if (DeciderUtil.isAvailableForRandomRecipient(</dt><dd><blockquote>
+<div><p>decider, “<a href="#id15"><span class="problematic" id="id16">filter_out_geo_scrubbed_tweets_</span></a>” + earlybirdCluster.getNameForStats())) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>return new FilteredQuery(</dt><dd><p>baseQuery,
+UserScrubGeoFilter.getDocIdFilterFactory(userScrubGeoMap));</p>
+</dd>
+</dl>
+</dd>
+<dt>} else {</dt><dd><p>return baseQuery;</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private Query buildLongTermAttributeQuery(SearchOperator op, String fieldName) {</dt><dd><p>return buildLongTermAttributeQuery(op, fieldName, Long.parseLong(op.getOperand()));</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private Query buildLongTermAttributeQuery(SearchOperator op, String fieldName, long argValue) {</dt><dd><dl class="simple">
+<dt>org.apache.lucene.index.Term term = new org.apache.lucene.index.Term(</dt><dd><p>fieldName, LongTermAttributeImpl.copyIntoNewBytesRef(argValue));</p>
+</dd>
+</dl>
+<p>return wrapQuery(new TermQueryWithSafeToString(term, Long.toString(argValue)), op, fieldName);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private static void parseLongArgs(List&lt;String&gt; operands,</dt><dd><blockquote>
+<div><p>Collection&lt;Long&gt; arguments,
+SearchOperator op) throws QueryParserException {</p>
+</div></blockquote>
+<dl>
+<dt>for (String operand<span class="classifier">operands) {</span></dt><dd><dl class="simple">
+<dt>try {</dt><dd><p>arguments.add(Long.parseLong(operand));</p>
+</dd>
+<dt>} catch (NumberFormatException e) {</dt><dd><p>throw new QueryParserException(“Invalid long operand in “ + op.serialize(), e);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private static boolean isUserIdField(String field) {</dt><dd><dl class="simple">
+<dt>return EarlybirdFieldConstant.FROM_USER_ID_FIELD.getFieldName().equals(field)</dt><dd><p>|| EarlybirdFieldConstant.IN_REPLY_TO_USER_ID_FIELD.getFieldName().equals(field)
+|| EarlybirdFieldConstant.RETWEET_SOURCE_USER_ID_FIELD.getFieldName().equals(field)
+|| EarlybirdFieldConstant.LIKED_BY_USER_ID_FIELD.getFieldName().equals(field)
+|| EarlybirdFieldConstant.RETWEETED_BY_USER_ID.getFieldName().equals(field)
+|| EarlybirdFieldConstant.REPLIED_TO_BY_USER_ID.getFieldName().equals(field)
+|| EarlybirdFieldConstant.QUOTED_USER_ID_FIELD.getFieldName().equals(field)
+|| EarlybirdFieldConstant.DIRECTED_AT_USER_ID_FIELD.getFieldName().equals(field);</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private static boolean isTweetIdField(String field) {</dt><dd><dl class="simple">
+<dt>return EarlybirdFieldConstant.IN_REPLY_TO_TWEET_ID_FIELD.getFieldName().equals(field)</dt><dd><p>|| EarlybirdFieldConstant.RETWEET_SOURCE_TWEET_ID_FIELD.getFieldName().equals(field)
+|| EarlybirdFieldConstant.QUOTED_TWEET_ID_FIELD.getFieldName().equals(field)
+|| EarlybirdFieldConstant.CONVERSATION_ID_FIELD.getFieldName().equals(field);</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private static boolean isIdCSFField(String field) {</dt><dd><p>return EarlybirdFieldConstant.DIRECTED_AT_USER_ID_CSF.getFieldName().equals(field);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public Set&lt;String&gt; getQueriedFields() {</dt><dd><p>return queriedFields;</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../_sources/src/java/com/twitter/search/earlybird/queryparser/EarlybirdLuceneQueryVisitor.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

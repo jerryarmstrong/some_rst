@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../" id="documentation_options" src="../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>from collections import OrderedDict
+import json
+import os
+from os.path import join</p>
+<p>from twitter.magicpony.common import file_access
+import twml</p>
+<p>from .model_utils import read_config</p>
+<p>import numpy as np
+from scipy import stats
+import tensorflow.compat.v1 as tf</p>
+<p># checkstyle: noqa</p>
+<dl>
+<dt>def get_model_type_to_tensors_to_change_axis():</dt><dd><dl>
+<dt>model_type_to_tensors_to_change_axis = {</dt><dd><p>“magic_recs/model/batch_normalization/beta”: ([0], “continuous”),
+“magic_recs/model/batch_normalization/gamma”: ([0], “continuous”),
+“magic_recs/model/batch_normalization/moving_mean”: ([0], “continuous”),
+“magic_recs/model/batch_normalization/moving_stddev”: ([0], “continuous”),
+“magic_recs/model/batch_normalization/moving_variance”: ([0], “continuous”),
+“magic_recs/model/batch_normalization/renorm_mean”: ([0], “continuous”),
+“magic_recs/model/batch_normalization/renorm_stddev”: ([0], “continuous”),
+“magic_recs/model/logits/EngagementGivenOONC_logits/clem_net_1/block2_4/channel_wise_dense_4/kernel”: (</p>
+<blockquote>
+<div><p>[1],
+“all”,</p>
+</div></blockquote>
+<p>),
+“magic_recs/model/logits/OONC_logits/clem_net/block2/channel_wise_dense/kernel”: ([1], “all”),</p>
+</dd>
+</dl>
+<p>}</p>
+<p>return model_type_to_tensors_to_change_axis</p>
+</dd>
+<dt>def mkdirp(dirname):</dt><dd><dl class="simple">
+<dt>if not tf.io.gfile.exists(dirname):</dt><dd><p>tf.io.gfile.makedirs(dirname)</p>
+</dd>
+</dl>
+</dd>
+<dt>def rename_dir(dirname, dst):</dt><dd><p>file_access.hdfs.mv(dirname, dst)</p>
+</dd>
+<dt>def rmdir(dirname):</dt><dd><dl class="simple">
+<dt>if tf.io.gfile.exists(dirname):</dt><dd><dl class="simple">
+<dt>if tf.io.gfile.isdir(dirname):</dt><dd><p>tf.io.gfile.rmtree(dirname)</p>
+</dd>
+<dt>else:</dt><dd><p>tf.io.gfile.remove(dirname)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+<dt>def get_var_dict(checkpoint_path):</dt><dd><p>checkpoint = tf.train.get_checkpoint_state(checkpoint_path)
+var_dict = OrderedDict()
+with tf.Session() as sess:</p>
+<blockquote>
+<div><p>all_var_list = tf.train.list_variables(checkpoint_path)
+for var_name, _ in all_var_list:</p>
+<blockquote>
+<div><p># Load the variable
+var = tf.train.load_variable(checkpoint_path, var_name)
+var_dict[var_name] = var</p>
+</div></blockquote>
+</div></blockquote>
+<p>return var_dict</p>
+</dd>
+<dt>def get_continunous_mapping_from_feat_list(old_feature_list, new_feature_list):</dt><dd><p>“””
+get var_ind for old_feature and corresponding var_ind for new_feature
+“””
+new_var_ind, old_var_ind = [], []
+for this_new_id, this_new_name in enumerate(new_feature_list):</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if this_new_name in old_feature_list:</dt><dd><p>this_old_id = old_feature_list.index(this_new_name)
+new_var_ind.append(this_new_id)
+old_var_ind.append(this_old_id)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>return np.asarray(old_var_ind), np.asarray(new_var_ind)</p>
+</dd>
+<dt>def get_continuous_mapping_from_feat_dict(old_feature_dict, new_feature_dict):</dt><dd><p>“””
+get var_ind for old_feature and corresponding var_ind for new_feature
+“””
+old_cont = old_feature_dict[“continuous”]
+old_bin = old_feature_dict[“binary”]</p>
+<p>new_cont = new_feature_dict[“continuous”]
+new_bin = new_feature_dict[“binary”]</p>
+<p>_dummy_sparse_feat = [f”sparse_feature_{_idx}” for _idx in range(100)]</p>
+<p>cont_old_var_ind, cont_new_var_ind = get_continunous_mapping_from_feat_list(old_cont, new_cont)</p>
+<dl class="simple">
+<dt>all_old_var_ind, all_new_var_ind = get_continunous_mapping_from_feat_list(</dt><dd><p>old_cont + old_bin + _dummy_sparse_feat, new_cont + new_bin + _dummy_sparse_feat</p>
+</dd>
+</dl>
+<p>)</p>
+<dl class="simple">
+<dt>_res = {</dt><dd><p>“continuous”: (cont_old_var_ind, cont_new_var_ind),
+“all”: (all_old_var_ind, all_new_var_ind),</p>
+</dd>
+</dl>
+<p>}</p>
+<p>return _res</p>
+</dd>
+<dt>def warm_start_from_var_dict(</dt><dd><p>old_ckpt_path,
+var_ind_dict,
+output_dir,
+new_len_var,
+var_to_change_dict_fn=get_model_type_to_tensors_to_change_axis,</p>
+</dd>
+<dt>):</dt><dd><p>“””
+Parameters:</p>
+<blockquote>
+<div><p>old_ckpt_path (str): path to the old checkpoint path
+new_var_ind (array of int): index to overlapping features in new var between old and new feature list.
+old_var_ind (array of int): index to overlapping features in old var between old and new feature list.</p>
+<p>output_dir (str): dir that used to write modified checkpoint
+new_len_var ({str:int}): number of feature in the new feature list.
+var_to_change_dict_fn (dict): A function to get the dictionary of format {var_name: dim_to_change}</p>
+</div></blockquote>
+<p>“””
+old_var_dict = get_var_dict(old_ckpt_path)</p>
+<p>ckpt_file_name = os.path.basename(old_ckpt_path)
+mkdirp(output_dir)
+output_path = join(output_dir, ckpt_file_name)</p>
+<p>tensors_to_change = var_to_change_dict_fn()
+tf.compat.v1.reset_default_graph()</p>
+<dl>
+<dt>with tf.Session() as sess:</dt><dd><p>var_name_shape_list = tf.train.list_variables(old_ckpt_path)
+count = 0</p>
+<dl>
+<dt>for var_name, var_shape in var_name_shape_list:</dt><dd><p>old_var = old_var_dict[var_name]
+if var_name in tensors_to_change.keys():</p>
+<blockquote>
+<div><p>_info_tuple = tensors_to_change[var_name]
+dims_to_remove_from, var_type = _info_tuple</p>
+<p>new_var_ind, old_var_ind = var_ind_dict[var_type]</p>
+<p>this_shape = list(old_var.shape)
+for this_dim in dims_to_remove_from:</p>
+<blockquote>
+<div><p>this_shape[this_dim] = new_len_var[var_type]</p>
+</div></blockquote>
+<p>stddev = np.std(old_var)
+truncated_norm_generator = stats.truncnorm(-0.5, 0.5, loc=0, scale=stddev)
+size = np.prod(this_shape)
+new_var = truncated_norm_generator.rvs(size).reshape(this_shape)
+new_var = new_var.astype(old_var.dtype)</p>
+<dl class="simple">
+<dt>new_var = copy_feat_based_on_mapping(</dt><dd><p>new_var, old_var, dims_to_remove_from, new_var_ind, old_var_ind</p>
+</dd>
+</dl>
+<p>)
+count = count + 1</p>
+</div></blockquote>
+<dl class="simple">
+<dt>else:</dt><dd><p>new_var = old_var</p>
+</dd>
+</dl>
+<p>var = tf.Variable(new_var, name=var_name)</p>
+</dd>
+</dl>
+<p>assert count == len(tensors_to_change.keys()), “not all variables are exchanged.n”
+saver = tf.train.Saver()
+sess.run(tf.global_variables_initializer())
+saver.save(sess, output_path)</p>
+</dd>
+</dl>
+<p>return output_path</p>
+</dd>
+<dt>def copy_feat_based_on_mapping(new_array, old_array, dims_to_remove_from, new_var_ind, old_var_ind):</dt><dd><dl class="simple">
+<dt>if dims_to_remove_from == [0, 1]:</dt><dd><dl class="simple">
+<dt>for this_new_ind, this_old_ind in zip(new_var_ind, old_var_ind):</dt><dd><p>new_array[this_new_ind, new_var_ind] = old_array[this_old_ind, old_var_ind]</p>
+</dd>
+</dl>
+</dd>
+<dt>elif dims_to_remove_from == [0]:</dt><dd><p>new_array[new_var_ind] = old_array[old_var_ind]</p>
+</dd>
+<dt>elif dims_to_remove_from == [1]:</dt><dd><p>new_array[:, new_var_ind] = old_array[:, old_var_ind]</p>
+</dd>
+<dt>else:</dt><dd><p>raise RuntimeError(f”undefined dims_to_remove_from pattern: ({dims_to_remove_from})”)</p>
+</dd>
+</dl>
+<p>return new_array</p>
+</dd>
+<dt>def read_file(filename, decode=False):</dt><dd><p>“””
+Reads contents from a file and optionally decodes it.</p>
+<dl class="simple">
+<dt>Arguments:</dt><dd><dl class="simple">
+<dt>filename:</dt><dd><p>path to file where the contents will be loaded from.
+Accepts HDFS and local paths.</p>
+</dd>
+<dt>decode:</dt><dd><p>False or ‘json’. When decode=’json’, contents is decoded
+with json.loads. When False, contents is returned as is.</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>“””
+graph = tf.Graph()
+with graph.as_default():</p>
+<blockquote>
+<div><p>read = tf.read_file(filename)</p>
+</div></blockquote>
+<dl>
+<dt>with tf.Session(graph=graph) as sess:</dt><dd><p>contents = sess.run(read)
+if not isinstance(contents, str):</p>
+<blockquote>
+<div><p>contents = contents.decode()</p>
+</div></blockquote>
+</dd>
+<dt>if decode == “json”:</dt><dd><p>contents = json.loads(contents)</p>
+</dd>
+</dl>
+<p>return contents</p>
+</dd>
+<dt>def read_feat_list_from_disk(file_path):</dt><dd><p>return read_file(file_path, decode=”json”)</p>
+</dd>
+<dt>def get_feature_list_for_light_ranking(feature_list_path, data_spec_path):</dt><dd><p>feature_list = read_config(feature_list_path).items()
+string_feat_list = [f[0] for f in feature_list if f[1] != “S”]</p>
+<dl class="simple">
+<dt>feature_config_builder = twml.contrib.feature_config.FeatureConfigBuilder(</dt><dd><p>data_spec_path=data_spec_path</p>
+</dd>
+</dl>
+<p>)
+feature_config_builder = feature_config_builder.extract_feature_group(</p>
+<blockquote>
+<div><p>feature_regexes=string_feat_list,
+group_name=”continuous”,
+default_value=-1,
+type_filter=[“CONTINUOUS”],</p>
+</div></blockquote>
+<p>)
+feature_config = feature_config_builder.build()
+feature_list = feature_config_builder._feature_group_extraction_configs[0].feature_map[</p>
+<blockquote>
+<div><p>“CONTINUOUS”</p>
+</div></blockquote>
+<p>]
+return feature_list</p>
+</dd>
+<dt>def get_feature_list_for_heavy_ranking(feature_list_path, data_spec_path):</dt><dd><p>feature_list = read_config(feature_list_path).items()
+string_feat_list = [f[0] for f in feature_list if f[1] != “S”]</p>
+<dl class="simple">
+<dt>feature_config_builder = twml.contrib.feature_config.FeatureConfigBuilder(</dt><dd><p>data_spec_path=data_spec_path</p>
+</dd>
+</dl>
+<p>)
+feature_config_builder = feature_config_builder.extract_feature_group(</p>
+<blockquote>
+<div><p>feature_regexes=string_feat_list,
+group_name=”continuous”,
+default_value=-1,
+type_filter=[“CONTINUOUS”],</p>
+</div></blockquote>
+<p>)</p>
+<dl class="simple">
+<dt>feature_config_builder = feature_config_builder.extract_feature_group(</dt><dd><p>feature_regexes=string_feat_list,
+group_name=”binary”,
+default_value=False,
+type_filter=[“BINARY”],</p>
+</dd>
+</dl>
+<p>)</p>
+<p>feature_config_builder = feature_config_builder.build()</p>
+<dl class="simple">
+<dt>continuous_feature_list = feature_config_builder._feature_group_extraction_configs[0].feature_map[</dt><dd><p>“CONTINUOUS”</p>
+</dd>
+</dl>
+<p>]</p>
+<dl class="simple">
+<dt>binary_feature_list = feature_config_builder._feature_group_extraction_configs[1].feature_map[</dt><dd><p>“BINARY”</p>
+</dd>
+</dl>
+<p>]
+return {“continuous”: continuous_feature_list, “binary”: binary_feature_list}</p>
+</dd>
+<dt>def warm_start_checkpoint(</dt><dd><p>old_best_ckpt_folder,
+old_feature_list_path,
+feature_allow_list_path,
+data_spec_path,
+output_ckpt_folder,
+<a href="#id1"><span class="problematic" id="id2">*</span></a>args,</p>
+</dd>
+<dt>):</dt><dd><p>“””
+Reads old checkpoint and the old feature list, and create a new ckpt warm started from old ckpt using new features .</p>
+<dl class="simple">
+<dt>Arguments:</dt><dd><dl class="simple">
+<dt>old_best_ckpt_folder:</dt><dd><p>path to the best_checkpoint_folder for old model</p>
+</dd>
+<dt>old_feature_list_path:</dt><dd><p>path to the json file that stores the list of continuous features used in old models.</p>
+</dd>
+<dt>feature_allow_list_path:</dt><dd><p>yaml file that contain the feature allow list.</p>
+</dd>
+<dt>data_spec_path:</dt><dd><p>path to the data_spec file</p>
+</dd>
+<dt>output_ckpt_folder:</dt><dd><p>folder that contains the modified ckpt.</p>
+</dd>
+</dl>
+</dd>
+<dt>Returns:</dt><dd><p>path to the modified ckpt.”””</p>
+</dd>
+</dl>
+<p>old_ckpt_path = tf.train.latest_checkpoint(old_best_ckpt_folder, latest_filename=None)</p>
+<p>new_feature_dict = get_feature_list(feature_allow_list_path, data_spec_path)
+old_feature_dict = read_feat_list_from_disk(old_feature_list_path)</p>
+<p>var_ind_dict = get_continuous_mapping_from_feat_dict(new_feature_dict, old_feature_dict)</p>
+<dl class="simple">
+<dt>new_len_var = {</dt><dd><p>“continuous”: len(new_feature_dict[“continuous”]),
+“all”: len(new_feature_dict[“continuous”] + new_feature_dict[“binary”]) + 100,</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>warm_started_ckpt_path = warm_start_from_var_dict(</dt><dd><p>old_ckpt_path,
+var_ind_dict,
+output_dir=output_ckpt_folder,
+new_len_var=new_len_var,</p>
+</dd>
+</dl>
+<p>)</p>
+<p>return warm_started_ckpt_path</p>
+</dd>
+</dl>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../_sources/pushservice/src/main/python/models/libs/warm_start_utils.py.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

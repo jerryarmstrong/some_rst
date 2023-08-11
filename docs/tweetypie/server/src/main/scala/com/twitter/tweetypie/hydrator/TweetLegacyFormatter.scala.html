@@ -1,0 +1,506 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.tweetypie
+package hydrator</p>
+<p>import com.twitter.stitch.Stitch
+import com.twitter.tweetypie.core._
+import com.twitter.tweetypie.media.Media
+import com.twitter.tweetypie.repository.TweetQuery
+import com.twitter.tweetypie.serverutil.ExtendedTweetMetadataBuilder
+import com.twitter.tweetypie.thriftscala.UrlEntity
+import com.twitter.tweetypie.thriftscala._
+import com.twitter.tweetypie.thriftscala.entities.Implicits._
+import com.twitter.tweetypie.tweettext.Offset
+import com.twitter.tweetypie.tweettext.TextModification
+import com.twitter.tweetypie.tweettext.TweetText
+import com.twitter.tweetypie.util.EditControlUtil
+import com.twitter.tweetypie.util.TweetLenses</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>This hydrator is the backwards-compatibility layer to support QT, Edit Tweets &amp; Mixed Media</p></li>
+<li><p>Tweets rendering on legacy non-updated clients. Legacy rendering provides a way for every client</p></li>
+<li><p>to consume these Tweets until the client is upgraded. For Edit and Mixed Media Tweets, the</p></li>
+<li><p>Tweet’s self-permalink is appended to the visible text. For Quoting Tweets, the Quoted Tweet’s</p></li>
+<li><p>permalink is appended to the text. For Tweets that meet multiple criteria for legacy rendering</p></li>
+<li><p>(e.g. QT containing Mixed Media), only one permalink is appended and the self-permalink takes</p></li>
+<li><p>precedence.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+</dl>
+<p>object TweetLegacyFormatter {</p>
+<blockquote>
+<div><p>private[this] val log = Logger(getClass)</p>
+<p>import TweetText._</p>
+<dl>
+<dt>def legacyQtPermalink(</dt><dd><p>td: TweetData,
+opts: TweetQuery.Options</p>
+</dd>
+<dt>): Option[ShortenedUrl] = {</dt><dd><p>val tweet = td.tweet
+val tweetText = TweetLenses.text(tweet)
+val urls = TweetLenses.urls(tweet)
+val ctx = TweetCtx.from(td, opts)
+val qtPermalink: Option[ShortenedUrl] = tweet.quotedTweet.flatMap(_.permalink)
+val qtShortUrl = qtPermalink.map(_.shortUrl)</p>
+<dl class="simple">
+<dt>def urlsContains(url: String): Boolean =</dt><dd><p>urls.exists(_.url == url)</p>
+</dd>
+<dt>val doLegacyQtFormatting =</dt><dd><dl class="simple">
+<dt>!opts.simpleQuotedTweet &amp;&amp; !ctx.isRetweet &amp;&amp;</dt><dd><p>qtPermalink.isDefined &amp;&amp; qtShortUrl.isDefined &amp;&amp;
+!qtShortUrl.exists(tweetText.contains) &amp;&amp;
+!qtShortUrl.exists(urlsContains)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>if (doLegacyQtFormatting) qtPermalink else None</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def legacySelfPermalink(</dt><dd><p>td: TweetData</p>
+</dd>
+<dt>): Option[ShortenedUrl] = {</dt><dd><p>val tweet = td.tweet
+val selfPermalink = tweet.selfPermalink
+val tweetText = TweetLenses.text(tweet)
+val urls = TweetLenses.urls(tweet)
+val selfShortUrl = selfPermalink.map(_.shortUrl)</p>
+<dl class="simple">
+<dt>def urlsContains(url: String): Boolean =</dt><dd><p>urls.exists(_.url == url)</p>
+</dd>
+<dt>val doLegacyFormatting =</dt><dd><dl class="simple">
+<dt>selfPermalink.isDefined &amp;&amp; selfShortUrl.isDefined &amp;&amp;</dt><dd><p>!selfShortUrl.exists(tweetText.contains) &amp;&amp;
+!selfShortUrl.exists(urlsContains) &amp;&amp;
+needsLegacyFormatting(td)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>if (doLegacyFormatting) selfPermalink else None</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def isMixedMediaTweet(tweet: Tweet): Boolean =</dt><dd><p>tweet.media.exists(Media.isMixedMedia)</p>
+</dd>
+<dt>def buildUrlEntity(from: Short, to: Short, permalink: ShortenedUrl): UrlEntity =</dt><dd><dl class="simple">
+<dt>UrlEntity(</dt><dd><p>fromIndex = from,
+toIndex = to,
+url = permalink.shortUrl,
+expanded = Some(permalink.longUrl),
+display = Some(permalink.displayText)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>private[this] def isValidVisibleRange(</dt><dd><p>tweetIdForLogging: TweetId,
+textRange: TextRange,
+textLength: Int</p>
+</dd>
+<dt>) = {</dt><dd><p>val isValid = textRange.fromIndex &lt;= textRange.toIndex &amp;&amp; textRange.toIndex &lt;= textLength
+if (!isValid) {</p>
+<blockquote>
+<div><p>log.warn(s”Tweet $tweetIdForLogging has invalid visibleTextRange: $textRange”)</p>
+</div></blockquote>
+<p>}
+isValid</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// This Function checks if legacy formatting is required for Edit &amp; Mixed Media Tweets.
+// Calls FeatureSwitches.matchRecipient which is an expensive call,
+// so caution is taken to call it only once and only when needed.
+def needsLegacyFormatting(</p>
+<blockquote>
+<div><p>td: TweetData</p>
+</div></blockquote>
+<dl>
+<dt>): Boolean = {</dt><dd><p>val isEdit = EditControlUtil.isEditTweet(td.tweet)
+val isMixedMedia = isMixedMediaTweet(td.tweet)
+val isNoteTweet = td.tweet.noteTweet.isDefined</p>
+<p>if (isEdit || isMixedMedia || isNoteTweet) {</p>
+<blockquote>
+<div><p>// These feature switches are disabled unless greater than certain android, ios versions
+// &amp; all versions of RWEB.
+val TweetEditConsumptionEnabledKey = “tweet_edit_consumption_enabled”
+val MixedMediaEnabledKey = “mixed_media_enabled”
+val NoteTweetConsumptionEnabledKey = “note_tweet_consumption_enabled”</p>
+<dl class="simple">
+<dt>def fsEnabled(fsKey: String): Boolean = {</dt><dd><dl class="simple">
+<dt>td.featureSwitchResults</dt><dd><p>.flatMap(_.getBoolean(fsKey, shouldLogImpression = false))
+.getOrElse(false)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>val tweetEditConsumptionEnabled = fsEnabled(TweetEditConsumptionEnabledKey)
+val mixedMediaEnabled = fsEnabled(MixedMediaEnabledKey)
+val noteTweetConsumptionEnabled = fsEnabled(NoteTweetConsumptionEnabledKey)</p>
+<p>(isEdit &amp;&amp; !tweetEditConsumptionEnabled) ||
+(isMixedMedia &amp;&amp; !mixedMediaEnabled) ||
+(isNoteTweet &amp;&amp; !noteTweetConsumptionEnabled)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>false</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>//given a permalink, the tweet text gets updated
+def updateTextAndURLsAndMedia(</p>
+<blockquote>
+<div><p>permalink: ShortenedUrl,
+tweet: Tweet,
+statsReceiver: StatsReceiver</p>
+</div></blockquote>
+<p>): Tweet = {</p>
+<blockquote>
+<div><p>val originalText = TweetLenses.text(tweet)
+val originalTextLength = codePointLength(originalText)</p>
+<p>// Default the visible range to the whole tweet if the existing visible range is invalid.
+val visibleRange: TextRange =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>TweetLenses</dt><dd><p>.visibleTextRange(tweet)
+.filter((r: TextRange) =&gt; isValidVisibleRange(tweet.id, r, originalTextLength))
+.getOrElse(TextRange(0, originalTextLength))</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>val permalinkShortUrl = permalink.shortUrl
+val insertAtCodePoint = Offset.CodePoint(visibleRange.toIndex)</p>
+<dl>
+<dt>/*</dt><dd><ul class="simple">
+<li><p>Insertion at position 0 implies that the original tweet text has no</p></li>
+<li><p>visible text, so the resulting text should be only the url without</p></li>
+<li><p>leading padding.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+</dl>
+<p>val padLeft = if (insertAtCodePoint.toInt &gt; 0) “ “ else “”</p>
+<dl>
+<dt>/*</dt><dd><ul class="simple">
+<li><p>Empty visible text at position 0 implies that the original tweet text</p></li>
+<li><p>only contains a URL in the hidden suffix area, which would not already</p></li>
+<li><p>be padded.</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+</dl>
+<p>val padRight = if (visibleRange == TextRange(0, 0)) “ “ else “”
+val paddedShortUrl = s”$padLeft$permalinkShortUrl$padRight”</p>
+<dl class="simple">
+<dt>val tweetTextModification = TextModification.insertAt(</dt><dd><p>originalText,
+insertAtCodePoint,
+paddedShortUrl</p>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>/*</dt><dd><ul class="simple">
+<li><p>As we modified tweet text and appended tweet permalink above</p></li>
+<li><p>we have to correct the url and media entities accordingly as they are</p></li>
+<li><p>expected to be present in the hidden suffix of text.</p></li>
+<li></li>
+<li><ul>
+<li><p>we compute the new (from, to) indices for the url entity</p></li>
+</ul>
+</li>
+<li><ul>
+<li><p>build new url entity for quoted tweet permalink or self permalink for Edit/ MM Tweets</p></li>
+</ul>
+</li>
+<li><ul>
+<li><p>shift url entities which are after visible range end</p></li>
+</ul>
+</li>
+<li><ul>
+<li><p>shift media entities associated with above url entities</p></li>
+</ul>
+</li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+</dl>
+<p>val shortUrlLength = codePointLength(permalinkShortUrl)
+val fromIndex = insertAtCodePoint.toInt + codePointLength(padLeft)
+val toIndex = fromIndex + shortUrlLength</p>
+<dl class="simple">
+<dt>val tweetUrlEntity = buildUrlEntity(</dt><dd><p>from = fromIndex.toShort,
+to = toIndex.toShort,
+permalink = permalink</p>
+</dd>
+</dl>
+<p>)</p>
+<dl class="simple">
+<dt>val tweetMedia = if (isMixedMediaTweet(tweet)) {</dt><dd><p>TweetLenses.media(tweet).take(1)</p>
+</dd>
+<dt>} else {</dt><dd><p>TweetLenses.media(tweet)</p>
+</dd>
+</dl>
+<p>}</p>
+<p>val modifiedMedia = tweetTextModification.reindexEntities(tweetMedia)
+val modifiedUrls =</p>
+<blockquote>
+<div><p>tweetTextModification.reindexEntities(TweetLenses.urls(tweet)) :+ tweetUrlEntity</p>
+</div></blockquote>
+<p>val modifiedText = tweetTextModification.updated</p>
+<dl>
+<dt>/*</dt><dd><ul class="simple">
+<li><p>Visible Text Range computation differs by scenario</p></li>
+<li><p>== Any Tweet with Media ==</p></li>
+<li><p>Tweet text has a media url <em>after</em> the visible text range</p></li>
+<li><p>original  text: [visible text] <a class="reference external" href="https://t.co/mediaUrl">https://t.co/mediaUrl</a></p></li>
+<li><p>original range:  ^START  END^</p></li>
+<li></li>
+<li><p>Append the permalink URL to the <em>visible text</em> so non-upgraded clients can see it</p></li>
+<li><p>modified  text: [visible text <a class="reference external" href="https://t.co/permalink">https://t.co/permalink</a>] <a class="reference external" href="https://t.co/mediaUrl">https://t.co/mediaUrl</a></p></li>
+<li><p>modified range:  ^START                         END^</p></li>
+<li><p>visible range expanded, permalink is visible</p></li>
+<li></li>
+<li><p>== Non-QT Tweet w/o Media ==</p></li>
+<li><p>original  text: [visible text]</p></li>
+<li><p>original range: None (default: whole text is visible)</p></li>
+<li></li>
+<li><p>modified  text: [visible text <a class="reference external" href="https://t.co/selfPermalink">https://t.co/selfPermalink</a>]</p></li>
+<li><p>modified range: None (default: whole text is visible)</p></li>
+<li><p>trailing self permalink will be visible</p></li>
+<li></li>
+<li><p>== QT w/o Media ==</p></li>
+<li><p>original  text: [visible text]</p></li>
+<li><p>original range: None (default: whole text is visible)</p></li>
+<li></li>
+<li><p>modified  text: [visible text] <a class="reference external" href="https://t.co/qtPermalink">https://t.co/qtPermalink</a></p></li>
+<li><p>modified range:  ^START  END^</p></li>
+<li><p>trailing QT permalink is <em>hidden</em> because legacy clients that process the visible text range know how to display QTs</p></li>
+<li></li>
+<li><p>== Non-QT Replies w/o media ==</p></li>
+<li><p>original  text: &#64;user [visible text]</p></li>
+<li><p>original range:        ^START  END^</p></li>
+<li></li>
+<li><p>modified  text: &#64;user [visible text <a class="reference external" href="https://t.co/selfPermalink">https://t.co/selfPermalink</a>]</p></li>
+<li><p>modified range:        ^START                             END^</p></li>
+<li><p>visible range expanded, self permalink is visible</p></li>
+<li></li>
+<li><p>== QT Replies w/o media ==</p></li>
+<li><p>original  text: &#64;user [visible text]</p></li>
+<li><p>original range:        ^START  END^</p></li>
+<li></li>
+<li><p>modified  text: &#64;user [visible text] <a class="reference external" href="https://t.co/qtPermalink">https://t.co/qtPermalink</a></p></li>
+<li><p>modified range:        ^START  END^</p></li>
+<li><p>visible range remains the same, trailing QT permalink is hidden</p></li>
+<li></li>
+</ul>
+<p><a href="#id9"><span class="problematic" id="id10">*</span></a>/</p>
+</dd>
+<dt>val modifiedVisibleTextRange =</dt><dd><dl>
+<dt>if (modifiedMedia.nonEmpty ||</dt><dd><p>EditControlUtil.isEditTweet(tweet) ||
+tweet.noteTweet.isDefined) {
+Some(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>visibleRange.copy(</dt><dd><p>toIndex = visibleRange.toIndex + codePointLength(padLeft) + shortUrlLength</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+<dt>} else {</dt><dd><p>Some(visibleRange)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>val updatedTweet =</dt><dd><dl class="simple">
+<dt>Lens.setAll(</dt><dd><p>tweet,
+TweetLenses.text -&gt; modifiedText,
+TweetLenses.urls -&gt; modifiedUrls.sortBy(_.fromIndex),
+TweetLenses.media -&gt; modifiedMedia.sortBy(_.fromIndex),
+TweetLenses.visibleTextRange -&gt; modifiedVisibleTextRange</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>compute extended tweet metadata when text length &gt; 140</p></li>
+<li><p>and apply the final lens to return a modified tweet</p></li>
+</ul>
+<p><a href="#id11"><span class="problematic" id="id12">*</span></a>/</p>
+</dd>
+</dl>
+<p>val totalDisplayLength = displayLength(modifiedText)
+if (totalDisplayLength &gt; OriginalMaxDisplayLength) {</p>
+<blockquote>
+<div><dl>
+<dt>updatedTweet.selfPermalink match {</dt><dd><dl>
+<dt>case Some(permalink) =&gt;</dt><dd><p>val extendedTweetMetadata = ExtendedTweetMetadataBuilder(updatedTweet, permalink)
+updatedTweet.copy(</p>
+<blockquote>
+<div><p>extendedTweetMetadata = Some(extendedTweetMetadata)</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+<dt>case None =&gt;</dt><dd><dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>This case shouldn’t happen as TweetBuilder currently populates</p></li>
+<li><p>selfPermalink for extended tweets. In QT + Media, we will</p></li>
+<li><p>use AttachmentBuilder to store selfPermalink during writes,</p></li>
+<li><p>if text display length is going to exceed 140 after QT url append.</p></li>
+</ul>
+<p><a href="#id13"><span class="problematic" id="id14">*</span></a>/</p>
+</dd>
+<dt>log.error(</dt><dd><dl class="simple">
+<dt>s”Failed to compute extended metadata for tweet: ${tweet.id} with “ +</dt><dd><p>s”display length: ${totalDisplayLength}, as self-permalink is empty.”</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>)
+statsReceiver.counter(“self_permalink_not_found”).incr()
+tweet</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>updatedTweet</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>def apply(</dt><dd><p>statsReceiver: StatsReceiver</p>
+</dd>
+<dt>): TweetDataValueHydrator = {</dt><dd><dl>
+<dt>ValueHydrator[TweetData, TweetQuery.Options] { (td, opts) =&gt;</dt><dd><p>// Prefer any required self permalink rendering over QT permalink rendering because a
+// client that doesn’t understand the attributes of the Tweet (i.e. Edit, Mixed
+// Media) won’t be able to render the Tweet properly at all, regardless of whether
+// it’s a QT. By preferring a visible self-permalink, the viewer is linked to an
+// RWeb view of the Tweet which can fully display all of its features.
+val permalink: Option[ShortenedUrl] =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>legacySelfPermalink(td)</dt><dd><p>.orElse(legacyQtPermalink(td, opts))</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl class="simple">
+<dt>permalink match {</dt><dd><dl class="simple">
+<dt>case Some(permalink) =&gt;</dt><dd><p>val updatedTweet = updateTextAndURLsAndMedia(permalink, td.tweet, statsReceiver)
+Stitch(ValueState.delta(td, td.copy(tweet = updatedTweet)))</p>
+</dd>
+<dt>case _ =&gt;</dt><dd><p>Stitch(ValueState.unmodified(td))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/tweetypie/server/src/main/scala/com/twitter/tweetypie/hydrator/TweetLegacyFormatter.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

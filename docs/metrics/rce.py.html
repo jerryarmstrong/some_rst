@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../" id="documentation_options" src="../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../_static/doctools.js?v=888ff710"></script>
+    <script src="../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+   
+  <link rel="stylesheet" href="../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>“””
+Contains RCE metrics.
+“””
+import copy
+from functools import partial
+from typing import Union</p>
+<p>from tml.metrics import aggregation</p>
+<p>import torch
+import torchmetrics</p>
+<dl>
+<dt>def _smooth(</dt><dd><p>value: torch.Tensor, label_smoothing: Union[float, torch.Tensor]</p>
+</dd>
+<dt>) -&gt; Union[float, torch.Tensor]:</dt><dd><p>“””
+Smooth given values.
+Args:</p>
+<blockquote>
+<div><p>value: Value to smooth.
+label_smoothing: smoothing constant.</p>
+</div></blockquote>
+<p>Returns: Smoothed values.
+“””
+return value * (1.0 - label_smoothing) + 0.5 * label_smoothing</p>
+</dd>
+<dt>def _binary_cross_entropy_with_clipping(</dt><dd><p>predictions: torch.Tensor,
+target: torch.Tensor,
+epsilon: Union[float, torch.Tensor],
+reduction: str = “none”,</p>
+</dd>
+<dt>) -&gt; torch.Tensor:</dt><dd><p>“””
+Clip Predictions and apply binary cross entropy.
+This is done to match the implementation in keras at
+<a class="reference external" href="https://github.com/keras-team/keras/blob/r2.9/keras/backend.py#L5294-L5300">https://github.com/keras-team/keras/blob/r2.9/keras/backend.py#L5294-L5300</a>
+Args:</p>
+<blockquote>
+<div><p>predictions: Predicted probabilities.
+target: Ground truth.
+epsilon: Epsilon fuzz factor used to clip the predictions.
+reduction: The reduction method to use.</p>
+</div></blockquote>
+<p>Returns: Binary cross entropy on the clipped predictions.</p>
+<p>“””
+predictions = torch.clamp(predictions, epsilon, 1.0 - epsilon)
+bce = -target * torch.log(predictions + epsilon)
+bce -= (1.0 - target) * torch.log(1.0 - predictions + epsilon)
+if reduction == “mean”:</p>
+<blockquote>
+<div><p>return torch.mean(bce)</p>
+</div></blockquote>
+<p>return bce</p>
+</dd>
+<dt>class RCE(torchmetrics.Metric):</dt><dd><p>“””
+Compute the relative cross entropy (<a class="reference external" href="http://go/rce">RCE</a>).</p>
+<p>RCE is metric used for models predicting probability of success (p), i.e. pCTR.
+RCE represents the binary <cite>cross entropy &lt;https://en.wikipedia.org/wiki/Cross_entropy&gt;</cite> of
+the model compared to a reference straw man model.</p>
+<p>Binary cross entropy is defined as:</p>
+<p>y = label; p = prediction;
+binary cross entropy(example) = - y * log(p) - (1-y) * log(1-p)</p>
+<p>Where y in {0, 1}</p>
+<p>Cross entropy of a model is defined as:</p>
+<p>CE(model) = average(binary cross entropy(example))</p>
+<p>Over all the examples we aggregate on.</p>
+<p>The straw man model is quite simple, it is a constant predictor, always predicting the average
+over the labels.</p>
+<p>RCE of a model is defined as:</p>
+<p>RCE(model) = 100 * (CE(reference model) - CE(model)) / CE(reference model)</p>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>Maximizing the likelihood is the same as minimizing the cross entropy or maximizing
+the RCE. Since cross entropy is the average minus likelihood for the binary case.</p>
+</div>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>Binary cross entropy of an example is non negative, and equal to the
+<cite>KL divergence &lt;(https://en.wikipedia.org/wiki/Kullback%E2%80%93Leibler_divergence
+#Properties&gt;</cite>
+since p is constant, and its entropy is equal to zero.</p>
+</div>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>0% RCE means as good as the straw man model.
+100% means always predicts exactly the label. Namely, cross entropy of the model is</p>
+<blockquote>
+<div><p>always zero. In practice 100% is impossible to achieve due to clipping.</p>
+</div></blockquote>
+<p>Negative RCE means that the model is doing worse than the straw man.
+This usually means an un-calibrated model, namely, the average prediction
+is “far” from the average label. Examining NRCE might help identifying if that is
+the case.</p>
+</div>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>RCE is not a “ratio” in the statistical
+<cite>level of measurement sense &lt;https://en.wikipedia.org/wiki/Level_of_measurement&gt;</cite>.
+The higher the model’s RCE is the harder it is to improve it by an extra point.</p>
+<p>For example:
+Let CE(model) = 0.5 CE(reference model), then the RCE(model) = 50.
+Now take a “twice as good” model:
+Let CE(better model) = 0.5 CE(model) = 0.25 CE(reference model),
+then the RCE(better model) = 75 and not 100.</p>
+</div>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>In order to keep the log function stable, typically p is limited to
+lie in [CLAMP_EPSILON, 1-CLAMP_EPSILON],
+where CLAMP_EPSILON is some small constant like: 1e-7.
+Old implementation used 1e-5 clipping by default, current uses
+tf.keras.backend.epsilon()
+whose default is 1e-7.</p>
+</div>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>Since the reference model prediction is constant (probability),
+CE(reference model) = H(average(label))</p>
+<p>Where H is the standard
+<cite>entropy &lt;https://en.wikipedia.org/wiki/Entropy_(information_theory)&gt;</cite> function.</p>
+</div>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>Must have at least 1 positive and 1 negative sample accumulated,
+or RCE will come out as NaN.</p>
+</div>
+<p>“””</p>
+<dl>
+<dt>def __init__(</dt><dd><p>self, from_logits: bool = False, label_smoothing: float = 0, epsilon: float = 1e-7, <a href="#id1"><span class="problematic" id="id2">**</span></a>kwargs</p>
+</dd>
+<dt>):</dt><dd><p>“””
+Args:</p>
+<blockquote>
+<div><p>from_logits: whether or not predictions are logits or probabilities.
+label_smoothing: label smoothing constant.
+epsilon: Epsilon fuzz factor used on the predictions probabilities when from_logits is False.
+<a href="#id3"><span class="problematic" id="id4">**</span></a>kwargs: Additional parameters supported by all torchmetrics.Metric.</p>
+</div></blockquote>
+<p>“””
+super().__init__(<a href="#id5"><span class="problematic" id="id6">**</span></a>kwargs)
+self.from_logits = from_logits
+self.label_smoothing = label_smoothing
+self.epsilon = epsilon
+self.kwargs = kwargs</p>
+<p>self.mean_label = aggregation.StableMean(<a href="#id7"><span class="problematic" id="id8">**</span></a>kwargs)
+self.binary_cross_entropy = aggregation.StableMean(<a href="#id9"><span class="problematic" id="id10">**</span></a>kwargs)</p>
+<dl class="simple">
+<dt>if self.from_logits:</dt><dd><p>self.bce_loss_fn = torch.nn.functional.binary_cross_entropy_with_logits</p>
+</dd>
+<dt>else:</dt><dd><p>self.bce_loss_fn = partial(_binary_cross_entropy_with_clipping, epsilon=self.epsilon)</p>
+</dd>
+</dl>
+<p># Used to compute non-accumulated batch metric if <cite>forward</cite> or <cite>__call__</cite> functions are used.
+self.batch_metric = copy.deepcopy(self)</p>
+</dd>
+<dt>def update(</dt><dd><p>self, predictions: torch.Tensor, target: torch.Tensor, weight: float = 1.0</p>
+</dd>
+<dt>) -&gt; torch.Tensor:</dt><dd><p>“””
+Update the current rce.
+Args:</p>
+<blockquote>
+<div><p>predictions: Predicted values.
+target: Ground truth. Should have same shape as predictions.
+weight: The weight to use for the predicted values. Shape should be broadcastable to that of</p>
+<blockquote>
+<div><p>predictions.</p>
+</div></blockquote>
+</div></blockquote>
+<p>“””
+target = _smooth(target, self.label_smoothing)
+self.mean_label.update(target, weight)
+self.binary_cross_entropy.update(</p>
+<blockquote>
+<div><p>self.bce_loss_fn(predictions, target, reduction=”none”), weight</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+<dt>def compute(self) -&gt; torch.Tensor:</dt><dd><p>“””
+Compute and return the accumulated rce.
+“””
+baseline_mean = self.mean_label.compute()</p>
+<dl class="simple">
+<dt>baseline_ce = _binary_cross_entropy_with_clipping(</dt><dd><p>baseline_mean, baseline_mean, reduction=”mean”, epsilon=self.epsilon</p>
+</dd>
+</dl>
+<p>)</p>
+<p>pred_ce = self.binary_cross_entropy.compute()</p>
+<p>return (1.0 - (pred_ce / baseline_ce)) * 100</p>
+</dd>
+<dt>def reset(self):</dt><dd><p>“””
+Reset the metric to its initial state.
+“””
+super().reset()
+self.mean_label.reset()
+self.binary_cross_entropy.reset()</p>
+</dd>
+<dt>def forward(self, <a href="#id11"><span class="problematic" id="id12">*</span></a>args, <a href="#id13"><span class="problematic" id="id14">**</span></a>kwargs):</dt><dd><p>“””
+Serves the dual purpose of both computing the metric on the current batch of inputs but also</p>
+<blockquote>
+<div><p>add the batch statistics to the overall accumulating metric state.</p>
+</div></blockquote>
+<p>Input arguments are the exact same as corresponding <code class="docutils literal notranslate"><span class="pre">update</span></code> method.
+The returned output is the exact same as the output of <code class="docutils literal notranslate"><span class="pre">compute</span></code>.
+“””
+self.update(<a href="#id15"><span class="problematic" id="id16">*</span></a>args, <a href="#id17"><span class="problematic" id="id18">**</span></a>kwargs)
+self.batch_metric.update(<a href="#id19"><span class="problematic" id="id20">*</span></a>args, <a href="#id21"><span class="problematic" id="id22">**</span></a>kwargs)
+batch_result = self.batch_metric.compute()
+self.batch_metric.reset()
+return batch_result</p>
+</dd>
+</dl>
+</dd>
+<dt>class NRCE(RCE):</dt><dd><p>“””
+Calculate the RCE of the normalizes model.
+Where the normalized model prediction average is normalized to the average label seen so far.
+Namely, the the normalized model prediction:</p>
+<p>normalized model prediction(example) = (model prediction(example) * average(label)) /
+average(model prediction)</p>
+<p>Where the average is over all previously seen examples.</p>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>average(normalized model prediction) = average(label)</p>
+</div>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>NRCE can be misleading since it is oblivious to mis-calibrations.
+The common interpretation of NRCE is to measure how good your model could potentially
+perform if it was well calibrated.</p>
+</div>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>A big gap between NRCE and RCE might indicate a badly calibrated model,</p>
+</div>
+<p>“””</p>
+<dl>
+<dt>def __init__(</dt><dd><p>self, from_logits: bool = False, label_smoothing: float = 0, epsilon: float = 1e-7, <a href="#id23"><span class="problematic" id="id24">**</span></a>kwargs</p>
+</dd>
+<dt>):</dt><dd><p>“””</p>
+<dl>
+<dt>Args:</dt><dd><p>from_logits: whether or not predictions are logits or probabilities.
+label_smoothing: label smoothing constant.
+epsilon: Epsilon fuzz factor used on the predictions probabilities when from_logits is False.</p>
+<blockquote>
+<div><p>It only used when computing the cross entropy but not when normalizing.</p>
+</div></blockquote>
+<p><a href="#id25"><span class="problematic" id="id26">**</span></a>kwargs: Additional parameters supported by all torchmetrics.Metric.</p>
+</dd>
+</dl>
+<p>“””
+super().__init__(from_logits=False, label_smoothing=0, epsilon=epsilon, <a href="#id27"><span class="problematic" id="id28">**</span></a>kwargs)
+self.nrce_from_logits = from_logits
+self.nrce_label_smoothing = label_smoothing
+self.mean_prediction = aggregation.StableMean()</p>
+<p># Used to compute non-accumulated batch metric if <cite>forward</cite> or <cite>__call__</cite> functions are used.
+self.batch_metric = copy.deepcopy(self)</p>
+</dd>
+<dt>def update(</dt><dd><p>self,
+predictions: torch.Tensor,
+target: torch.Tensor,
+weight: Union[float, torch.Tensor] = 1.0,</p>
+</dd>
+<dt>):</dt><dd><p>“””
+Update the current nrce.
+Args:</p>
+<blockquote>
+<div><p>predictions: Predicted values.
+target: Ground truth. Should have same shape as predictions.
+weight: The weight to use for the predicted values. Shape should be broadcastable to that of</p>
+<blockquote>
+<div><p>predictions.</p>
+</div></blockquote>
+</div></blockquote>
+<p>“””
+predictions = torch.sigmoid(predictions) if self.nrce_from_logits else predictions</p>
+<p>target = _smooth(target, self.nrce_label_smoothing)
+self.mean_label.update(target, weight)</p>
+<p>self.mean_prediction.update(predictions, weight)</p>
+<p>normalizer = self.mean_label.compute() / self.mean_prediction.compute()</p>
+<p>predictions = predictions * normalizer</p>
+<dl class="simple">
+<dt>self.binary_cross_entropy.update(</dt><dd><p>self.bce_loss_fn(predictions, target, reduction=”none”), weight</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>def reset(self):</dt><dd><p>“””
+Reset the metric to its initial state.
+“””
+super().reset()
+self.mean_prediction.reset()</p>
+</dd>
+</dl>
+</dd>
+</dl>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../_sources/metrics/rce.py.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

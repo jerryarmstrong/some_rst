@@ -1,0 +1,450 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../" id="documentation_options" src="../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.tweetypie.storage</p>
+<p>import com.twitter.logging.Logger
+import com.twitter.scrooge.TFieldBlob
+import com.twitter.snowflake.id.SnowflakeId
+import com.twitter.storage.client.manhattan.kv.DeniedManhattanException
+import com.twitter.storage.client.manhattan.kv.ManhattanException
+import com.twitter.tweetypie.storage.Response._
+import com.twitter.tweetypie.storage_internal.thriftscala.StoredTweet
+import com.twitter.util.Return
+import com.twitter.util.Throw
+import com.twitter.util.Try</p>
+<dl>
+<dt>object TweetUtils {</dt><dd><p>val log: Logger = Logger(“com.twitter.tweetypie.storage.TweetStorageLibrary”)
+import FieldResponseCodec.ValueNotFoundException</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>It’s rare, but we have seen tweets with userId=0, which is likely the result of a</p></li>
+<li><p>failed/partial delete. Treat these as invalid tweets, which are returned to callers</p></li>
+<li><p>as not found.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>def isValid(tweet: StoredTweet): Boolean =</dt><dd><dl class="simple">
+<dt>tweet.userId.exists(_ != 0) &amp;&amp; tweet.text.nonEmpty &amp;&amp;</dt><dd><p>tweet.createdVia.nonEmpty &amp;&amp; tweet.createdAtSec.nonEmpty</p>
+</dd>
+</dl>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Helper function to extract Scrubbed field Ids from the result returned by reading entire tweet prefix</p></li>
+<li><p>function.</p></li>
+<li></li>
+<li><p>&#64;param records The sequence of MH records for the given tweetId</p></li>
+<li></li>
+<li><p>&#64;return The set of scrubbed field ids</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>private[tweetypie] def extractScrubbedFields(records: Seq[TweetManhattanRecord]): Set[Short] =</dt><dd><dl class="simple">
+<dt>records</dt><dd><p>.map(r =&gt; r.lkey)
+.collect { case TweetKey.LKey.ScrubbedFieldKey(fieldId) =&gt; fieldId }
+.toSet</p>
+</dd>
+</dl>
+</dd>
+<dt>private[tweetypie] val expectedFields =</dt><dd><p>TweetFields.requiredFieldIds.toSet - TweetFields.tweetIdField</p>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Find the timestamp from a tweetId and a list of MH records. This is used when</p></li>
+<li><p>you need a timestamp and you aren’t sure that tweetId is a snowflake id.</p></li>
+<li></li>
+<li><p>&#64;param tweetId A tweetId you want the timestamp for.</p></li>
+<li><p>&#64;param records Tbird_mh records keyed on tweetId, one of which should be the</p></li>
+<li><p>core fields record.</p></li>
+<li><p>&#64;return A milliseconds timestamp if one could be found.</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>private[tweetypie] def creationTimeFromTweetIdOrMHRecords(</dt><dd><p>tweetId: Long,
+records: Seq[TweetManhattanRecord]</p>
+</dd>
+<dt>): Option[Long] =</dt><dd><dl>
+<dt>SnowflakeId</dt><dd><dl>
+<dt>.unixTimeMillisOptFromId(tweetId).orElse({</dt><dd><dl>
+<dt>records</dt><dd><p>.find(_.lkey == TweetKey.LKey.CoreFieldsKey)
+.flatMap { coreFields =&gt;</p>
+<blockquote>
+<div><dl>
+<dt>CoreFieldsCodec</dt><dd><dl class="simple">
+<dt>.fromTFieldBlob(</dt><dd><p>TFieldBlobCodec.fromByteBuffer(coreFields.value.contents)</p>
+</dd>
+</dl>
+<p>).createdAtSec.map(seconds =&gt; seconds * 1000)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>})</p>
+</dd>
+</dl>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Helper function used to parse manhattan results for fields in a tweet (given in the form of</p></li>
+<li><p>Sequence of (FieldKey, Try[Unit]) pairs) and build a TweetResponse object.</p></li>
+<li></li>
+<li><p>&#64;param callerName The name of the caller function. Used for error messages</p></li>
+<li><p>&#64;param tweetId Id of the Tweet for which TweetResponse is being built</p></li>
+<li><p>&#64;param fieldResults Sequence of (FieldKey, Try[Unit]).</p></li>
+<li></li>
+<li><p>&#64;return TweetResponse object</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+<dt>private[tweetypie] def buildTweetResponse(</dt><dd><p>callerName: String,
+tweetId: Long,
+fieldResults: Map[FieldId, Try[Unit]]</p>
+</dd>
+<dt>): TweetResponse = {</dt><dd><p>// Count Found/Not Found
+val successCount =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>fieldResults.foldLeft(0) {</dt><dd><p>case (count, (_, Return(_))) =&gt; count + 1
+case (count, (_, Throw(_: ValueNotFoundException))) =&gt; count + 1
+case (count, _) =&gt; count</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>val fieldResponsesMap = getFieldResponses(callerName, tweetId, fieldResults)</p>
+<dl class="simple">
+<dt>val overallCode = if (successCount &gt; 0 &amp;&amp; successCount == fieldResults.size) {</dt><dd><p>TweetResponseCode.Success</p>
+</dd>
+</dl>
+<p>} else {</p>
+<blockquote>
+<div><p>// If any field was rate limited, then we consider the entire tweet to be rate limited. So first we scan
+// the field results to check such an occurrence.
+val wasRateLimited = fieldResults.exists { fieldResult =&gt;</p>
+<blockquote>
+<div><dl class="simple">
+<dt>fieldResult._2 match {</dt><dd><p>case Throw(e: DeniedManhattanException) =&gt; true
+case _ =&gt; false</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>// Were we rate limited for any of the additional fields?
+if (wasRateLimited) {</p>
+<blockquote>
+<div><p>TweetResponseCode.OverCapacity</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else if (successCount == 0) {</dt><dd><p>// successCount is &lt; fieldResults.size at this point. So if allOrNone is true or
+// if successCount == 0 (i.e failed on all Fields), the overall code should be ‘Failure’
+TweetResponseCode.Failure</p>
+</dd>
+<dt>} else {</dt><dd><p>// allOrNone == false AND successCount &gt; 0 at this point. Clearly the overallCode should be Partial
+TweetResponseCode.Partial</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>TweetResponse(tweetId, overallCode, Some(fieldResponsesMap))</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Helper function to convert manhattan results into a Map[FieldId, FieldResponse]</p></li>
+<li></li>
+<li><p>&#64;param fieldResults Sequence of (TweetKey, TFieldBlob).</p></li>
+</ul>
+<p><a href="#id9"><span class="problematic" id="id10">*</span></a>/</p>
+</dd>
+<dt>private[tweetypie] def getFieldResponses(</dt><dd><p>callerName: String,
+tweetId: TweetId,
+fieldResults: Map[FieldId, Try[_]]</p>
+</dd>
+<dt>): Map[FieldId, FieldResponse] =</dt><dd><dl>
+<dt>fieldResults.map {</dt><dd><dl>
+<dt>case (fieldId, resp) =&gt;</dt><dd><p>def keyStr = TweetKey.fieldKey(tweetId, fieldId).toString
+resp match {</p>
+<blockquote>
+<div><dl>
+<dt>case Return(_) =&gt;</dt><dd><p>fieldId -&gt; FieldResponse(FieldResponseCode.Success, None)</p>
+</dd>
+<dt>case Throw(mhException: ManhattanException) =&gt;</dt><dd><p>val errMsg = s”Exception in $callerName. Key: $keyStr. Error: $mhException”
+mhException match {</p>
+<blockquote>
+<div><p>case _: ValueNotFoundException =&gt; // ValueNotFound is not an error
+case _ =&gt; log.error(errMsg)</p>
+</div></blockquote>
+<p>}
+fieldId -&gt; FieldResponseCodec.fromThrowable(mhException, Some(errMsg))</p>
+</dd>
+<dt>case Throw(e) =&gt;</dt><dd><p>val errMsg = s”Exception in $callerName. Key: $keyStr. Error: $e”
+log.error(errMsg)
+fieldId -&gt; FieldResponse(FieldResponseCode.Error, Some(errMsg))</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Helper function to build a TweetResponse object when being rate limited. Its possible that only some of the fields</p></li>
+<li><p>got rate limited, so we indicate which fields got processed successfully, and which encountered some sort of error.</p></li>
+<li></li>
+<li><p>&#64;param tweetId Tweet id</p></li>
+<li><p>&#64;param callerName name of API calling this function</p></li>
+<li><p>&#64;param fieldResponses field responses for the case where</p></li>
+<li></li>
+<li><p>&#64;return The TweetResponse object</p></li>
+</ul>
+<p><a href="#id11"><span class="problematic" id="id12">*</span></a>/</p>
+</dd>
+<dt>private[tweetypie] def buildTweetOverCapacityResponse(</dt><dd><p>callerName: String,
+tweetId: Long,
+fieldResponses: Map[FieldId, Try[Unit]]</p>
+</dd>
+<dt>) = {</dt><dd><p>val fieldResponsesMap = getFieldResponses(callerName, tweetId, fieldResponses)
+TweetResponse(tweetId, TweetResponseCode.OverCapacity, Some(fieldResponsesMap))</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Build a StoredTweet from a Seq of records. Core fields are handled specially.</p></li>
+</ul>
+<p><a href="#id13"><span class="problematic" id="id14">*</span></a>/</p>
+</dd>
+<dt>private[tweetypie] def buildStoredTweet(</dt><dd><p>tweetId: TweetId,
+records: Seq[TweetManhattanRecord],
+includeScrubbed: Boolean = false,</p>
+</dd>
+<dt>): StoredTweet = {</dt><dd><dl>
+<dt>getStoredTweetBlobs(records, includeScrubbed)</dt><dd><dl>
+<dt>.flatMap { fieldBlob =&gt;</dt><dd><p>// When fieldId == TweetFields.rootCoreFieldId, we have further work to do since the
+// ‘value’ is really serialized/packed version of all core fields. In this case we’ll have
+// to unpack it into many TFieldBlobs.
+if (fieldBlob.id == TweetFields.rootCoreFieldId) {</p>
+<blockquote>
+<div><p>// We won’t throw any error in this function and instead let the caller function handle this
+// condition (i.e If the caller function does not find any values for the core-fields in
+// the returned map, it should assume that the tweet is not found)
+CoreFieldsCodec.unpackFields(fieldBlob).values.toSeq</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>Seq(fieldBlob)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}.foldLeft(StoredTweet(tweetId))(_.setField(_))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private[tweetypie] def buildValidStoredTweet(</dt><dd><p>tweetId: TweetId,
+records: Seq[TweetManhattanRecord]</p>
+</dd>
+<dt>): Option[StoredTweet] = {</dt><dd><p>val storedTweet = buildStoredTweet(tweetId, records)
+if (storedTweet.getFieldBlobs(expectedFields).nonEmpty &amp;&amp; isValid(storedTweet)) {</p>
+<blockquote>
+<div><p>Some(storedTweet)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>None</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Return a TFieldBlob for each StoredTweet field defined in this set of records.</p></li>
+<li><p>&#64;param includeScrubbed when false, result will not include scrubbed fields even</p></li>
+<li><p>if the data is present in the set of records.</p></li>
+</ul>
+<p><a href="#id15"><span class="problematic" id="id16">*</span></a>/</p>
+</dd>
+<dt>private[tweetypie] def getStoredTweetBlobs(</dt><dd><p>records: Seq[TweetManhattanRecord],
+includeScrubbed: Boolean = false,</p>
+</dd>
+<dt>): Seq[TFieldBlob] = {</dt><dd><p>val scrubbed = extractScrubbedFields(records)</p>
+<dl>
+<dt>records</dt><dd><dl>
+<dt>.flatMap { r =&gt;</dt><dd><p>// extract LKey.FieldKey records if they are not scrubbed and get their TFieldBlobs
+r.key match {</p>
+<blockquote>
+<div><dl>
+<dt>case fullKey &#64; TweetKey(_, key: TweetKey.LKey.FieldKey)</dt><dd><blockquote>
+<div><p>if includeScrubbed || !scrubbed.contains(key.fieldId) =&gt;</p>
+</div></blockquote>
+<dl>
+<dt>try {</dt><dd><p>val fieldBlob = TFieldBlobCodec.fromByteBuffer(r.value.contents)
+if (fieldBlob.field.id != key.fieldId) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>throw new AssertionError(</dt><dd><p>s”Blob stored for $fullKey has unexpected id ${fieldBlob.field.id}”</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<p>}
+Some(fieldBlob)</p>
+</dd>
+<dt>} catch {</dt><dd><dl>
+<dt>case e: VersionMismatchError =&gt;</dt><dd><dl class="simple">
+<dt>log.error(</dt><dd><p>s”Failed to decode bytebuffer for $fullKey: ${e.getMessage}”</p>
+</dd>
+</dl>
+<p>)
+throw e</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>case _ =&gt; None</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Its important to bubble up rate limiting exceptions as they would likely be the root cause for other issues</p></li>
+<li><p>(timeouts etc.), so we scan for this particular exception, and if found, we bubble that up specifically</p></li>
+<li></li>
+<li><p>&#64;param seqOfTries The sequence of tries which may contain within it a rate limit exception</p></li>
+<li></li>
+<li><p>&#64;return if a rate limiting exn was detected, this will be a Throw(e: DeniedManhattanException)</p></li>
+<li><p>otherwise it will be a Return(_) only if all individual tries succeeded</p></li>
+</ul>
+<p><a href="#id17"><span class="problematic" id="id18">*</span></a>/</p>
+</dd>
+<dt>private[tweetypie] def collectWithRateLimitCheck(seqOfTries: Seq[Try[Unit]]): Try[Unit] = {</dt><dd><dl class="simple">
+<dt>val rateLimitThrowOpt = seqOfTries.find {</dt><dd><p>case Throw(e: DeniedManhattanException) =&gt; true
+case _ =&gt; false</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>rateLimitThrowOpt.getOrElse(</dt><dd><p>Try.collect(seqOfTries).map(_ =&gt; ())</p>
+</dd>
+</dl>
+<p>) // Operation is considered successful only if all the deletions are successful</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../_sources/tweetypie/common/src/scala/com/twitter/tweetypie/storage/TweetUtils.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

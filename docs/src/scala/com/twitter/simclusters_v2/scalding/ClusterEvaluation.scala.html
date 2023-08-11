@@ -1,0 +1,883 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../" id="documentation_options" src="../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.simclusters_v2.scalding</p>
+<p>import com.twitter.algebird.Monoid
+import com.twitter.algebird.mutable.PriorityQueueMonoid
+import com.twitter.dal.client.dataset.KeyValDALDataset
+import com.twitter.pluck.source.cassowary.FollowingsCosineSimilaritiesManhattanSource
+import com.twitter.scalding._
+import com.twitter.scalding_internal.dalv2.DAL
+import com.twitter.scalding_internal.job.TwitterExecutionApp
+import com.twitter.scalding_internal.job.analytics_batch._
+import com.twitter.scalding_internal.multiformat.format.keyval.KeyVal
+import com.twitter.simclusters_v2.common.ModelVersions
+import com.twitter.simclusters_v2.hdfs_sources._
+import com.twitter.simclusters_v2.scalding.common.TypedRichPipe._
+import com.twitter.simclusters_v2.scalding.common.Util
+import com.twitter.simclusters_v2.scalding.common.Util.Distribution
+import com.twitter.simclusters_v2.thriftscala.ClusterQuality
+import com.twitter.simclusters_v2.thriftscala.ClustersUserIsKnownFor
+import com.twitter.usersource.snapshot.flat.UsersourceFlatScalaDataset
+import java.util.PriorityQueue
+import scala.collection.JavaConverters._</p>
+<p>object ClusterEvaluation {</p>
+<blockquote>
+<div><dl>
+<dt>val samplerMonoid: PriorityQueueMonoid[((Long, Long), (Double, Double))] =</dt><dd><p>Util.reservoirSamplerMonoidForPairs[(Long, Long), (Double, Double)](5000)(Util.edgeOrdering)</p>
+</dd>
+<dt>case class ClusterResults(</dt><dd><p>numEdgesInsideCluster: Int,
+wtOfEdgesInsideCluster: Double,
+numEdgesOutsideCluster: Int,
+wtOfEdgesOutsideCluster: Double,
+originalWtAndProductOfNodeScoresSample: PriorityQueue[((Long, Long), (Double, Double))]) {
+def clusterQuality(clusterSize: Int, averagePrecisionWholeGraph: Double): ClusterQuality = {</p>
+<blockquote>
+<div><p>val unweightedRecallDenominator = numEdgesInsideCluster + numEdgesOutsideCluster
+val unweightedRecall = if (unweightedRecallDenominator &gt; 0) {</p>
+<blockquote>
+<div><p>numEdgesInsideCluster.toDouble / unweightedRecallDenominator.toDouble</p>
+</div></blockquote>
+<p>} else 0.0</p>
+<p>val weightedRecallDenominator = wtOfEdgesInsideCluster + wtOfEdgesOutsideCluster
+val weightedRecall = if (weightedRecallDenominator &gt; 0) {</p>
+<blockquote>
+<div><p>wtOfEdgesInsideCluster / weightedRecallDenominator</p>
+</div></blockquote>
+<p>} else 0.0</p>
+<dl class="simple">
+<dt>val precision = if (clusterSize &gt; 1) {</dt><dd><p>Some(wtOfEdgesInsideCluster / (clusterSize * (clusterSize - 1)))</p>
+</dd>
+</dl>
+<p>} else Some(0.0)</p>
+<dl class="simple">
+<dt>val relativePrecision = if (averagePrecisionWholeGraph &gt; 0) {</dt><dd><p>precision.flatMap { p =&gt; Some(p / averagePrecisionWholeGraph) }</p>
+</dd>
+</dl>
+<p>} else Some(0.0)</p>
+<dl>
+<dt>ClusterQuality(</dt><dd><p>unweightedRecall = Some(unweightedRecall),
+weightedRecall = Some(weightedRecall),
+unweightedRecallDenominator = Some(unweightedRecallDenominator),
+weightedRecallDenominator = Some(weightedRecallDenominator),
+relativePrecisionNumerator = precision,
+relativePrecision = relativePrecision,
+weightAndProductOfNodeScoresCorrelation = Some(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>Util.computeCorrelation(</dt><dd><p>originalWtAndProductOfNodeScoresSample.iterator.asScala.map(_._2)))</p>
+</dd>
+</dl>
+</div></blockquote>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>object ClusterResultsMonoid extends Monoid[ClusterResults] {</dt><dd><p>override def zero = ClusterResults(0, 0, 0, 0, samplerMonoid.zero)
+override def plus(l: ClusterResults, r: ClusterResults) = ClusterResults(</p>
+<blockquote>
+<div><p>l.numEdgesInsideCluster + r.numEdgesInsideCluster,
+l.wtOfEdgesInsideCluster + r.wtOfEdgesInsideCluster,
+l.numEdgesOutsideCluster + r.numEdgesOutsideCluster,
+l.wtOfEdgesOutsideCluster + r.wtOfEdgesOutsideCluster,
+samplerMonoid</p>
+<blockquote>
+<div><p>.plus(l.originalWtAndProductOfNodeScoresSample, r.originalWtAndProductOfNodeScoresSample)</p>
+</div></blockquote>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Evaluate the quality of a cluster.</p></li>
+<li><p>&#64;param memberScores A map with the members of the cluster as the keys and their scores</p></li>
+<li><p>inside the cluster as values. The more central a member is inside the score,</p></li>
+<li><p>the higher it’s score is.</p></li>
+<li><p>&#64;param membersAdjLists A map that gives the weighted neighbors of each member in the cluster.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>def evaluateCluster(</dt><dd><p>memberScores: Map[Long, Double],
+membersAdjLists: Map[Long, Map[Long, Float]]</p>
+</dd>
+<dt>): ClusterResults = {</dt><dd><dl>
+<dt>val resultsIter = membersAdjLists.flatMap {</dt><dd><dl>
+<dt>case (fromNodeId, adjList) =&gt;</dt><dd><p>val fromNodeWt = memberScores.getOrElse(fromNodeId, 0.0)
+adjList.map {</p>
+<blockquote>
+<div><dl>
+<dt>case (toNodeId, edgeWt) =&gt;</dt><dd><dl>
+<dt>if (memberScores.contains(toNodeId)) {</dt><dd><p>val productOfMembershipScores = fromNodeWt * memberScores(toNodeId)
+ClusterResults(</p>
+<blockquote>
+<div><p>1,
+edgeWt,
+0,
+0,
+samplerMonoid.build(</p>
+<blockquote>
+<div><p>((fromNodeId, toNodeId), (edgeWt.toDouble, productOfMembershipScores))))</p>
+</div></blockquote>
+</div></blockquote>
+</dd>
+<dt>} else {</dt><dd><p>ClusterResults(0, 0, 1, edgeWt, samplerMonoid.zero)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+Monoid.sum(resultsIter)(ClusterResultsMonoid)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Evaluate each cluster with respect to the provided graph.</p></li>
+<li><p>&#64;param graph graph represented via the adjacency lists of each node, needs to be symmetrized i.e. if u is in v’s adjlist, then v needs to be in u’s adjlist as well</p></li>
+<li><p>&#64;param clusters cluster memberships of each node.</p></li>
+<li><p>&#64;param statsPrefix convenience argument to act as prefix for stats counters</p></li>
+<li><p>&#64;return key-value pipe with clusterId as key and (size of the cluster, quality struct) as value</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>def clusterLevelEvaluation(</dt><dd><p>graph: TypedPipe[(Long, Map[Long, Float])],
+clusters: TypedPipe[(Long, Array[(Int, Float)])],
+statsPrefix: String = “”</p>
+</dd>
+<dt>)(</dt><dd><p>implicit uniqueId: UniqueID</p>
+</dd>
+<dt>): Execution[TypedPipe[(Int, (Int, ClusterQuality))]] = {</dt><dd><p>val numRealClusters = Stat(s”${statsPrefix}/numRealClusters”)
+val numFakeClusters = Stat(s”${statsPrefix}/numFakeClusters”)</p>
+<dl>
+<dt>val numNodesAndEdgesExec = graph</dt><dd><dl class="simple">
+<dt>.map {</dt><dd><dl class="simple">
+<dt>case (nId, nbrMap) =&gt;</dt><dd><p>(1L, nbrMap.size.toLong, nbrMap.values.sum.toDouble)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}.sum.getExecution</p>
+</dd>
+<dt>numNodesAndEdgesExec.map {</dt><dd><dl>
+<dt>case (numNodes, numEdges, sumOfAllEdgeWts) =&gt;</dt><dd><p>println(“numNodes “ + numNodes)
+println(“numEdges “ + numEdges)
+println(“sumOfAllEdgeWts “ + sumOfAllEdgeWts)</p>
+<p>val numFakeClustersForUnassignedNodes = numNodes / 1e4</p>
+<p>val averagePrecisionWholeGraph = sumOfAllEdgeWts / (numNodes * (numNodes - 1))
+graph</p>
+<blockquote>
+<div><p>.leftJoin(clusters)
+// uncomment for adhoc job
+.withReducers(200)
+.flatMap {</p>
+<blockquote>
+<div><dl>
+<dt>case (nodeId, (adjList, assignedClustersOpt)) =&gt;</dt><dd><p>val nodeDegree = adjList.size.toLong
+val nodeWeightedDegree = adjList.values.sum
+assignedClustersOpt match {</p>
+<blockquote>
+<div><dl>
+<dt>case Some(assignedClusters) if assignedClusters.nonEmpty =&gt;</dt><dd><dl>
+<dt>assignedClusters.toList.map {</dt><dd><dl>
+<dt>case (clusterId, scoreOfNodeInCluster) =&gt;</dt><dd><dl>
+<dt>(</dt><dd><p>clusterId,
+(</p>
+<blockquote>
+<div><p>Map(nodeId -&gt; (scoreOfNodeInCluster.toDouble, adjList)),
+1,
+nodeDegree,
+nodeWeightedDegree))</p>
+</div></blockquote>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>case _ =&gt;</dt><dd><p>// For nodes that don’t belong to any cluster, create a fake clusterId (0 or lesser)
+// and add the node’s statistics to that clusterId. We don’t need the adjacency lists for
+// unassigned nodes, we’ll simply track how many edges are incident on those nodes and their weighted sum etc
+val fakeClusterId =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>(-1 * (math.abs(</dt><dd><p>Util.hashToLong(nodeId)) % numFakeClustersForUnassignedNodes)).toInt</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl>
+<dt>List(</dt><dd><dl>
+<dt>(</dt><dd><p>fakeClusterId,
+(</p>
+<blockquote>
+<div><p>Map.empty[Long, (Double, Map[Long, Float])],
+1,
+nodeDegree,
+nodeWeightedDegree)))</p>
+</div></blockquote>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+.sumByKey
+// uncomment for adhoc job
+.withReducers(60)
+.map {</p>
+<blockquote>
+<div><dl>
+<dt>case (clusterId, (membersMap, clusterSize, volumeOfCluster, weightedVolumeOfCluster)) =&gt;</dt><dd><dl>
+<dt>if (clusterId &gt; 0) {</dt><dd><p>numRealClusters.inc()</p>
+<dl class="simple">
+<dt>val scoresMap =</dt><dd><p>if (clusterId &gt; 0) membersMap.mapValues(_._1) else Map.empty[Long, Double]</p>
+</dd>
+</dl>
+<p>val adjListsMap = membersMap.mapValues(_._2)</p>
+<dl class="simple">
+<dt>val quality = evaluateCluster(scoresMap, adjListsMap)</dt><dd><p>.clusterQuality(clusterSize, averagePrecisionWholeGraph)</p>
+</dd>
+</dl>
+<p>(clusterId, (clusterSize, quality))</p>
+</dd>
+<dt>} else {</dt><dd><p>// clusterId &lt;= 0 means that this is a fake cluster.
+numFakeClusters.inc()
+(</p>
+<blockquote>
+<div><p>clusterId,
+(</p>
+<blockquote>
+<div><p>clusterSize,
+ClusterQuality(</p>
+<blockquote>
+<div><p>unweightedRecallDenominator = Some(volumeOfCluster),
+weightedRecallDenominator = Some(weightedVolumeOfCluster)</p>
+</div></blockquote>
+<p>)</p>
+</div></blockquote>
+<p>)</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>case class OverallResults(</dt><dd><p>unweightedRecall: Double,
+edgesInsideClusters: Long,
+allEdges: Long,
+allNodes: Int,
+weightedRecall: Double,
+wtOnEdgesInsideClusters: Double,
+wtOnAllEdges: Double,
+weightCorrelation: Double,
+relativePrecision: Double,
+numUnassignedNodes: Int,
+numAssignedNodes: Int,
+sizeDist: Distribution,
+recallDist: Distribution,
+weightedRecallDist: Distribution,
+relativePrecisionDist: Distribution,
+weightCorrelationDist: Distribution,
+numClustersWithNegativeCorrelation: Double,
+numClustersWithZeroRecall: Double,
+numClustersWithLessThanOneRelativePrecision: Double,
+numSingletonClusters: Int)</p>
+</dd>
+<dt>def summarizePerClusterResults(</dt><dd><p>perClusterResults: TypedPipe[(Int, (Int, ClusterQuality))]</p>
+</dd>
+<dt>): Execution[Option[OverallResults]] = {</dt><dd><dl>
+<dt>perClusterResults</dt><dd><dl>
+<dt>.map {</dt><dd><dl>
+<dt>case (clusterId, (size, quality)) =&gt;</dt><dd><p>val unweightedRecallDen = quality.unweightedRecallDenominator.getOrElse(0.0)
+val unweightedRecallNum = quality.unweightedRecall.getOrElse(0.0) * unweightedRecallDen
+val weightedRecallDen = quality.weightedRecallDenominator.getOrElse(0.0)
+val weightedRecallNum = quality.weightedRecall.getOrElse(0.0) * weightedRecallDen</p>
+<p>val weightCorrelationDen = size
+val weightCorrelationNum =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>weightCorrelationDen * quality.weightAndProductOfNodeScoresCorrelation</dt><dd><p>.getOrElse(0.0)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>val relativePrecisionDen = size
+val relativePrecisionNum = relativePrecisionDen * quality.relativePrecision.getOrElse(0.0)</p>
+<dl class="simple">
+<dt>val numClustersWithNegativeCorrelation =</dt><dd><p>if (weightCorrelationNum &lt; 0 &amp;&amp; clusterId &gt; 0) 1 else 0</p>
+</dd>
+<dt>val numClustersWithLessThanOneRelativePrecision =</dt><dd><p>if (quality.relativePrecision.getOrElse(0.0) &lt; 1 &amp;&amp; clusterId &gt; 0) 1 else 0</p>
+</dd>
+</dl>
+<p>val numClustersWithZeroRecall = if (weightedRecallNum &lt; 1e-5 &amp;&amp; clusterId &gt; 0) 1 else 0
+val numUnassignedNodes = if (clusterId &lt; 1) size else 0
+val numAssignedNodes = if (clusterId &gt; 0) size else 0
+val numSingletonClusters = if (clusterId &gt; 0 &amp;&amp; size == 1) 1 else 0</p>
+<dl class="simple">
+<dt>(</dt><dd><p>unweightedRecallDen,
+unweightedRecallNum,
+weightedRecallDen,
+weightedRecallNum,
+weightCorrelationDen,
+weightCorrelationNum,
+relativePrecisionDen,
+relativePrecisionNum,
+numClustersWithNegativeCorrelation,
+numClustersWithLessThanOneRelativePrecision,
+numClustersWithZeroRecall,
+List(size.toDouble),
+List(quality.unweightedRecall.getOrElse(0.0)),
+List(quality.weightedRecall.getOrElse(0.0)),
+List(quality.relativePrecision.getOrElse(0.0)),
+List(quality.weightAndProductOfNodeScoresCorrelation.getOrElse(0.0)),
+numUnassignedNodes,
+numAssignedNodes,
+numSingletonClusters</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+.sum
+.toOptionExecution
+.map { opt =&gt;</p>
+<blockquote>
+<div><dl>
+<dt>opt.map {</dt><dd><dl>
+<dt>case (</dt><dd><blockquote>
+<div><p>unweightedRecallDen,
+unweightedRecallNum,
+weightedRecallDen,
+weightedRecallNum,
+weightCorrelationDen,
+weightCorrelationNum,
+relativePrecisionDen,
+relativePrecisionNum,
+numClustersWithNegativeCorrelation,
+numClustersWithLessThanOneRelativePrecision,
+numClustersWithZeroRecall,
+sizeList,
+unweightedRecallList,
+weightedRecallList,
+relativePrecisionList,
+weightCorrelationList,
+numUnassignedNodes,
+numAssignedNodes,
+numSingletonClusters) =&gt;</p>
+</div></blockquote>
+<dl>
+<dt>OverallResults(</dt><dd><p>unweightedRecall = unweightedRecallNum / unweightedRecallDen,
+edgesInsideClusters = unweightedRecallNum.toLong,
+allEdges = unweightedRecallDen.toLong,
+allNodes = numAssignedNodes + numUnassignedNodes,
+weightedRecall = weightedRecallNum / weightedRecallDen,
+wtOnEdgesInsideClusters = weightedRecallNum,
+wtOnAllEdges = weightedRecallDen,
+weightCorrelation = weightCorrelationNum / weightCorrelationDen,
+relativePrecision = relativePrecisionNum / relativePrecisionDen,
+numAssignedNodes = numAssignedNodes,
+numUnassignedNodes = numUnassignedNodes,
+sizeDist = Util.distributionFromArray(sizeList.toArray),
+recallDist = Util.distributionFromArray(unweightedRecallList.toArray),
+weightedRecallDist = Util.distributionFromArray(weightedRecallList.toArray),
+weightCorrelationDist = Util.distributionFromArray(weightCorrelationList.toArray),
+relativePrecisionDist = Util.distributionFromArray(relativePrecisionList.toArray),
+numClustersWithNegativeCorrelation = numClustersWithNegativeCorrelation,
+numClustersWithLessThanOneRelativePrecision =</p>
+<blockquote>
+<div><p>numClustersWithLessThanOneRelativePrecision,</p>
+</div></blockquote>
+<p>numClustersWithZeroRecall = numClustersWithZeroRecall,
+numSingletonClusters = numSingletonClusters</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>&#64;param graph Input similarity graph, needs to be symmetrized i.e. if u is in v’s adjlist, then v needs to be in u’s adjlist as well</p></li>
+<li><p>&#64;param clusters cluster assignments to be evaluated</p></li>
+<li><p>&#64;return summary of results</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>def overallEvaluation(</dt><dd><p>graph: TypedPipe[(Long, Map[Long, Float])],
+clusters: TypedPipe[(Long, Array[(Int, Float)])],
+statsPrefix: String</p>
+</dd>
+<dt>)(</dt><dd><p>implicit uniqueId: UniqueID</p>
+</dd>
+<dt>): Execution[Option[OverallResults]] = {</dt><dd><p>clusterLevelEvaluation(graph, clusters, statsPrefix).flatMap(summarizePerClusterResults)</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>./bazel bundle src/scala/com/twitter/simclusters_v2/scalding:cluster_evaluation &amp;&amp; </p></li>
+<li><p>oscar hdfs –user frigate –host hadoopnest1.atla.twitter.com –bundle cluster_evaluation </p></li>
+<li><p>–tool com.twitter.simclusters_v2.scalding.ClusterEvaluationAdhoc –screen –screen-detached </p></li>
+<li><p>–tee logs/clusterQualityFor_updatedUnnormalizedInputScores_usingSims20190318  – </p></li>
+<li><p>–simsInputDir /user/frigate/your_ldap/commonDirForClusterEvaluation/classifiedSims_20190314_copiedFromAtlaProc </p></li>
+<li><p>–topK 20000000 –date 2019-03-18 –minActiveFollowers 400 </p></li>
+<li><p>–topUsersDir /user/frigate/your_ldap/commonDirForClusterEvaluation/top20MUsers_minActiveFollowers400_20190215 </p></li>
+<li><p>–maxSimsNeighborsForEval 40 </p></li>
+<li><p>–preparedSimsGraph /user/frigate/your_ldap/commonDirForClusterEvaluation/symmetrized_classifiedSims20190318_top20MUsers </p></li>
+<li><p>–outputDir /user/frigate/your_ldap/dirFor_updatedKnownFor20M_145K_dec11_usingSims20190127_unnormalizedInputScores/knownForClusterEvaluation </p></li>
+<li><p>–knownForDir /user/frigate/your_ldap/dirFor_updatedKnownFor20M_145K_dec11_usingSims20190127_unnormalizedInputScores/knownFor</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+<dt>object ClusterEvaluationAdhoc extends TwitterExecutionApp {</dt><dd><p>implicit val tz: java.util.TimeZone = DateOps.UTC
+implicit val dp = DateParser.default</p>
+<dl>
+<dt>def job: Execution[Unit] =</dt><dd><dl>
+<dt>Execution.getConfigMode.flatMap {</dt><dd><dl>
+<dt>case (config, mode) =&gt;</dt><dd><dl>
+<dt>Execution.withId { implicit uniqueId =&gt;</dt><dd><p>val args = config.getArgs
+val knownFor = args</p>
+<blockquote>
+<div><dl class="simple">
+<dt>.optional(“knownForDir”).map { location =&gt;</dt><dd><p>KnownForSources.readKnownFor(location)</p>
+</dd>
+</dl>
+<p>}.getOrElse(KnownForSources.knownFor_20M_Dec11_145K)</p>
+</div></blockquote>
+<p>val minActiveFollowers = args.int(“minActiveFollowers”, 400)
+val topK = args.int(“topK”)
+val date = DateRange.parse(args(“date”))</p>
+<dl>
+<dt>val topUsersExec =</dt><dd><dl>
+<dt>TopUsersSimilarityGraph</dt><dd><dl class="simple">
+<dt>.topUsers(</dt><dd><p>DAL.readMostRecentSnapshot(UsersourceFlatScalaDataset, date).toTypedPipe,
+minActiveFollowers,
+topK</p>
+</dd>
+</dl>
+<p>)
+.map(_.id)
+.count(“num_top_users”)
+.make(TypedTsv(args(“topUsersDir”)))</p>
+</dd>
+</dl>
+</dd>
+<dt>val simsGraphExec = topUsersExec.flatMap { topUsers =&gt;</dt><dd><dl>
+<dt>TopUsersSimilarityGraph.makeGraph(</dt><dd><dl class="simple">
+<dt>TopUsersSimilarityGraph.getSubgraphFromUserGroupedInput(</dt><dd><p>TypedPipe.from(WTFCandidatesSource(args(“simsInputDir”))),
+topUsers,
+args.int(“maxSimsNeighborsForEval”, 40),
+degreeThresholdForStat = 5</p>
+</dd>
+</dl>
+<p>),
+args(“preparedSimsGraph”)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>val fullExec = simsGraphExec.flatMap { sims =&gt;</dt><dd><dl>
+<dt>ClusterEvaluation</dt><dd><p>.clusterLevelEvaluation(sims, knownFor, “eval”)
+.flatMap { clusterResultsPipe =&gt;</p>
+<blockquote>
+<div><p>val clusterResults = clusterResultsPipe.forceToDiskExecution
+val outputExec = clusterResults.flatMap { pipe =&gt;</p>
+<blockquote>
+<div><dl>
+<dt>pipe</dt><dd><dl>
+<dt>.map {</dt><dd><dl>
+<dt>case (clusterId, (clusterSize, quality)) =&gt;</dt><dd><dl>
+<dt>“%dt%dt%.2gt%.2gt%.1ft%.2gt%.2ft%.2gt%.2g”</dt><dd><dl class="simple">
+<dt>.format(</dt><dd><p>clusterId,
+clusterSize,
+quality.unweightedRecall.getOrElse(0.0),
+quality.weightedRecall.getOrElse(0.0),
+quality.unweightedRecallDenominator.getOrElse(0.0),
+quality.weightedRecallDenominator.getOrElse(0.0),
+quality.relativePrecision.getOrElse(0.0),
+quality.relativePrecisionNumerator.getOrElse(0.0),
+quality.weightAndProductOfNodeScoresCorrelation.getOrElse(0.0)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}.writeExecution(TypedTsv(args(“outputDir”)))</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>val printExec = clusterResults.flatMap { pipe =&gt;</dt><dd><dl class="simple">
+<dt>ClusterEvaluation.summarizePerClusterResults(pipe).map {</dt><dd><dl class="simple">
+<dt>case Some(res) =&gt;</dt><dd><p>println(“Overall results: “ + Util.prettyJsonMapper.writeValueAsString(res))</p>
+</dd>
+<dt>case None =&gt;</dt><dd><p>println(“No overall results!!! Probably cluster results pipe is empty.”)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>Execution.zip(outputExec, printExec)</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>Util.printCounters(fullExec)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>trait ClusterEvaluationBatch extends TwitterScheduledExecutionApp {</dt><dd><p>implicit val tz: java.util.TimeZone = DateOps.UTC
+implicit val dp = DateParser.default</p>
+<p>def firstTime: String</p>
+<p>def batchDescription: String</p>
+<p>def batchIncrement: Duration</p>
+<dl class="simple">
+<dt>private lazy val execArgs = AnalyticsBatchExecutionArgs(</dt><dd><p>batchDesc = BatchDescription(batchDescription),
+firstTime = BatchFirstTime(RichDate(firstTime)),
+lastTime = None,
+batchIncrement = BatchIncrement(batchIncrement)</p>
+</dd>
+</dl>
+<p>)</p>
+<p>val emailAddress: String = “<a class="reference external" href="mailto:no-reply&#37;&#52;&#48;twitter&#46;com">no-reply<span>&#64;</span>twitter<span>&#46;</span>com</a>”</p>
+<p>def knownForDALDataset: KeyValDALDataset[KeyVal[Long, ClustersUserIsKnownFor]]</p>
+<p>def knownForModelVersion: String</p>
+<p>def baselineKnownForDALDataset: KeyValDALDataset[KeyVal[Long, ClustersUserIsKnownFor]]</p>
+<p>def baselineKnownForModelVersion: String</p>
+<dl>
+<dt>override def scheduledJob: Execution[Unit] =</dt><dd><dl>
+<dt>AnalyticsBatchExecution(execArgs) { implicit dateRange =&gt;</dt><dd><dl>
+<dt>Execution.withId { implicit uniqueId =&gt;</dt><dd><dl>
+<dt>Execution.withArgs { args =&gt;</dt><dd><dl>
+<dt>val baselineKnownFor =</dt><dd><dl>
+<dt>KnownForSources.fromKeyVal(</dt><dd><dl class="simple">
+<dt>DAL</dt><dd><p>.readMostRecentSnapshot(baselineKnownForDALDataset, dateRange.prepend(Days(7)))
+.toTypedPipe,</p>
+</dd>
+</dl>
+<p>baselineKnownForModelVersion</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>val knownFor =</dt><dd><dl>
+<dt>KnownForSources.fromKeyVal(</dt><dd><dl class="simple">
+<dt>DAL</dt><dd><p>.readMostRecentSnapshot(knownForDALDataset, dateRange.prepend(Days(7)))
+.toTypedPipe,</p>
+</dd>
+</dl>
+<p>knownForModelVersion</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>val inputSimsGraph = TypedPipe</dt><dd><p>.from(FollowingsCosineSimilaritiesManhattanSource())
+.map(_._2)</p>
+</dd>
+</dl>
+<p>val minActiveFollowers = args.int(“minActiveFollowers”)
+val topK = args.int(“topK”)
+val maxSimsNeighborsForEval =</p>
+<blockquote>
+<div><p>args.int(“maxSimsNeighborsForEval”, 40)</p>
+</div></blockquote>
+<dl>
+<dt>val topUsers = TopUsersSimilarityGraph</dt><dd><dl>
+<dt>.topUsers(</dt><dd><dl class="simple">
+<dt>DAL</dt><dd><p>.readMostRecentSnapshot(UsersourceFlatScalaDataset, dateRange)
+.toTypedPipe,</p>
+</dd>
+</dl>
+<p>minActiveFollowers,
+topK</p>
+</dd>
+</dl>
+<p>)
+.map(_.id)
+.count(“num_top_users”)</p>
+</dd>
+<dt>TopUsersSimilarityGraph</dt><dd><dl class="simple">
+<dt>.getSubgraphFromUserGroupedInput(</dt><dd><p>fullGraph = inputSimsGraph,
+usersToInclude = topUsers,
+maxNeighborsPerNode = maxSimsNeighborsForEval,
+degreeThresholdForStat = 2</p>
+</dd>
+</dl>
+<p>)
+.forceToDiskExecution
+.flatMap { symmetrizedSims =&gt;</p>
+<blockquote>
+<div><dl class="simple">
+<dt>val baselineResultsExec = ClusterEvaluation</dt><dd><p>.overallEvaluation(symmetrizedSims, baselineKnownFor, “baselineKnownForEval”)</p>
+</dd>
+<dt>val newResultsExec = ClusterEvaluation</dt><dd><p>.overallEvaluation(symmetrizedSims, knownFor, “newKnownForEval”)</p>
+</dd>
+</dl>
+<p>val minSizeOfBiggerClusterForComparison = 10
+val compareExec = CompareClusters.summarize(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>CompareClusters.compare(</dt><dd><p>KnownForSources.transpose(baselineKnownFor),
+KnownForSources.transpose(knownFor),
+minSizeOfBiggerCluster = minSizeOfBiggerClusterForComparison</p>
+</dd>
+</dl>
+<p>))</p>
+</div></blockquote>
+<dl>
+<dt>Execution</dt><dd><p>.zip(baselineResultsExec, newResultsExec, compareExec)
+.map {</p>
+<blockquote>
+<div><dl>
+<dt>case (oldResults, newResults, compareResults) =&gt;</dt><dd><dl>
+<dt>val emailText =</dt><dd><dl>
+<dt>s”Evaluation Results for baseline knownFor: $baselineKnownForModelVersion n” +</dt><dd><p>Util.prettyJsonMapper.writeValueAsString(oldResults) +
+“nn——————-nn” +
+s”Evaluation Results for new knownFor:$knownForModelVersionn” +
+Util.prettyJsonMapper.writeValueAsString(newResults) +
+“nn——————-nn” +
+s”Cosine similarity distribution between $baselineKnownForModelVersion and “ +
+s”$knownForModelVersion cluster membership vectors for “ +
+s”clusters with at least $minSizeOfBiggerClusterForComparison members:n” +
+Util.prettyJsonMapper</p>
+<blockquote>
+<div><p>.writeValueAsString(compareResults)</p>
+</div></blockquote>
+</dd>
+</dl>
+</dd>
+<dt>Util</dt><dd><dl class="simple">
+<dt>.sendEmail(</dt><dd><p>emailText,
+s”Evaluation results comparing $knownForModelVersion with baseline $baselineKnownForModelVersion”,
+emailAddress)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>()</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>capesospy-v2 update –build_locally –start_cron cluster_evaluation_for_20M_145k </p></li>
+<li><p>src/scala/com/twitter/simclusters_v2/capesos_config/atla_proc.yaml</p></li>
+</ul>
+<p><a href="#id9"><span class="problematic" id="id10">*</span></a>/</p>
+</dd>
+<dt>object ClusterEvaluationFor20M145K extends ClusterEvaluationBatch {</dt><dd><p>override val firstTime: String = “2019-06-11”</p>
+<p>override val batchIncrement: Duration = Days(7)</p>
+<p>override val batchDescription = “com.twitter.simclusters_v2.scalding.ClusterEvaluationFor20M145K”</p>
+<p>override val knownForDALDataset = SimclustersV2KnownFor20M145KUpdatedScalaDataset</p>
+<p>override val knownForModelVersion = ModelVersions.Model20M145KUpdated</p>
+<p>override val baselineKnownForDALDataset = SimclustersV2KnownFor20M145KDec11ScalaDataset</p>
+<p>override val baselineKnownForModelVersion = ModelVersions.Model20M145KDec11</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>capesospy-v2 update –build_locally –start_cron cluster_evaluation_for_20M_145k_2020 </p></li>
+<li><p>src/scala/com/twitter/simclusters_v2/capesos_config/atla_proc.yaml</p></li>
+</ul>
+<p><a href="#id11"><span class="problematic" id="id12">*</span></a>/</p>
+</dd>
+<dt>object ClusterEvaluationFor20M145K2020 extends ClusterEvaluationBatch {</dt><dd><p>override val firstTime: String = “2021-01-25”</p>
+<p>override val batchIncrement: Duration = Days(7)</p>
+<dl class="simple">
+<dt>override val batchDescription =</dt><dd><p>“com.twitter.simclusters_v2.scalding.ClusterEvaluationFor20M145K2020”</p>
+</dd>
+</dl>
+<p>override val knownForDALDataset = SimclustersV2KnownFor20M145K2020ScalaDataset</p>
+<p>override val knownForModelVersion = ModelVersions.Model20M145K2020</p>
+<p>override val baselineKnownForDALDataset = SimclustersV2KnownFor20M145KUpdatedScalaDataset</p>
+<p>override val baselineKnownForModelVersion = ModelVersions.Model20M145KUpdated</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../_sources/src/scala/com/twitter/simclusters_v2/scalding/ClusterEvaluation.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

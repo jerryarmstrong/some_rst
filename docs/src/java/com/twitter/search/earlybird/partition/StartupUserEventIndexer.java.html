@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../" id="documentation_options" src="../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.earlybird.partition;</p>
+<p>import java.sql.Timestamp;
+import java.text.DateFormat;
+import java.text.SimpleDateFormat;
+import java.time.Duration;
+import java.util.Date;
+import java.util.Optional;</p>
+<p>import com.google.common.annotations.VisibleForTesting;</p>
+<p>import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;</p>
+<p>import com.twitter.common.util.Clock;
+import com.twitter.search.common.metrics.SearchTimer;
+import com.twitter.search.earlybird.EarlybirdStatus;
+import com.twitter.search.earlybird.common.NonPagingAssert;
+import com.twitter.search.earlybird.common.config.EarlybirdConfig;
+import com.twitter.search.earlybird.common.config.EarlybirdProperty;
+import com.twitter.search.earlybird.common.userupdates.UserScrubGeoMap;
+import com.twitter.search.earlybird.common.userupdates.UserTableBuilderFromSnapshot;
+import com.twitter.search.earlybird.common.userupdates.UserTable;
+import com.twitter.search.earlybird.factory.EarlybirdIndexConfigUtil;</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Indexer class responsible for getting the the <a class="reference external" href="mailto:{&#37;&#52;&#48;link">{<span>&#64;</span>link</a> UserTable} and <a class="reference external" href="mailto:{&#37;&#52;&#48;link">{<span>&#64;</span>link</a> UserScrubGeoMap}</p></li>
+<li><p>indexed up until the current moment.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>public class StartupUserEventIndexer {</dt><dd><p>private static final Logger LOG = LoggerFactory.getLogger(StartupUserEventIndexer.class);
+private static final String LOAD_USER_UPDATE_SNAPSHOT =</p>
+<blockquote>
+<div><p>“loading user update snapshot”;</p>
+</div></blockquote>
+<dl class="simple">
+<dt>private static final String INDEX_ALL_USER_EVENTS =</dt><dd><p>“indexing all user events”;</p>
+</dd>
+<dt>private static final NonPagingAssert FAILED_USER_TABLE_HDFS_LOAD</dt><dd><p>= new NonPagingAssert(“failed_user_table_hdfs_load”);</p>
+</dd>
+<dt>private static final long MAX_RETRY_MILLIS_FOR_SEEK_TO_TIMESTAMP =</dt><dd><p>Duration.ofMinutes(1).toMillis();</p>
+</dd>
+<dt>private static final long SLEEP_MILLIS_BETWEEN_RETRIES_FOR_SEEK_TO_TIMESTAMP =</dt><dd><p>Duration.ofSeconds(1).toMillis();</p>
+</dd>
+</dl>
+<p>private static final long MILLIS_IN_FOURTEEN_DAYS = 1209600000;
+private static final long MILLIS_IN_ONE_DAY = 86400000;</p>
+<p>private final SearchIndexingMetricSet searchIndexingMetricSet;
+private final UserUpdatesStreamIndexer userUpdatesStreamIndexer;
+private final UserScrubGeoEventStreamIndexer userScrubGeoEventStreamIndexer;
+private final SegmentManager segmentManager;
+private final Clock clock;</p>
+<dl>
+<dt>public StartupUserEventIndexer(</dt><dd><blockquote>
+<div><p>SearchIndexingMetricSet searchIndexingMetricSet,
+UserUpdatesStreamIndexer userUpdatesStreamIndexer,
+UserScrubGeoEventStreamIndexer userScrubGeoEventStreamIndexer,
+SegmentManager segmentManager,
+Clock clock) {</p>
+</div></blockquote>
+<p>this.searchIndexingMetricSet = searchIndexingMetricSet;
+this.userUpdatesStreamIndexer = userUpdatesStreamIndexer;
+this.userScrubGeoEventStreamIndexer = userScrubGeoEventStreamIndexer;
+this.segmentManager = segmentManager;
+this.clock = clock;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Index all user events.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>public void indexAllEvents() {</dt><dd><dl class="simple">
+<dt>EarlybirdStatus.beginEvent(</dt><dd><p>INDEX_ALL_USER_EVENTS, searchIndexingMetricSet.startupInUserEventIndexer);</p>
+</dd>
+</dl>
+<p>indexUserUpdates();
+if (EarlybirdConfig.consumeUserScrubGeoEvents()) {</p>
+<blockquote>
+<div><p>indexUserScrubGeoEvents();</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>EarlybirdStatus.endEvent(</dt><dd><p>INDEX_ALL_USER_EVENTS, searchIndexingMetricSet.startupInUserEventIndexer);</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Index user updates until current.</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>public void indexUserUpdates() {</dt><dd><dl class="simple">
+<dt>EarlybirdStatus.beginEvent(</dt><dd><p>LOAD_USER_UPDATE_SNAPSHOT, searchIndexingMetricSet.startupInUserUpdates);</p>
+</dd>
+</dl>
+<p>Optional&lt;UserTable&gt; userTable = buildUserTable();
+if (userTable.isPresent()) {</p>
+<blockquote>
+<div><p>segmentManager.getUserTable().setTable(userTable.get());
+LOG.info(“Set new user table.”);</p>
+<dl>
+<dt>if (!seekToTimestampWithRetriesIfNecessary(</dt><dd><blockquote>
+<div><p>userTable.get().getLastRecordTimestamp(),
+userUpdatesStreamIndexer)) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>LOG.error(“User Updates stream indexer unable to seek to timestamp. “</dt><dd><ul class="simple">
+<li><p>“Will seek to beginning.”);</p></li>
+</ul>
+</dd>
+</dl>
+<p>userUpdatesStreamIndexer.seekToBeginning();</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>LOG.info(“Failed to load user update snapshot. Will reindex user updates from scratch.”);
+FAILED_USER_TABLE_HDFS_LOAD.assertFailed();
+userUpdatesStreamIndexer.seekToBeginning();</p>
+</dd>
+</dl>
+<p>}</p>
+<p>userUpdatesStreamIndexer.readRecordsUntilCurrent();
+LOG.info(“Finished catching up on user updates via Kafka”);</p>
+<dl class="simple">
+<dt>EarlybirdStatus.endEvent(</dt><dd><p>LOAD_USER_UPDATE_SNAPSHOT, searchIndexingMetricSet.startupInUserUpdates);</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Index UserScrubGeoEvents until current.</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+<dt>public void indexUserScrubGeoEvents() {</dt><dd><p>seekUserScrubGeoEventKafkaConsumer();</p>
+<p>SearchTimer timer = new SearchTimer();
+timer.start();
+userScrubGeoEventStreamIndexer.readRecordsUntilCurrent();
+timer.stop();</p>
+<p>LOG.info(“Finished catching up on user scrub geo events via Kafka”);
+LOG.info(“UserScrubGeoMap contains {} users and finished in {} milliseconds”,</p>
+<blockquote>
+<div><p>segmentManager.getUserScrubGeoMap().getNumUsersInMap(), timer.getElapsed());</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Seeks UserScrubGeoEventKafkaConsumer using timestamp derived from</p></li>
+<li><p>getTimestampForUserScrubGeoEventKafkaConsumer().</p></li>
+</ul>
+<p><a href="#id9"><span class="problematic" id="id10">*</span></a>/</p>
+</dd>
+</dl>
+<p>&#64;VisibleForTesting
+public void seekUserScrubGeoEventKafkaConsumer() {</p>
+<blockquote>
+<div><p>long seekTimestamp = getTimestampForUserScrubGeoEventKafkaConsumer();
+if (seekTimestamp == -1) {</p>
+<blockquote>
+<div><p>userScrubGeoEventStreamIndexer.seekToBeginning();</p>
+</div></blockquote>
+<dl>
+<dt>} else {</dt><dd><dl>
+<dt>if (!seekToTimestampWithRetriesIfNecessary(seekTimestamp, userScrubGeoEventStreamIndexer)) {</dt><dd><dl class="simple">
+<dt>LOG.error(“User Scrub Geo stream indexer unable to seek to timestamp. “</dt><dd><ul class="simple">
+<li><p>“Will seek to beginning.”);</p></li>
+</ul>
+</dd>
+</dl>
+<p>userScrubGeoEventStreamIndexer.seekToBeginning();</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Get timestamp to seek UserScrubGeoEventKafkaConsumer to.</p></li>
+<li><p>&#64;return</p></li>
+</ul>
+<p><a href="#id11"><span class="problematic" id="id12">*</span></a>/</p>
+</dd>
+<dt>public long getTimestampForUserScrubGeoEventKafkaConsumer() {</dt><dd><dl class="simple">
+<dt>if (EarlybirdIndexConfigUtil.isArchiveSearch()) {</dt><dd><p>return getTimestampForArchive();</p>
+</dd>
+<dt>} else {</dt><dd><p>return getTimestampForRealtime();</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>For archive: grab scrub gen from config file and convert date into a timestamp. Add buffer of</p></li>
+<li><p>one day. We need all UserScrubGeoEvents since the date of the current scrub gen.</p></li>
+<li></li>
+<li><p>See go/realtime-geo-filtering</p></li>
+<li><p>&#64;return</p></li>
+</ul>
+<p><a href="#id13"><span class="problematic" id="id14">*</span></a>/</p>
+</dd>
+<dt>public long getTimestampForArchive() {</dt><dd><dl>
+<dt>try {</dt><dd><p>String scrubGenString = EarlybirdProperty.EARLYBIRD_SCRUB_GEN.get();</p>
+<p>DateFormat dateFormat = new SimpleDateFormat(“yyyyMMdd”);
+Date date = dateFormat.parse(scrubGenString);
+return new Timestamp(date.getTime()).getTime() - MILLIS_IN_ONE_DAY;</p>
+</dd>
+<dt>} catch (Exception e) {</dt><dd><dl class="simple">
+<dt>LOG.error(“Could not derive timestamp from scrub gen. “</dt><dd><ul class="simple">
+<li><p>“Will seek User Scrub Geo Kafka consumer to beginning of topic”);</p></li>
+</ul>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+return -1;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>For realtime/protected: Compute the timestamp 14 days from the current time. This will account</p></li>
+<li><p>for all events that have occurred during the lifecylce of the current index.</p></li>
+<li></li>
+<li><p>See go/realtime-geo-filtering</p></li>
+</ul>
+<p><a href="#id15"><span class="problematic" id="id16">*</span></a>/</p>
+</dd>
+<dt>public long getTimestampForRealtime() {</dt><dd><p>return System.currentTimeMillis() - MILLIS_IN_FOURTEEN_DAYS;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private boolean seekToTimestampWithRetriesIfNecessary(</dt><dd><blockquote>
+<div><p>long lastRecordTimestamp,
+SimpleStreamIndexer streamIndexer) {</p>
+</div></blockquote>
+<p>long initialTimeMillis = clock.nowMillis();
+int numFailures = 0;
+while (shouldTrySeekToTimestamp(initialTimeMillis, numFailures)) {</p>
+<blockquote>
+<div><dl>
+<dt>try {</dt><dd><p>streamIndexer.seekToTimestamp(lastRecordTimestamp);
+LOG.info(“Seeked consumer to timestamp {} after {} failures”,</p>
+<blockquote>
+<div><p>lastRecordTimestamp, numFailures);</p>
+</div></blockquote>
+<p>return true;</p>
+</dd>
+<dt>} catch (Exception e) {</dt><dd><p>numFailures++;
+LOG.info(“Caught exception when seeking to timestamp. Num failures: {}. Exception: {}”,</p>
+<blockquote>
+<div><p>numFailures, e);</p>
+</div></blockquote>
+<p>// Sleep before attempting to retry
+try {</p>
+<blockquote>
+<div><p>clock.waitFor(SLEEP_MILLIS_BETWEEN_RETRIES_FOR_SEEK_TO_TIMESTAMP);</p>
+</div></blockquote>
+<dl>
+<dt>} catch (InterruptedException interruptedException) {</dt><dd><dl class="simple">
+<dt>LOG.warn(“Interrupted while sleeping between seekToTimestamp retries”,</dt><dd><p>interruptedException);</p>
+</dd>
+</dl>
+<p>// Preserve interrupt status.
+Thread.currentThread().interrupt();
+break;</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}
+// Failed to seek to timestamp
+return false;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private boolean shouldTrySeekToTimestamp(long initialTimeMillis, int numFailures) {</dt><dd><dl class="simple">
+<dt>if (numFailures == 0) {</dt><dd><p>// no attempts have been made yet, so we should try to seek to timestamp
+return true;</p>
+</dd>
+<dt>} else {</dt><dd><p>return clock.nowMillis() - initialTimeMillis &lt; MAX_RETRY_MILLIS_FOR_SEEK_TO_TIMESTAMP;</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>protected Optional&lt;UserTable&gt; buildUserTable() {</dt><dd><p>UserTableBuilderFromSnapshot builder = new UserTableBuilderFromSnapshot();
+return builder.build(segmentManager.getUserTable().getUserIdFilter());</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../_sources/src/java/com/twitter/search/earlybird/partition/StartupUserEventIndexer.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

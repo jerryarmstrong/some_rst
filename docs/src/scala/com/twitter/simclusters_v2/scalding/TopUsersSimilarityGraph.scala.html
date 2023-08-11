@@ -1,0 +1,1498 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../" id="documentation_options" src="../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.simclusters_v2.scalding</p>
+<p>import com.twitter.algebird.Max
+import com.twitter.algebird.Monoid
+import com.twitter.bijection.scrooge.BinaryScalaCodec
+import com.twitter.hermit.candidate.thriftscala.Candidate
+import com.twitter.hermit.candidate.thriftscala.Candidates
+import com.twitter.logging.Logger
+import com.twitter.pluck.source.cassowary.FollowingsCosineSimilaritiesManhattanSource
+import com.twitter.sbf.core.AlgorithmConfig
+import com.twitter.sbf.core.MHAlgorithm
+import com.twitter.sbf.core.PredictionStat
+import com.twitter.sbf.core.SparseBinaryMatrix
+import com.twitter.sbf.core.SparseRealMatrix
+import com.twitter.sbf.graph.Graph
+import com.twitter.scalding._
+import com.twitter.scalding.commons.source.VersionedKeyValSource
+import com.twitter.scalding_internal.dalv2.DAL
+import com.twitter.scalding_internal.job.TwitterExecutionApp
+import com.twitter.scalding_internal.source.lzo_scrooge.FixedPathLzoScrooge
+import com.twitter.simclusters_v2.scalding.common.TypedRichPipe._
+import com.twitter.usersource.snapshot.flat.UsersourceFlatScalaDataset
+import com.twitter.usersource.snapshot.flat.thriftscala.FlatUser
+import com.twitter.wtf.scalding.sims.thriftscala.SimilarUserPair
+import java.io.PrintWriter
+import java.text.DecimalFormat
+import java.util
+import org.apache.hadoop.conf.Configuration
+import org.apache.hadoop.fs.FileSystem
+import org.apache.hadoop.fs.Path
+import scala.collection.JavaConverters._</p>
+<p>case class TopUser(id: Long, activeFollowerCount: Int, screenName: String)</p>
+<p>case class TopUserWithMappedId(topUser: TopUser, mappedId: Int)</p>
+<p>case class AdjList(sourceId: Long, neighbors: List[(Long, Float)])</p>
+<dl>
+<dt>object TopUsersSimilarityGraph {</dt><dd><p>val log = Logger()</p>
+<dl>
+<dt>def topUsers(</dt><dd><p>userSourcePipe: TypedPipe[FlatUser],
+minActiveFollowers: Int,
+topK: Int</p>
+</dd>
+<dt>): TypedPipe[TopUser] = {</dt><dd><dl>
+<dt>userSourcePipe</dt><dd><dl>
+<dt>.collect {</dt><dd><dl>
+<dt>case f: FlatUser</dt><dd><blockquote>
+<div><dl class="simple">
+<dt>if f.activeFollowers.exists(_ &gt;= minActiveFollowers)</dt><dd><p>&amp;&amp; f.followers.isDefined &amp;&amp; f.id.isDefined &amp;&amp; f.screenName.isDefined
+&amp;&amp; !f.deactivated.contains(true) &amp;&amp; !f.suspended.contains(true) =&gt;</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>TopUser(f.id.get, f.activeFollowers.get.toInt, f.screenName.get)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+.groupAll
+.sortedReverseTake(topK)(Ordering.by(_.activeFollowerCount))
+.values
+.flatten</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>This function returns the top most followed userIds truncated to topK</p></li>
+<li><p>Offers the same functionality as TopUsersSimilarityGraph.topUsers but more efficient</p></li>
+<li><p>as we donot store screennames while grouping and sorting the users</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>def topUserIds(</dt><dd><p>userSourcePipe: TypedPipe[FlatUser],
+minActiveFollowers: Int,
+topK: Int</p>
+</dd>
+<dt>): TypedPipe[Long] = {</dt><dd><dl>
+<dt>userSourcePipe</dt><dd><dl>
+<dt>.collect {</dt><dd><dl>
+<dt>case f: FlatUser</dt><dd><blockquote>
+<div><dl class="simple">
+<dt>if f.activeFollowers.exists(_ &gt;= minActiveFollowers)</dt><dd><p>&amp;&amp; f.followers.isDefined &amp;&amp; f.id.isDefined &amp;&amp; f.screenName.isDefined
+&amp;&amp; !f.deactivated.contains(true) &amp;&amp; !f.suspended.contains(true) =&gt;</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>(f.id.get, f.activeFollowers.get)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+.groupAll
+.sortedReverseTake(topK)(Ordering.by(_._2))
+.values
+.flatten
+.keys</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def topUsersWithMappedIds(</dt><dd><p>userSourcePipe: TypedPipe[FlatUser],
+minActiveFollowers: Int</p>
+</dd>
+<dt>): TypedPipe[TopUserWithMappedId] = {</dt><dd><dl>
+<dt>userSourcePipe</dt><dd><dl>
+<dt>.collect {</dt><dd><dl>
+<dt>case f: FlatUser</dt><dd><blockquote>
+<div><dl class="simple">
+<dt>if f.activeFollowers.exists(_ &gt;= minActiveFollowers)</dt><dd><p>&amp;&amp; f.followers.isDefined &amp;&amp; f.id.isDefined &amp;&amp; f.screenName.isDefined
+&amp;&amp; !f.deactivated.contains(true) &amp;&amp; !f.suspended.contains(true) =&gt;</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>TopUser(f.id.get, f.activeFollowers.get.toInt, f.screenName.get)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+.groupAll
+.mapGroup {</p>
+<blockquote>
+<div><dl>
+<dt>case (_, topUserIter) =&gt;</dt><dd><dl class="simple">
+<dt>topUserIter.zipWithIndex.map {</dt><dd><dl class="simple">
+<dt>case (topUser, id) =&gt;</dt><dd><p>TopUserWithMappedId(topUser, id)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+.values</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def topUsersWithMappedIdsTopK(</dt><dd><p>userSourcePipe: TypedPipe[FlatUser],
+minActiveFollowers: Int,
+topK: Int</p>
+</dd>
+<dt>): TypedPipe[TopUserWithMappedId] = {</dt><dd><dl>
+<dt>userSourcePipe</dt><dd><dl>
+<dt>.collect {</dt><dd><dl>
+<dt>case f: FlatUser</dt><dd><blockquote>
+<div><dl class="simple">
+<dt>if f.activeFollowers.exists(_ &gt;= minActiveFollowers)</dt><dd><p>&amp;&amp; f.followers.isDefined &amp;&amp; f.id.isDefined &amp;&amp; f.screenName.isDefined
+&amp;&amp; !f.deactivated.contains(true) &amp;&amp; !f.suspended.contains(true) =&gt;</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>TopUser(f.id.get, f.activeFollowers.get.toInt, f.screenName.get)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+.groupAll
+.sortedReverseTake(topK)(Ordering.by(_.activeFollowerCount))
+.map {</p>
+<blockquote>
+<div><dl>
+<dt>case (_, topUserIter) =&gt;</dt><dd><dl class="simple">
+<dt>topUserIter.zipWithIndex.map {</dt><dd><dl class="simple">
+<dt>case (topUser, id) =&gt;</dt><dd><p>TopUserWithMappedId(topUser, id)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+.flatten</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>This function returns the top most followed and verified userIds truncated to topK</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>def vits(</dt><dd><p>userSourcePipe: TypedPipe[FlatUser],
+minActiveFollowers: Int,
+topK: Int</p>
+</dd>
+<dt>): TypedPipe[Long] = {</dt><dd><dl>
+<dt>userSourcePipe</dt><dd><dl>
+<dt>.collect {</dt><dd><dl>
+<dt>case f: FlatUser</dt><dd><blockquote>
+<div><dl class="simple">
+<dt>if f.verified.contains(true) &amp;&amp; f.id.isDefined &amp;&amp;</dt><dd><p>f.screenName.isDefined &amp;&amp; !f.deactivated.contains(true) &amp;&amp; !f.suspended.contains(
+true) &amp;&amp;
+f.activeFollowers.exists(_ &gt;= minActiveFollowers) =&gt;</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>(f.id.get, f.activeFollowers.get)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+.groupAll
+.sortedReverseTake(topK)(Ordering.by(_._2))
+.values
+.flatten
+.keys</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def topUsersInMemory(</dt><dd><p>userSourcePipe: TypedPipe[FlatUser],
+minActiveFollowers: Int,
+topK: Int</p>
+</dd>
+<dt>): Execution[List[TopUserWithMappedId]] = {</dt><dd><p>log.info(s”Will fetch top $topK users with at least $minActiveFollowers many active followers”)
+topUsers(userSourcePipe, minActiveFollowers, topK).toIterableExecution</p>
+<blockquote>
+<div><dl>
+<dt>.map { idFollowersList =&gt;</dt><dd><dl class="simple">
+<dt>idFollowersList.toList.sortBy(_.id).zipWithIndex.map {</dt><dd><dl class="simple">
+<dt>case (topuser, index) =&gt;</dt><dd><p>TopUserWithMappedId(topuser, index)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def addSelfLoop(</dt><dd><p>input: TypedPipe[(Long, Map[Long, Float])],
+maxToSelfLoopWeight: Float =&gt; Float</p>
+</dd>
+<dt>): TypedPipe[(Long, Map[Long, Float])] = {</dt><dd><dl>
+<dt>input</dt><dd><dl class="simple">
+<dt>.map {</dt><dd><dl class="simple">
+<dt>case (nodeId, neighborMap) if neighborMap.nonEmpty =&gt;</dt><dd><p>val maxEntry = neighborMap.values.max
+val selfLoopWeight = maxToSelfLoopWeight(maxEntry)
+(nodeId, neighborMap ++ Map(nodeId -&gt; selfLoopWeight))</p>
+</dd>
+<dt>case (nodeId, emptyMap) =&gt;</dt><dd><p>(nodeId, emptyMap)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def makeGraph(</dt><dd><p>backfillPipe: TypedPipe[(Long, Map[Long, Float])],
+dirToReadFromOrSaveTo: String</p>
+</dd>
+<dt>): Execution[TypedPipe[(Long, Map[Long, Float])]] = {</dt><dd><dl>
+<dt>backfillPipe</dt><dd><dl class="simple">
+<dt>.map {</dt><dd><dl class="simple">
+<dt>case (nodeId, nbrMap) =&gt;</dt><dd><p>val cands = nbrMap.toList.map { case (nId, wt) =&gt; Candidate(nId, wt) }
+Candidates(nodeId, candidates = cands)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+.make(new FixedPathLzoScrooge(dirToReadFromOrSaveTo, Candidates))
+.map { tp =&gt;</p>
+<blockquote>
+<div><dl class="simple">
+<dt>tp.map {</dt><dd><dl class="simple">
+<dt>case Candidates(nodeId, cands) =&gt;</dt><dd><p>(nodeId, cands.map { case Candidate(nId, wt, _) =&gt; (nId, wt.toFloat) }.toMap)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def getSubgraphFromUserGroupedInput(</dt><dd><p>fullGraph: TypedPipe[Candidates],
+usersToInclude: TypedPipe[Long],
+maxNeighborsPerNode: Int,
+degreeThresholdForStat: Int</p>
+</dd>
+<dt>)(</dt><dd><p>implicit uniqId: UniqueID</p>
+</dd>
+<dt>): TypedPipe[(Long, Map[Long, Float])] = {</dt><dd><p>val numUsersWithZeroEdges = Stat(“num_users_with_zero_edges”)
+val numUsersWithSmallDegree = Stat(”<a href="#id17"><span class="problematic" id="id18">num_users_with_degree_lt_</span></a>” + degreeThresholdForStat)
+val numUsersWithEnoughDegree = Stat(”<a href="#id19"><span class="problematic" id="id20">num_users_with_degree_gte_</span></a>” + degreeThresholdForStat)</p>
+<dl>
+<dt>fullGraph</dt><dd><dl>
+<dt>.map { cands =&gt;</dt><dd><dl>
+<dt>(</dt><dd><p>cands.userId,
+// These candidates are already sorted, but leaving it in just in case the behavior changes upstream
+cands.candidates</p>
+<blockquote>
+<div><p>.map { c =&gt; (c.userId, c.score) }.sortBy(-_._2).take(maxNeighborsPerNode).toMap</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}
+.rightJoin(usersToInclude.asKeys)
+// uncomment for adhoc job
+//.withReducers(110)
+.mapValues(_._1) // discard the Unit
+.toTypedPipe
+.count(“num_sims_records_from_top_users”)
+.flatMap {</p>
+<blockquote>
+<div><dl>
+<dt>case (nodeId, Some(neighborMap)) =&gt;</dt><dd><dl>
+<dt>neighborMap.flatMap {</dt><dd><dl>
+<dt>case (neighborId, edgeWt) =&gt;</dt><dd><dl class="simple">
+<dt>List(</dt><dd><p>(nodeId, Map(neighborId -&gt; Max(edgeWt.toFloat))),
+(neighborId, Map(nodeId -&gt; Max(edgeWt.toFloat)))</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>case (nodeId, None) =&gt; List((nodeId, Map.empty[Long, Max[Float]]))</p>
+</div></blockquote>
+<p>}
+.sumByKey
+// uncomment for adhoc job
+//.withReducers(150)
+.toTypedPipe
+.mapValues(_.mapValues(_.get)) // get the max for each value in each map
+.count(“num_sims_records_after_symmetrization_before_keeping_only_top_users”)
+.join(usersToInclude.asKeys) // only keep records for top users
+// uncomment for adhoc job
+//.withReducers(100)
+.mapValues(_._1)
+.toTypedPipe
+.map {</p>
+<blockquote>
+<div><dl>
+<dt>case (nodeId, neighborsMap) =&gt;</dt><dd><dl>
+<dt>if (neighborsMap.nonEmpty) {</dt><dd><dl class="simple">
+<dt>if (neighborsMap.size &lt; degreeThresholdForStat) {</dt><dd><p>numUsersWithSmallDegree.inc()</p>
+</dd>
+<dt>} else {</dt><dd><p>numUsersWithEnoughDegree.inc()</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>} else {</dt><dd><p>numUsersWithZeroEdges.inc()</p>
+</dd>
+</dl>
+<p>}
+(nodeId, neighborsMap)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+.count(“num_sims_records_after_symmetrization_only_top_users”)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def getSubgraphFromUserGroupedInput(</dt><dd><p>fullGraph: TypedPipe[Candidates],
+usersToInclude: Set[Long],
+maxNeighborsPerNode: Int</p>
+</dd>
+<dt>)(</dt><dd><p>implicit uniqId: UniqueID</p>
+</dd>
+<dt>): TypedPipe[(Long, Map[Long, Float])] = {</dt><dd><p>val numUsersWithZeroEdges = Stat(“num_users_with_zero_edges”)
+val numUsersWithDegreeLessThan10 = Stat(“num_users_with_degree_less_than_10”)</p>
+<dl class="simple">
+<dt>val (intIdsToIncludeSorted: Array[Int], longIdsToIncludeSorted: Array[Long]) =</dt><dd><p>setToSortedArrays(usersToInclude)</p>
+</dd>
+</dl>
+<p>log.info(“Size of intArray “ + intIdsToIncludeSorted.length)
+log.info(“Size of longArray “ + longIdsToIncludeSorted.length)</p>
+<dl>
+<dt>fullGraph</dt><dd><dl>
+<dt>.collect {</dt><dd><dl>
+<dt>case candidates</dt><dd><blockquote>
+<div><dl class="simple">
+<dt>if isIdInIntOrLongArray(</dt><dd><p>candidates.userId,
+intIdsToIncludeSorted,
+longIdsToIncludeSorted) =&gt;</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>val sourceId = candidates.userId
+val toKeep = candidates.candidates.collect {</p>
+<blockquote>
+<div><dl>
+<dt>case neighbor</dt><dd><blockquote>
+<div><dl class="simple">
+<dt>if isIdInIntOrLongArray(</dt><dd><p>neighbor.userId,
+intIdsToIncludeSorted,
+longIdsToIncludeSorted) =&gt;</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>(neighbor.userId, neighbor.score.toFloat)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}.toList</p>
+<p>val toKeepLength = toKeep.size
+if (toKeep.isEmpty) {</p>
+<blockquote>
+<div><p>numUsersWithZeroEdges.inc()</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else if (toKeepLength &lt; 10) {</dt><dd><p>numUsersWithDegreeLessThan10.inc()</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>val knn = if (toKeepLength &gt; maxNeighborsPerNode) {</dt><dd><p>toKeep.sortBy(_._2).takeRight(maxNeighborsPerNode)</p>
+</dd>
+</dl>
+<p>} else toKeep</p>
+<dl>
+<dt>knn.flatMap {</dt><dd><dl>
+<dt>case (nbrId, wt) =&gt;</dt><dd><dl class="simple">
+<dt>List(</dt><dd><p>(sourceId, Map(nbrId -&gt; Max(wt))),
+(nbrId, Map(sourceId -&gt; Max(wt)))</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+.flatten
+.sumByKey
+.toTypedPipe
+.mapValues(_.mapValues(_.get)) // get the max for each value in each map</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def getInMemorySubgraphFromUserGroupedInput(</dt><dd><p>fullGraph: TypedPipe[Candidates],
+usersToInclude: Set[Long],
+maxNeighborsPerNode: Int</p>
+</dd>
+<dt>)(</dt><dd><p>implicit uniqId: UniqueID</p>
+</dd>
+<dt>): Execution[Iterable[AdjList]] = {</dt><dd><dl>
+<dt>getSubgraphFromUserGroupedInput(fullGraph, usersToInclude, maxNeighborsPerNode).map {</dt><dd><dl>
+<dt>case (sourceId, weightedNeighbors) =&gt;</dt><dd><dl class="simple">
+<dt>AdjList(</dt><dd><p>sourceId,
+weightedNeighbors.toList.sortBy(_._1)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}.toIterableExecution</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def isIdInIntOrLongArray(</dt><dd><p>id: Long,
+intArraySorted: Array[Int],
+longArraySorted: Array[Long]</p>
+</dd>
+<dt>): Boolean = {</dt><dd><dl class="simple">
+<dt>if (id &lt; Integer.MAX_VALUE) {</dt><dd><p>util.Arrays.binarySearch(intArraySorted, id.toInt) &gt;= 0</p>
+</dd>
+<dt>} else {</dt><dd><p>util.Arrays.binarySearch(longArraySorted, id.toLong) &gt;= 0</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Creates two sorted arrays out of a set, one with ints and one with longs.</p></li>
+<li><p>Sorted arrays are only slightly more expensive to search in, but empirically I’ve found</p></li>
+<li><p>that the MapReduce job runs more reliably using them than using Set directly.</p></li>
+<li></li>
+<li><p>&#64;param inSet</p></li>
+<li></li>
+<li><p>&#64;return</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>def setToSortedArrays(inSet: Set[Long]): (Array[Int], Array[Long]) = {</dt><dd><dl class="simple">
+<dt>val (intArrayUnconvertedSorted, longArraySorted) =</dt><dd><p>inSet.toArray.sorted.partition { l =&gt; l &lt; Integer.MAX_VALUE }</p>
+</dd>
+</dl>
+<p>(intArrayUnconvertedSorted.map(_.toInt), longArraySorted)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def getInMemorySubgraph(</dt><dd><p>fullGraph: TypedPipe[SimilarUserPair],
+usersToInclude: Set[Long],
+maxNeighborsPerNode: Int</p>
+</dd>
+<dt>)(</dt><dd><p>implicit uniqId: UniqueID</p>
+</dd>
+<dt>): Execution[Iterable[AdjList]] = {</dt><dd><p>val numValidEdges = Stat(“num_valid_edges”)
+val numInvalidEdges = Stat(“num_invalid_edges”)</p>
+<dl class="simple">
+<dt>val (intIdsToIncludeSorted: Array[Int], longIdsToIncludeSorted: Array[Long]) =</dt><dd><p>setToSortedArrays(usersToInclude)</p>
+</dd>
+</dl>
+<p>log.info(“Size of intArray “ + intIdsToIncludeSorted.length)
+log.info(“Size of longArray “ + longIdsToIncludeSorted.length)</p>
+<dl>
+<dt>fullGraph</dt><dd><dl>
+<dt>.filter { edge =&gt;</dt><dd><dl class="simple">
+<dt>val res =</dt><dd><dl class="simple">
+<dt>isIdInIntOrLongArray(edge.sourceId, intIdsToIncludeSorted, longIdsToIncludeSorted) &amp;&amp;</dt><dd><p>isIdInIntOrLongArray(edge.destinationId, intIdsToIncludeSorted, longIdsToIncludeSorted)</p>
+</dd>
+</dl>
+</dd>
+<dt>if (res) {</dt><dd><p>numValidEdges.inc()</p>
+</dd>
+<dt>} else {</dt><dd><p>numInvalidEdges.inc()</p>
+</dd>
+</dl>
+<p>}
+res</p>
+</dd>
+</dl>
+<p>}
+.map { edge =&gt; (edge.sourceId, (edge.destinationId, edge.cosineScore.toFloat)) }
+.group
+.sortedReverseTake(maxNeighborsPerNode)(Ordering.by(_._2))
+.toTypedPipe
+.flatMap {</p>
+<blockquote>
+<div><dl>
+<dt>case (sourceId, weightedNeighbors) =&gt;</dt><dd><dl class="simple">
+<dt>weightedNeighbors.flatMap {</dt><dd><dl class="simple">
+<dt>case (destId, wt) =&gt;</dt><dd><p>/*</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>By default, a k-nearest neighbor graph need not be symmetric, since if u is in v’s
+k nearest neighbors, that doesn’t guarantee that v is in u’s.
+This step adds edges in both directions, but having a Map ensures that each neighbor
+only appears once and not twice. Using Max() operator from Algebird, we take the max
+weight of (u, v) and (v, u) - it is expected that the two will be pretty much the same.</p>
+<p>Example illustrating how Map and Max work together:
+Map(1 -&gt; Max(2)) + Map(1 -&gt; Max(3)) = Map(1 -&gt; Max(3))</p>
+<blockquote>
+<div><blockquote>
+<div><p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</div></blockquote>
+<dl class="simple">
+<dt>List(</dt><dd><p>(sourceId, Map(destId -&gt; Max(wt))),
+(destId, Map(sourceId -&gt; Max(wt)))</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+.sumByKey
+.map {</p>
+<blockquote>
+<div><dl>
+<dt>case (sourceId, weightedNeighbors) =&gt;</dt><dd><dl class="simple">
+<dt>AdjList(</dt><dd><p>sourceId,
+weightedNeighbors.toList.map { case (id, maxWt) =&gt; (id, maxWt.get) }.sortBy(_._1)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+.toIterableExecution</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def convertIterableToGraph(</dt><dd><p>adjList: Iterable[AdjList],
+verticesMapping: Map[Long, Int],
+wtExponent: Float</p>
+</dd>
+<dt>): Graph = {</dt><dd><p>val n = verticesMapping.size
+val neighbors: Array[Array[Int]] = new Array[Array[Int]](n)
+val wts: Array[Array[Float]] = new Array[Array[Float]](n)</p>
+<p>var numEdges = 0L
+var numVertices = 0</p>
+<p>val iter = adjList.iterator
+val verticesWithAtleastOneEdgeBuilder = Set.newBuilder[Long]</p>
+<dl>
+<dt>while (iter.hasNext) {</dt><dd><p>val AdjList(originalId, wtedNeighbors) = iter.next()
+val wtedNeighborsSize = wtedNeighbors.size
+val newId = verticesMapping(originalId) // throw exception if originalId not in map
+if (newId &lt; 0 || newId &gt;= n) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>throw new IllegalStateException(</dt><dd><dl class="simple">
+<dt>s”$originalId has been mapped to $newId, which is outside” +</dt><dd><p>s”the expected range [0, “ + (n - 1) + “]”)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+verticesWithAtleastOneEdgeBuilder += originalId
+neighbors(newId) = new Array[Int](wtedNeighborsSize)
+wts(newId) = new Array[Float](wtedNeighborsSize)
+wtedNeighbors.zipWithIndex.foreach {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case ((nbrId, wt), index) =&gt;</dt><dd><p>neighbors(newId)(index) = verticesMapping(nbrId)
+wts(newId)(index) = wt
+numEdges += 1</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>if (math.abs(wtExponent - 1.0) &gt; 1e-5) {</dt><dd><p>var maxWt = Float.MinValue
+for (index &lt;- wts(newId).indices) {</p>
+<blockquote>
+<div><p>wts(newId)(index) = math.pow(wts(newId)(index), wtExponent).toFloat
+if (wts(newId)(index) &gt; maxWt) {</p>
+<blockquote>
+<div><p>maxWt = wts(newId)(index)</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}
+numVertices += 1
+if (numVertices % 100000 == 0) {</p>
+<blockquote>
+<div><p>log.info(s”Done with $numVertices many vertices.”)</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>val verticesWithAtleastOneEdge = verticesWithAtleastOneEdgeBuilder.result()
+val verticesWithZeroEdges = verticesMapping.keySet.diff(verticesWithAtleastOneEdge)</p>
+<dl class="simple">
+<dt>verticesWithZeroEdges.foreach { originalId =&gt;</dt><dd><p>neighbors(verticesMapping(originalId)) = new Array[Int](0)
+wts(verticesMapping(originalId)) = new Array[Float](0)</p>
+</dd>
+</dl>
+<p>}</p>
+<p>log.info(“Number of vertices with zero edges “ + verticesWithZeroEdges.size)
+log.info(“Number of edges “ + numEdges)
+if (verticesWithZeroEdges.nonEmpty) {</p>
+<blockquote>
+<div><p>log.info(“The vertices with zero edges: “ + verticesWithZeroEdges.mkString(“,”))</p>
+</div></blockquote>
+<p>}</p>
+<p>new Graph(n, numEdges / 2, neighbors, wts)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def run(</dt><dd><p>userSourcePipe: TypedPipe[FlatUser],
+minActiveFollowers: Int,
+topK: Int,
+getSubgraphFn: Set[Long] =&gt; Execution[Iterable[AdjList]],
+wtExponent: Float</p>
+</dd>
+<dt>)(</dt><dd><p>implicit id: UniqueID</p>
+</dd>
+<dt>): Execution[(List[TopUserWithMappedId], Graph)] = {</dt><dd><dl>
+<dt>topUsersInMemory(</dt><dd><p>userSourcePipe,
+minActiveFollowers,
+topK</p>
+</dd>
+<dt>).flatMap { topUsers =&gt;</dt><dd><p>val idMap = topUsers.map { topUser =&gt; (topUser.topUser.id, topUser.mappedId) }.toMap</p>
+<p>log.info(“Got idMap with “ + idMap.size + “ entries.”)
+getSubgraphFn(idMap.keySet)</p>
+<blockquote>
+<div><dl>
+<dt>.map { iterableAdjLists =&gt;</dt><dd><p>log.info(“Going to convert iterable to graph”)
+val tic = System.currentTimeMillis()
+val graph = convertIterableToGraph(</p>
+<blockquote>
+<div><p>iterableAdjLists,
+idMap,
+wtExponent</p>
+</div></blockquote>
+<p>)
+val toc = System.currentTimeMillis()
+val seconds = (toc - tic) * 1.0 / 1e6
+log.info(“Took %.2f seconds to convert iterable to graph”.format(seconds))
+(topUsers, graph)</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def runUsingJoin(</dt><dd><p>mappedUsers: TypedPipe[(Long, Int)],
+allEdges: TypedPipe[Candidates],
+maxNeighborsPerNode: Int</p>
+</dd>
+<dt>)(</dt><dd><p>implicit uniqueID: UniqueID</p>
+</dd>
+<dt>): TypedPipe[(Int, String)] = {</dt><dd><p>val numEdgesAfterFirstJoin = Stat(“num_edges_after_first_join”)
+val numEdgesAfterSecondJoin = Stat(“num_edges_after_second_join”)
+val numEdgesLostTopKTruncated = Stat(“num_edges_lost_topk_truncated”)
+val finalNumEdges = Stat(“final_num_edges”)</p>
+<dl>
+<dt>allEdges</dt><dd><p>.map { cs =&gt; (cs.userId, cs.candidates) }
+.join(mappedUsers)
+.withReducers(6000)
+.flatMap {</p>
+<blockquote>
+<div><dl>
+<dt>case (id, (neighbors, mappedId)) =&gt;</dt><dd><p>val before = neighbors.size
+val topKNeighbors = neighbors.sortBy(-_.score).take(maxNeighborsPerNode)
+val after = topKNeighbors.size
+numEdgesLostTopKTruncated.incBy(before - after)
+topKNeighbors.map { candidate =&gt;</p>
+<blockquote>
+<div><p>numEdgesAfterFirstJoin.inc()
+(candidate.userId, (mappedId, candidate.score.toFloat))</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+.join(mappedUsers)
+.withReducers(9000)
+.flatMap {</p>
+<blockquote>
+<div><dl>
+<dt>case (id, ((mappedNeighborId, score), mappedId)) =&gt;</dt><dd><p>numEdgesAfterSecondJoin.inc()
+List(</p>
+<blockquote>
+<div><p>(mappedId, Map(mappedNeighborId -&gt; Max(score))),
+(mappedNeighborId, Map(mappedId -&gt; Max(score)))</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+.sumByKey
+.withReducers(9100)
+.map {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case (id, nbrMap) =&gt;</dt><dd><p>val sorted = nbrMap.mapValues(_.get).toList.sortBy(-_._2)
+finalNumEdges.incBy(sorted.size)
+val str = sorted.map { case (nbrId, wt) =&gt; “%d %.2f”.format(nbrId, wt) }.mkString(” “)
+(id, str)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def writeToHDFSFile(lines: Iterator[String], conf: Configuration, outputFile: String): Unit = {</dt><dd><p>val fs = FileSystem.newInstance(conf)
+val outputStream = fs.create(new Path(outputFile))
+log.info(“Will write to “ + outputFile)
+var numLines = 0
+val tic = System.currentTimeMillis()
+try {</p>
+<blockquote>
+<div><p>val writer = new PrintWriter(outputStream)
+while (lines.hasNext) {</p>
+<blockquote>
+<div><p>writer.println(lines.next())
+numLines += 1
+if (numLines % 1000000 == 0) {</p>
+<blockquote>
+<div><p>log.info(s”Done writing $numLines lines”)</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}
+writer.flush()
+writer.close()</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} finally {</dt><dd><p>outputStream.close()</p>
+</dd>
+</dl>
+<p>}
+val toc = System.currentTimeMillis()
+val seconds = (toc - tic) * 1.0 / 1e6
+log.info(</p>
+<blockquote>
+<div><p>“Finished writing %d lines to %s. Took %.2f seconds”.format(numLines, outputFile, seconds))</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def writeToHDFSIfHDFS(lines: Iterator[String], mode: Mode, outputFile: String): Unit = {</dt><dd><dl>
+<dt>mode match {</dt><dd><dl class="simple">
+<dt>case Hdfs(_, conf) =&gt;</dt><dd><p>writeToHDFSFile(lines, conf, outputFile)</p>
+</dd>
+</dl>
+<p>case _ =&gt; ()</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def writeTopUsers(topUsers: List[TopUserWithMappedId], mode: Mode, outputFile: String): Unit = {</dt><dd><dl>
+<dt>val topUsersLines =</dt><dd><dl>
+<dt>topUsers.map { topUser =&gt;</dt><dd><p>// Add 1 to mappedId so as to get 1-indexed ids, which are friendlier to humans.
+List(</p>
+<blockquote>
+<div><p>topUser.topUser.id,
+topUser.mappedId + 1,
+topUser.topUser.screenName,
+topUser.topUser.activeFollowerCount</p>
+</div></blockquote>
+<p>).mkString(”t”)</p>
+</dd>
+</dl>
+<p>}.iterator</p>
+</dd>
+</dl>
+<p>writeToHDFSIfHDFS(topUsersLines, mode, outputFile)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def readSimsInput(isKeyValSource: Boolean, inputDir: String): TypedPipe[Candidates] = {</dt><dd><dl class="simple">
+<dt>if (isKeyValSource) {</dt><dd><p>log.info(“Will treat “ + inputDir + “ as SequenceFiles input”)
+val rawInput = FollowingsCosineSimilaritiesManhattanSource(path = inputDir)
+TypedPipe.from(rawInput).map(_._2)</p>
+</dd>
+<dt>} else {</dt><dd><p>log.info(“Will treat “ + inputDir + “ as LzoScrooge input”)
+TypedPipe.from(new FixedPathLzoScrooge(inputDir, Candidates))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>./bazel bundle src/scala/com/twitter/simclusters_v2/scalding:top_users_only &amp;&amp; </p></li>
+<li><p>oscar hdfs –hadoop-client-memory 120000 –user cassowary –host atla-aor-08-sr1 </p></li>
+<li><p>–bundle top_users_only –tool com.twitter.simclusters_v2.scalding.ClusterHdfsGraphApp </p></li>
+<li><p>–screen –screen-detached –tee ldap_logs/SBFOnSubGraphOf100MTopusersWithMappedIds_120GB_RAM </p></li>
+<li><p>– –inputDir adhoc/ldap_subgraphOf100MTopUsersWithMappedIds –numNodesPerCommunity 200 </p></li>
+<li><p>–outputDir adhoc/ldap_SBFOnSubGraphOf100MTopusersWithMappedIds_k500K_120GB_RAM –assumedNumberOfNodes 100200000</p></li>
+</ul>
+<p><a href="#id9"><span class="problematic" id="id10">*</span></a>/</p>
+</dd>
+<dt>object ClusterHdfsGraphApp extends TwitterExecutionApp {</dt><dd><dl>
+<dt>def job: Execution[Unit] =</dt><dd><dl>
+<dt>Execution.getConfigMode.flatMap {</dt><dd><dl>
+<dt>case (config, mode) =&gt;</dt><dd><dl>
+<dt>Execution.withId { implicit uniqueId =&gt;</dt><dd><p>val args = config.getArgs
+val inputDir = args(“inputDir”)
+val numNodesPerCommunity = args.int(“numNodesPerCommunity”, 200)
+val outputDir = args(“outputDir”)
+val assumedNumberOfNodes = args.int(“assumedNumberOfNodes”)
+//val useEdgeWeights = args.boolean(“useEdgeWeights”)</p>
+<dl>
+<dt>val input = TypedPipe.from(TypedTsv[(Int, String)](inputDir)).map {</dt><dd><dl>
+<dt>case (id, nbrStr) =&gt;</dt><dd><p>val nbrsWithWeights = nbrStr.split(” “)
+val nbrsArray = nbrsWithWeights.zipWithIndex</p>
+<blockquote>
+<div><dl class="simple">
+<dt>.collect {</dt><dd><dl class="simple">
+<dt>case (str, index) if index % 2 == 0 =&gt;</dt><dd><p>str.toInt</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>(id, nbrsArray.sorted)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>println(“Gonna assume total number of nodes is “ + assumedNumberOfNodes)</p>
+<dl>
+<dt>input.toIterableExecution.flatMap { adjListsIter =&gt;</dt><dd><p>val nbrs: Array[Array[Int]] = new Array[Array[Int]](assumedNumberOfNodes)
+var numEdges = 0L
+var numVertices = 0
+var maxVertexId = 0</p>
+<p>val tic = System.currentTimeMillis
+adjListsIter.foreach {</p>
+<blockquote>
+<div><dl>
+<dt>case (id, nbrArray) =&gt;</dt><dd><dl class="simple">
+<dt>if (id &gt;= assumedNumberOfNodes) {</dt><dd><dl class="simple">
+<dt>throw new IllegalStateException(</dt><dd><p>s”Yikes! Entry with id $id, &gt;= assumedNumberOfNodes”)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+nbrs(id) = nbrArray
+if (id &gt; maxVertexId) {</p>
+<blockquote>
+<div><p>maxVertexId = id</p>
+</div></blockquote>
+<p>}
+numEdges += nbrArray.length
+numVertices += 1
+if (numVertices % 100000 == 0) {</p>
+<blockquote>
+<div><p>println(s”Done loading $numVertices many vertices. Edges so far: $numEdges”)</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+(0 until assumedNumberOfNodes).foreach { i =&gt;</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (nbrs(i) == null) {</dt><dd><p>nbrs(i) = Array[Int]()</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}
+val toc = System.currentTimeMillis()
+println(</p>
+<blockquote>
+<div><p>“maxVertexId is “ + maxVertexId + “, assumedNumberOfNodes is “ + assumedNumberOfNodes)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>println(</dt><dd><p>s”Done loading graph with $assumedNumberOfNodes nodes and $numEdges edges (counting each edge twice)”)</p>
+</dd>
+</dl>
+<p>println(“Number of nodes with at least neighbor is “ + numVertices)
+println(“Time to load the graph “ + (toc - tic) / 1000.0 / 60.0 + “ minutes”)</p>
+<p>val graph = new Graph(assumedNumberOfNodes, numEdges / 2, nbrs, null)
+val k = assumedNumberOfNodes / numNodesPerCommunity
+println(“Will set number of communities to “ + k)
+val algoConfig = new AlgorithmConfig()</p>
+<blockquote>
+<div><p>.withCpu(16).withK(k)
+.withWtCoeff(10.0).withMaxEpoch(5)</p>
+</div></blockquote>
+<p>var z = new SparseBinaryMatrix(assumedNumberOfNodes, k)
+val err = new PrintWriter(System.err)</p>
+<p>println(“Going to initalize from random neighborhoods”)
+z.initFromBestNeighborhoods(</p>
+<blockquote>
+<div><p>graph,
+(gr: Graph, i: Integer) =&gt; algoConfig.rng.nextDouble,
+false,
+err)</p>
+</div></blockquote>
+<p>println(“Done initializing from random neighborhoods”)</p>
+<p>val prec0 = MHAlgorithm.clusterPrecision(graph, z, 0, 1000, algoConfig.rng)
+println(“Precision of cluster 0:” + prec0.precision)
+val prec1 = MHAlgorithm.clusterPrecision(graph, z, 1, 1000, algoConfig.rng)
+println(“Precision of cluster 1:” + prec1.precision)
+println(</p>
+<blockquote>
+<div><p>“Fraction of empty rows after initializing from random neighborhoods: “ + z.emptyRowProportion)</p>
+</div></blockquote>
+<p>val tic2 = System.currentTimeMillis
+val algo = new MHAlgorithm(algoConfig, graph, z, err)
+val optimizedZ = algo.optimize
+val toc2 = System.currentTimeMillis
+println(“Time to optimize: %.2f secondsn”.format((toc2 - tic2) / 1000.0))
+println(“Time to initialize &amp; optimize: %.2f secondsn”.format((toc2 - toc) / 1000.0))</p>
+<p>val srm = MHAlgorithm.heuristicallyScoreClusterAssignments(graph, optimizedZ)
+val outputIter = (0 to srm.getNumRows).map { rowId =&gt;</p>
+<blockquote>
+<div><p>val rowWithIndices = srm.getColIdsForRow(rowId)
+val rowWithScores = srm.getValuesForRow(rowId)
+val str = rowWithIndices</p>
+<blockquote>
+<div><dl class="simple">
+<dt>.zip(rowWithScores).map {</dt><dd><dl class="simple">
+<dt>case (colId, score) =&gt;</dt><dd><p>“%d:%.2g”.format(colId + 1, score)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}.mkString(” “)</p>
+</div></blockquote>
+<p>“%d %s”.format(rowId, str)</p>
+</div></blockquote>
+<p>}</p>
+<p>TypedPipe.from(outputIter).writeExecution(TypedTsv(outputDir))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>./bazel bundle src/scala/com/twitter/simclusters_v2/scalding:top_users_only &amp;&amp; </p></li>
+<li><p>oscar hdfs –hadoop-client-memory 60000 –user cassowary –host atla-aor-08-sr1 </p></li>
+<li><p>–bundle top_users_only –tool com.twitter.simclusters_v2.scalding.ScalableTopUsersSimilarityGraphApp </p></li>
+<li><p>–screen –screen-detached –tee ldap_logs/SubGraphOf100MTopusersWithMappedIds </p></li>
+<li><p>– –mappedUsersDir adhoc/ldap_top100M_mappedUsers </p></li>
+<li><p>–inputDir adhoc/ldap_approximate_cosine_similarity_follow </p></li>
+<li><p>–outputDir adhoc/ldap_subgraphOf100MTopUsersWithMappedIds_correct_topK</p></li>
+</ul>
+<p><a href="#id11"><span class="problematic" id="id12">*</span></a>/</p>
+</dd>
+<dt>object ScalableTopUsersSimilarityGraphApp extends TwitterExecutionApp {</dt><dd><p>implicit val tz: java.util.TimeZone = DateOps.UTC
+implicit val dp = DateParser.default
+val log = Logger()</p>
+<dl>
+<dt>def job: Execution[Unit] =</dt><dd><dl>
+<dt>Execution.getConfigMode.flatMap {</dt><dd><dl>
+<dt>case (config, mode) =&gt;</dt><dd><dl>
+<dt>Execution.withId { implicit uniqueId =&gt;</dt><dd><p>val args = config.getArgs
+val inputDir = args(“inputDir”)
+val mappedUsersDir = args(“mappedUsersDir”)
+val maxNeighbors = args.int(“maxNeighbors”, 100)
+val outputDir = args(“outputDir”)</p>
+<dl>
+<dt>val mappedUsers = TypedPipe</dt><dd><p>.from(TypedTsv[(Long, Int, String, Int)](mappedUsersDir))
+.map {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case (id, _, _, mappedId) =&gt;</dt><dd><p>(id, mappedId)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+.shard(200)</p>
+</dd>
+<dt>val sims = TypedPipe</dt><dd><p>.from(FollowingsCosineSimilaritiesManhattanSource(path = inputDir))
+.map(_._2)</p>
+</dd>
+<dt>TopUsersSimilarityGraph</dt><dd><dl class="simple">
+<dt>.runUsingJoin(</dt><dd><p>mappedUsers,
+sims,
+maxNeighbors</p>
+</dd>
+</dl>
+<p>).writeExecution(TypedTsv(args(“outputDir”)))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Scalding app using Executions that does the following:</p></li>
+<li></li>
+<li><ol class="arabic simple">
+<li><p>Get the top N most followed users on Twitter</p></li>
+</ol>
+</li>
+<li><p>(also maps them to ids 1 -&gt; N in int space for easier processing)</p></li>
+<li><ol class="arabic simple" start="2">
+<li><p>For each user from the step above, get the top K most similar users for this user from the</p></li>
+</ol>
+</li>
+<li><p>list of N users from the step above.</p></li>
+<li><ol class="arabic simple" start="3">
+<li><p>Construct an undirected graph by setting an edge between (u, v) if</p></li>
+</ol>
+</li>
+<li><p>either v is in u’s top-K similar users list, or u is in v’s top-K similar user’s list.</p></li>
+<li><ol class="arabic simple" start="4">
+<li><p>The weight for the (u, v) edge is set to be the cosine similarity between u and v’s</p></li>
+</ol>
+</li>
+<li><p>follower lists, raised to some exponent &gt; 1.</p></li>
+<li><p>This last step is a heuristic reweighting procedure to give more importance to edges involving</p></li>
+<li><p>more similar users.</p></li>
+<li><ol class="arabic simple" start="5">
+<li><p>Write the above graph to HDFS in Metis format,</p></li>
+</ol>
+</li>
+<li><p>i.e. one line per node, with the line for each node specifying the list of neighbors along</p></li>
+<li><p>with their weights. The first line specifies the number of nodes and the number of edges.</p></li>
+<li></li>
+<li><p>I’ve tested this Scalding job for values of topK upto 20M.</p></li>
+<li></li>
+<li><p>Example invocation:</p></li>
+<li><p>$ ./bazel bundle src/scala/com/twitter/simclusters_v2/scalding:top_users_similarity_graph &amp;&amp; </p></li>
+<li><p>oscar hdfs –hadoop-client-memory 60000 –host atla-amw-03-sr1 –bundle top_users_similarity_graph </p></li>
+<li><p>–tool com.twitter.simclusters_v2.scalding.TopUsersSimilarityGraphApp </p></li>
+<li><p>–hadoop-properties “elephantbird.use.combine.input.format=true;elephantbird.combine.split.size=468435456;mapred.min.split.size=468435456;mapreduce.reduce.memory.mb=5096;mapreduce.reduce.java.opts=-Xmx4400m” </p></li>
+<li><p>–screen –screen-detached –tee logs/20MSubGraphExecution – –date 2017-10-24 </p></li>
+<li><p>–minActiveFollowers 300 –topK 20000000 </p></li>
+<li><p>–inputUserGroupedDir /user/cassowary/manhattan_sequence_files/approximate_cosine_similarity_follow/ </p></li>
+<li><p>–groupedInputInSequenceFiles </p></li>
+<li><p>–maxNeighborsPerNode 100 –wtExponent 2 </p></li>
+<li><p>–outputTopUsersDir /user/your_ldap/simclusters_graph_prep_q42017/top20MUsers </p></li>
+<li><p>–outputGraphDir /user/your_ldap/simclusters_graph_prep_q42017/top20Musers_exp2_100neighbors_metis_graph</p></li>
+<li></li>
+</ul>
+<p><a href="#id13"><span class="problematic" id="id14">*</span></a>/</p>
+</dd>
+<dt>object TopUsersSimilarityGraphApp extends TwitterExecutionApp {</dt><dd><p>implicit val tz: java.util.TimeZone = DateOps.UTC
+implicit val dp = DateParser.default
+val log = Logger()</p>
+<dl>
+<dt>def job: Execution[Unit] =</dt><dd><dl>
+<dt>Execution.getConfigMode.flatMap {</dt><dd><dl>
+<dt>case (config, mode) =&gt;</dt><dd><dl>
+<dt>Execution.withId { implicit uniqueId =&gt;</dt><dd><p>val args = config.getArgs
+val minActiveFollowers = args.int(“minActiveFollowers”, 100000)
+val topK = args.int(“topK”)
+val date = DateRange.parse(args(“date”))
+val inputSimilarPairsDir = args.optional(“inputSimilarPairsDir”)
+val inputUserGroupedDir = args.optional(“inputUserGroupedDir”)
+val isGroupedInputSequenceFiles = args.boolean(“groupedInputInSequenceFiles”)
+val outputTopUsersDir = args(“outputTopUsersDir”)
+val maxNeighborsPerNode = args.int(“maxNeighborsPerNode”, 300)
+val wtExponent = args.float(“wtExponent”, 3.5f)
+val outputGraphDir = args(“outputGraphDir”)</p>
+<p>val userSource = DAL.readMostRecentSnapshot(UsersourceFlatScalaDataset, date).toTypedPipe
+val exception = new IllegalStateException(</p>
+<blockquote>
+<div><p>“Please specify only one of inputSimilarPairsDir or inputUserGroupedDir”</p>
+</div></blockquote>
+<p>)</p>
+<dl class="simple">
+<dt>(inputSimilarPairsDir, inputUserGroupedDir) match {</dt><dd><p>case (Some(_), Some(_)) =&gt; throw exception
+case (None, None) =&gt; throw exception
+case _ =&gt; // no-op</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def getSubgraphFn(usersToInclude: Set[Long]) = {</dt><dd><dl>
+<dt>(inputSimilarPairsDir, inputUserGroupedDir) match {</dt><dd><dl>
+<dt>case (Some(similarPairs), None) =&gt;</dt><dd><dl>
+<dt>val similarUserPairs: TypedPipe[SimilarUserPair] =</dt><dd><dl>
+<dt>TypedPipe.from(</dt><dd><dl class="simple">
+<dt>new FixedPathLzoScrooge(</dt><dd><p>inputSimilarPairsDir.get,
+SimilarUserPair</p>
+</dd>
+</dl>
+<p>))</p>
+</dd>
+</dl>
+</dd>
+<dt>TopUsersSimilarityGraph.getInMemorySubgraph(</dt><dd><p>similarUserPairs,
+usersToInclude,
+maxNeighborsPerNode)</p>
+</dd>
+</dl>
+</dd>
+<dt>case (None, Some(groupedInput)) =&gt;</dt><dd><dl class="simple">
+<dt>val candidatesPipe =</dt><dd><p>TopUsersSimilarityGraph.readSimsInput(isGroupedInputSequenceFiles, groupedInput)</p>
+</dd>
+<dt>TopUsersSimilarityGraph.getInMemorySubgraphFromUserGroupedInput(</dt><dd><p>candidatesPipe,
+usersToInclude,
+maxNeighborsPerNode</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>case _ =&gt; Execution.from(Nil) // we should never get here</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>TopUsersSimilarityGraph</dt><dd><dl>
+<dt>.run(</dt><dd><p>userSource,
+minActiveFollowers,
+topK,
+getSubgraphFn,
+wtExponent</p>
+</dd>
+<dt>).flatMap {</dt><dd><dl>
+<dt>case (topUsersList, graph) =&gt;</dt><dd><p>// We’re writing to HDFS ourselves, from the submitter node.
+// When we use TypedPipe.write, it’s failing for large topK, e.g.10M.
+// We can make the submitter node have a lot of memory, but it’s
+// difficult and suboptimal to give this much memory to all mappers.
+val topUsersExec = Execution.from(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>TopUsersSimilarityGraph</dt><dd><p>.writeTopUsers(topUsersList, mode, outputTopUsersDir + “/all”)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>)</p>
+<p>// We want to make sure the write of the topUsers succeeds, and
+// only then write out the graph. A graph without the topUsers is useless.
+topUsersExec.map { _ =&gt;</p>
+<blockquote>
+<div><p>// We’re writing to HDFS ourselves, from the submitter node.
+// When we use TypedPipe.write, it fails due to OOM on the mappers.
+// We can make the submitter node have a lot of memory, but it’s difficult
+// and suboptimal to give this much memory to all mappers.
+TopUsersSimilarityGraph.writeToHDFSIfHDFS(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>graph</dt><dd><p>.iterableStringRepresentation(new DecimalFormat(“#.###”)).iterator().asScala,</p>
+</dd>
+</dl>
+<p>mode,
+outputGraphDir + “/all”</p>
+</div></blockquote>
+<p>)</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>App that only outputs the topK users on Twitter by active follower count. Example invocation:</p></li>
+<li><p>$ ./bazel bundle src/scala/com/twitter/simclusters_v2/scalding:top_users_only &amp;&amp; </p></li>
+<li><p>oscar hdfs –hadoop-client-memory 60000 –host atla-aor-08-sr1 –bundle top_users_only </p></li>
+<li><p>–tool com.twitter.simclusters_v2.scalding.TopUsersOnlyApp </p></li>
+<li><p>#are these hadoop-properties needed for this job?</p></li>
+<li><p>#–hadoop-properties “scalding.with.reducers.set.explicitly=true;elephantbird.use.combine.input.format=true;elephantbird.combine.split.size=468435456;mapred.min.split.size=468435456” </p></li>
+<li><p>–screen –screen-detached –tee logs/10MTopusersOnlyExecution – –date 2017-10-20 </p></li>
+<li><p>–minActiveFollowers 500 –topK 10000000 </p></li>
+<li><p>–outputTopUsersDir /user/your_ldap/simclusters_graph_prep_q42017/top10MUsers</p></li>
+<li></li>
+<li><p>./bazel bundle src/scala/com/twitter/simclusters_v2/scalding:top_users_only &amp;&amp; </p></li>
+<li><p>oscar hdfs –hadoop-client-memory 60000 –user cassowary –host atla-aor-08-sr1 </p></li>
+<li><p>–bundle top_users_only –tool com.twitter.simclusters_v2.scalding.TopUsersOnlyApp </p></li>
+<li><p>–screen –screen-detached –tee ldap_logs/100MTopusersWithMappedIds </p></li>
+<li><p>– –date 2019-10-11 –minActiveFollowers 67 –outputTopUsersDir adhoc/ldap_top100M_mappedUsers </p></li>
+<li><p>–includeMappedIds</p></li>
+</ul>
+<p><a href="#id15"><span class="problematic" id="id16">*</span></a>/</p>
+</dd>
+<dt>object TopUsersOnlyApp extends TwitterExecutionApp {</dt><dd><p>implicit val tz: java.util.TimeZone = DateOps.UTC
+implicit val dp = DateParser.default
+val log = Logger()</p>
+<dl>
+<dt>def job: Execution[Unit] =</dt><dd><dl>
+<dt>Execution.getConfigMode.flatMap {</dt><dd><dl>
+<dt>case (config, mode) =&gt;</dt><dd><dl>
+<dt>Execution.withId { implicit uniqueId =&gt;</dt><dd><p>val args = config.getArgs
+val minActiveFollowers = args.int(“minActiveFollowers”, 100000)
+val topK = args.int(“topK”, 20000000)
+val date = DateRange.parse(args(“date”))
+val outputTopUsersDir = args(“outputTopUsersDir”)
+val includeMappedIds = args.boolean(“includeMappedIds”)</p>
+<dl>
+<dt>if (includeMappedIds) {</dt><dd><p>println(“Going to include mappedIds in output”)
+TopUsersSimilarityGraph</p>
+<blockquote>
+<div><dl class="simple">
+<dt>.topUsersWithMappedIds(</dt><dd><p>DAL.readMostRecentSnapshot(UsersourceFlatScalaDataset, date).toTypedPipe,
+minActiveFollowers</p>
+</dd>
+</dl>
+<p>)
+.map {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case TopUserWithMappedId(TopUser(id, activeFollowerCount, screenName), mappedId) =&gt;</dt><dd><p>(id, activeFollowerCount, screenName, mappedId)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+.writeExecution(TypedTsv(outputTopUsersDir))</p>
+</div></blockquote>
+</dd>
+<dt>} else {</dt><dd><dl>
+<dt>TopUsersSimilarityGraph</dt><dd><dl class="simple">
+<dt>.topUsersInMemory(</dt><dd><p>DAL.readMostRecentSnapshot(UsersourceFlatScalaDataset, date).toTypedPipe,
+minActiveFollowers,
+topK</p>
+</dd>
+<dt>).map { topUsersList =&gt;</dt><dd><dl class="simple">
+<dt>TopUsersSimilarityGraph.writeTopUsers(</dt><dd><p>topUsersList,
+mode,
+outputTopUsersDir + “/all”)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../_sources/src/scala/com/twitter/simclusters_v2/scalding/TopUsersSimilarityGraph.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

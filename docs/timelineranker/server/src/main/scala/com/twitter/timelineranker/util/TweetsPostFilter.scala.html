@@ -1,0 +1,738 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.timelineranker.util</p>
+<p>import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.logging.Level
+import com.twitter.logging.Logger
+import com.twitter.timelines.model.TweetId
+import com.twitter.timelines.model.UserId
+import com.twitter.timelines.model.tweet.HydratedTweet
+import com.twitter.timelines.util.stats.BooleanObserver
+import com.twitter.timelines.util.stats.RequestStats
+import scala.collection.mutable</p>
+<dl>
+<dt>object TweetFilters extends Enumeration {</dt><dd><p>// Filters independent of users or their follow graph.
+val DuplicateRetweets: Value = Value
+val DuplicateTweets: Value = Value
+val NullcastTweets: Value = Value
+val Replies: Value = Value
+val Retweets: Value = Value</p>
+<p>// Filters that depend on users or their follow graph.
+val DirectedAtNotFollowedUsers: Value = Value
+val NonReplyDirectedAtNotFollowedUsers: Value = Value
+val TweetsFromNotFollowedUsers: Value = Value
+val ExtendedReplies: Value = Value
+val NotQualifiedExtendedReplies: Value = Value
+val NotValidExpandedExtendedReplies: Value = Value
+val NotQualifiedReverseExtendedReplies: Value = Value
+val RecommendedRepliesToNotFollowedUsers: Value = Value</p>
+<p>val None: TweetFilters.ValueSet = ValueSet.empty</p>
+<dl class="simple">
+<dt>val UserDependent: ValueSet = ValueSet(</dt><dd><p>NonReplyDirectedAtNotFollowedUsers,
+DirectedAtNotFollowedUsers,
+TweetsFromNotFollowedUsers,
+ExtendedReplies,
+NotQualifiedExtendedReplies,
+NotValidExpandedExtendedReplies,
+NotQualifiedReverseExtendedReplies,
+RecommendedRepliesToNotFollowedUsers</p>
+</dd>
+</dl>
+<p>)</p>
+<dl class="simple">
+<dt>val UserIndependent: ValueSet = ValueSet(</dt><dd><p>DuplicateRetweets,
+DuplicateTweets,
+NullcastTweets,
+Replies,
+Retweets</p>
+</dd>
+</dl>
+<p>)
+require(</p>
+<blockquote>
+<div><p>(UserDependent ++ UserIndependent) == TweetFilters.values,
+“UserIndependent and UserDependent should contain all possible filters”</p>
+</div></blockquote>
+<p>)</p>
+<dl>
+<dt>private[util] type FilterMethod =</dt><dd><p>(HydratedTweet, TweetsPostFilterParams, MutableState) =&gt; Boolean</p>
+</dd>
+<dt>case class MutableState(</dt><dd><p>seenTweetIds: mutable.Map[TweetId, Int] = mutable.Map.empty[TweetId, Int].withDefaultValue(0)) {
+def isSeen(tweetId: TweetId): Boolean = {</p>
+<blockquote>
+<div><p>val seen = seenTweetIds(tweetId) &gt;= 1
+incrementIf0(tweetId)
+seen</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>def incrementIf0(key: TweetId): Unit = {</dt><dd><dl class="simple">
+<dt>if (seenTweetIds(key) == 0) {</dt><dd><p>seenTweetIds(key) = 1</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>def incrementThenGetCount(key: TweetId): Int = {</dt><dd><p>seenTweetIds(key) += 1
+seenTweetIds(key)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>case class TweetsPostFilterParams(</dt><dd><p>userId: UserId,
+followedUserIds: Seq[UserId],
+inNetworkUserIds: Seq[UserId],
+mutedUserIds: Set[UserId],
+numRetweetsAllowed: Int,
+loggingPrefix: String = “”,
+sourceTweets: Seq[HydratedTweet] = Nil) {
+lazy val sourceTweetsById: Map[TweetId, HydratedTweet] =</p>
+<blockquote>
+<div><p>sourceTweets.map(tweet =&gt; tweet.tweetId -&gt; tweet).toMap</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Performs post-filtering on tweets obtained from search.</p></li>
+<li></li>
+<li><p>Search currently does not perform certain steps or performs them inadequately.</p></li>
+<li><p>This class addresses those shortcomings by post-processing hydrated search results.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>abstract class TweetsPostFilterBase(</dt><dd><p>filters: TweetFilters.ValueSet,
+logger: Logger,
+statsReceiver: StatsReceiver)</p>
+<blockquote>
+<div><p>extends RequestStats {</p>
+</div></blockquote>
+<p>import TweetFilters.FilterMethod
+import TweetFilters.MutableState</p>
+<p>private[this] val baseScope = statsReceiver.scope(“filter”)
+private[this] val directedAtNotFollowedCounter = baseScope.counter(“directedAtNotFollowed”)
+private[this] val nonReplyDirectedAtNotFollowedObserver =</p>
+<blockquote>
+<div><p>BooleanObserver(baseScope.scope(“nonReplyDirectedAtNotFollowed”))</p>
+</div></blockquote>
+<p>private[this] val dupRetweetCounter = baseScope.counter(“dupRetweet”)
+private[this] val dupTweetCounter = baseScope.counter(“dupTweet”)
+private[this] val notFollowedCounter = baseScope.counter(“notFollowed”)
+private[this] val nullcastCounter = baseScope.counter(“nullcast”)
+private[this] val repliesCounter = baseScope.counter(“replies”)
+private[this] val retweetsCounter = baseScope.counter(“retweets”)
+private[this] val extendedRepliesCounter = baseScope.counter(“extendedReplies”)
+private[this] val notQualifiedExtendedRepliesObserver =</p>
+<blockquote>
+<div><p>BooleanObserver(baseScope.scope(“notQualifiedExtendedReplies”))</p>
+</div></blockquote>
+<dl class="simple">
+<dt>private[this] val notValidExpandedExtendedRepliesObserver =</dt><dd><p>BooleanObserver(baseScope.scope(“notValidExpandedExtendedReplies”))</p>
+</dd>
+<dt>private[this] val notQualifiedReverseExtendedRepliesCounter =</dt><dd><p>baseScope.counter(“notQualifiedReverseExtendedReplies”)</p>
+</dd>
+<dt>private[this] val recommendedRepliesToNotFollowedUsersObserver =</dt><dd><p>BooleanObserver(baseScope.scope(“recommendedRepliesToNotFollowedUsers”))</p>
+</dd>
+</dl>
+<p>private[this] val totalCounter = baseScope.counter(Total)
+private[this] val resultCounter = baseScope.counter(“result”)</p>
+<p>// Used for debugging. Its values should remain false for prod use.
+private[this] val alwaysLog = false</p>
+<p>val applicableFilters: Seq[FilterMethod] = Filters.getApplicableFilters(filters)</p>
+<dl>
+<dt>protected def filter(</dt><dd><p>tweets: Seq[HydratedTweet],
+params: TweetsPostFilterParams</p>
+</dd>
+<dt>): Seq[HydratedTweet] = {</dt><dd><p>val invocationState = MutableState()
+val result = tweets.reverseIterator</p>
+<blockquote>
+<div><p>.filterNot { tweet =&gt; applicableFilters.exists(_(tweet, params, invocationState)) }
+.toSeq
+.reverse</p>
+</div></blockquote>
+<p>totalCounter.incr(tweets.size)
+resultCounter.incr(result.size)
+result</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>object Filters {</dt><dd><p>case class FilterData(kind: TweetFilters.Value, method: FilterMethod)
+private val allFilters = Seq[FilterData](</p>
+<blockquote>
+<div><p>FilterData(TweetFilters.DuplicateTweets, isDuplicateTweet),
+FilterData(TweetFilters.DuplicateRetweets, isDuplicateRetweet),
+FilterData(TweetFilters.DirectedAtNotFollowedUsers, isDirectedAtNonFollowedUser),
+FilterData(</p>
+<blockquote>
+<div><p>TweetFilters.NonReplyDirectedAtNotFollowedUsers,
+isNonReplyDirectedAtNonFollowedUser</p>
+</div></blockquote>
+<p>),
+FilterData(TweetFilters.NullcastTweets, isNullcast),
+FilterData(TweetFilters.Replies, isReply),
+FilterData(TweetFilters.Retweets, isRetweet),
+FilterData(TweetFilters.TweetsFromNotFollowedUsers, isFromNonFollowedUser),
+FilterData(TweetFilters.ExtendedReplies, isExtendedReply),
+FilterData(TweetFilters.NotQualifiedExtendedReplies, isNotQualifiedExtendedReply),
+FilterData(TweetFilters.NotValidExpandedExtendedReplies, isNotValidExpandedExtendedReply),
+FilterData(</p>
+<blockquote>
+<div><p>TweetFilters.NotQualifiedReverseExtendedReplies,
+isNotQualifiedReverseExtendedReply),</p>
+</div></blockquote>
+<dl class="simple">
+<dt>FilterData(</dt><dd><p>TweetFilters.RecommendedRepliesToNotFollowedUsers,
+isRecommendedRepliesToNotFollowedUsers)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>)</p>
+<dl class="simple">
+<dt>def getApplicableFilters(filters: TweetFilters.ValueSet): Seq[FilterMethod] = {</dt><dd><p>require(allFilters.map(_.kind).toSet == TweetFilters.values)
+allFilters.filter(data =&gt; filters.contains(data.kind)).map(_.method)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def isNullcast(</dt><dd><p>tweet: HydratedTweet,
+params: TweetsPostFilterParams,
+invocationState: MutableState</p>
+</dd>
+<dt>): Boolean = {</dt><dd><dl>
+<dt>if (tweet.isNullcast) {</dt><dd><p>nullcastCounter.incr()
+log(</p>
+<blockquote>
+<div><p>Level.ERROR,
+() =&gt; s”${params.loggingPrefix}:: Found nullcast tweet: tweet-id: ${tweet.tweetId}”</p>
+</div></blockquote>
+<p>)
+true</p>
+</dd>
+<dt>} else {</dt><dd><p>false</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def isReply(</dt><dd><p>tweet: HydratedTweet,
+params: TweetsPostFilterParams,
+invocationState: MutableState</p>
+</dd>
+<dt>): Boolean = {</dt><dd><dl class="simple">
+<dt>if (tweet.hasReply) {</dt><dd><p>repliesCounter.incr()
+log(Level.OFF, () =&gt; s”${params.loggingPrefix}:: Removed reply: tweet-id: ${tweet.tweetId}”)
+true</p>
+</dd>
+<dt>} else {</dt><dd><p>false</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def isRetweet(</dt><dd><p>tweet: HydratedTweet,
+params: TweetsPostFilterParams,
+invocationState: MutableState</p>
+</dd>
+<dt>): Boolean = {</dt><dd><dl>
+<dt>if (tweet.isRetweet) {</dt><dd><p>retweetsCounter.incr()
+log(</p>
+<blockquote>
+<div><p>Level.OFF,
+() =&gt; s”${params.loggingPrefix}:: Removed retweet: tweet-id: ${tweet.tweetId}”</p>
+</div></blockquote>
+<p>)
+true</p>
+</dd>
+<dt>} else {</dt><dd><p>false</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def isFromNonFollowedUser(</dt><dd><p>tweet: HydratedTweet,
+params: TweetsPostFilterParams,
+invocationState: MutableState</p>
+</dd>
+<dt>): Boolean = {</dt><dd><dl>
+<dt>if ((tweet.userId != params.userId) &amp;&amp; !params.inNetworkUserIds.contains(tweet.userId)) {</dt><dd><p>notFollowedCounter.incr()
+log(</p>
+<blockquote>
+<div><p>Level.ERROR,
+() =&gt;</p>
+<blockquote>
+<div><p>s”${params.loggingPrefix}:: Found tweet from not-followed user: ${tweet.tweetId} from ${tweet.userId}”</p>
+</div></blockquote>
+</div></blockquote>
+<p>)
+true</p>
+</dd>
+<dt>} else {</dt><dd><p>false</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def isDirectedAtNonFollowedUser(</dt><dd><p>tweet: HydratedTweet,
+params: TweetsPostFilterParams,
+invocationState: MutableState</p>
+</dd>
+<dt>): Boolean = {</dt><dd><dl>
+<dt>tweet.directedAtUser.exists { directedAtUserId =&gt;</dt><dd><dl class="simple">
+<dt>val shouldFilterOut = (tweet.userId != params.userId) &amp;&amp; !params.inNetworkUserIds</dt><dd><p>.contains(directedAtUserId)</p>
+</dd>
+</dl>
+<p>// We do not log here because search is known to not handle this case.
+if (shouldFilterOut) {</p>
+<blockquote>
+<div><dl>
+<dt>log(</dt><dd><p>Level.OFF,
+() =&gt;</p>
+<blockquote>
+<div><p>s”${params.loggingPrefix}:: Found tweet: ${tweet.tweetId} directed-at not-followed user: $directedAtUserId”</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>)
+directedAtNotFollowedCounter.incr()</p>
+</div></blockquote>
+<p>}
+shouldFilterOut</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def isNonReplyDirectedAtNonFollowedUser(</dt><dd><p>tweet: HydratedTweet,
+params: TweetsPostFilterParams,
+invocationState: MutableState</p>
+</dd>
+<dt>): Boolean = {</dt><dd><dl>
+<dt>tweet.directedAtUser.exists { directedAtUserId =&gt;</dt><dd><dl class="simple">
+<dt>val shouldFilterOut = !tweet.hasReply &amp;&amp;</dt><dd><p>(tweet.userId != params.userId) &amp;&amp;
+!params.inNetworkUserIds.contains(directedAtUserId)</p>
+</dd>
+</dl>
+<p>// We do not log here because search is known to not handle this case.
+if (nonReplyDirectedAtNotFollowedObserver(shouldFilterOut)) {</p>
+<blockquote>
+<div><dl>
+<dt>log(</dt><dd><p>Level.OFF,
+() =&gt;</p>
+<blockquote>
+<div><p>s”${params.loggingPrefix}:: Found non-reply tweet: ${tweet.tweetId} directed-at not-followed user: $directedAtUserId”</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<p>}
+shouldFilterOut</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Determines whether the given tweet has already been seen.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>private def isDuplicateTweet(</dt><dd><p>tweet: HydratedTweet,
+params: TweetsPostFilterParams,
+invocationState: MutableState</p>
+</dd>
+<dt>): Boolean = {</dt><dd><p>val shouldFilterOut = invocationState.isSeen(tweet.tweetId)
+if (shouldFilterOut) {</p>
+<blockquote>
+<div><p>dupTweetCounter.incr()
+log(Level.ERROR, () =&gt; s”${params.loggingPrefix}:: Duplicate tweet found: ${tweet.tweetId}”)</p>
+</div></blockquote>
+<p>}
+shouldFilterOut</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>If the given tweet is a retweet, determines whether the source tweet</p></li>
+<li><p>of that retweet has already been seen.</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>private def isDuplicateRetweet(</dt><dd><p>tweet: HydratedTweet,
+params: TweetsPostFilterParams,
+invocationState: MutableState</p>
+</dd>
+<dt>): Boolean = {</dt><dd><p>invocationState.incrementIf0(tweet.tweetId)
+tweet.sourceTweetId.exists { sourceTweetId =&gt;</p>
+<blockquote>
+<div><p>val seenCount = invocationState.incrementThenGetCount(sourceTweetId)
+val shouldFilterOut = seenCount &gt; params.numRetweetsAllowed
+if (shouldFilterOut) {</p>
+<blockquote>
+<div><p>// We do not log here because search is known to not handle this case.
+dupRetweetCounter.incr()
+log(</p>
+<blockquote>
+<div><p>Level.OFF,
+() =&gt;</p>
+<blockquote>
+<div><p>s”${params.loggingPrefix}:: Found dup retweet: ${tweet.tweetId} (source tweet: $sourceTweetId), count: $seenCount”</p>
+</div></blockquote>
+</div></blockquote>
+<p>)</p>
+</div></blockquote>
+<p>}
+shouldFilterOut</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def isExtendedReply(</dt><dd><p>tweet: HydratedTweet,
+params: TweetsPostFilterParams,
+invocationState: MutableState</p>
+</dd>
+<dt>): Boolean = {</dt><dd><dl class="simple">
+<dt>val shouldFilterOut = ExtendedRepliesFilter.isExtendedReply(</dt><dd><p>tweet,
+params.followedUserIds</p>
+</dd>
+</dl>
+<p>)
+if (shouldFilterOut) {</p>
+<blockquote>
+<div><p>extendedRepliesCounter.incr()
+log(</p>
+<blockquote>
+<div><p>Level.DEBUG,
+() =&gt; s”${params.loggingPrefix}:: extended reply to be filtered: ${tweet.tweetId}”</p>
+</div></blockquote>
+<p>)</p>
+</div></blockquote>
+<p>}
+shouldFilterOut</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def isNotQualifiedExtendedReply(</dt><dd><p>tweet: HydratedTweet,
+params: TweetsPostFilterParams,
+invocationState: MutableState</p>
+</dd>
+<dt>): Boolean = {</dt><dd><dl class="simple">
+<dt>val shouldFilterOut = ExtendedRepliesFilter.isNotQualifiedExtendedReply(</dt><dd><p>tweet,
+params.userId,
+params.followedUserIds,
+params.mutedUserIds,
+params.sourceTweetsById</p>
+</dd>
+</dl>
+<p>)
+if (notQualifiedExtendedRepliesObserver(shouldFilterOut)) {</p>
+<blockquote>
+<div><dl>
+<dt>log(</dt><dd><p>Level.DEBUG,
+() =&gt;</p>
+<blockquote>
+<div><p>s”${params.loggingPrefix}:: non qualified extended reply to be filtered: ${tweet.tweetId}”</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<p>}
+shouldFilterOut</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def isNotValidExpandedExtendedReply(</dt><dd><p>tweet: HydratedTweet,
+params: TweetsPostFilterParams,
+invocationState: MutableState</p>
+</dd>
+<dt>): Boolean = {</dt><dd><dl class="simple">
+<dt>val shouldFilterOut = ExtendedRepliesFilter.isNotValidExpandedExtendedReply(</dt><dd><p>tweet,
+params.userId,
+params.followedUserIds,
+params.mutedUserIds,
+params.sourceTweetsById</p>
+</dd>
+</dl>
+<p>)
+if (notValidExpandedExtendedRepliesObserver(shouldFilterOut)) {</p>
+<blockquote>
+<div><dl>
+<dt>log(</dt><dd><p>Level.DEBUG,
+() =&gt;</p>
+<blockquote>
+<div><p>s”${params.loggingPrefix}:: non qualified extended reply to be filtered: ${tweet.tweetId}”</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<p>}
+shouldFilterOut</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def isRecommendedRepliesToNotFollowedUsers(</dt><dd><p>tweet: HydratedTweet,
+params: TweetsPostFilterParams,
+invocationState: MutableState</p>
+</dd>
+<dt>): Boolean = {</dt><dd><dl class="simple">
+<dt>val shouldFilterOut = RecommendedRepliesFilter.isRecommendedReplyToNotFollowedUser(</dt><dd><p>tweet,
+params.userId,
+params.followedUserIds,
+params.mutedUserIds</p>
+</dd>
+</dl>
+<p>)
+if (recommendedRepliesToNotFollowedUsersObserver(shouldFilterOut)) {</p>
+<blockquote>
+<div><dl>
+<dt>log(</dt><dd><p>Level.DEBUG,
+() =&gt;</p>
+<blockquote>
+<div><p>s”${params.loggingPrefix}:: non qualified recommended reply to be filtered: ${tweet.tweetId}”</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<p>}
+shouldFilterOut</p>
+</dd>
+</dl>
+<p>}</p>
+<p>//For now this filter is meant to be used only with reply tweets from the inReplyToUserId query
+private def isNotQualifiedReverseExtendedReply(</p>
+<blockquote>
+<div><p>tweet: HydratedTweet,
+params: TweetsPostFilterParams,
+invocationState: MutableState</p>
+</div></blockquote>
+<dl>
+<dt>): Boolean = {</dt><dd><dl class="simple">
+<dt>val shouldFilterOut = !ReverseExtendedRepliesFilter.isQualifiedReverseExtendedReply(</dt><dd><p>tweet,
+params.userId,
+params.followedUserIds,
+params.mutedUserIds,
+params.sourceTweetsById</p>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>if (shouldFilterOut) {</dt><dd><p>notQualifiedReverseExtendedRepliesCounter.incr()
+log(</p>
+<blockquote>
+<div><p>Level.DEBUG,
+() =&gt;</p>
+<blockquote>
+<div><p>s”${params.loggingPrefix}:: non qualified reverse extended reply to be filtered: ${tweet.tweetId}”</p>
+</div></blockquote>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>}
+shouldFilterOut</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def log(level: Level, message: () =&gt; String): Unit = {</dt><dd><dl class="simple">
+<dt>if (alwaysLog || ((level != Level.OFF) &amp;&amp; logger.isLoggable(level))) {</dt><dd><p>val updatedLevel = if (alwaysLog) Level.INFO else level
+logger.log(updatedLevel, message())</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>class TweetsPostFilter(filters: TweetFilters.ValueSet, logger: Logger, statsReceiver: StatsReceiver)</dt><dd><blockquote>
+<div><p>extends TweetsPostFilterBase(filters, logger, statsReceiver) {</p>
+</div></blockquote>
+<dl>
+<dt>def apply(</dt><dd><p>userId: UserId,
+followedUserIds: Seq[UserId],
+inNetworkUserIds: Seq[UserId],
+mutedUserIds: Set[UserId],
+tweets: Seq[HydratedTweet],
+numRetweetsAllowed: Int = 1,
+sourceTweets: Seq[HydratedTweet] = Nil</p>
+</dd>
+<dt>): Seq[HydratedTweet] = {</dt><dd><p>val loggingPrefix = s”userId: $userId”
+val params = TweetsPostFilterParams(</p>
+<blockquote>
+<div><p>userId = userId,
+followedUserIds = followedUserIds,
+inNetworkUserIds = inNetworkUserIds,
+mutedUserIds = mutedUserIds,
+numRetweetsAllowed = numRetweetsAllowed,
+loggingPrefix = loggingPrefix,
+sourceTweets = sourceTweets</p>
+</div></blockquote>
+<p>)
+super.filter(tweets, params)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>class TweetsPostFilterUserIndependent(</dt><dd><p>filters: TweetFilters.ValueSet,
+logger: Logger,
+statsReceiver: StatsReceiver)</p>
+<blockquote>
+<div><p>extends TweetsPostFilterBase(filters, logger, statsReceiver) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>require(</dt><dd><p>(filters – TweetFilters.UserIndependent).isEmpty,
+“Only user independent filters are supported”</p>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>def apply(tweets: Seq[HydratedTweet], numRetweetsAllowed: Int = 1): Seq[HydratedTweet] = {</dt><dd><dl class="simple">
+<dt>val params = TweetsPostFilterParams(</dt><dd><p>userId = 0L,
+followedUserIds = Seq.empty,
+inNetworkUserIds = Seq.empty,
+mutedUserIds = Set.empty,
+numRetweetsAllowed</p>
+</dd>
+</dl>
+<p>)
+super.filter(tweets, params)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/timelineranker/server/src/main/scala/com/twitter/timelineranker/util/TweetsPostFilter.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

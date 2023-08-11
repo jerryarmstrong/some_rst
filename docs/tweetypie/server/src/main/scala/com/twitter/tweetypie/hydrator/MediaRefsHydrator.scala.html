@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.tweetypie
+package hydrator</p>
+<p>import com.twitter.mediaservices.commons.thriftscala.MediaKey
+import com.twitter.mediaservices.media_util.GenericMediaKey
+import com.twitter.spam.rtf.thriftscala.SafetyLevel
+import com.twitter.stitch.Stitch
+import com.twitter.tweetypie.core.ValueState
+import com.twitter.tweetypie.thriftscala.MediaEntity
+import com.twitter.tweetypie.thriftscala.UrlEntity
+import com.twitter.tweetypie.media.thriftscala.MediaRef
+import com.twitter.tweetypie.repository.TweetQuery
+import com.twitter.tweetypie.repository.TweetRepository
+import com.twitter.tweetypie.thriftscala.FieldByPath</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>MediaRefsHydrator hydrates the Tweet.mediaRefs field based on stored media keys</p></li>
+<li><p>and pasted media. Media keys are available in three ways:</p></li>
+<li></li>
+<li><ol class="arabic simple">
+<li><p>(For old Tweets): in the stored MediaEntity</p></li>
+</ol>
+</li>
+<li><ol class="arabic simple" start="2">
+<li><p>(For 2016+ Tweets): in the mediaKeys field</p></li>
+</ol>
+</li>
+<li><ol class="arabic simple" start="3">
+<li><p>From other Tweets using pasted media</p></li>
+</ol>
+</li>
+<li></li>
+<li><p>This hydrator combines these three sources into a single field, providing the</p></li>
+<li><p>media key and source Tweet information for pasted media.</p></li>
+<li></li>
+<li><p>Long-term we will move this logic to the write path and backfill the field for old Tweets.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>object MediaRefsHydrator {</dt><dd><p>type Type = ValueHydrator[Option[Seq[MediaRef]], Ctx]</p>
+<dl>
+<dt>case class Ctx(</dt><dd><p>media: Seq[MediaEntity],
+mediaKeys: Seq[MediaKey],
+urlEntities: Seq[UrlEntity],
+underlyingTweetCtx: TweetCtx)</p>
+<blockquote>
+<div><p>extends TweetCtx.Proxy {</p>
+</div></blockquote>
+<p>def includePastedMedia: Boolean = opts.include.pastedMedia</p>
+</dd>
+</dl>
+<p>}</p>
+<p>val hydratedField: FieldByPath = fieldByPath(Tweet.MediaRefsField)</p>
+<dl>
+<dt>def mediaKeyToMediaRef(mediaKey: MediaKey): MediaRef =</dt><dd><dl class="simple">
+<dt>MediaRef(</dt><dd><p>genericMediaKey = GenericMediaKey(mediaKey).toStringKey()</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>// Convert a pasted Tweet into a Seq of MediaRef from that Tweet with the correct sourceTweetId and sourceUserId
+def pastedTweetToMediaRefs(</p>
+<blockquote>
+<div><p>tweet: Tweet</p>
+</div></blockquote>
+<dl>
+<dt>): Seq[MediaRef] =</dt><dd><dl>
+<dt>tweet.mediaRefs.toSeq.flatMap { mediaRefs =&gt;</dt><dd><dl>
+<dt>mediaRefs.map(</dt><dd><dl class="simple">
+<dt>_.copy(</dt><dd><p>sourceTweetId = Some(tweet.id),
+sourceUserId = Some(getUserId(tweet))</p>
+</dd>
+</dl>
+<p>))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>// Fetch MediaRefs from pasted media Tweet URLs in the Tweet text
+def getPastedMediaRefs(</p>
+<blockquote>
+<div><p>repo: TweetRepository.Optional,
+ctx: Ctx,
+includePastedMedia: Gate[Unit]</p>
+</div></blockquote>
+<dl>
+<dt>): Stitch[Seq[MediaRef]] = {</dt><dd><p>if (includePastedMedia() &amp;&amp; ctx.includePastedMedia) {</p>
+<blockquote>
+<div><p>// Extract Tweet ids from pasted media permalinks in the Tweet text
+val pastedMediaTweetIds: Seq[TweetId] =</p>
+<blockquote>
+<div><p>PastedMediaHydrator.pastedIdsAndEntities(ctx.tweetId, ctx.urlEntities).map(_._1)</p>
+</div></blockquote>
+<dl>
+<dt>val opts = TweetQuery.Options(</dt><dd><dl class="simple">
+<dt>include = TweetQuery.Include(</dt><dd><p>tweetFields = Set(Tweet.CoreDataField.id, Tweet.MediaRefsField.id),
+pastedMedia = false // don’t recursively load pasted media refs</p>
+</dd>
+</dl>
+<p>))</p>
+</dd>
+</dl>
+<p>// Load a Seq of Tweets with pasted media, ignoring any returned with NotFound or a FilteredState
+val pastedTweets: Stitch[Seq[Tweet]] = Stitch</p>
+<blockquote>
+<div><dl class="simple">
+<dt>.traverse(pastedMediaTweetIds) { id =&gt;</dt><dd><p>repo(id, opts)</p>
+</dd>
+</dl>
+<p>}.map(_.flatten)</p>
+</div></blockquote>
+<p>pastedTweets.map(_.flatMap(pastedTweetToMediaRefs))</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>Stitch.Nil</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// Make empty Seq None and non-empty Seq Some(Seq(…)) to comply with the thrift field type
+def optionalizeSeq(mediaRefs: Seq[MediaRef]): Option[Seq[MediaRef]] =</p>
+<blockquote>
+<div><p>Some(mediaRefs).filterNot(_.isEmpty)</p>
+</div></blockquote>
+<dl>
+<dt>def apply(</dt><dd><p>repo: TweetRepository.Optional,
+includePastedMedia: Gate[Unit]</p>
+</dd>
+<dt>): Type = {</dt><dd><dl>
+<dt>ValueHydrator[Option[Seq[MediaRef]], Ctx] { (curr, ctx) =&gt;</dt><dd><p>// Fetch mediaRefs from Tweet media
+val storedMediaRefs: Seq[MediaRef] = ctx.media.map { mediaEntity =&gt;</p>
+<blockquote>
+<div><p>// Use MediaKeyHydrator.infer to determine the media key from the media entity
+val mediaKey = MediaKeyHydrator.infer(Some(ctx.mediaKeys), mediaEntity)
+mediaKeyToMediaRef(mediaKey)</p>
+</div></blockquote>
+<p>}</p>
+<p>// Fetch mediaRefs from pasted media
+getPastedMediaRefs(repo, ctx, includePastedMedia).liftToTry.map {</p>
+<blockquote>
+<div><dl>
+<dt>case Return(pastedMediaRefs) =&gt;</dt><dd><p>// Combine the refs from the Tweet’s own media and those from pasted media, then limit
+// to MaxMediaEntitiesPerTweet.
+val limitedRefs =</p>
+<blockquote>
+<div><p>(storedMediaRefs ++ pastedMediaRefs).take(PastedMediaHydrator.MaxMediaEntitiesPerTweet)</p>
+</div></blockquote>
+<p>ValueState.delta(curr, optionalizeSeq(limitedRefs))</p>
+</dd>
+<dt>case Throw(_) =&gt;</dt><dd><p>ValueState.partial(optionalizeSeq(storedMediaRefs), hydratedField)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+<dt>}.onlyIf { (_, ctx) =&gt;</dt><dd><p>ctx.tweetFieldRequested(Tweet.MediaRefsField) ||
+ctx.opts.safetyLevel != SafetyLevel.FilterNone</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/tweetypie/server/src/main/scala/com/twitter/tweetypie/hydrator/MediaRefsHydrator.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

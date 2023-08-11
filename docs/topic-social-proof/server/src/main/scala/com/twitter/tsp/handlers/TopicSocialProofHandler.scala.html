@@ -1,0 +1,886 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.tsp.handlers</p>
+<p>import com.twitter.conversions.DurationOps._
+import com.twitter.finagle.mux.ClientDiscardedRequestException
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.frigate.common.util.StatsUtil
+import com.twitter.simclusters_v2.common.SemanticCoreEntityId
+import com.twitter.simclusters_v2.common.TweetId
+import com.twitter.simclusters_v2.thriftscala.EmbeddingType
+import com.twitter.simclusters_v2.thriftscala.ModelVersion
+import com.twitter.strato.response.Err
+import com.twitter.storehaus.ReadableStore
+import com.twitter.timelines.configapi.Params
+import com.twitter.topic_recos.common.Configs.ConsumerTopicEmbeddingType
+import com.twitter.topic_recos.common.Configs.DefaultModelVersion
+import com.twitter.topic_recos.common.Configs.ProducerTopicEmbeddingType
+import com.twitter.topic_recos.common.Configs.TweetEmbeddingType
+import com.twitter.topiclisting.TopicListingViewerContext
+import com.twitter.topic_recos.common.LocaleUtil
+import com.twitter.topiclisting.AnnotationRuleProvider
+import com.twitter.tsp.common.DeciderConstants
+import com.twitter.tsp.common.LoadShedder
+import com.twitter.tsp.common.RecTargetFactory
+import com.twitter.tsp.common.TopicSocialProofDecider
+import com.twitter.tsp.common.TopicSocialProofParams
+import com.twitter.tsp.stores.TopicSocialProofStore
+import com.twitter.tsp.stores.TopicSocialProofStore.TopicSocialProof
+import com.twitter.tsp.stores.UttTopicFilterStore
+import com.twitter.tsp.stores.TopicTweetsCosineSimilarityAggregateStore.ScoreKey
+import com.twitter.tsp.thriftscala.MetricTag
+import com.twitter.tsp.thriftscala.TopicFollowType
+import com.twitter.tsp.thriftscala.TopicListingSetting
+import com.twitter.tsp.thriftscala.TopicSocialProofRequest
+import com.twitter.tsp.thriftscala.TopicSocialProofResponse
+import com.twitter.tsp.thriftscala.TopicWithScore
+import com.twitter.tsp.thriftscala.TspTweetInfo
+import com.twitter.tsp.utils.HealthSignalsUtils
+import com.twitter.util.Future
+import com.twitter.util.Timer
+import com.twitter.util.Duration
+import com.twitter.util.TimeoutException</p>
+<p>import scala.util.Random</p>
+<dl>
+<dt>class TopicSocialProofHandler(</dt><dd><p>topicSocialProofStore: ReadableStore[TopicSocialProofStore.Query, Seq[TopicSocialProof]],
+tweetInfoStore: ReadableStore[TweetId, TspTweetInfo],
+uttTopicFilterStore: UttTopicFilterStore,
+recTargetFactory: RecTargetFactory,
+decider: TopicSocialProofDecider,
+statsReceiver: StatsReceiver,
+loadShedder: LoadShedder,
+timer: Timer) {</p>
+<p>import TopicSocialProofHandler._</p>
+<dl>
+<dt>def getTopicSocialProofResponse(</dt><dd><p>request: TopicSocialProofRequest</p>
+</dd>
+<dt>): Future[TopicSocialProofResponse] = {</dt><dd><p>val scopedStats = statsReceiver.scope(request.displayLocation.toString)
+scopedStats.counter(“fanoutRequests”).incr(request.tweetIds.size)
+scopedStats.stat(“numTweetsPerRequest”).add(request.tweetIds.size)
+StatsUtil.trackBlockStats(scopedStats) {</p>
+<blockquote>
+<div><dl>
+<dt>recTargetFactory</dt><dd><dl>
+<dt>.buildRecTopicSocialProofTarget(request).flatMap { target =&gt;</dt><dd><dl>
+<dt>val enableCosineSimilarityScoreCalculation =</dt><dd><p>decider.isAvailable(DeciderConstants.enableTopicSocialProofScore)</p>
+</dd>
+<dt>val semanticCoreVersionId =</dt><dd><p>target.params(TopicSocialProofParams.TopicTweetsSemanticCoreVersionId)</p>
+</dd>
+<dt>val semanticCoreVersionIdsSet =</dt><dd><p>target.params(TopicSocialProofParams.TopicTweetsSemanticCoreVersionIdsSet)</p>
+</dd>
+<dt>val allowListWithTopicFollowTypeFut = uttTopicFilterStore</dt><dd><dl>
+<dt>.getAllowListTopicsForUser(</dt><dd><p>request.userId,
+request.topicListingSetting,
+TopicListingViewerContext</p>
+<blockquote>
+<div><dl class="simple">
+<dt>.fromThrift(request.context).copy(languageCode =</dt><dd><p>LocaleUtil.getStandardLanguageCode(request.context.languageCode)),</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>request.bypassModes.map(_.toSet)</p>
+</dd>
+<dt>).rescue {</dt><dd><dl class="simple">
+<dt>case _ =&gt;</dt><dd><p>scopedStats.counter(“uttTopicFilterStoreFailure”).incr()
+Future.value(Map.empty[SemanticCoreEntityId, Option[TopicFollowType]])</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>val tweetInfoMapFut: Future[Map[TweetId, Option[TspTweetInfo]]] = Future</dt><dd><dl class="simple">
+<dt>.collect(</dt><dd><p>tweetInfoStore.multiGet(request.tweetIds.toSet)</p>
+</dd>
+<dt>).raiseWithin(TweetInfoStoreTimeout)(timer).rescue {</dt><dd><dl class="simple">
+<dt>case _: TimeoutException =&gt;</dt><dd><p>scopedStats.counter(“tweetInfoStoreTimeout”).incr()
+Future.value(Map.empty[TweetId, Option[TspTweetInfo]])</p>
+</dd>
+<dt>case _ =&gt;</dt><dd><p>scopedStats.counter(“tweetInfoStoreFailure”).incr()
+Future.value(Map.empty[TweetId, Option[TspTweetInfo]])</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>val definedTweetInfoMapFut =</dt><dd><p>keepTweetsWithTweetInfoAndLanguage(tweetInfoMapFut, request.displayLocation.toString)</p>
+</dd>
+<dt>Future</dt><dd><dl>
+<dt>.join(definedTweetInfoMapFut, allowListWithTopicFollowTypeFut).map {</dt><dd><dl>
+<dt>case (tweetInfoMap, allowListWithTopicFollowType) =&gt;</dt><dd><p>val tweetIdsToQuery = tweetInfoMap.keys.toSet
+val topicProofQueries =</p>
+<blockquote>
+<div><dl>
+<dt>tweetIdsToQuery.map { tweetId =&gt;</dt><dd><dl>
+<dt>TopicSocialProofStore.Query(</dt><dd><dl>
+<dt>TopicSocialProofStore.CacheableQuery(</dt><dd><p>tweetId = tweetId,
+tweetLanguage = LocaleUtil.getSupportedStandardLanguageCodeWithDefault(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>tweetInfoMap.getOrElse(tweetId, None).flatMap {</dt><dd><p>_.language</p>
+</dd>
+</dl>
+<p>}),</p>
+</div></blockquote>
+<dl class="simple">
+<dt>enableCosineSimilarityScoreCalculation =</dt><dd><p>enableCosineSimilarityScoreCalculation</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>),
+allowedSemanticCoreVersionIds = semanticCoreVersionIdsSet</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<dl>
+<dt>val topicSocialProofsFut: Future[Map[TweetId, Seq[TopicSocialProof]]] = {</dt><dd><dl>
+<dt>Future</dt><dd><dl class="simple">
+<dt>.collect(topicSocialProofStore.multiGet(topicProofQueries)).map(_.map {</dt><dd><dl class="simple">
+<dt>case (query, results) =&gt;</dt><dd><dl class="simple">
+<dt>query.cacheableQuery.tweetId -&gt; results.toSeq.flatten.filter(</dt><dd><p>_.semanticCoreVersionId == semanticCoreVersionId)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>})</p>
+</dd>
+</dl>
+</dd>
+<dt>}.raiseWithin(TopicSocialProofStoreTimeout)(timer).rescue {</dt><dd><dl class="simple">
+<dt>case _: TimeoutException =&gt;</dt><dd><p>scopedStats.counter(“topicSocialProofStoreTimeout”).incr()
+Future(Map.empty[TweetId, Seq[TopicSocialProof]])</p>
+</dd>
+<dt>case _ =&gt;</dt><dd><p>scopedStats.counter(“topicSocialProofStoreFailure”).incr()
+Future(Map.empty[TweetId, Seq[TopicSocialProof]])</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>val random = new Random(seed = request.userId.toInt)</p>
+<dl>
+<dt>topicSocialProofsFut.map { topicSocialProofs =&gt;</dt><dd><dl class="simple">
+<dt>val filteredTopicSocialProofs = filterByAllowedList(</dt><dd><p>topicSocialProofs,
+request.topicListingSetting,
+allowListWithTopicFollowType.keySet</p>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>val filteredTopicSocialProofsEmptyCount: Int =</dt><dd><dl class="simple">
+<dt>filteredTopicSocialProofs.count {</dt><dd><dl class="simple">
+<dt>case (_, topicSocialProofs: Seq[TopicSocialProof]) =&gt;</dt><dd><p>topicSocialProofs.isEmpty</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>scopedStats</dt><dd><p>.counter(“filteredTopicSocialProofsCount”).incr(filteredTopicSocialProofs.size)</p>
+</dd>
+<dt>scopedStats</dt><dd><dl class="simple">
+<dt>.counter(“filteredTopicSocialProofsEmptyCount”).incr(</dt><dd><p>filteredTopicSocialProofsEmptyCount)</p>
+</dd>
+</dl>
+</dd>
+<dt>if (isCrTopicTweets(request)) {</dt><dd><dl>
+<dt>val socialProofs = filteredTopicSocialProofs.mapValues(_.flatMap { topicProof =&gt;</dt><dd><dl class="simple">
+<dt>val topicWithScores = buildTopicWithRandomScore(</dt><dd><p>topicProof,
+allowListWithTopicFollowType,
+random</p>
+</dd>
+</dl>
+<p>)
+topicWithScores</p>
+</dd>
+</dl>
+<p>})
+TopicSocialProofResponse(socialProofs)</p>
+</dd>
+<dt>} else {</dt><dd><dl>
+<dt>val socialProofs = filteredTopicSocialProofs.mapValues(_.flatMap { topicProof =&gt;</dt><dd><dl class="simple">
+<dt>getTopicProofScore(</dt><dd><p>topicProof = topicProof,
+allowListWithTopicFollowType = allowListWithTopicFollowType,
+params = target.params,
+random = random,
+statsReceiver = statsReceiver</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}.sortBy(-_.score).take(MaxCandidates))</p>
+<dl>
+<dt>val personalizedContextSocialProofs =</dt><dd><dl class="simple">
+<dt>if (target.params(TopicSocialProofParams.EnablePersonalizedContextTopics)) {</dt><dd><dl class="simple">
+<dt>val personalizedContextEligibility =</dt><dd><dl class="simple">
+<dt>checkPersonalizedContextsEligibility(</dt><dd><p>target.params,
+allowListWithTopicFollowType)</p>
+</dd>
+</dl>
+</dd>
+<dt>val filteredTweets =</dt><dd><p>filterPersonalizedContexts(socialProofs, tweetInfoMap, target.params)</p>
+</dd>
+<dt>backfillPersonalizedContexts(</dt><dd><p>allowListWithTopicFollowType,
+filteredTweets,
+request.tags.getOrElse(Map.empty),
+personalizedContextEligibility)</p>
+</dd>
+</dl>
+</dd>
+<dt>} else {</dt><dd><p>Map.empty[TweetId, Seq[TopicWithScore]]</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>val mergedSocialProofs = socialProofs.map {</dt><dd><dl>
+<dt>case (tweetId, proofs) =&gt;</dt><dd><dl>
+<dt>(</dt><dd><p>tweetId,
+proofs</p>
+<blockquote>
+<div><p>++ personalizedContextSocialProofs.getOrElse(tweetId, Seq.empty))</p>
+</div></blockquote>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>// Note that we will NOT filter out tweets with no TSP in either case
+TopicSocialProofResponse(mergedSocialProofs)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+<dt>}.flatten.raiseWithin(Timeout)(timer).rescue {</dt><dd><dl class="simple">
+<dt>case _: ClientDiscardedRequestException =&gt;</dt><dd><p>scopedStats.counter(“ClientDiscardedRequestException”).incr()
+Future.value(DefaultResponse)</p>
+</dd>
+<dt>case err: Err if err.code == Err.Cancelled =&gt;</dt><dd><p>scopedStats.counter(“CancelledErr”).incr()
+Future.value(DefaultResponse)</p>
+</dd>
+<dt>case _ =&gt;</dt><dd><p>scopedStats.counter(“FailedRequests”).incr()
+Future.value(DefaultResponse)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Fetch the Score for each Topic Social Proof</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>private def getTopicProofScore(</dt><dd><p>topicProof: TopicSocialProof,
+allowListWithTopicFollowType: Map[SemanticCoreEntityId, Option[TopicFollowType]],
+params: Params,
+random: Random,
+statsReceiver: StatsReceiver</p>
+</dd>
+<dt>): Option[TopicWithScore] = {</dt><dd><p>val scopedStats = statsReceiver.scope(“getTopicProofScores”)
+val enableTweetToTopicScoreRanking =</p>
+<blockquote>
+<div><p>params(TopicSocialProofParams.EnableTweetToTopicScoreRanking)</p>
+</div></blockquote>
+<dl>
+<dt>val minTweetToTopicCosineSimilarityThreshold =</dt><dd><p>params(TopicSocialProofParams.TweetToTopicCosineSimilarityThreshold)</p>
+</dd>
+<dt>val topicWithScore =</dt><dd><dl>
+<dt>if (enableTweetToTopicScoreRanking) {</dt><dd><p>scopedStats.counter(“enableTweetToTopicScoreRanking”).incr()
+buildTopicWithValidScore(</p>
+<blockquote>
+<div><p>topicProof,
+TweetEmbeddingType,
+Some(ConsumerTopicEmbeddingType),
+Some(ProducerTopicEmbeddingType),
+allowListWithTopicFollowType,
+DefaultModelVersion,
+minTweetToTopicCosineSimilarityThreshold</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+<dt>} else {</dt><dd><p>scopedStats.counter(“buildTopicWithRandomScore”).incr()
+buildTopicWithRandomScore(</p>
+<blockquote>
+<div><p>topicProof,
+allowListWithTopicFollowType,
+random</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>topicWithScore</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private[handlers] def isCrTopicTweets(</dt><dd><p>request: TopicSocialProofRequest</p>
+</dd>
+<dt>): Boolean = {</dt><dd><p>// CrTopic (across a variety of DisplayLocations) is the only use case with TopicListingSetting.All
+request.topicListingSetting == TopicListingSetting.All</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Consolidate logics relevant to whether only quality topics should be enabled for Implicit Follows</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>/<a href="#id5"><span class="problematic" id="id6">**</span></a><a href="#id7"><span class="problematic" id="id8">*</span></a></dt><dd><ul class="simple">
+<li><p>Consolidate logics relevant to whether Personalized Contexts backfilling should be enabled</p></li>
+</ul>
+<p><a href="#id9"><span class="problematic" id="id10">*</span></a>/</p>
+</dd>
+<dt>private[handlers] def checkPersonalizedContextsEligibility(</dt><dd><p>params: Params,
+allowListWithTopicFollowType: Map[SemanticCoreEntityId, Option[TopicFollowType]]</p>
+</dd>
+<dt>): PersonalizedContextEligibility = {</dt><dd><p>val scopedStats = statsReceiver.scope(“checkPersonalizedContextsEligibility”)
+val isRecentFavInAllowlist = allowListWithTopicFollowType</p>
+<blockquote>
+<div><p>.contains(AnnotationRuleProvider.recentFavTopicId)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>val isRecentFavEligible =</dt><dd><p>isRecentFavInAllowlist &amp;&amp; params(TopicSocialProofParams.EnableRecentEngagementsTopic)</p>
+</dd>
+<dt>if (isRecentFavEligible)</dt><dd><p>scopedStats.counter(“isRecentFavEligible”).incr()</p>
+</dd>
+<dt>val isRecentRetweetInAllowlist = allowListWithTopicFollowType</dt><dd><p>.contains(AnnotationRuleProvider.recentRetweetTopicId)</p>
+</dd>
+<dt>val isRecentRetweetEligible =</dt><dd><p>isRecentRetweetInAllowlist &amp;&amp; params(TopicSocialProofParams.EnableRecentEngagementsTopic)</p>
+</dd>
+<dt>if (isRecentRetweetEligible)</dt><dd><p>scopedStats.counter(“isRecentRetweetEligible”).incr()</p>
+</dd>
+<dt>val isYMLInAllowlist = allowListWithTopicFollowType</dt><dd><p>.contains(AnnotationRuleProvider.youMightLikeTopicId)</p>
+</dd>
+<dt>val isYMLEligible =</dt><dd><p>isYMLInAllowlist &amp;&amp; params(TopicSocialProofParams.EnableYouMightLikeTopic)</p>
+</dd>
+<dt>if (isYMLEligible)</dt><dd><p>scopedStats.counter(“isYMLEligible”).incr()</p>
+</dd>
+</dl>
+<p>PersonalizedContextEligibility(isRecentFavEligible, isRecentRetweetEligible, isYMLEligible)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private[handlers] def filterPersonalizedContexts(</dt><dd><p>socialProofs: Map[TweetId, Seq[TopicWithScore]],
+tweetInfoMap: Map[TweetId, Option[TspTweetInfo]],
+params: Params</p>
+</dd>
+<dt>): Map[TweetId, Seq[TopicWithScore]] = {</dt><dd><dl class="simple">
+<dt>val filters: Seq[(Option[TspTweetInfo], Params) =&gt; Boolean] = Seq(</dt><dd><p>healthSignalsFilter,
+tweetLanguageFilter</p>
+</dd>
+</dl>
+<p>)
+applyFilters(socialProofs, tweetInfoMap, params, filters)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/** *</dt><dd><ul class="simple">
+<li><p>filter tweets with None tweetInfo and undefined language</p></li>
+</ul>
+<p><a href="#id11"><span class="problematic" id="id12">*</span></a>/</p>
+</dd>
+<dt>private def keepTweetsWithTweetInfoAndLanguage(</dt><dd><p>tweetInfoMapFut: Future[Map[TweetId, Option[TspTweetInfo]]],
+displayLocation: String</p>
+</dd>
+<dt>): Future[Map[TweetId, Option[TspTweetInfo]]] = {</dt><dd><p>val scopedStats = statsReceiver.scope(displayLocation)
+tweetInfoMapFut.map { tweetInfoMap =&gt;</p>
+<blockquote>
+<div><dl>
+<dt>val filteredTweetInfoMap = tweetInfoMap.filter {</dt><dd><dl>
+<dt>case (_, optTweetInfo: Option[TspTweetInfo]) =&gt;</dt><dd><dl class="simple">
+<dt>if (optTweetInfo.isEmpty) {</dt><dd><p>scopedStats.counter(“undefinedTweetInfoCount”).incr()</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>optTweetInfo.exists { tweetInfo: TspTweetInfo =&gt;</dt><dd><dl>
+<dt>{</dt><dd><dl class="simple">
+<dt>if (tweetInfo.language.isEmpty) {</dt><dd><p>scopedStats.counter(“undefinedLanguageCount”).incr()</p>
+</dd>
+</dl>
+<p>}
+tweetInfo.language.isDefined</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+val undefinedTweetInfoOrLangCount = tweetInfoMap.size - filteredTweetInfoMap.size
+scopedStats.counter(“undefinedTweetInfoOrLangCount”).incr(undefinedTweetInfoOrLangCount)</p>
+<p>scopedStats.counter(“TweetInfoCount”).incr(tweetInfoMap.size)</p>
+<p>filteredTweetInfoMap</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/<a href="#id13"><span class="problematic" id="id14">**</span></a><a href="#id15"><span class="problematic" id="id16">*</span></a></dt><dd><ul class="simple">
+<li><p>filter tweets with NO evergreen topic social proofs by their health signal scores &amp; tweet languages</p></li>
+<li><p>i.e., tweets that are possible to be converted into Personalized Context topic tweets</p></li>
+<li><p>TBD: whether we are going to apply filters to all topic tweet candidates</p></li>
+</ul>
+<p><a href="#id17"><span class="problematic" id="id18">*</span></a>/</p>
+</dd>
+<dt>private def applyFilters(</dt><dd><p>socialProofs: Map[TweetId, Seq[TopicWithScore]],
+tweetInfoMap: Map[TweetId, Option[TspTweetInfo]],
+params: Params,
+filters: Seq[(Option[TspTweetInfo], Params) =&gt; Boolean]</p>
+</dd>
+<dt>): Map[TweetId, Seq[TopicWithScore]] = {</dt><dd><dl>
+<dt>socialProofs.collect {</dt><dd><dl>
+<dt>case (tweetId, socialProofs) if socialProofs.nonEmpty || filters.forall { filter =&gt;</dt><dd><blockquote>
+<div><blockquote>
+<div><p>filter(tweetInfoMap.getOrElse(tweetId, None), params)</p>
+</div></blockquote>
+<p>} =&gt;</p>
+</div></blockquote>
+<p>tweetId -&gt; socialProofs</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private def healthSignalsFilter(</dt><dd><p>tweetInfoOpt: Option[TspTweetInfo],
+params: Params</p>
+</dd>
+<dt>): Boolean = {</dt><dd><dl class="simple">
+<dt>!params(</dt><dd><p>TopicSocialProofParams.EnableTopicTweetHealthFilterPersonalizedContexts) || HealthSignalsUtils
+.isHealthyTweet(tweetInfoOpt)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private def tweetLanguageFilter(</dt><dd><p>tweetInfoOpt: Option[TspTweetInfo],
+params: Params</p>
+</dd>
+<dt>): Boolean = {</dt><dd><dl class="simple">
+<dt>PersonalizedContextTopicsAllowedLanguageSet</dt><dd><p>.contains(tweetInfoOpt.flatMap(_.language).getOrElse(LocaleUtil.DefaultLanguage))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private[handlers] def backfillPersonalizedContexts(</dt><dd><p>allowListWithTopicFollowType: Map[SemanticCoreEntityId, Option[TopicFollowType]],
+socialProofs: Map[TweetId, Seq[TopicWithScore]],
+metricTagsMap: scala.collection.Map[TweetId, scala.collection.Set[MetricTag]],
+personalizedContextEligibility: PersonalizedContextEligibility</p>
+</dd>
+<dt>): Map[TweetId, Seq[TopicWithScore]] = {</dt><dd><p>val scopedStats = statsReceiver.scope(“backfillPersonalizedContexts”)
+socialProofs.map {</p>
+<blockquote>
+<div><dl>
+<dt>case (tweetId, topicWithScores) =&gt;</dt><dd><dl>
+<dt>if (topicWithScores.nonEmpty) {</dt><dd><p>tweetId -&gt; Seq.empty</p>
+</dd>
+<dt>} else {</dt><dd><dl class="simple">
+<dt>val metricTagContainsTweetFav = metricTagsMap</dt><dd><p>.getOrElse(tweetId, Set.empty[MetricTag]).contains(MetricTag.TweetFavorite)</p>
+</dd>
+<dt>val backfillRecentFav =</dt><dd><p>personalizedContextEligibility.isRecentFavEligible &amp;&amp; metricTagContainsTweetFav</p>
+</dd>
+<dt>if (metricTagContainsTweetFav)</dt><dd><p>scopedStats.counter(“MetricTag.TweetFavorite”).incr()</p>
+</dd>
+<dt>if (backfillRecentFav)</dt><dd><p>scopedStats.counter(“backfillRecentFav”).incr()</p>
+</dd>
+<dt>val metricTagContainsRetweet = metricTagsMap</dt><dd><p>.getOrElse(tweetId, Set.empty[MetricTag]).contains(MetricTag.Retweet)</p>
+</dd>
+<dt>val backfillRecentRetweet =</dt><dd><p>personalizedContextEligibility.isRecentRetweetEligible &amp;&amp; metricTagContainsRetweet</p>
+</dd>
+<dt>if (metricTagContainsRetweet)</dt><dd><p>scopedStats.counter(“MetricTag.Retweet”).incr()</p>
+</dd>
+<dt>if (backfillRecentRetweet)</dt><dd><p>scopedStats.counter(“backfillRecentRetweet”).incr()</p>
+</dd>
+<dt>val metricTagContainsRecentSearches = metricTagsMap</dt><dd><dl class="simple">
+<dt>.getOrElse(tweetId, Set.empty[MetricTag]).contains(</dt><dd><p>MetricTag.InterestsRankerRecentSearches)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>val backfillYML = personalizedContextEligibility.isYMLEligible
+if (backfillYML)</p>
+<blockquote>
+<div><p>scopedStats.counter(“backfillYML”).incr()</p>
+</div></blockquote>
+<dl class="simple">
+<dt>tweetId -&gt; buildBackfillTopics(</dt><dd><p>allowListWithTopicFollowType,
+backfillRecentFav,
+backfillRecentRetweet,
+backfillYML)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def buildBackfillTopics(</dt><dd><p>allowListWithTopicFollowType: Map[SemanticCoreEntityId, Option[TopicFollowType]],
+backfillRecentFav: Boolean,
+backfillRecentRetweet: Boolean,
+backfillYML: Boolean</p>
+</dd>
+<dt>): Seq[TopicWithScore] = {</dt><dd><dl>
+<dt>Seq(</dt><dd><dl>
+<dt>if (backfillRecentFav) {</dt><dd><dl>
+<dt>Some(</dt><dd><dl>
+<dt>TopicWithScore(</dt><dd><p>topicId = AnnotationRuleProvider.recentFavTopicId,
+score = 1.0,
+topicFollowType = allowListWithTopicFollowType</p>
+<blockquote>
+<div><p>.getOrElse(AnnotationRuleProvider.recentFavTopicId, None)</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>} else { None },
+if (backfillRecentRetweet) {</p>
+<blockquote>
+<div><dl>
+<dt>Some(</dt><dd><dl>
+<dt>TopicWithScore(</dt><dd><p>topicId = AnnotationRuleProvider.recentRetweetTopicId,
+score = 1.0,
+topicFollowType = allowListWithTopicFollowType</p>
+<blockquote>
+<div><p>.getOrElse(AnnotationRuleProvider.recentRetweetTopicId, None)</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>))</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>} else { None },
+if (backfillYML) {</p>
+<blockquote>
+<div><dl>
+<dt>Some(</dt><dd><dl>
+<dt>TopicWithScore(</dt><dd><p>topicId = AnnotationRuleProvider.youMightLikeTopicId,
+score = 1.0,
+topicFollowType = allowListWithTopicFollowType</p>
+<blockquote>
+<div><p>.getOrElse(AnnotationRuleProvider.youMightLikeTopicId, None)</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>))</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>} else { None }</p>
+</dd>
+</dl>
+<p>).flatten</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def toReadableStore: ReadableStore[TopicSocialProofRequest, TopicSocialProofResponse] = {</dt><dd><dl>
+<dt>new ReadableStore[TopicSocialProofRequest, TopicSocialProofResponse] {</dt><dd><dl>
+<dt>override def get(k: TopicSocialProofRequest): Future[Option[TopicSocialProofResponse]] = {</dt><dd><p>val displayLocation = k.displayLocation.toString
+loadShedder(displayLocation) {</p>
+<blockquote>
+<div><p>getTopicSocialProofResponse(k).map(Some(_))</p>
+</div></blockquote>
+<dl class="simple">
+<dt>}.rescue {</dt><dd><dl class="simple">
+<dt>case LoadShedder.LoadSheddingException =&gt;</dt><dd><p>statsReceiver.scope(displayLocation).counter(“LoadSheddingException”).incr()
+Future.None</p>
+</dd>
+<dt>case _ =&gt;</dt><dd><p>statsReceiver.scope(displayLocation).counter(“Exception”).incr()
+Future.None</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>object TopicSocialProofHandler {</p>
+<blockquote>
+<div><p>private val MaxCandidates = 10
+// Currently we do hardcode for the language check of PersonalizedContexts Topics
+private val PersonalizedContextTopicsAllowedLanguageSet: Set[String] =</p>
+<blockquote>
+<div><p>Set(“pt”, “ko”, “es”, “ja”, “tr”, “id”, “en”, “hi”, “ar”, “fr”, “ru”)</p>
+</div></blockquote>
+<p>private val Timeout: Duration = 200.milliseconds
+private val TopicSocialProofStoreTimeout: Duration = 40.milliseconds
+private val TweetInfoStoreTimeout: Duration = 60.milliseconds
+private val DefaultResponse: TopicSocialProofResponse = TopicSocialProofResponse(Map.empty)</p>
+<dl>
+<dt>case class PersonalizedContextEligibility(</dt><dd><p>isRecentFavEligible: Boolean,
+isRecentRetweetEligible: Boolean,
+isYMLEligible: Boolean)</p>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Calculate the Topic Scores for each (tweet, topic), filter out topic proofs whose scores do not</p></li>
+<li><p>pass the minimum threshold</p></li>
+</ul>
+<p><a href="#id19"><span class="problematic" id="id20">*</span></a>/</p>
+</dd>
+<dt>private[handlers] def buildTopicWithValidScore(</dt><dd><p>topicProof: TopicSocialProof,
+tweetEmbeddingType: EmbeddingType,
+maybeConsumerEmbeddingType: Option[EmbeddingType],
+maybeProducerEmbeddingType: Option[EmbeddingType],
+allowListWithTopicFollowType: Map[SemanticCoreEntityId, Option[TopicFollowType]],
+simClustersModelVersion: ModelVersion,
+minTweetToTopicCosineSimilarityThreshold: Double</p>
+</dd>
+</dl>
+<p>): Option[TopicWithScore] = {</p>
+<blockquote>
+<div><dl>
+<dt>val consumerScore = maybeConsumerEmbeddingType</dt><dd><dl class="simple">
+<dt>.flatMap { consumerEmbeddingType =&gt;</dt><dd><dl class="simple">
+<dt>topicProof.scores.get(</dt><dd><p>ScoreKey(consumerEmbeddingType, tweetEmbeddingType, simClustersModelVersion))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}.getOrElse(0.0)</p>
+</dd>
+<dt>val producerScore = maybeProducerEmbeddingType</dt><dd><dl class="simple">
+<dt>.flatMap { producerEmbeddingType =&gt;</dt><dd><dl class="simple">
+<dt>topicProof.scores.get(</dt><dd><p>ScoreKey(producerEmbeddingType, tweetEmbeddingType, simClustersModelVersion))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}.getOrElse(0.0)</p>
+</dd>
+</dl>
+<p>val combinedScore = consumerScore + producerScore
+if (combinedScore &gt; minTweetToTopicCosineSimilarityThreshold || topicProof.ignoreSimClusterFiltering) {</p>
+<blockquote>
+<div><dl>
+<dt>Some(</dt><dd><dl>
+<dt>TopicWithScore(</dt><dd><p>topicId = topicProof.topicId.entityId,
+score = combinedScore,
+topicFollowType =</p>
+<blockquote>
+<div><p>allowListWithTopicFollowType.getOrElse(topicProof.topicId.entityId, None)))</p>
+</div></blockquote>
+</dd>
+</dl>
+</dd>
+</dl>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>None</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>private[handlers] def buildTopicWithRandomScore(</dt><dd><p>topicSocialProof: TopicSocialProof,
+allowListWithTopicFollowType: Map[SemanticCoreEntityId, Option[TopicFollowType]],
+random: Random</p>
+</dd>
+</dl>
+<p>): Option[TopicWithScore] = {</p>
+<blockquote>
+<div><dl>
+<dt>Some(</dt><dd><dl>
+<dt>TopicWithScore(</dt><dd><p>topicId = topicSocialProof.topicId.entityId,
+score = random.nextDouble(),
+topicFollowType =</p>
+<blockquote>
+<div><p>allowListWithTopicFollowType.getOrElse(topicSocialProof.topicId.entityId, None)</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>))</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Filter all the non-qualified Topic Social Proof</p></li>
+</ul>
+<p><a href="#id21"><span class="problematic" id="id22">*</span></a>/</p>
+</dd>
+<dt>private[handlers] def filterByAllowedList(</dt><dd><p>topicProofs: Map[TweetId, Seq[TopicSocialProof]],
+setting: TopicListingSetting,
+allowList: Set[SemanticCoreEntityId]</p>
+</dd>
+<dt>): Map[TweetId, Seq[TopicSocialProof]] = {</dt><dd><dl class="simple">
+<dt>setting match {</dt><dd><dl class="simple">
+<dt>case TopicListingSetting.All =&gt;</dt><dd><p>// Return all the topics
+topicProofs</p>
+</dd>
+<dt>case _ =&gt;</dt><dd><dl class="simple">
+<dt>topicProofs.mapValues(</dt><dd><p>_.filter(topicProof =&gt; allowList.contains(topicProof.topicId.entityId)))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/topic-social-proof/server/src/main/scala/com/twitter/tsp/handlers/TopicSocialProofHandler.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

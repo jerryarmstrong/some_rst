@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.frigate.pushservice.predicate</p>
+<p>import com.twitter.abuse.detection.scoring.thriftscala.Model
+import com.twitter.abuse.detection.scoring.thriftscala.TweetScoringRequest
+import com.twitter.abuse.detection.scoring.thriftscala.TweetScoringResponse
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.frigate.common.base.TweetCandidate
+import com.twitter.frigate.common.rec_types.RecTypes
+import com.twitter.frigate.pushservice.model.PushTypes.PushCandidate
+import com.twitter.frigate.pushservice.params.PushFeatureSwitchParams
+import com.twitter.frigate.pushservice.params.PushParams
+import com.twitter.frigate.pushservice.util.CandidateUtil
+import com.twitter.hermit.predicate.NamedPredicate
+import com.twitter.hermit.predicate.Predicate
+import com.twitter.storehaus.ReadableStore
+import com.twitter.util.Future</p>
+<p>object PNegMultimodalPredicates {</p>
+<blockquote>
+<div><dl>
+<dt>def healthSignalScorePNegMultimodalPredicate(</dt><dd><p>tweetHealthScoreStore: ReadableStore[TweetScoringRequest, TweetScoringResponse]</p>
+</dd>
+<dt>)(</dt><dd><p>implicit stats: StatsReceiver</p>
+</dd>
+<dt>): NamedPredicate[PushCandidate with TweetCandidate] = {</dt><dd><p>val name = “pneg_multimodal_predicate”
+val statsScope = stats.scope(name)
+val oonCandidatesCounter = statsScope.counter(“oon_candidates”)
+val nonEmptyModelScoreCounter = statsScope.counter(“non_empty_model_score”)
+val bucketedCounter = statsScope.counter(“bucketed_oon_candidates”)
+val filteredCounter = statsScope.counter(“filtered_oon_candidates”)</p>
+<dl>
+<dt>Predicate</dt><dd><dl>
+<dt>.fromAsync { candidate: PushCandidate with TweetCandidate =&gt;</dt><dd><p>val target = candidate.target
+val crt = candidate.commonRecType
+val isOonCandidate = RecTypes.isOutOfNetworkTweetRecType(crt) ||</p>
+<blockquote>
+<div><p>RecTypes.outOfNetworkTopicTweetTypes.contains(crt)</p>
+</div></blockquote>
+<dl>
+<dt>lazy val enablePNegMultimodalPredicateParam =</dt><dd><p>target.params(PushFeatureSwitchParams.EnablePNegMultimodalPredicateParam)</p>
+</dd>
+<dt>lazy val pNegMultimodalPredicateModelThresholdParam =</dt><dd><p>target.params(PushFeatureSwitchParams.PNegMultimodalPredicateModelThresholdParam)</p>
+</dd>
+<dt>lazy val pNegMultimodalPredicateBucketThresholdParam =</dt><dd><p>target.params(PushFeatureSwitchParams.PNegMultimodalPredicateBucketThresholdParam)</p>
+</dd>
+<dt>val pNegMultimodalEnabledForF1Tweets =</dt><dd><p>target.params(PushParams.EnablePnegMultimodalPredictionForF1Tweets)</p>
+</dd>
+<dt>if (CandidateUtil.shouldApplyHealthQualityFilters(</dt><dd><blockquote>
+<div><p>candidate) &amp;&amp; (isOonCandidate || pNegMultimodalEnabledForF1Tweets) &amp;&amp; enablePNegMultimodalPredicateParam) {</p>
+</div></blockquote>
+<p>val pNegMultimodalRequest = TweetScoringRequest(candidate.tweetId, Model.PNegMultimodal)
+tweetHealthScoreStore.get(pNegMultimodalRequest).map {</p>
+<blockquote>
+<div><dl>
+<dt>case Some(tweetScoringResponse) =&gt;</dt><dd><p>nonEmptyModelScoreCounter.incr()</p>
+<p>val pNegMultimodalScore = 1.0 - tweetScoringResponse.score</p>
+<dl>
+<dt>candidate</dt><dd><p>.cacheExternalScore(“PNegMultimodalScore”, Future.value(Some(pNegMultimodalScore)))</p>
+</dd>
+<dt>if (isOonCandidate) {</dt><dd><p>oonCandidatesCounter.incr()</p>
+<dl>
+<dt>if (pNegMultimodalScore &gt; pNegMultimodalPredicateBucketThresholdParam) {</dt><dd><p>bucketedCounter.incr()
+if (pNegMultimodalScore &gt; pNegMultimodalPredicateModelThresholdParam) {</p>
+<blockquote>
+<div><p>filteredCounter.incr()
+false</p>
+</div></blockquote>
+<p>} else true</p>
+</dd>
+</dl>
+<p>} else true</p>
+</dd>
+<dt>} else {</dt><dd><p>true</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>case _ =&gt; true</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+<dt>} else {</dt><dd><p>Future.True</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}
+.withStats(stats.scope(name))
+.withName(name)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/pushservice/src/main/scala/com/twitter/frigate/pushservice/predicate/PNegMultimodalPredicates.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

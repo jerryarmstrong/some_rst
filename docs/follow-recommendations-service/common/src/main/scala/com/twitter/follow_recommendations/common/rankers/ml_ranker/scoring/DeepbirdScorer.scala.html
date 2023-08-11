@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../../../../" id="documentation_options" src="../../../../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.follow_recommendations.common.rankers.ml_ranker.scoring</p>
+<p>import com.twitter.cortex.deepbird.thriftjava.DeepbirdPredictionService
+import com.twitter.cortex.deepbird.thriftjava.ModelSelector
+import com.twitter.finagle.stats.Stat
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.follow_recommendations.common.models.CandidateUser
+import com.twitter.follow_recommendations.common.models.HasDebugOptions
+import com.twitter.follow_recommendations.common.models.HasDisplayLocation
+import com.twitter.follow_recommendations.common.models.Score
+import com.twitter.ml.api.DataRecord
+import com.twitter.ml.api.Feature
+import com.twitter.ml.api.RichDataRecord
+import com.twitter.ml.prediction_service.{BatchPredictionRequest =&gt; JBatchPredictionRequest}
+import com.twitter.product_mixer.core.model.marshalling.request.HasClientContext
+import com.twitter.stitch.Stitch
+import com.twitter.timelines.configapi.HasParams
+import com.twitter.util.Future
+import com.twitter.util.TimeoutException
+import scala.collection.JavaConversions._
+import scala.collection.JavaConverters._</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Generic trait that implements the scoring given a deepbirdClient</p></li>
+<li><p>To test out a new model, create a scorer extending this trait, override the modelName and inject the scorer</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>trait DeepbirdScorer extends Scorer {</dt><dd><p>def modelName: String
+def predictionFeature: Feature.Continuous
+// Set a default batchSize of 100 when making model prediction calls to the Deepbird V2 prediction server
+def batchSize: Int = 100
+def deepbirdClient: DeepbirdPredictionService.ServiceToClient
+def baseStats: StatsReceiver</p>
+<p>def modelSelector: ModelSelector = new ModelSelector().setId(modelName)
+def stats: StatsReceiver = baseStats.scope(this.getClass.getSimpleName).scope(modelName)</p>
+<p>private def requestCount = stats.counter(“requests”)
+private def emptyRequestCount = stats.counter(“empty_requests”)
+private def successCount = stats.counter(“success”)
+private def failureCount = stats.counter(“failures”)
+private def inputRecordsStat = stats.stat(“input_records”)
+private def outputRecordsStat = stats.stat(“output_records”)</p>
+<p>// Counters for tracking batch-prediction statistics when making DBv2 prediction calls
+//
+// numBatchRequests tracks the number of batch prediction requests made to DBv2 prediction servers
+private def numBatchRequests = stats.counter(“batches”)
+// numEmptyBatchRequests tracks the number of batch prediction requests made to DBv2 prediction servers
+// that had an empty input DataRecord
+private def numEmptyBatchRequests = stats.counter(“empty_batches”)
+// numTimedOutBatchRequests tracks the number of batch prediction requests made to DBv2 prediction servers
+// that had timed-out
+private def numTimedOutBatchRequests = stats.counter(“timeout_batches”)</p>
+<p>private def batchPredictionLatency = stats.stat(“batch_prediction_latency”)
+private def predictionLatency = stats.stat(“prediction_latency”)</p>
+<p>private def numEmptyModelPredictions = stats.counter(“empty_model_predictions”)
+private def numNonEmptyModelPredictions = stats.counter(“non_empty_model_predictions”)</p>
+<p>private val DefaultPredictionScore = 0.0</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>NOTE: For instances of [[DeepbirdScorer]] this function SHOULD NOT be used.</p></li>
+<li><p>Please use [[score(records: Seq[DataRecord])]] instead.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+</dl>
+<p>&#64;Deprecated
+def score(</p>
+<blockquote>
+<div><p>target: HasClientContext with HasParams with HasDisplayLocation with HasDebugOptions,
+candidates: Seq[CandidateUser]</p>
+</div></blockquote>
+<dl>
+<dt>): Seq[Option[Score]] =</dt><dd><dl class="simple">
+<dt>throw new UnsupportedOperationException(</dt><dd><dl class="simple">
+<dt>“For instances of DeepbirdScorer this operation is not defined. Please use “ +</dt><dd><p>“<cite>def score(records: Seq[DataRecord]): Stitch[Seq[Score]]</cite> “ +
+“instead.”)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+<dt>override def score(records: Seq[DataRecord]): Stitch[Seq[Score]] = {</dt><dd><p>requestCount.incr()
+if (records.isEmpty) {</p>
+<blockquote>
+<div><p>emptyRequestCount.incr()
+Stitch.Nil</p>
+</div></blockquote>
+<dl>
+<dt>} else {</dt><dd><p>inputRecordsStat.add(records.size)
+Stitch.callFuture(</p>
+<blockquote>
+<div><dl>
+<dt>batchPredict(records, batchSize)</dt><dd><dl>
+<dt>.map { recordList =&gt;</dt><dd><dl class="simple">
+<dt>val scores = recordList.map { record =&gt;</dt><dd><dl class="simple">
+<dt>Score(</dt><dd><p>value = record.getOrElse(DefaultPredictionScore),
+rankerId = Some(id),
+scoreType = scoreType)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+outputRecordsStat.add(scores.size)
+scores</p>
+</dd>
+</dl>
+<p>}.onSuccess(_ =&gt; successCount.incr())
+.onFailure(_ =&gt; failureCount.incr()))</p>
+</dd>
+</dl>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def batchPredict(</dt><dd><p>dataRecords: Seq[DataRecord],
+batchSize: Int</p>
+</dd>
+<dt>): Future[Seq[Option[Double]]] = {</dt><dd><dl>
+<dt>Stat</dt><dd><dl>
+<dt>.timeFuture(predictionLatency) {</dt><dd><p>val batchedDataRecords = dataRecords.grouped(batchSize).toSeq
+numBatchRequests.incr(batchedDataRecords.size)
+Future</p>
+<blockquote>
+<div><p>.collect(batchedDataRecords.map(batch =&gt; predict(batch)))
+.map(res =&gt; res.reduce(_ ++ _))</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def predict(dataRecords: Seq[DataRecord]): Future[Seq[Option[Double]]] = {</dt><dd><dl>
+<dt>Stat</dt><dd><dl>
+<dt>.timeFuture(batchPredictionLatency) {</dt><dd><dl>
+<dt>if (dataRecords.isEmpty) {</dt><dd><p>numEmptyBatchRequests.incr()
+Future.Nil</p>
+</dd>
+<dt>} else {</dt><dd><dl>
+<dt>deepbirdClient</dt><dd><p>.batchPredictFromModel(new JBatchPredictionRequest(dataRecords.asJava), modelSelector)
+.map { response =&gt;</p>
+<blockquote>
+<div><dl>
+<dt>response.predictions.toSeq.map { prediction =&gt;</dt><dd><dl class="simple">
+<dt>val predictionFeatureOption = Option(</dt><dd><p>new RichDataRecord(prediction).getFeatureValue(predictionFeature)</p>
+</dd>
+</dl>
+<p>)
+predictionFeatureOption match {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case Some(predictionValue) =&gt;</dt><dd><p>numNonEmptyModelPredictions.incr()
+Option(predictionValue.toDouble)</p>
+</dd>
+<dt>case None =&gt;</dt><dd><p>numEmptyModelPredictions.incr()
+Option(DefaultPredictionScore)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}
+.rescue {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case e: TimeoutException =&gt; // DBv2 prediction calls that timed out</dt><dd><p>numTimedOutBatchRequests.incr()
+stats.counter(e.getClass.getSimpleName).incr()
+Future.value(dataRecords.map(_ =&gt; Option(DefaultPredictionScore)))</p>
+</dd>
+<dt>case e: Exception =&gt; // other generic DBv2 prediction call failures</dt><dd><p>stats.counter(e.getClass.getSimpleName).incr()
+Future.value(dataRecords.map(_ =&gt; Option(DefaultPredictionScore)))</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../../../../_sources/follow-recommendations-service/common/src/main/scala/com/twitter/follow_recommendations/common/rankers/ml_ranker/scoring/DeepbirdScorer.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

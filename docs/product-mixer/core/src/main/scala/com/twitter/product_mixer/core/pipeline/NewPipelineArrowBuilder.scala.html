@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../../" id="documentation_options" src="../../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.product_mixer.core.pipeline</p>
+<p>import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.product_mixer.core.model.common.identifier.ComponentIdentifier
+import com.twitter.product_mixer.core.model.common.identifier.PipelineStepIdentifier
+import com.twitter.product_mixer.core.pipeline.pipeline_failure.PipelineFailure
+import com.twitter.product_mixer.core.pipeline.state.HasExecutorResults
+import com.twitter.product_mixer.core.pipeline.state.HasResult
+import com.twitter.product_mixer.core.pipeline.step.Step
+import com.twitter.product_mixer.core.quality_factor.QualityFactorStatus
+import com.twitter.product_mixer.core.service.Executor
+import com.twitter.product_mixer.core.service.Executor.Context
+import com.twitter.product_mixer.core.service.ExecutorResult
+import com.twitter.stitch.Arrow
+import com.twitter.stitch.Arrow.Iso
+import com.twitter.util.Return
+import com.twitter.util.Throw</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Pipeline Arrow Builder used for constructing a final arrow for a pipeline after adding necessary</p></li>
+<li><p>steps.</p></li>
+<li></li>
+<li><p>&#64;param steps The kept non-empty Pipeline Steps</p></li>
+<li><p>&#64;param addedSteps Steps that have been added, but not necessarily kept.</p></li>
+<li><p>&#64;param statsReceiver Stats Receiver for metric book keeping</p></li>
+<li><p>&#64;tparam Result sThe expected final result type of the pipeline.</p></li>
+<li><p>&#64;tparam State The input state type, which should implement [[HasResult]].</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>case class NewPipelineArrowBuilder[</dt><dd><p>Result,
+State &lt;: HasExecutorResults[State] with HasResult[Result]</p>
+</dd>
+<dt>] private (</dt><dd><p>private val steps: Seq[PipelineStep[State, _, _, _]],
+override val statsReceiver: StatsReceiver)</p>
+<blockquote>
+<div><p>extends Executor {</p>
+</div></blockquote>
+<dl>
+<dt>def add[Config, ExecutorInput, ExResult &lt;: ExecutorResult](</dt><dd><p>pipelineStepIdentifier: PipelineStepIdentifier,
+step: Step[State, Config, ExecutorInput, ExResult],
+executorConfig: Config</p>
+</dd>
+<dt>): NewPipelineArrowBuilder[Result, State] = {</dt><dd><dl class="simple">
+<dt>require(</dt><dd><p>!steps.contains(pipelineStepIdentifier),
+s”Found duplicate step $pipelineStepIdentifier when building pipeline arrow”)</p>
+</dd>
+</dl>
+<p>// If the step has nothing to execute, drop it for simplification but still added it to the
+// “addedSteps” field for build time validation
+if (step.isEmpty(executorConfig)) {</p>
+<blockquote>
+<div><p>this</p>
+</div></blockquote>
+<dl>
+<dt>} else {</dt><dd><dl class="simple">
+<dt>val newPipelineStep =</dt><dd><p>PipelineStep(pipelineStepIdentifier, executorConfig, step)</p>
+</dd>
+</dl>
+<p>val newSteps = steps :+ newPipelineStep
+this.copy(steps = newSteps)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def buildArrow(</dt><dd><p>context: Executor.Context</p>
+</dd>
+<dt>): Arrow[State, NewPipelineResult[Result]] = {</dt><dd><dl>
+<dt>val initialArrow = Arrow</dt><dd><p>.map { input: State =&gt; NewStepData[State](input) }</p>
+</dd>
+<dt>val allStepArrows = steps.map { step =&gt;</dt><dd><dl class="simple">
+<dt>Iso.onlyIf[NewStepData[State]] { stepData =&gt; !stepData.stopExecuting } {</dt><dd><p>wrapStepWithExecutorBookkeeping(step, context)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}
+val combinedArrow = isoArrowsSequentially(allStepArrows)
+val resultArrow = Arrow.map { stepData: NewStepData[State] =&gt;</p>
+<blockquote>
+<div><dl class="simple">
+<dt>stepData.pipelineFailure match {</dt><dd><dl class="simple">
+<dt>case Some(failure) =&gt;</dt><dd><p>NewPipelineResult.Failure(failure, stepData.pipelineState.executorResultsByPipelineStep)</p>
+</dd>
+<dt>case None =&gt;</dt><dd><dl class="simple">
+<dt>NewPipelineResult.Success(</dt><dd><p>stepData.pipelineState.buildResult,
+stepData.pipelineState.executorResultsByPipelineStep)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}
+initialArrow.andThen(combinedArrow).andThen(resultArrow)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private[this] def wrapStepWithExecutorBookkeeping(</dt><dd><p>step: PipelineStep[State, _, _, _],
+context: Context</p>
+</dd>
+<dt>): Arrow.Iso[NewStepData[State]] = {</dt><dd><dl class="simple">
+<dt>val wrapped = wrapStepWithExecutorBookkeeping[NewStepData[State], NewStepData[State]](</dt><dd><p>context = context,
+identifier = step.stepIdentifier,
+arrow = step.arrow(context),
+// extract the failure only if it’s present. Not sure if this is needed???
+transformer = _.pipelineFailure.map(Throw(_)).getOrElse(Return.Unit)</p>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>Arrow</dt><dd><p>.zipWithArg(wrapped.liftToTry)
+.map {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case (_: NewStepData[State], Return(result)) =&gt;</dt><dd><p>// if Step was successful, return the result
+result</p>
+</dd>
+<dt>case (previous: NewStepData[State], Throw(pipelineFailure: PipelineFailure)) =&gt;</dt><dd><p>// if the Step failed in such a way that the failure was NOT captured
+// in the result object, then update the State with the failure
+previous.withFailure(pipelineFailure)</p>
+</dd>
+<dt>case (_, Throw(ex)) =&gt;</dt><dd><p>// an exception was thrown which was not handled by the failure classifier
+// this only happens with cancellation exceptions which are re-thrown
+throw ex</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Sets up stats [[com.twitter.finagle.stats.Gauge]]s for any [[QualityFactorStatus]]</p></li>
+<li></li>
+<li><p>&#64;note We use provideGauge so these gauges live forever even without a reference.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>private[pipeline] def buildGaugesForQualityFactor(</dt><dd><p>pipelineIdentifier: ComponentIdentifier,
+qualityFactorStatus: QualityFactorStatus,
+statsReceiver: StatsReceiver</p>
+</dd>
+<dt>): Unit = {</dt><dd><dl class="simple">
+<dt>qualityFactorStatus.qualityFactorByPipeline.foreach {</dt><dd><dl class="simple">
+<dt>case (identifier, qualityFactor) =&gt;</dt><dd><p>// QF is a relative stat (since the parent pipeline is monitoring a child pipeline)
+val scopes = pipelineIdentifier.toScopes ++ identifier.toScopes :+ “QualityFactor”
+statsReceiver.provideGauge(scopes: _*) { qualityFactor.currentValue.toFloat }</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>object NewPipelineArrowBuilder {</dt><dd><dl>
+<dt>def apply[Result, InputState &lt;: HasExecutorResults[InputState] with HasResult[Result]](</dt><dd><p>statsReceiver: StatsReceiver</p>
+</dd>
+<dt>): NewPipelineArrowBuilder[Result, InputState] = {</dt><dd><dl class="simple">
+<dt>NewPipelineArrowBuilder(</dt><dd><p>Seq.empty,
+statsReceiver</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>This is a pipeline specific instance of a step, i.e, a generic step with the step identifier</p></li>
+<li><p>within the pipeline and its executor configs.</p></li>
+<li><p>&#64;param stepIdentifier Step identifier of the step within a pipeline</p></li>
+<li><p>&#64;param executorConfig Config to execute the step with</p></li>
+<li><p>&#64;param step The underlying step to be used</p></li>
+<li><p>&#64;tparam InputState The input state object</p></li>
+<li><p>&#64;tparam ExecutorConfig The config expected for the given step</p></li>
+<li><p>&#64;tparam ExecutorInput Input for the underlying executor</p></li>
+<li><p>&#64;tparam ExecResult The result type</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>case class PipelineStep[</dt><dd><p>State &lt;: HasExecutorResults[State],
+PipelineStepConfig,
+ExecutorInput,
+ExecResult &lt;: ExecutorResult</p>
+</dd>
+<dt>](</dt><dd><p>stepIdentifier: PipelineStepIdentifier,
+executorConfig: PipelineStepConfig,
+step: Step[State, PipelineStepConfig, ExecutorInput, ExecResult]) {</p>
+<dl>
+<dt>def arrow(</dt><dd><p>context: Executor.Context</p>
+</dd>
+<dt>): Arrow.Iso[NewStepData[State]] = {</dt><dd><dl class="simple">
+<dt>val inputArrow = Arrow.map { stepData: NewStepData[State] =&gt;</dt><dd><p>step.adaptInput(stepData.pipelineState, executorConfig)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>Arrow</dt><dd><dl>
+<dt>.zipWithArg(inputArrow.andThen(step.arrow(executorConfig, context))).map {</dt><dd><dl>
+<dt>case (stepData: NewStepData[State], executorResult: ExecResult &#64;unchecked) =&gt;</dt><dd><dl class="simple">
+<dt>val updatedResultsByPipelineStep =</dt><dd><p>stepData.pipelineState.executorResultsByPipelineStep + (stepIdentifier -&gt; executorResult)</p>
+</dd>
+<dt>val updatedPipelineState = step</dt><dd><dl class="simple">
+<dt>.updateState(stepData.pipelineState, executorResult, executorConfig).setExecutorResults(</dt><dd><p>updatedResultsByPipelineStep)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>NewStepData(updatedPipelineState)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../../_sources/product-mixer/core/src/main/scala/com/twitter/product_mixer/core/pipeline/NewPipelineArrowBuilder.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

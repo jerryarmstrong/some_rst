@@ -1,0 +1,416 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.timelineranker.in_network_tweets</p>
+<p>import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.servo.util.FutureArrow
+import com.twitter.storehaus.Store
+import com.twitter.timelineranker.common._
+import com.twitter.timelineranker.core.HydratedCandidatesAndFeaturesEnvelope
+import com.twitter.timelineranker.model.RecapQuery.DependencyProvider
+import com.twitter.timelineranker.model._
+import com.twitter.timelineranker.monitoring.UsersSearchResultMonitoringTransform
+import com.twitter.timelineranker.parameters.in_network_tweets.InNetworkTweetParams
+import com.twitter.timelineranker.parameters.monitoring.MonitoringParams
+import com.twitter.timelineranker.parameters.recap.RecapParams
+import com.twitter.timelineranker.recap.model.ContentFeatures
+import com.twitter.timelineranker.util.CopyContentFeaturesIntoHydratedTweetsTransform
+import com.twitter.timelineranker.util.CopyContentFeaturesIntoThriftTweetFeaturesTransform
+import com.twitter.timelineranker.util.TweetFilters
+import com.twitter.timelineranker.visibility.FollowGraphDataProvider
+import com.twitter.timelines.clients.gizmoduck.GizmoduckClient
+import com.twitter.timelines.clients.manhattan.UserMetadataClient
+import com.twitter.timelines.clients.relevance_search.SearchClient
+import com.twitter.timelines.clients.tweetypie.TweetyPieClient
+import com.twitter.timelines.model.TweetId
+import com.twitter.timelines.util.FailOpenHandler
+import com.twitter.timelines.util.stats.RequestStatsReceiver
+import com.twitter.timelines.visibility.VisibilityEnforcer
+import com.twitter.util.Future</p>
+<dl>
+<dt>class InNetworkTweetSource(</dt><dd><p>gizmoduckClient: GizmoduckClient,
+searchClient: SearchClient,
+searchClientForSourceTweets: SearchClient,
+tweetyPieClient: TweetyPieClient,
+userMetadataClient: UserMetadataClient,
+followGraphDataProvider: FollowGraphDataProvider,
+contentFeaturesCache: Store[TweetId, ContentFeatures],
+visibilityEnforcer: VisibilityEnforcer,
+statsReceiver: StatsReceiver) {
+private[this] val baseScope = statsReceiver.scope(“recycledTweetSource”)
+private[this] val requestStats = RequestStatsReceiver(baseScope)</p>
+<p>private[this] val failOpenScope = baseScope.scope(“failOpen”)
+private[this] val userProfileHandler = new FailOpenHandler(failOpenScope, “userProfileInfo”)
+private[this] val userLanguagesHandler = new FailOpenHandler(failOpenScope, “userLanguages”)
+private[this] val sourceTweetSearchHandler =</p>
+<blockquote>
+<div><p>new FailOpenHandler(failOpenScope, “sourceTweetSearch”)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>private[this] val filters = TweetFilters.ValueSet(</dt><dd><p>TweetFilters.DuplicateTweets,
+TweetFilters.DuplicateRetweets,
+TweetFilters.TweetsFromNotFollowedUsers,
+TweetFilters.NonReplyDirectedAtNotFollowedUsers</p>
+</dd>
+</dl>
+<p>)</p>
+<dl class="simple">
+<dt>private[this] val hydrateReplyRootTweetProvider =</dt><dd><p>DependencyProvider.from(InNetworkTweetParams.EnableReplyRootTweetHydrationParam)</p>
+</dd>
+<dt>private[this] val sourceTweetsSearchResultsTransform = new SourceTweetsSearchResultsTransform(</dt><dd><p>searchClientForSourceTweets,
+sourceTweetSearchHandler,
+hydrateReplyRootTweetProvider = hydrateReplyRootTweetProvider,
+perRequestSourceSearchClientIdProvider = DependencyProvider.None,
+baseScope</p>
+</dd>
+</dl>
+<p>)</p>
+<dl class="simple">
+<dt>private[this] val visibilityEnforcingTransform = new VisibilityEnforcingTransform(</dt><dd><p>visibilityEnforcer</p>
+</dd>
+</dl>
+<p>)</p>
+<dl class="simple">
+<dt>private[this] val hydratedTweetsFilter = new HydratedTweetsFilterTransform(</dt><dd><p>outerFilters = filters,
+innerFilters = TweetFilters.None,
+useFollowGraphData = true,
+useSourceTweets = true,
+statsReceiver = baseScope,
+numRetweetsAllowed = HydratedTweetsFilterTransform.NumDuplicateRetweetsAllowed</p>
+</dd>
+</dl>
+<p>)</p>
+<dl class="simple">
+<dt>private[this] val dynamicHydratedTweetsFilter = new TweetKindOptionHydratedTweetsFilterTransform(</dt><dd><p>useFollowGraphData = true,
+useSourceTweets = true,
+statsReceiver = baseScope</p>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>private[this] val userProfileInfoTransform =</dt><dd><p>new UserProfileInfoTransform(userProfileHandler, gizmoduckClient)</p>
+</dd>
+<dt>private[this] val languagesTransform =</dt><dd><p>new UserLanguagesTransform(userLanguagesHandler, userMetadataClient)</p>
+</dd>
+<dt>private[this] def hydratesContentFeatures(</dt><dd><p>hydratedEnvelope: HydratedCandidatesAndFeaturesEnvelope</p>
+</dd>
+<dt>): Boolean =</dt><dd><p>hydratedEnvelope.candidateEnvelope.query.hydratesContentFeatures.getOrElse(true)</p>
+</dd>
+<dt>private[this] val contentFeaturesTransformer = FutureArrow.choose(</dt><dd><p>predicate = hydratesContentFeatures,
+ifTrue = contentFeaturesHydrationTransform</p>
+<blockquote>
+<div><p>.andThen(CopyContentFeaturesIntoThriftTweetFeaturesTransform)
+.andThen(CopyContentFeaturesIntoHydratedTweetsTransform),</p>
+</div></blockquote>
+<dl class="simple">
+<dt>ifFalse = FutureArrow[</dt><dd><p>HydratedCandidatesAndFeaturesEnvelope,
+HydratedCandidatesAndFeaturesEnvelope</p>
+</dd>
+</dl>
+<p>](Future.value) // empty transformer</p>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>private[this] val contentFeaturesHydrationTransform =</dt><dd><dl>
+<dt>new ContentFeaturesHydrationTransformBuilder(</dt><dd><p>tweetyPieClient = tweetyPieClient,
+contentFeaturesCache = contentFeaturesCache,
+enableContentFeaturesGate =</p>
+<blockquote>
+<div><p>RecapQuery.paramGate(InNetworkTweetParams.EnableContentFeaturesHydrationParam),</p>
+</div></blockquote>
+<dl class="simple">
+<dt>enableTokensInContentFeaturesGate =</dt><dd><p>RecapQuery.paramGate(InNetworkTweetParams.EnableTokensInContentFeaturesHydrationParam),</p>
+</dd>
+<dt>enableTweetTextInContentFeaturesGate =</dt><dd><p>RecapQuery.paramGate(InNetworkTweetParams.EnableTweetTextInContentFeaturesHydrationParam),</p>
+</dd>
+<dt>enableConversationControlContentFeaturesGate = RecapQuery.paramGate(</dt><dd><p>InNetworkTweetParams.EnableConversationControlInContentFeaturesHydrationParam),</p>
+</dd>
+<dt>enableTweetMediaHydrationGate = RecapQuery.paramGate(</dt><dd><p>InNetworkTweetParams.EnableTweetMediaHydrationParam</p>
+</dd>
+</dl>
+<p>),
+hydrateInReplyToTweets = true,
+statsReceiver = baseScope</p>
+</dd>
+</dl>
+<p>).build()</p>
+</dd>
+</dl>
+<p>private[this] val candidateGenerationTransform = new CandidateGenerationTransform(baseScope)</p>
+<dl class="simple">
+<dt>private[this] val maxFollowedUsersProvider =</dt><dd><p>DependencyProvider.from(InNetworkTweetParams.MaxFollowedUsersParam)</p>
+</dd>
+<dt>private[this] val earlybirdReturnAllResultsProvider =</dt><dd><p>DependencyProvider.from(InNetworkTweetParams.EnableEarlybirdReturnAllResultsParam)</p>
+</dd>
+<dt>private[this] val relevanceOptionsMaxHitsToProcessProvider =</dt><dd><p>DependencyProvider.from(InNetworkTweetParams.RelevanceOptionsMaxHitsToProcessParam)</p>
+</dd>
+<dt>private[this] val followGraphDataTransform =</dt><dd><p>new FollowGraphDataTransform(followGraphDataProvider, maxFollowedUsersProvider)</p>
+</dd>
+<dt>private[this] val enableRealGraphUsersProvider =</dt><dd><p>DependencyProvider.from(RecapParams.EnableRealGraphUsersParam)</p>
+</dd>
+<dt>private[this] val maxRealGraphAndFollowedUsersProvider =</dt><dd><p>DependencyProvider.from(RecapParams.MaxRealGraphAndFollowedUsersParam)</p>
+</dd>
+<dt>private[this] val maxRealGraphAndFollowedUsersFSOverrideProvider =</dt><dd><p>DependencyProvider.from(RecapParams.MaxRealGraphAndFollowedUsersFSOverrideParam)</p>
+</dd>
+<dt>private[this] val imputeRealGraphAuthorWeightsProvider =</dt><dd><p>DependencyProvider.from(RecapParams.ImputeRealGraphAuthorWeightsParam)</p>
+</dd>
+<dt>private[this] val imputeRealGraphAuthorWeightsPercentileProvider =</dt><dd><p>DependencyProvider.from(RecapParams.ImputeRealGraphAuthorWeightsPercentileParam)</p>
+</dd>
+<dt>private[this] val maxRealGraphAndFollowedUsersFromDeciderAndFS = DependencyProvider { envelope =&gt;</dt><dd><dl class="simple">
+<dt>maxRealGraphAndFollowedUsersFSOverrideProvider(envelope).getOrElse(</dt><dd><p>maxRealGraphAndFollowedUsersProvider(envelope))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+private[this] val followAndRealGraphCombiningTransform = new FollowAndRealGraphCombiningTransform(</p>
+<blockquote>
+<div><p>followGraphDataProvider = followGraphDataProvider,
+maxFollowedUsersProvider = maxFollowedUsersProvider,
+enableRealGraphUsersProvider = enableRealGraphUsersProvider,
+maxRealGraphAndFollowedUsersProvider = maxRealGraphAndFollowedUsersFromDeciderAndFS,
+imputeRealGraphAuthorWeightsProvider = imputeRealGraphAuthorWeightsProvider,
+imputeRealGraphAuthorWeightsPercentileProvider = imputeRealGraphAuthorWeightsPercentileProvider,
+statsReceiver = baseScope</p>
+</div></blockquote>
+<p>)</p>
+<dl class="simple">
+<dt>private[this] val maxCountProvider = DependencyProvider { query =&gt;</dt><dd><p>query.maxCount.getOrElse(query.params(InNetworkTweetParams.DefaultMaxTweetCount))</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private[this] val maxCountWithMarginProvider = DependencyProvider { query =&gt;</dt><dd><p>val maxCount = query.maxCount.getOrElse(query.params(InNetworkTweetParams.DefaultMaxTweetCount))
+val multiplier = query.params(InNetworkTweetParams.MaxCountMultiplierParam)
+(maxCount * multiplier).toInt</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private[this] val debugAuthorsMonitoringProvider =</dt><dd><p>DependencyProvider.from(MonitoringParams.DebugAuthorsAllowListParam)</p>
+</dd>
+<dt>private[this] val retrieveSearchResultsTransform = new RecapSearchResultsTransform(</dt><dd><p>searchClient = searchClient,
+maxCountProvider = maxCountWithMarginProvider,
+returnAllResultsProvider = earlybirdReturnAllResultsProvider,
+relevanceOptionsMaxHitsToProcessProvider = relevanceOptionsMaxHitsToProcessProvider,
+enableExcludeSourceTweetIdsProvider = DependencyProvider.True,
+enableSettingTweetTypesWithTweetKindOptionProvider =</p>
+<blockquote>
+<div><p>DependencyProvider.from(RecapParams.EnableSettingTweetTypesWithTweetKindOption),</p>
+</div></blockquote>
+<p>perRequestSearchClientIdProvider = DependencyProvider.None,
+statsReceiver = baseScope,
+logSearchDebugInfo = false</p>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>private[this] val preTruncateSearchResultsTransform =</dt><dd><dl>
+<dt>new UsersSearchResultMonitoringTransform(</dt><dd><p>name = “RecapSearchResultsTruncationTransform”,
+new RecapSearchResultsTruncationTransform(</p>
+<blockquote>
+<div><p>extraSortBeforeTruncationGate = DependencyProvider.True,
+maxCountProvider = maxCountWithMarginProvider,
+statsReceiver = baseScope.scope(“afterSearchResultsTransform”)</p>
+</div></blockquote>
+<p>),
+baseScope.scope(“afterSearchResultsTransform”),
+debugAuthorsMonitoringProvider</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>private[this] val finalTruncationTransform = new UsersSearchResultMonitoringTransform(</dt><dd><p>name = “RecapSearchResultsTruncationTransform”,
+new RecapSearchResultsTruncationTransform(</p>
+<blockquote>
+<div><p>extraSortBeforeTruncationGate = DependencyProvider.True,
+maxCountProvider = maxCountProvider,
+statsReceiver = baseScope.scope(“finalTruncation”)</p>
+</div></blockquote>
+<p>),
+baseScope.scope(“finalTruncation”),
+debugAuthorsMonitoringProvider</p>
+</dd>
+</dl>
+<p>)</p>
+<p>// Fetch source tweets based on search results present in the envelope
+// and hydrate them.
+private[this] val fetchAndHydrateSourceTweets =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>sourceTweetsSearchResultsTransform</dt><dd><p>.andThen(SourceTweetHydrationTransform)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>// Hydrate candidate tweets and fetch source tweets in parallel
+private[this] val hydrateTweetsAndSourceTweetsInParallel =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>new HydrateTweetsAndSourceTweetsInParallelTransform(</dt><dd><p>candidateTweetHydration = CandidateTweetHydrationTransform,
+sourceTweetHydration = fetchAndHydrateSourceTweets</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>private[this] val trimToMatchSearchResultsTransform = new TrimToMatchSearchResultsTransform(</dt><dd><p>hydrateReplyRootTweetProvider = hydrateReplyRootTweetProvider,
+statsReceiver = baseScope</p>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>private[this] val hydrationAndFilteringPipeline =</dt><dd><dl>
+<dt>CreateCandidateEnvelopeTransform // Create empty CandidateEnvelope</dt><dd><p>.andThen(followGraphDataTransform) // Fetch follow graph data
+.andThen(followAndRealGraphCombiningTransform) // Experiment: expand seed author set
+.andThen(retrieveSearchResultsTransform) // Fetch search results
+.andThen(</p>
+<blockquote>
+<div><p>preTruncateSearchResultsTransform</p>
+</div></blockquote>
+<p>) // truncate the search result up to maxCount + some margin, preserving the random tweet
+.andThen(SearchResultDedupAndSortingTransform) // dedups, and sorts reverse-chron
+.andThen(hydrateTweetsAndSourceTweetsInParallel) // candidates + source tweets in parallel
+.andThen(visibilityEnforcingTransform) // filter hydrated tweets to visible ones
+.andThen(hydratedTweetsFilter) // filter hydrated tweets based on predefined filter
+.andThen(dynamicHydratedTweetsFilter) // filter hydrated tweets based on query TweetKindOption
+.andThen(TrimToMatchHydratedTweetsTransform) // trim searchResult to match with hydratedTweets
+.andThen(</p>
+<blockquote>
+<div><p>finalTruncationTransform</p>
+</div></blockquote>
+<p>) // truncate the searchResult to exactly up to maxCount, preserving the random tweet
+.andThen(</p>
+<blockquote>
+<div><p>trimToMatchSearchResultsTransform</p>
+</div></blockquote>
+<p>) // trim other fields to match with the final searchResult</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>// runs the main pipeline in parallel with fetching user profile info and user languages
+private[this] val featureHydrationDataTransform = new FeatureHydrationDataTransform(</p>
+<blockquote>
+<div><p>hydrationAndFilteringPipeline,
+languagesTransform,
+userProfileInfoTransform</p>
+</div></blockquote>
+<p>)</p>
+<dl>
+<dt>private[this] val featureHydrationPipeline =</dt><dd><dl class="simple">
+<dt>featureHydrationDataTransform</dt><dd><p>.andThen(InNetworkTweetsSearchFeaturesHydrationTransform)
+.andThen(contentFeaturesTransformer)
+.andThen(candidateGenerationTransform)</p>
+</dd>
+</dl>
+</dd>
+<dt>def get(query: RecapQuery): Future[CandidateTweetsResult] = {</dt><dd><dl class="simple">
+<dt>requestStats.addEventStats {</dt><dd><p>featureHydrationPipeline(query)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>def get(queries: Seq[RecapQuery]): Future[Seq[CandidateTweetsResult]] = {</dt><dd><p>Future.collect(queries.map(get))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/timelineranker/server/src/main/scala/com/twitter/timelineranker/in_network_tweets/InNetworkTweetSource.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

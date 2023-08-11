@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../" id="documentation_options" src="../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.earlybird.search;</p>
+<p>import java.io.IOException;
+import java.util.LinkedHashSet;
+import java.util.Set;</p>
+<p>import org.apache.lucene.index.LeafReaderContext;
+import org.apache.lucene.index.NumericDocValues;
+import org.apache.lucene.search.Query;
+import org.apache.lucene.spatial.prefix.tree.Cell;
+import org.apache.lucene.spatial.prefix.tree.CellIterator;
+import org.apache.lucene.util.BytesRef;
+import org.locationtech.spatial4j.shape.Rectangle;</p>
+<p>import com.twitter.search.common.query.MultiTermDisjunctionQuery;
+import com.twitter.search.common.schema.earlybird.EarlybirdFieldConstants.EarlybirdFieldConstant;
+import com.twitter.search.common.search.GeoQuadTreeQueryBuilderUtil;
+import com.twitter.search.common.search.TerminationTracker;
+import com.twitter.search.common.util.spatial.BoundingBox;
+import com.twitter.search.common.util.spatial.GeoUtil;
+import com.twitter.search.common.util.spatial.GeohashChunkImpl;
+import com.twitter.search.core.earlybird.index.EarlybirdIndexSegmentAtomicReader;
+import com.twitter.search.earlybird.search.queries.GeoTwoPhaseQuery;
+import com.twitter.search.earlybird.search.queries.GeoTwoPhaseQuery.SecondPhaseDocAccepter;
+import com.twitter.search.queryparser.query.QueryParserException;
+import com.twitter.search.queryparser.util.GeoCode;</p>
+<p>import geo.google.datamodel.GeoCoordinate;</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>A class that builds queries to query the quadtree.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>public final class GeoQuadTreeQueryBuilder {</dt><dd><p>private GeoQuadTreeQueryBuilder() {
+}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Returns a GeoTwoPhaseQuery for the given geocode.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>public static Query buildGeoQuadTreeQuery(final GeoCode geocode) {</dt><dd><p>return buildGeoQuadTreeQuery(geocode, null);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Returns a GeoTwoPhaseQuery for the given geocode.</p></li>
+<li></li>
+<li><p>&#64;param geocode The geocode.</p></li>
+<li><p>&#64;param terminationTracker The tracker that determines when the query needs to terminate.</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>public static Query buildGeoQuadTreeQuery(GeoCode geocode,</dt><dd><blockquote>
+<div><p>TerminationTracker terminationTracker) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>Query geoHashDisjuntiveQuery = GeoQuadTreeQueryBuilderUtil.buildGeoQuadTreeQuery(</dt><dd><p>geocode, EarlybirdFieldConstant.GEO_HASH_FIELD.getFieldName());</p>
+</dd>
+</dl>
+<p>// 5. Create post filtering accepter
+final SecondPhaseDocAccepter accepter = (geocode.distanceKm != GeoCode.DOUBLE_DISTANCE_NOT_SET)</p>
+<blockquote>
+<div><p>? new CenterRadiusAccepter(geocode.latitude, geocode.longitude, geocode.distanceKm)
+: GeoTwoPhaseQuery.ALL_DOCS_ACCEPTER;</p>
+</div></blockquote>
+<p>return new GeoTwoPhaseQuery(geoHashDisjuntiveQuery, accepter, terminationTracker);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Construct a query as below:</p></li>
+<li><ol class="arabic simple">
+<li><p>Compute all quadtree cells that intersects the bounding box.</p></li>
+</ol>
+</li>
+<li><ol class="arabic simple" start="2">
+<li><p>Create a disjunction of the geohashes of all the intersecting cells.</p></li>
+</ol>
+</li>
+<li><ol class="arabic simple" start="3">
+<li><p>Add a filter to only keep points inside the giving bounding box.</p></li>
+</ol>
+</li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+<dt>public static Query buildGeoQuadTreeQuery(final Rectangle boundingBox,</dt><dd><blockquote>
+<div><blockquote>
+<div><p>final TerminationTracker terminationTracker)</p>
+</div></blockquote>
+<p>throws QueryParserException {</p>
+</div></blockquote>
+<p>// 1. Locate the main quadtree cell—the cell containing the bounding box’s center point whose
+// diagonal is just longer than the bounding box’s diagonal.
+final Cell centerCell = GeohashChunkImpl.getGeoNodeByBoundingBox(boundingBox);</p>
+<p>// 2. Determine quadtree level to search.
+int treeLevel = -1;
+if (centerCell != null) {</p>
+<blockquote>
+<div><p>treeLevel = centerCell.getLevel();</p>
+</div></blockquote>
+<dl>
+<dt>} else {</dt><dd><p>// This should not happen.
+throw new QueryParserException(</p>
+<blockquote>
+<div><p>“Unable to locate quadtree cell containing the given bounding box.”
++ “Bounding box is: “ + boundingBox);</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<p>// 3. get all quadtree cells at treeLevel that intersects the given bounding box.
+CellIterator intersectingCells =</p>
+<blockquote>
+<div><p>GeohashChunkImpl.getNodesIntersectingBoundingBox(boundingBox, treeLevel);</p>
+</div></blockquote>
+<p>// 4. Construct disjunction query
+final Set&lt;BytesRef&gt; geoHashSet = new LinkedHashSet&lt;&gt;();</p>
+<p>// Add center node
+geoHashSet.add(centerCell.getTokenBytesNoLeaf(new BytesRef()));
+// If there are other nodes intersecting query circle, also add them in.
+if (intersectingCells != null) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>while (intersectingCells.hasNext()) {</dt><dd><p>geoHashSet.add(intersectingCells.next().getTokenBytesNoLeaf(new BytesRef()));</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}
+MultiTermDisjunctionQuery geoHashDisjuntiveQuery = new MultiTermDisjunctionQuery(</p>
+<blockquote>
+<div><p>EarlybirdFieldConstant.GEO_HASH_FIELD.getFieldName(), geoHashSet);</p>
+</div></blockquote>
+<p>// 5. Create post filtering accepter
+final GeoDocAccepter accepter = new BoundingBoxAccepter(boundingBox);</p>
+<p>return new GeoTwoPhaseQuery(geoHashDisjuntiveQuery, accepter, terminationTracker);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private abstract static class GeoDocAccepter extends SecondPhaseDocAccepter {</dt><dd><p>private NumericDocValues latLonDocValues;
+private final GeoCoordinate geoCoordReuse = new GeoCoordinate();</p>
+<p>&#64;Override
+public void initialize(LeafReaderContext context) throws IOException {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>final EarlybirdIndexSegmentAtomicReader reader =</dt><dd><p>(EarlybirdIndexSegmentAtomicReader) context.reader();</p>
+</dd>
+<dt>latLonDocValues =</dt><dd><p>reader.getNumericDocValues(EarlybirdFieldConstant.LAT_LON_CSF_FIELD.getFieldName());</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<p>// Decides whether a point should be accepted.
+protected abstract boolean acceptPoint(double lat, double lon);</p>
+<p>// Decides whether a document should be accepted based on its geo coordinates.
+&#64;Override
+public final boolean accept(int internalDocId) throws IOException {</p>
+<blockquote>
+<div><p>// Cannot obtain valid geo coordinates for the document. Not acceptable.
+if (latLonDocValues == null</p>
+<blockquote>
+<div><blockquote>
+<div><p>|| !latLonDocValues.advanceExact(internalDocId)
+|| !GeoUtil.decodeLatLonFromInt64(latLonDocValues.longValue(), geoCoordReuse)) {</p>
+</div></blockquote>
+<p>return false;</p>
+</div></blockquote>
+<p>}</p>
+<p>return acceptPoint(geoCoordReuse.getLatitude(), geoCoordReuse.getLongitude());</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// Accepts points within a circle defined by a center point and a radius.
+private static final class CenterRadiusAccepter extends GeoDocAccepter {</p>
+<blockquote>
+<div><p>private final double centerLat;
+private final double centerLon;
+private final double radiusKm;</p>
+<dl class="simple">
+<dt>public CenterRadiusAccepter(double centerLat, double centerLon, double radiusKm) {</dt><dd><p>this.centerLat = centerLat;
+this.centerLon = centerLon;
+this.radiusKm = radiusKm;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;Override
+protected boolean acceptPoint(double lat, double lon) {</p>
+<blockquote>
+<div><dl>
+<dt>double actualDistance =</dt><dd><p>BoundingBox.approxDistanceC(centerLat, centerLon, lat, lon);</p>
+</dd>
+<dt>if (actualDistance &lt; radiusKm) {</dt><dd><p>return true;</p>
+</dd>
+<dt>} else if (Double.isNaN(actualDistance)) {</dt><dd><p>// There seems to be a rare bug in GeoUtils that computes NaN
+// for two identical lat/lon pairs on occasion. Check for that here.
+if (lat == centerLat &amp;&amp; lon == centerLon) {</p>
+<blockquote>
+<div><p>return true;</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>return false;</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public String toString() {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>return String.format(“CenterRadiusAccepter(Center: %.4f, %.4f Radius (km): %.4f)”,</dt><dd><p>centerLat, centerLon, radiusKm);</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>// Accepts points within a BoundingBox
+private static final class BoundingBoxAccepter extends GeoDocAccepter {</p>
+<blockquote>
+<div><p>private final Rectangle boundingBox;</p>
+<dl class="simple">
+<dt>public BoundingBoxAccepter(Rectangle boundingBox)  {</dt><dd><p>this.boundingBox = boundingBox;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;Override
+protected boolean acceptPoint(double lat, double lon) {</p>
+<blockquote>
+<div><p>return GeohashChunkImpl.isPointInBoundingBox(lat, lon, boundingBox);</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public String toString() {</p>
+<blockquote>
+<div><dl>
+<dt>return String.format(“PointInBoundingBoxAccepter((%.4f, %.4f), (%.4f, %.4f), “</dt><dd><ul class="simple">
+<li><p>“crossesDateLine=%b)”,</p></li>
+</ul>
+<p>boundingBox.getMinY(), boundingBox.getMinX(),
+boundingBox.getMaxY(), boundingBox.getMaxX(),
+boundingBox.getCrossesDateLine());</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../_sources/src/java/com/twitter/search/earlybird/search/GeoQuadTreeQueryBuilder.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

@@ -1,0 +1,718 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../" id="documentation_options" src="../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.earlybird.archive.segmentbuilder;</p>
+<p>import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Random;
+import java.util.concurrent.TimeUnit;</p>
+<p>import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Preconditions;
+import com.google.common.base.Stopwatch;
+import com.google.common.collect.ComparisonChain;
+import com.google.common.collect.ImmutableList;
+import com.google.common.util.concurrent.Uninterruptibles;
+import com.google.inject.Inject;</p>
+<p>import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;</p>
+<p>import com.twitter.common.quantity.Amount;
+import com.twitter.common.quantity.Time;
+import com.twitter.common.util.Clock;
+import com.twitter.decider.Decider;
+import com.twitter.inject.annotations.Flag;
+import com.twitter.search.common.metrics.SearchCounter;
+import com.twitter.search.common.metrics.SearchLongGauge;
+import com.twitter.search.common.metrics.SearchStatsReceiver;
+import com.twitter.search.common.metrics.SearchStatsReceiverImpl;
+import com.twitter.search.common.partitioning.zookeeper.SearchZkClient;
+import com.twitter.search.common.util.Kerberos;
+import com.twitter.search.common.util.zktrylock.ZooKeeperTryLockFactory;
+import com.twitter.search.earlybird.archive.ArchiveOnDiskEarlybirdIndexConfig;
+import com.twitter.search.earlybird.archive.ArchiveSegment;
+import com.twitter.search.earlybird.archive.DailyStatusBatches;
+import com.twitter.search.earlybird.archive.ArchiveTimeSlicer;
+import com.twitter.search.earlybird.common.config.EarlybirdConfig;
+import com.twitter.search.earlybird.util.ScrubGenUtil;
+import com.twitter.search.earlybird.exception.CriticalExceptionHandler;
+import com.twitter.search.earlybird.index.EarlybirdSegmentFactory;
+import com.twitter.search.earlybird.partition.SearchIndexingMetricSet;
+import com.twitter.search.earlybird.partition.SegmentInfo;
+import com.twitter.search.earlybird.partition.SegmentSyncConfig;
+import com.twitter.search.earlybird.stats.EarlybirdSearcherStats;</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>This class provides the core logic to build segment indices offline.</p></li>
+<li><p>For each server, it coordinate via zookeeper to pick the next segment, build the indices for it</p></li>
+<li><p>and upload them to HDFS. A state machine is used to handle the build state transitions. There</p></li>
+<li><p>are three states:</p></li>
+<li><p>NOT_BUILD_YET: a segment that needs to be built</p></li>
+<li><p>SOMEONE_ELSE_IS_BUILDING: another server is building the segment.</p></li>
+<li><p>BUILT_AND_FINALIZED: the indices of this segment have already been built.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>public class SegmentBuilder {</dt><dd><p>private static final Logger LOG = LoggerFactory.getLogger(SegmentBuilder.class);</p>
+<p>private final boolean onlyRunOnce;
+private final int waitBetweenLoopsMins;
+private final int startUpBatchSize;
+private final int instance;
+private final int waitBetweenSegmentsSecs;
+private final int waitBeforeQuitMins;</p>
+<p>// When multiple segment builders start simultaneously, they might make the HDFS name node and
+// zookeeper overwhelmed. So, we let some instances sleep sometimes before they start to avoid
+// the issues.
+private final long startUpSleepMins;</p>
+<p>// If no more segments to built, wait this interval before checking again.
+private final long processWaitingInterval = TimeUnit.MINUTES.toMillis(10);</p>
+<p>// The hash partitions that segments will be built.
+private final ImmutableList&lt;Integer&gt; hashPartitions;</p>
+<p>private final SearchStatsReceiver statsReceiver = new SearchStatsReceiverImpl();
+private final SearchIndexingMetricSet searchIndexingMetricSet =</p>
+<blockquote>
+<div><p>new SearchIndexingMetricSet(statsReceiver);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>private final EarlybirdSearcherStats searcherStats =</dt><dd><p>new EarlybirdSearcherStats(statsReceiver);</p>
+</dd>
+</dl>
+<p>private final ArchiveOnDiskEarlybirdIndexConfig earlybirdIndexConfig;</p>
+<p>private final ZooKeeperTryLockFactory zkTryLockFactory;
+private final RateLimitingSegmentHandler segmentHandler;
+private final Clock clock;
+private final int numSegmentBuilderPartitions;
+private final int myPartitionId;
+private final SegmentConfig segmentConfig;
+private final EarlybirdSegmentFactory segmentFactory;
+private final SegmentBuilderCoordinator segmentBuilderCoordinator;
+private final SegmentSyncConfig segmentSyncConfig;
+private final Random random = new Random();</p>
+<p>private static final double SLEEP_RANDOMIZATION_RATIO = .2;</p>
+<p>// Stats
+// The flush version used to build segments
+private static final SearchLongGauge CURRENT_FLUSH_VERSION =</p>
+<blockquote>
+<div><p>SearchLongGauge.export(“current_flush_version”);</p>
+</div></blockquote>
+<p>// Accumulated number and time in seconds spent on building segments locally
+private static SearchCounter segmentsBuiltLocally =</p>
+<blockquote>
+<div><p>SearchCounter.export(“segments_built_locally”);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>private static SearchCounter timeSpentOnSuccessfulBuildSecs =</dt><dd><p>SearchCounter.export(“time_spent_on_successful_build_secs”);</p>
+</dd>
+</dl>
+<p>// The total number of segments to be built
+private static final SearchLongGauge SEGMENTS_TO_BUILD =</p>
+<blockquote>
+<div><p>SearchLongGauge.export(“segments_to_build”);</p>
+</div></blockquote>
+<p>// How many segments failed locally
+private static final SearchCounter FAILED_SEGMENTS =</p>
+<blockquote>
+<div><p>SearchCounter.export(“failed_segments”);</p>
+</div></blockquote>
+<p>&#64;Inject
+protected SegmentBuilder(&#64;Flag(“onlyRunOnce”) boolean onlyRunOnceFlag,</p>
+<blockquote>
+<div><blockquote>
+<div><p>&#64;Flag(“waitBetweenLoopsMins”) int waitBetweenLoopsMinsFlag,
+&#64;Flag(“startup_batch_size”) int startUpBatchSizeFlag,
+&#64;Flag(“instance”) int instanceFlag,
+&#64;Flag(“segmentZkLockExpirationHours”)</p>
+<blockquote>
+<div><p>int segmentZkLockExpirationHoursFlag,</p>
+</div></blockquote>
+<p>&#64;Flag(“startupSleepMins”) long startupSleepMinsFlag,
+&#64;Flag(“maxRetriesOnFailure”) int maxRetriesOnFailureFlag,
+&#64;Flag(“hash_partitions”) List&lt;Integer&gt; hashPartitionsFlag,
+&#64;Flag(“numSegmentBuilderPartitions”) int numSegmentBuilderPartitionsFlag,
+&#64;Flag(“waitBetweenSegmentsSecs”) int waitBetweenSegmentsSecsFlag,
+&#64;Flag(“waitBeforeQuitMins”) int waitBeforeQuitMinsFlag,
+&#64;Flag(“scrubGen”) String scrubGen,
+Decider decider) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>this(onlyRunOnceFlag,</dt><dd><p>waitBetweenLoopsMinsFlag,
+startUpBatchSizeFlag,
+instanceFlag,
+segmentZkLockExpirationHoursFlag,
+startupSleepMinsFlag,
+hashPartitionsFlag,
+maxRetriesOnFailureFlag,
+waitBetweenSegmentsSecsFlag,
+waitBeforeQuitMinsFlag,
+SearchZkClient.getSZooKeeperClient().createZooKeeperTryLockFactory(),
+new RateLimitingSegmentHandler(TimeUnit.MINUTES.toMillis(10), Clock.SYSTEM_CLOCK),
+Clock.SYSTEM_CLOCK,
+numSegmentBuilderPartitionsFlag,
+decider,
+getSyncConfig(scrubGen));</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<p>&#64;VisibleForTesting
+protected SegmentBuilder(boolean onlyRunOnceFlag,</p>
+<blockquote>
+<div><blockquote>
+<div><p>int waitBetweenLoopsMinsFlag,
+int startUpBatchSizeFlag,
+int instanceFlag,
+int segmentZkLockExpirationHoursFlag,
+long startupSleepMinsFlag,
+List&lt;Integer&gt; hashPartitions,
+int maxRetriesOnFailure,
+int waitBetweenSegmentsSecsFlag,
+int waitBeforeQuitMinsFlag,
+ZooKeeperTryLockFactory zooKeeperTryLockFactory,
+RateLimitingSegmentHandler segmentHandler,
+Clock clock,
+int numSegmentBuilderPartitions,
+Decider decider,
+SegmentSyncConfig syncConfig) {</p>
+</div></blockquote>
+<p>LOG.info(“Creating SegmentBuilder”);
+LOG.info(“Penguin version in use: “ + EarlybirdConfig.getPenguinVersion());</p>
+<p>// Set command line flag values
+this.onlyRunOnce = onlyRunOnceFlag;
+this.waitBetweenLoopsMins = waitBetweenLoopsMinsFlag;
+this.startUpBatchSize = startUpBatchSizeFlag;
+this.instance = instanceFlag;
+this.waitBetweenSegmentsSecs = waitBetweenSegmentsSecsFlag;
+this.waitBeforeQuitMins = waitBeforeQuitMinsFlag;</p>
+<p>this.segmentHandler = segmentHandler;
+this.zkTryLockFactory = zooKeeperTryLockFactory;
+this.segmentSyncConfig = syncConfig;
+this.startUpSleepMins = startupSleepMinsFlag;</p>
+<dl class="simple">
+<dt>if (!hashPartitions.isEmpty()) {</dt><dd><p>this.hashPartitions = ImmutableList.copyOf(hashPartitions);</p>
+</dd>
+<dt>} else {</dt><dd><p>this.hashPartitions = null;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>Amount&lt;Long, Time&gt; segmentZKLockExpirationTime = Amount.of((long)</dt><dd><p>segmentZkLockExpirationHoursFlag, Time.HOURS);</p>
+</dd>
+<dt>this.earlybirdIndexConfig =</dt><dd><dl class="simple">
+<dt>new ArchiveOnDiskEarlybirdIndexConfig(decider, searchIndexingMetricSet,</dt><dd><p>new CriticalExceptionHandler());</p>
+</dd>
+</dl>
+</dd>
+<dt>this.segmentConfig = new SegmentConfig(</dt><dd><p>earlybirdIndexConfig,
+segmentZKLockExpirationTime,
+maxRetriesOnFailure,
+zkTryLockFactory);</p>
+</dd>
+<dt>this.segmentFactory = new EarlybirdSegmentFactory(</dt><dd><p>earlybirdIndexConfig,
+searchIndexingMetricSet,
+searcherStats,
+clock);</p>
+</dd>
+<dt>this.segmentBuilderCoordinator = new SegmentBuilderCoordinator(</dt><dd><p>zkTryLockFactory, syncConfig, clock);</p>
+</dd>
+</dl>
+<p>this.clock = clock;</p>
+<p>this.numSegmentBuilderPartitions = numSegmentBuilderPartitions;
+this.myPartitionId = instance % numSegmentBuilderPartitions;
+SearchLongGauge.export(”<a href="#id13"><span class="problematic" id="id14">segment_builder_partition_id_</span></a>” + myPartitionId).set(1);</p>
+<p>CURRENT_FLUSH_VERSION.set(earlybirdIndexConfig.getSchema().getMajorVersionNumber());</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>void run() {</dt><dd><p>LOG.info(“Config values: {}”, EarlybirdConfig.allValuesAsString());</p>
+<p>// Sleep some time uninterruptibly before get started so that if multiple instances are running,
+// the HDFS name node and zookeeper wont be overwhelmed
+// Say, we have 100 instances (instance_arg will have value from 0 - 99, our
+// STARTUP_BATCH_SIZE_ARG is 20 and startUpSleepMins is 3 mins. Then the first 20 instances
+// will not sleep, but start immediately. then instance 20 - 39 will sleep 3 mins and then
+// start to run. instance 40 - 59 will sleep 6 mins then start to run. instances 60 - 79 will
+// sleep 9 mins and then start to run and so forth.
+long sleepTime = instance / startUpBatchSize * startUpSleepMins;
+LOG.info(“Instance={}, Start up batch size={}”, instance, startUpBatchSize);
+LOG.info(“Sleep {} minutes to void HDFS name node and ZooKeeper overwhelmed.”, sleepTime);
+Uninterruptibles.sleepUninterruptibly(sleepTime, TimeUnit.MINUTES);</p>
+<p>// Kinit here.
+Kerberos.kinit(</p>
+<blockquote>
+<div><p>EarlybirdConfig.getString(“kerberos_user”, “”),
+EarlybirdConfig.getString(“kerberos_keytab_path”, “”)</p>
+</div></blockquote>
+<p>);</p>
+<p>long waitBetweenLoopsMs = TimeUnit.MINUTES.toMillis(waitBetweenLoopsMins);
+if (onlyRunOnce) {</p>
+<blockquote>
+<div><p>LOG.info(“This segment builder will run the full rebuild of all the segments”);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><dl class="simple">
+<dt>LOG.info(“This segment builder will incrementally check for new data and rebuilt “</dt><dd><ul class="simple">
+<li><p>“current segments as needed.”);</p></li>
+</ul>
+</dd>
+<dt>LOG.info(“The waiting interval between two new data checking is: “</dt><dd><ul class="simple">
+<li><p>waitBetweenLoopsMs + “ ms.”);</p></li>
+</ul>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>boolean scrubGenPresent = segmentSyncConfig.getScrubGen().isPresent();
+LOG.info(“Scrub gen present: {}”, scrubGenPresent);
+boolean scrubGenDataFullyBuilt = segmentBuilderCoordinator.isScrubGenDataFullyBuilt(instance);
+LOG.info(“Scrub gen data fully built: {}”, scrubGenDataFullyBuilt);</p>
+<dl>
+<dt>if (!scrubGenPresent || scrubGenDataFullyBuilt) {</dt><dd><p>LOG.info(“Starting segment building loop…”);
+while (!Thread.currentThread().isInterrupted()) {</p>
+<blockquote>
+<div><dl>
+<dt>try {</dt><dd><p>indexingLoop();
+if (onlyRunOnce) {</p>
+<blockquote>
+<div><p>LOG.info(“only run once is true, breaking”);
+break;</p>
+</div></blockquote>
+<p>}
+clock.waitFor(waitBetweenLoopsMs);</p>
+</dd>
+<dt>} catch (InterruptedException e) {</dt><dd><p>LOG.info(“Interrupted, quitting segment builder”);
+Thread.currentThread().interrupt();</p>
+</dd>
+<dt>} catch (SegmentInfoConstructionException e) {</dt><dd><p>LOG.error(“Error creating new segmentInfo, quitting segment builder: “, e);
+break;</p>
+</dd>
+<dt>} catch (SegmentUpdaterException e) {</dt><dd><p>FAILED_SEGMENTS.increment();
+// Before the segment builder quits, sleep for WAIT_BEFORE_QUIT_MINS minutes so that the
+// FAILED_SEGMENTS stat can be exported.
+try {</p>
+<blockquote>
+<div><p>clock.waitFor(TimeUnit.MINUTES.toMillis(waitBeforeQuitMins));</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} catch (InterruptedException ex) {</dt><dd><p>LOG.info(“Interrupted, quitting segment builder”);
+Thread.currentThread().interrupt();</p>
+</dd>
+</dl>
+<p>}
+LOG.error(“SegmentUpdater processing segment error, quitting segment builder: “, e);
+break;</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+<dt>} else {</dt><dd><p>LOG.info(“Cannot build the segments for scrub gen yet.”);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// Refactoring the run loop to here for unittest
+&#64;VisibleForTesting
+void indexingLoop()</p>
+<blockquote>
+<div><blockquote>
+<div><p>throws SegmentInfoConstructionException, InterruptedException, SegmentUpdaterException {</p>
+</div></blockquote>
+<p>// This map contains all the segments to be processed; if a segment is built, it will be removed
+// from the map.
+Map&lt;String, SegmentBuilderSegment&gt; buildableSegmentInfoMap;
+try {</p>
+<blockquote>
+<div><p>buildableSegmentInfoMap = createSegmentInfoMap();
+printSegmentInfoMap(buildableSegmentInfoMap);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} catch (IOException e) {</dt><dd><p>LOG.error(“Error creating segmentInfoMap: “, e);
+return;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>while (!buildableSegmentInfoMap.isEmpty()) {</dt><dd><p>boolean hasBuiltSegment = processSegments(buildableSegmentInfoMap);</p>
+<dl class="simple">
+<dt>if (!hasBuiltSegment) {</dt><dd><p>// If we successfully built a segment, no need to sleep since building a segment takes a
+// long time
+clock.waitFor(processWaitingInterval);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>// Actual shutdown.
+protected void doShutdown() {</p>
+<blockquote>
+<div><p>LOG.info(“doShutdown()…”);
+try {</p>
+<blockquote>
+<div><p>earlybirdIndexConfig.getResourceCloser().shutdownExecutor();</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} catch (InterruptedException e) {</dt><dd><p>LOG.error(“Interrupted during shutdown. “, e);</p>
+</dd>
+</dl>
+<p>}</p>
+<p>LOG.info(“Segment builder stopped!”);</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>private List&lt;ArchiveTimeSlicer.ArchiveTimeSlice&gt; createTimeSlices() throws IOException {</dt><dd><p>Preconditions.checkState(segmentSyncConfig.getScrubGen().isPresent());
+Date scrubGen = ScrubGenUtil.parseScrubGenToDate(segmentSyncConfig.getScrubGen().get());</p>
+<dl class="simple">
+<dt>final DailyStatusBatches dailyStatusBatches =</dt><dd><p>new DailyStatusBatches(zkTryLockFactory, scrubGen);</p>
+</dd>
+<dt>final ArchiveTimeSlicer archiveTimeSlicer = new ArchiveTimeSlicer(</dt><dd><p>EarlybirdConfig.getMaxSegmentSize(), dailyStatusBatches, earlybirdIndexConfig);</p>
+</dd>
+</dl>
+<p>Stopwatch stopwatch = Stopwatch.createStarted();
+List&lt;ArchiveTimeSlicer.ArchiveTimeSlice&gt; timeSlices = archiveTimeSlicer.getTimeSlices();</p>
+<dl class="simple">
+<dt>if (timeSlices == null) {</dt><dd><p>LOG.error(“Failed to load timeslice map after {}”, stopwatch);
+return Collections.emptyList();</p>
+</dd>
+</dl>
+<p>}</p>
+<p>LOG.info(“Took {} to get timeslices”, stopwatch);
+return timeSlices;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private static class TimeSliceAndHashPartition implements Comparable&lt;TimeSliceAndHashPartition&gt; {</dt><dd><p>public final ArchiveTimeSlicer.ArchiveTimeSlice timeSlice;
+public final Integer hashPartition;</p>
+<dl>
+<dt>public TimeSliceAndHashPartition(</dt><dd><blockquote>
+<div><p>ArchiveTimeSlicer.ArchiveTimeSlice timeSlice,
+Integer hashPartition) {</p>
+</div></blockquote>
+<p>this.timeSlice = timeSlice;
+this.hashPartition = hashPartition;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;Override
+public int compareTo(TimeSliceAndHashPartition o) {</p>
+<blockquote>
+<div><p>Integer myHashPartition = this.hashPartition;
+Integer otherHashPartition = o.hashPartition;</p>
+<p>long myTimeSliceId = this.timeSlice.getMinStatusID(myHashPartition);
+long otherTimeSliceId = o.timeSlice.getMinStatusID(otherHashPartition);</p>
+<dl class="simple">
+<dt>return ComparisonChain.start()</dt><dd><p>.compare(myHashPartition, otherHashPartition)
+.compare(myTimeSliceId, otherTimeSliceId)
+.result();</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>For all the timeslices, create the corresponding SegmentInfo and store in a map</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+</dl>
+<p>&#64;VisibleForTesting
+Map&lt;String, SegmentBuilderSegment&gt; createSegmentInfoMap() throws IOException {</p>
+<blockquote>
+<div><p>final List&lt;ArchiveTimeSlicer.ArchiveTimeSlice&gt; timeSlices = createTimeSlices();</p>
+<p>List&lt;TimeSliceAndHashPartition&gt; timeSlicePairs = createPairs(timeSlices);
+// Export how many segments should be built
+SEGMENTS_TO_BUILD.set(timeSlicePairs.size());
+LOG.info(“Total number of segments to be built across all segment builders: {}”,</p>
+<blockquote>
+<div><p>timeSlicePairs.size());</p>
+</div></blockquote>
+<p>List&lt;TimeSliceAndHashPartition&gt; mySegments = getSegmentsForMyPartition(timeSlicePairs);</p>
+<p>Map&lt;String, SegmentBuilderSegment&gt; segmentInfoMap = new HashMap&lt;&gt;();
+for (TimeSliceAndHashPartition mySegment : mySegments) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>ArchiveSegment segment = new ArchiveSegment(mySegment.timeSlice, mySegment.hashPartition,</dt><dd><p>EarlybirdConfig.getMaxSegmentSize());</p>
+</dd>
+</dl>
+<p>SegmentInfo segmentInfo = new SegmentInfo(segment, segmentFactory, segmentSyncConfig);</p>
+<dl class="simple">
+<dt>segmentInfoMap.put(segmentInfo.getSegment().getSegmentName(), new NotYetBuiltSegment(</dt><dd><p>segmentInfo, segmentConfig, segmentFactory, 0, segmentSyncConfig));</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<p>return segmentInfoMap;</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>private List&lt;TimeSliceAndHashPartition&gt; createPairs(</dt><dd><blockquote>
+<div><p>List&lt;ArchiveTimeSlicer.ArchiveTimeSlice&gt; timeSlices) {</p>
+</div></blockquote>
+<p>List&lt;TimeSliceAndHashPartition&gt; timeSlicePairs = new ArrayList&lt;&gt;();</p>
+<dl>
+<dt>for (ArchiveTimeSlicer.ArchiveTimeSlice slice<span class="classifier">timeSlices) {</span></dt><dd><p>List&lt;Integer&gt; localPartitions = hashPartitions;
+if (localPartitions == null) {</p>
+<blockquote>
+<div><p>localPartitions = range(slice.getNumHashPartitions());</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>for (Integer partition<span class="classifier">localPartitions) {</span></dt><dd><p>timeSlicePairs.add(new TimeSliceAndHashPartition(slice, partition));</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}
+return timeSlicePairs;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private List&lt;TimeSliceAndHashPartition&gt; getSegmentsForMyPartition(</dt><dd><blockquote>
+<div><p>List&lt;TimeSliceAndHashPartition&gt; timeSlicePairs) {</p>
+</div></blockquote>
+<p>Collections.sort(timeSlicePairs);</p>
+<p>List&lt;TimeSliceAndHashPartition&gt; myTimeSlices = new ArrayList&lt;&gt;();
+for (int i = myPartitionId; i &lt; timeSlicePairs.size(); i += numSegmentBuilderPartitions) {</p>
+<blockquote>
+<div><p>myTimeSlices.add(timeSlicePairs.get(i));</p>
+</div></blockquote>
+<p>}</p>
+<p>LOG.info(“Getting segments to be built for partition: {}”, myPartitionId);
+LOG.info(“Total number of partitions: {}”, numSegmentBuilderPartitions);
+LOG.info(“Number of segments picked: {}”, myTimeSlices.size());
+return myTimeSlices;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Print out the segmentInfo Map for debugging</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>private void printSegmentInfoMap(Map&lt;String, SegmentBuilderSegment&gt; segmentInfoMap) {</dt><dd><p>LOG.info(“SegmentInfoMap: “);
+for (Map.Entry&lt;String, SegmentBuilderSegment&gt; entry : segmentInfoMap.entrySet()) {</p>
+<blockquote>
+<div><p>LOG.info(entry.getValue().toString());</p>
+</div></blockquote>
+<p>}
+LOG.info(“Total SegmentInfoMap size: “ + segmentInfoMap.size() + “. done.”);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Build indices or refresh state for the segments in the specified segmentInfoMap, which only</p></li>
+<li><p>contains the segments that need to build or are building. When a segment has not been built,</p></li>
+<li><p>it is built here. If built successfully, it will be removed from the map; otherwise, its</p></li>
+<li><p>state will be updated in the map.</p></li>
+<li></li>
+<li><p>Returns true iff this process has built a segment.</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+</dl>
+<p>&#64;VisibleForTesting
+boolean processSegments(Map&lt;String, SegmentBuilderSegment&gt; segmentInfoMap)</p>
+<blockquote>
+<div><blockquote>
+<div><p>throws SegmentInfoConstructionException, SegmentUpdaterException, InterruptedException {</p>
+</div></blockquote>
+<p>boolean hasBuiltSegment = false;</p>
+<dl>
+<dt>Iterator&lt;Map.Entry&lt;String, SegmentBuilderSegment&gt;&gt; iter =</dt><dd><p>segmentInfoMap.entrySet().iterator();</p>
+</dd>
+<dt>while (iter.hasNext()) {</dt><dd><p>Map.Entry&lt;String, SegmentBuilderSegment&gt; entry = iter.next();
+SegmentBuilderSegment originalSegment = entry.getValue();</p>
+<p>LOG.info(“About to process segment: {}”, originalSegment.getSegmentName());
+long startMillis = System.currentTimeMillis();
+SegmentBuilderSegment updatedSegment = segmentHandler.processSegment(originalSegment);</p>
+<dl>
+<dt>if (updatedSegment.isBuilt()) {</dt><dd><p>iter.remove();
+hasBuiltSegment = true;</p>
+<dl class="simple">
+<dt>if (originalSegment instanceof NotYetBuiltSegment) {</dt><dd><p>// Record the total time spent on successfully building a semgent, used to compute the
+// average segment building time.
+long timeSpent = System.currentTimeMillis() - startMillis;
+segmentsBuiltLocally.increment();
+timeSpentOnSuccessfulBuildSecs.add(timeSpent / 1000);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>} else {</dt><dd><p>entry.setValue(updatedSegment);</p>
+</dd>
+</dl>
+<p>}</p>
+<p>clock.waitFor(getSegmentSleepTime());</p>
+</dd>
+</dl>
+<p>}</p>
+<p>return hasBuiltSegment;</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>private long getSegmentSleepTime() {</dt><dd><p>// The Hadoop name node can handle only about 200 requests/sec before it gets overloaded.
+// Updating the state of a node that has been built takes about 1 second.  In the worst case
+// scenario with 800 segment builders, we end up with about 800 requests/sec.  Adding a 10
+// second sleep lowers the worst case to about 80 requests/sec.</p>
+<p>long sleepMillis = TimeUnit.SECONDS.toMillis(waitBetweenSegmentsSecs);</p>
+<p>// Use randomization so that we can’t get all segment builders hitting it at the exact same time</p>
+<p>int lowerSleepBoundMillis = (int) (sleepMillis * (1.0 - SLEEP_RANDOMIZATION_RATIO));
+int upperSleepBoundMillis = (int) (sleepMillis * (1.0 + SLEEP_RANDOMIZATION_RATIO));
+return randRange(lowerSleepBoundMillis, upperSleepBoundMillis);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Returns a pseudo-random number between min and max, inclusive.</p></li>
+</ul>
+<p><a href="#id9"><span class="problematic" id="id10">*</span></a>/</p>
+</dd>
+<dt>private int randRange(int min, int max) {</dt><dd><p>return random.nextInt((max - min) + 1) + min;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Returns list of integers 0, 1, 2, …, count-1.</p></li>
+</ul>
+<p><a href="#id11"><span class="problematic" id="id12">*</span></a>/</p>
+</dd>
+<dt>private static List&lt;Integer&gt; range(int count) {</dt><dd><p>List&lt;Integer&gt; nums = new ArrayList&lt;&gt;(count);</p>
+<dl class="simple">
+<dt>for (int i = 0; i &lt; count; i++) {</dt><dd><p>nums.add(i);</p>
+</dd>
+</dl>
+<p>}</p>
+<p>return nums;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private static SegmentSyncConfig getSyncConfig(String scrubGen) {</dt><dd><dl class="simple">
+<dt>if (scrubGen == null || scrubGen.isEmpty()) {</dt><dd><dl class="simple">
+<dt>throw new RuntimeException(</dt><dd><p>“Scrub gen expected, but could not get it from the arguments.”);</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>LOG.info(“Scrub gen: “ + scrubGen);
+return new SegmentSyncConfig(Optional.of(scrubGen));</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../_sources/src/java/com/twitter/search/earlybird/archive/segmentbuilder/SegmentBuilder.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

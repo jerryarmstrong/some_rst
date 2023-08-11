@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../../../" id="documentation_options" src="../../../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.follow_recommendations.common.rankers.interleave_ranker</p>
+<p>import com.google.common.annotations.VisibleForTesting
+import com.google.inject.Inject
+import com.google.inject.Singleton
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.follow_recommendations.common.base.Ranker
+import com.twitter.follow_recommendations.common.base.StatsUtil
+import com.twitter.follow_recommendations.common.models.CandidateUser
+import com.twitter.follow_recommendations.common.rankers.common.RankerId
+import com.twitter.follow_recommendations.common.rankers.utils.Utils
+import com.twitter.stitch.Stitch
+import com.twitter.timelines.configapi.HasParams</p>
+<p>&#64;Singleton
+class InterleaveRanker[Target &lt;: HasParams] &#64;Inject() (</p>
+<blockquote>
+<div><dl class="simple">
+<dt>statsReceiver: StatsReceiver)</dt><dd><p>extends Ranker[Target, CandidateUser] {</p>
+</dd>
+</dl>
+<p>val name: String = this.getClass.getSimpleName
+private val stats = statsReceiver.scope(“interleave_ranker”)
+private val inputStats = stats.scope(“input”)
+private val interleavingStats = stats.scope(“interleave”)</p>
+<dl>
+<dt>override def rank(</dt><dd><p>target: Target,
+candidates: Seq[CandidateUser]</p>
+</dd>
+<dt>): Stitch[Seq[CandidateUser]] = {</dt><dd><dl class="simple">
+<dt>StatsUtil.profileStitch(</dt><dd><p>Stitch.value(rankCandidates(target, candidates)),
+stats.scope(“rank”)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private def rankCandidates(</dt><dd><p>target: Target,
+candidates: Seq[CandidateUser]</p>
+</dd>
+</dl>
+<p>): Seq[CandidateUser] = {</p>
+<blockquote>
+<div><dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>By this stage, all valid candidates should have:</p></li>
+<li><ol class="arabic simple">
+<li><p>Their Scores field populated.</p></li>
+</ol>
+</li>
+<li><ol class="arabic simple" start="2">
+<li><p>Their selectedRankerId set.</p></li>
+</ol>
+</li>
+<li><ol class="arabic simple" start="3">
+<li><p>Have a score associated to their selectedRankerId.</p></li>
+</ol>
+</li>
+<li><p>If there is any candidate that doesn’t meet the conditions above, there is a problem in one</p></li>
+<li><p>of the previous rankers. Since no new scoring is done in this ranker, we simply remove them.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>val validCandidates =</dt><dd><dl class="simple">
+<dt>candidates.filter { c =&gt;</dt><dd><p>c.scores.isDefined &amp;&amp;
+c.scores.exists(_.selectedRankerId.isDefined) &amp;&amp;
+getCandidateScoreByRankerId(c, c.scores.flatMap(_.selectedRankerId)).isDefined</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>// To monitor the percentage of valid candidates, as defined above, we track the following:
+inputStats.counter(“candidates_with_no_scores”).incr(candidates.count(_.scores.isEmpty))
+inputStats</p>
+<blockquote>
+<div><dl class="simple">
+<dt>.counter(“candidates_with_no_selected_ranker”).incr(candidates.count { c =&gt;</dt><dd><p>c.scores.isEmpty || c.scores.exists(_.selectedRankerId.isEmpty)</p>
+</dd>
+</dl>
+<p>})</p>
+</div></blockquote>
+<dl>
+<dt>inputStats</dt><dd><dl class="simple">
+<dt>.counter(“candidates_with_no_score_for_selected_ranker”).incr(candidates.count { c =&gt;</dt><dd><p>c.scores.isEmpty ||
+c.scores.exists(_.selectedRankerId.isEmpty) ||
+getCandidateScoreByRankerId(c, c.scores.flatMap(_.selectedRankerId)).isEmpty</p>
+</dd>
+</dl>
+<p>})</p>
+</dd>
+</dl>
+<p>inputStats.counter(“total_num_candidates”).incr(candidates.length)
+inputStats.counter(“total_valid_candidates”).incr(validCandidates.length)</p>
+<p>// We only count rankerIds from those candidates who are valid to exclude those candidates with
+// a valid selectedRankerId that don’t have an associated score for it.
+val rankerIds = validCandidates.flatMap(_.scores.flatMap(_.selectedRankerId)).sorted.distinct
+rankerIds.foreach { rankerId =&gt;</p>
+<blockquote>
+<div><dl class="simple">
+<dt>inputStats</dt><dd><dl class="simple">
+<dt>.counter(s”valid_scores_for_${rankerId.toString}”).incr(</dt><dd><p>candidates.count(getCandidateScoreByRankerId(_, Some(rankerId)).isDefined))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>inputStats.counter(s”total_candidates_for_${rankerId.toString}”).incr(candidates.length)</p>
+</div></blockquote>
+<p>}
+inputStats.counter(s”num_ranker_ids=${rankerIds.length}”).incr()
+val scribeRankingInfo: Boolean =</p>
+<blockquote>
+<div><p>target.params(InterleaveRankerParams.ScribeRankingInfoInInterleaveRanker)</p>
+</div></blockquote>
+<dl>
+<dt>if (rankerIds.length &lt;= 1)</dt><dd><p>// In the case of “Number of RankerIds = 0”, we pass on the candidates even though there is
+// a problem in a previous ranker that provided the scores.
+if (scribeRankingInfo) Utils.addRankingInfo(candidates, name) else candidates</p>
+</dd>
+<dt>else</dt><dd><dl class="simple">
+<dt>if (scribeRankingInfo)</dt><dd><p>Utils.addRankingInfo(interleaveCandidates(validCandidates, rankerIds), name)</p>
+</dd>
+</dl>
+<p>else interleaveCandidates(validCandidates, rankerIds)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<p>&#64;VisibleForTesting
+private[interleave_ranker] def interleaveCandidates(</p>
+<blockquote>
+<div><p>candidates: Seq[CandidateUser],
+rankerIds: Seq[RankerId.RankerId]</p>
+</div></blockquote>
+<dl>
+<dt>): Seq[CandidateUser] = {</dt><dd><dl>
+<dt>val candidatesWithRank = rankerIds</dt><dd><dl>
+<dt>.flatMap { ranker =&gt;</dt><dd><p>candidates
+// We first sort all candidates using this ranker.</p>
+<blockquote>
+<div><p>.sortBy(-getCandidateScoreByRankerId(_, Some(ranker)).getOrElse(Double.MinValue))
+.zipWithIndex.filter(</p>
+<blockquote>
+<div><p>// but only hold those candidates whose selected ranker is this ranker.
+// These ranks will be forced in the final ordering.
+_._1.scores.flatMap(_.selectedRankerId).contains(ranker))</p>
+</div></blockquote>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>// Only candidates who have isInProducerScoringExperiment set to true will have their position enforced. We
+// separate candidates into two groups: (1) Production and (2) Experiment.
+val (expCandidates, prodCandidates) =</p>
+<blockquote>
+<div><p>candidatesWithRank.partition(_._1.scores.exists(_.isInProducerScoringExperiment))</p>
+</div></blockquote>
+<p>// We resolve (potential) conflicts between the enforced ranks of experimental models.
+val expCandidatesFinalPos = resolveConflicts(expCandidates)</p>
+<p>// Retrieve non-occupied positions and assign them to candidates who use production ranker.
+val occupiedPos = expCandidatesFinalPos.map(_._2).toSet
+val prodCandidatesFinalPos =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>prodCandidates</dt><dd><dl class="simple">
+<dt>.map(_._1).zip(</dt><dd><p>candidates.indices.filterNot(occupiedPos.contains).sorted.take(prodCandidates.length))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</div></blockquote>
+<p>// Merge the two groups and sort them by their corresponding positions.
+val finalCandidates = (prodCandidatesFinalPos ++ expCandidatesFinalPos).sortBy(_._2).map(_._1)</p>
+<p>// We count the presence of each ranker in the top-3 final positions.
+finalCandidates.zip(0 until 3).foreach {</p>
+<blockquote>
+<div><dl>
+<dt>case (c, r) =&gt;</dt><dd><p>// We only do so for candidates that are in a producer-side experiment.
+if (c.scores.exists(_.isInProducerScoringExperiment))</p>
+<blockquote>
+<div><dl class="simple">
+<dt>c.scores.flatMap(_.selectedRankerId).map(_.toString).foreach { rankerName =&gt;</dt><dd><dl class="simple">
+<dt>interleavingStats</dt><dd><p>.counter(s”num_final_position_${r}_$rankerName”)
+.incr()</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<p>finalCandidates</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;VisibleForTesting
+private[interleave_ranker] def resolveConflicts(</p>
+<blockquote>
+<div><p>candidatesWithRank: Seq[(CandidateUser, Int)]</p>
+</div></blockquote>
+<dl>
+<dt>): Seq[(CandidateUser, Int)] = {</dt><dd><p>// The following two metrics will allow us to calculate the rate of conflicts occurring.
+// Example: If overall there are 10 producers in different bucketing experiments, and 3 of them
+// are assigned to the same position. The rate would be 3/10, 30%.
+val numCandidatesWithConflicts = interleavingStats.counter(“candidates_with_conflict”)
+val numCandidatesNoConflicts = interleavingStats.counter(“candidates_without_conflict”)
+val candidatesGroupedByRank = candidatesWithRank.groupBy(_._2).toSeq.sortBy(_._1).map {</p>
+<blockquote>
+<div><p>case (rank, candidatesWithRank) =&gt; (rank, candidatesWithRank.map(_._1))</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>candidatesGroupedByRank.foldLeft(Seq[(CandidateUser, Int)]()) { (upToHere, nextGroup) =&gt;</dt><dd><p>val (rank, candidates) = nextGroup
+if (candidates.length &gt; 1)</p>
+<blockquote>
+<div><p>numCandidatesWithConflicts.incr(candidates.length)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>else</dt><dd><p>numCandidatesNoConflicts.incr()</p>
+</dd>
+</dl>
+<p>// We use the position after the last-assigned candidate as a starting point, or 0 otherwise.
+// If candidates’ position is after this “starting point”, we enforce that position instead.
+val minAvailableIndex = scala.math.max(upToHere.lastOption.map(_._2).getOrElse(-1) + 1, rank)
+val enforcedPos =</p>
+<blockquote>
+<div><p>(minAvailableIndex until minAvailableIndex + candidates.length).toList</p>
+</div></blockquote>
+<dl>
+<dt>val shuffledEnforcedPos =</dt><dd><p>if (candidates.length &gt; 1) scala.util.Random.shuffle(enforcedPos) else enforcedPos</p>
+</dd>
+<dt>if (shuffledEnforcedPos.length &gt; 1) {</dt><dd><dl>
+<dt>candidates.zip(shuffledEnforcedPos).sortBy(_._2).map(_._1).zipWithIndex.foreach {</dt><dd><dl>
+<dt>case (c, r) =&gt;</dt><dd><dl>
+<dt>c.scores.flatMap(_.selectedRankerId).map(_.toString).foreach { rankerName =&gt;</dt><dd><p>// For each ranker, we count the total number of times it has been in a conflict.
+interleavingStats</p>
+<blockquote>
+<div><p>.counter(s”num_${shuffledEnforcedPos.length}-way_conflicts_$rankerName”)
+.incr()</p>
+</div></blockquote>
+<p>// We also count the positions each of the rankers have fallen randomly into. In any
+// experiment this should converge to uniform distribution given enough occurrences.
+// Note that the position here is relative to the other candidates in the conflict and
+// not the overall position of each candidate.
+interleavingStats</p>
+<blockquote>
+<div><dl class="simple">
+<dt>.counter(</dt><dd><p>s”num_position_${r}_after_${shuffledEnforcedPos.length}-way_conflict_$rankerName”)</p>
+</dd>
+</dl>
+<p>.incr()</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}
+upToHere ++ candidates.zip(shuffledEnforcedPos).sortBy(_._2)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;VisibleForTesting
+private[interleave_ranker] def getCandidateScoreByRankerId(</p>
+<blockquote>
+<div><p>candidate: CandidateUser,
+rankerIdOpt: Option[RankerId.RankerId]</p>
+</div></blockquote>
+<dl>
+<dt>): Option[Double] = {</dt><dd><dl>
+<dt>rankerIdOpt match {</dt><dd><p>case None =&gt; None
+case Some(rankerId) =&gt;</p>
+<blockquote>
+<div><dl class="simple">
+<dt>candidate.scores.flatMap {</dt><dd><p>_.scores.find(_.rankerId.contains(rankerId)).map(_.value)</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../../../_sources/follow-recommendations-service/common/src/main/scala/com/twitter/follow_recommendations/common/rankers/interleave_ranker/InterleaveRanker.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

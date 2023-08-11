@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.tweetypie
+package backends</p>
+<p>import com.twitter.finagle.stats.NullStatsReceiver
+import com.twitter.limiter.thriftscala.FeatureRequest
+import com.twitter.tweetypie.backends.LimiterBackend.GetFeatureUsage
+import com.twitter.tweetypie.backends.LimiterBackend.IncrementFeature
+import com.twitter.tweetypie.backends.LimiterService.Feature</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Why does LimiterService exist?</p></li>
+<li></li>
+<li><p>The underlying Limiter thrift service doesn’t support batching. This trait and implementation</p></li>
+<li><p>basically exist to allow a batch like interface to the Limiter. This keeps us from having to</p></li>
+<li><p>spread batching throughout our code base.</p></li>
+<li></li>
+<li><p>Why is LimiterService in the backends package?</p></li>
+<li></li>
+<li><p>In some ways it is like a backend if the backend supports batching. There is a modest amount of</p></li>
+<li><p>business logic LimiterService, but that logic exists here to allow easier consumption throughout</p></li>
+<li><p>the tweetypie code base. We did look at moving LimiterService to another package, but all likely</p></li>
+<li><p>candidates (service, serverutil) caused circular dependencies.</p></li>
+<li></li>
+<li><p>When I need to add functionality, should I add it to LimiterBackend or LimiterService?</p></li>
+<li></li>
+<li><p>LimiterBackend is used as a simple wrapper around the Limiter thrift client. The LimiterBackend</p></li>
+<li><p>should be kept as dumb as possible. You will most likely want to add the functionality in</p></li>
+<li><p>LimiterService.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>object LimiterService {</dt><dd><p>type MinRemaining = (UserId, Option[UserId]) =&gt; Future[Int]
+type HasRemaining = (UserId, Option[UserId]) =&gt; Future[Boolean]
+type Increment = (UserId, Option[UserId], Int) =&gt; Future[Unit]
+type IncrementByOne = (UserId, Option[UserId]) =&gt; Future[Unit]</p>
+<dl>
+<dt>sealed abstract class Feature(val name: String, val hasPerApp: Boolean = false) {</dt><dd><p>def forUser(userId: UserId): FeatureRequest = FeatureRequest(name, userId = Some(userId))
+def forApp(appId: AppId): Option[FeatureRequest] =</p>
+<blockquote>
+<div><dl>
+<dt>if (hasPerApp) {</dt><dd><dl>
+<dt>Some(</dt><dd><dl class="simple">
+<dt>FeatureRequest(</dt><dd><p>s”${name}_per_app”,
+applicationId = Some(appId),
+identifier = Some(appId.toString)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>} else {</dt><dd><p>None</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}
+object Feature {</p>
+<blockquote>
+<div><p>case object Updates extends Feature(“updates”, hasPerApp = true)
+case object MediaTagCreate extends Feature(“media_tag_create”)
+case object TweetCreateFailure extends Feature(“tweet_creation_failure”)</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>def fromBackend(</dt><dd><p>incrementFeature: IncrementFeature,
+getFeatureUsage: GetFeatureUsage,
+getAppId: =&gt; Option[</p>
+<blockquote>
+<div><p>AppId</p>
+</div></blockquote>
+<p>], // the call-by-name here to invoke per request to get the current request’s app id
+stats: StatsReceiver = NullStatsReceiver</p>
+</dd>
+<dt>): LimiterService =</dt><dd><dl>
+<dt>new LimiterService {</dt><dd><dl>
+<dt>def increment(</dt><dd><p>feature: Feature</p>
+</dd>
+<dt>)(</dt><dd><p>userId: UserId,
+contributorUserId: Option[UserId],
+amount: Int</p>
+</dd>
+<dt>): Future[Unit] = {</dt><dd><dl>
+<dt>Future.when(amount &gt; 0) {</dt><dd><p>def increment(req: FeatureRequest): Future[Unit] = incrementFeature((req, amount))</p>
+<dl>
+<dt>val incrementUser: Option[Future[Unit]] =</dt><dd><p>Some(increment(feature.forUser(userId)))</p>
+</dd>
+<dt>val incrementContributor: Option[Future[Unit]] =</dt><dd><dl class="simple">
+<dt>for {</dt><dd><p>id &lt;- contributorUserId
+if id != userId</p>
+</dd>
+</dl>
+<p>} yield increment(feature.forUser(id))</p>
+</dd>
+<dt>val incrementPerApp: Option[Future[Unit]] =</dt><dd><dl class="simple">
+<dt>for {</dt><dd><p>appId &lt;- getAppId
+req &lt;- feature.forApp(appId)</p>
+</dd>
+</dl>
+<p>} yield increment(req)</p>
+</dd>
+</dl>
+<p>Future.collect(Seq(incrementUser, incrementContributor, incrementPerApp).flatten)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def minRemaining(</dt><dd><p>feature: Feature</p>
+</dd>
+<dt>)(</dt><dd><p>userId: UserId,
+contributorUserId: Option[UserId]</p>
+</dd>
+<dt>): Future[Int] = {</dt><dd><p>def getRemaining(req: FeatureRequest): Future[Int] = getFeatureUsage(req).map(_.remaining)</p>
+<dl>
+<dt>val getUserRemaining: Option[Future[Int]] =</dt><dd><p>Some(getRemaining(feature.forUser(userId)))</p>
+</dd>
+<dt>val getContributorRemaining: Option[Future[Int]] =</dt><dd><p>contributorUserId.map(id =&gt; getRemaining(feature.forUser(id)))</p>
+</dd>
+<dt>val getPerAppRemaining: Option[Future[Int]] =</dt><dd><dl class="simple">
+<dt>for {</dt><dd><p>appId &lt;- getAppId
+req &lt;- feature.forApp(appId)</p>
+</dd>
+</dl>
+<p>} yield getRemaining(req)</p>
+</dd>
+<dt>Future</dt><dd><p>.collect(Seq(getUserRemaining, getContributorRemaining, getPerAppRemaining).flatten)
+.map(_.min)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>trait LimiterService {</p>
+<blockquote>
+<div><dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Increment the feature count for both the user and the contributor. If either increment fails,</p></li>
+<li><p>the resulting future will be the first exception encountered.</p></li>
+<li></li>
+<li><p>&#64;param feature The feature that is incremented</p></li>
+<li><p>&#64;param userId The current user tied to the current request</p></li>
+<li><p>&#64;param contributorUserId The contributor, if one exists, tied to the current request</p></li>
+<li><p>&#64;param amount The amount that each feature should be incremented.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>def increment(</dt><dd><p>feature: Feature</p>
+</dd>
+<dt>)(</dt><dd><p>userId: UserId,
+contributorUserId: Option[UserId],
+amount: Int</p>
+</dd>
+</dl>
+<p>): Future[Unit]</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Increment the feature count, by one, for both the user and the contributor. If either</p></li>
+<li><p>increment fails, the resulting future will be the first exception encountered.</p></li>
+<li></li>
+<li><p>&#64;param feature The feature that is incremented</p></li>
+<li><p>&#64;param userId The current user tied to the current request</p></li>
+<li><p>&#64;param contributorUserId The contributor, if one exists, tied to the current request</p></li>
+<li></li>
+<li><p>&#64;see [[increment]] if you want to increment a feature by a specified amount</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>def incrementByOne(</dt><dd><p>feature: Feature</p>
+</dd>
+<dt>)(</dt><dd><p>userId: UserId,
+contributorUserId: Option[UserId]</p>
+</dd>
+<dt>): Future[Unit] =</dt><dd><p>increment(feature)(userId, contributorUserId, 1)</p>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>The minimum remaining limit between the user and contributor. If an exception occurs, then the</p></li>
+<li><p>resulting Future will be the first exception encountered.</p></li>
+<li></li>
+<li><p>&#64;param feature The feature that is queried</p></li>
+<li><p>&#64;param userId The current user tied to the current request</p></li>
+<li><p>&#64;param contributorUserId The contributor, if one exists, tied to the current request</p></li>
+<li></li>
+<li><p>&#64;return a <cite>Future[Int]</cite> with the minimum limit left between the user and contributor</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+</dl>
+<p>def minRemaining(feature: Feature)(userId: UserId, contributorUserId: Option[UserId]): Future[Int]</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Can the user and contributor increment the given feature. If the result cannot be determined</p></li>
+<li><p>because of an exception, then we assume they can increment. This will allow us to continue</p></li>
+<li><p>servicing requests even if the limiter service isn’t responding.</p></li>
+<li></li>
+<li><p>&#64;param feature The feature that is queried</p></li>
+<li><p>&#64;param userId The current user tied to the current request</p></li>
+<li><p>&#64;param contributorUserId The contributor, if one exists, tied to the current request</p></li>
+<li><p>&#64;return a <cite>Future[Boolean]</cite> with true if both the user and contributor have remaining limit</p></li>
+<li><p>cap.</p></li>
+<li></li>
+<li><p>&#64;see [[minRemaining]] if you would like to handle any exceptions that occur on your own</p></li>
+</ul>
+<p><a href="#id9"><span class="problematic" id="id10">*</span></a>/</p>
+</dd>
+<dt>def hasRemaining(</dt><dd><p>feature: Feature</p>
+</dd>
+<dt>)(</dt><dd><p>userId: UserId,
+contributorUserId: Option[UserId]</p>
+</dd>
+<dt>): Future[Boolean] =</dt><dd><dl class="simple">
+<dt>minRemaining(feature)(userId, contributorUserId)</dt><dd><p>.map(_ &gt; 0)
+.handle { case _ =&gt; true }</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/tweetypie/server/src/main/scala/com/twitter/tweetypie/backends/LimiterService.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

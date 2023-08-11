@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../" id="documentation_options" src="../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.visibility.engine</p>
+<p>import com.twitter.finagle.stats.NullStatsReceiver
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.finagle.stats.Verbosity
+import com.twitter.servo.util.Gate
+import com.twitter.servo.util.MemoizingStatsReceiver
+import com.twitter.visibility.builder.VisibilityResult
+import com.twitter.visibility.features.Feature
+import com.twitter.visibility.models.SafetyLevel
+import com.twitter.visibility.rules.NotEvaluated
+import com.twitter.visibility.rules.RuleResult
+import com.twitter.visibility.rules.State
+import com.twitter.visibility.rules.State.Disabled
+import com.twitter.visibility.rules.State.FeatureFailed
+import com.twitter.visibility.rules.State.MissingFeature
+import com.twitter.visibility.rules.State.RuleFailed
+import com.twitter.visibility.rules.Action</p>
+<dl>
+<dt>case class VisibilityResultsMetricRecorder(</dt><dd><p>statsReceiver: StatsReceiver,
+captureDebugStats: Gate[Unit]) {</p>
+<dl class="simple">
+<dt>private val scopedStatsReceiver = new MemoizingStatsReceiver(</dt><dd><p>statsReceiver.scope(“visibility_rule_engine”)</p>
+</dd>
+</dl>
+<p>)
+private val actionStats: StatsReceiver = scopedStatsReceiver.scope(“by_action”)
+private val featureFailureReceiver: StatsReceiver =</p>
+<blockquote>
+<div><p>scopedStatsReceiver.scope(“feature_failed”)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>private val safetyLevelStatsReceiver: StatsReceiver =</dt><dd><p>scopedStatsReceiver.scope(“from_safety_level”)</p>
+</dd>
+</dl>
+<p>private val ruleStatsReceiver: StatsReceiver = scopedStatsReceiver.scope(“for_rule”)
+private val ruleFailureReceiver: StatsReceiver =</p>
+<blockquote>
+<div><p>scopedStatsReceiver.scope(“rule_failures”)</p>
+</div></blockquote>
+<dl>
+<dt>private val failClosedReceiver: StatsReceiver =</dt><dd><p>scopedStatsReceiver.scope(“fail_closed”)</p>
+</dd>
+<dt>private val ruleStatsBySafetyLevelReceiver: StatsReceiver =</dt><dd><p>scopedStatsReceiver.scope(“for_rule_by_safety_level”)</p>
+</dd>
+<dt>def recordSuccess(</dt><dd><p>safetyLevel: SafetyLevel,
+result: VisibilityResult</p>
+</dd>
+<dt>): Unit = {</dt><dd><p>recordAction(safetyLevel, result.verdict.fullName)</p>
+<dl>
+<dt>val isFeatureFailure = result.ruleResultMap.values</dt><dd><dl class="simple">
+<dt>.collectFirst {</dt><dd><dl class="simple">
+<dt>case RuleResult(_, FeatureFailed(_)) =&gt;</dt><dd><p>ruleFailureReceiver.counter(“feature_failed”).incr()
+true</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}.getOrElse(false)</p>
+</dd>
+<dt>val isMissingFeature = result.ruleResultMap.values</dt><dd><dl class="simple">
+<dt>.collectFirst {</dt><dd><dl class="simple">
+<dt>case RuleResult(_, MissingFeature(_)) =&gt;</dt><dd><p>ruleFailureReceiver.counter(“missing_feature”).incr()
+true</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}.getOrElse(false)</p>
+</dd>
+<dt>val isRuleFailed = result.ruleResultMap.values</dt><dd><dl class="simple">
+<dt>.collectFirst {</dt><dd><dl class="simple">
+<dt>case RuleResult(_, RuleFailed(_)) =&gt;</dt><dd><p>ruleFailureReceiver.counter(“rule_failed”).incr()
+true</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}.getOrElse(false)</p>
+</dd>
+<dt>if (isFeatureFailure || isMissingFeature || isRuleFailed) {</dt><dd><p>ruleFailureReceiver.counter().incr()</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>if (captureDebugStats()) {</dt><dd><dl>
+<dt>val ruleBySafetyLevelStat =</dt><dd><p>ruleStatsBySafetyLevelReceiver.scope(safetyLevel.name)</p>
+</dd>
+<dt>result.ruleResultMap.foreach {</dt><dd><dl class="simple">
+<dt>case (rule, ruleResult) =&gt; {</dt><dd><dl class="simple">
+<dt>ruleBySafetyLevelStat</dt><dd><p>.scope(rule.name)
+.scope(“action”)
+.counter(Verbosity.Debug, ruleResult.action.fullName).incr()</p>
+</dd>
+<dt>ruleBySafetyLevelStat</dt><dd><p>.scope(rule.name)
+.scope(“state”)
+.counter(Verbosity.Debug, ruleResult.state.name).incr()</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def recordFailedFeature(</dt><dd><p>failedFeature: Feature[_],
+exception: Throwable</p>
+</dd>
+<dt>): Unit = {</dt><dd><p>featureFailureReceiver.counter().incr()</p>
+<p>val featureStat = featureFailureReceiver.scope(failedFeature.name)
+featureStat.counter().incr()
+featureStat.counter(exception.getClass.getName).incr()</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>def recordAction(</dt><dd><p>safetyLevel: SafetyLevel,
+action: String</p>
+</dd>
+<dt>): Unit = {</dt><dd><p>safetyLevelStatsReceiver.scope(safetyLevel.name).counter(action).incr()
+actionStats.counter(action).incr()</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>def recordUnknownSafetyLevel(</dt><dd><p>safetyLevel: SafetyLevel</p>
+</dd>
+<dt>): Unit = {</dt><dd><dl class="simple">
+<dt>safetyLevelStatsReceiver</dt><dd><p>.scope(“unknown_safety_level”)
+.counter(safetyLevel.name.toLowerCase).incr()</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def recordRuleMissingFeatures(</dt><dd><p>ruleName: String,
+missingFeatures: Set[Feature[_]]</p>
+</dd>
+<dt>): Unit = {</dt><dd><p>val ruleStat = ruleStatsReceiver.scope(ruleName)
+missingFeatures.foreach { featureId =&gt;</p>
+<blockquote>
+<div><p>ruleStat.scope(“missing_feature”).counter(featureId.name).incr()</p>
+</div></blockquote>
+<p>}
+ruleStat.scope(“action”).counter(NotEvaluated.fullName).incr()
+ruleStat.scope(“state”).counter(MissingFeature(missingFeatures).name).incr()</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def recordRuleFailedFeatures(</dt><dd><p>ruleName: String,
+failedFeatures: Map[Feature[_], Throwable]</p>
+</dd>
+<dt>): Unit = {</dt><dd><p>val ruleStat = ruleStatsReceiver.scope(ruleName)</p>
+<p>ruleStat.scope(“action”).counter(NotEvaluated.fullName).incr()
+ruleStat.scope(“state”).counter(FeatureFailed(failedFeatures).name).incr()</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>def recordFailClosed(rule: String, state: State) {</dt><dd><p>failClosedReceiver.scope(state.name).counter(rule).incr();</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>def recordRuleEvaluation(</dt><dd><p>ruleName: String,
+action: Action,
+state: State</p>
+</dd>
+<dt>): Unit = {</dt><dd><p>val ruleStat = ruleStatsReceiver.scope(ruleName)
+ruleStat.scope(“action”).counter(action.fullName).incr()
+ruleStat.scope(“state”).counter(state.name).incr()</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>def recordRuleFallbackAction(</dt><dd><p>ruleName: String</p>
+</dd>
+<dt>): Unit = {</dt><dd><p>val ruleStat = ruleStatsReceiver.scope(ruleName)
+ruleStat.counter(“fallback_action”).incr()</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>def recordRuleHoldBack(</dt><dd><p>ruleName: String</p>
+</dd>
+<dt>): Unit = {</dt><dd><p>ruleStatsReceiver.scope(ruleName).counter(“heldback”).incr()</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>def recordRuleFailed(</dt><dd><p>ruleName: String</p>
+</dd>
+<dt>): Unit = {</dt><dd><p>ruleStatsReceiver.scope(ruleName).counter(“failed”).incr()</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>def recordDisabledRule(</dt><dd><p>ruleName: String</p>
+</dd>
+</dl>
+<p>): Unit = recordRuleEvaluation(ruleName, NotEvaluated, Disabled)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>object NullVisibilityResultsMetricsRecorder</dt><dd><p>extends VisibilityResultsMetricRecorder(NullStatsReceiver, Gate.False)</p>
+</dd>
+</dl>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../_sources/visibilitylib/src/main/scala/com/twitter/visibility/engine/VisibilityResultsMetricRecorder.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

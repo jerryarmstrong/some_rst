@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.tweetypie
+package hydrator</p>
+<p>import com.twitter.stitch.NotFound
+import com.twitter.stitch.Stitch
+import com.twitter.tco_util.DisplayUrl
+import com.twitter.tco_util.InvalidUrlException
+import com.twitter.tco_util.TcoSlug
+import com.twitter.tweetypie.core._
+import com.twitter.tweetypie.repository._
+import com.twitter.tweetypie.thriftscala._
+import scala.util.control.NonFatal</p>
+<dl>
+<dt>object UrlEntitiesHydrator {</dt><dd><p>type Type = ValueHydrator[Seq[UrlEntity], TweetCtx]</p>
+<dl>
+<dt>def once(h: ValueHydrator[UrlEntity, TweetCtx]): Type =</dt><dd><dl class="simple">
+<dt>TweetHydration.completeOnlyOnce(</dt><dd><p>queryFilter = queryFilter,
+hydrationType = HydrationType.Urls,
+hydrator = h.liftSeq</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>def queryFilter(opts: TweetQuery.Options): Boolean =</dt><dd><p>opts.include.tweetFields.contains(Tweet.UrlsField.id)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Hydrates UrlEntities.  If there is a failure to hydrate an entity, the entity is left</p></li>
+<li><p>unhydrated, so that we can try again later.  The PartialEntityCleaner will remove</p></li>
+<li><p>the partial entity before returning to clients.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+</dl>
+<p>object UrlEntityHydrator {</p>
+<blockquote>
+<div><dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>a function type that takes a shorten-url and an expanded-url, and generates a</p></li>
+<li><p>“display url” (which isn’t really a url).  this may fail if the expanded-url</p></li>
+<li><p>can’t be parsed as a valid url, in which case None is returned.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+</dl>
+<p>type Truncator = (String, String) =&gt; Option[String]</p>
+<p>val hydratedField: FieldByPath = fieldByPath(Tweet.UrlsField)
+val log: Logger = Logger(getClass)</p>
+<dl>
+<dt>def apply(repo: UrlRepository.Type, stats: StatsReceiver): ValueHydrator[UrlEntity, TweetCtx] = {</dt><dd><p>val toDisplayUrl = truncator(stats)</p>
+<dl>
+<dt>ValueHydrator[UrlEntity, TweetCtx] { (curr, _) =&gt;</dt><dd><p>val slug = getTcoSlug(curr)</p>
+<p>val result: Stitch[Option[Try[ExpandedUrl]]] = Stitch.collect(slug.map(repo(_).liftToTry))</p>
+<dl>
+<dt>result.map {</dt><dd><dl>
+<dt>case Some(Return(expandedUrl)) =&gt;</dt><dd><p>ValueState.modified(update(curr, expandedUrl, toDisplayUrl))</p>
+</dd>
+<dt>case None =&gt;</dt><dd><p>ValueState.unmodified(curr)</p>
+</dd>
+<dt>case Some(Throw(NotFound)) =&gt;</dt><dd><p>// If the UrlEntity contains an invalid t.co slug that can’t be resolved,
+// leave the entity unhydrated, to be removed later by the PartialEntityCleaner.
+// We don’t consider this a partial because the input is invalid and is not
+// expected to succeed.
+ValueState.unmodified(curr)</p>
+</dd>
+<dt>case Some(Throw(_)) =&gt;</dt><dd><p>// On failure, use the t.co link as the expanded url so that it is still clickable,
+// but also still flag the failure
+ValueState.partial(</p>
+<blockquote>
+<div><p>update(curr, ExpandedUrl(curr.url), toDisplayUrl),
+hydratedField</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}.onlyIf((curr, ctx) =&gt; !ctx.isRetweet &amp;&amp; isUnhydrated(curr))</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>a UrlEntity needs hydration if the expanded url is either unset or set to the</p></li>
+<li><p>shortened url .</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>def isUnhydrated(entity: UrlEntity): Boolean =</dt><dd><p>entity.expanded.isEmpty || hydrationFailed(entity)</p>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Did the hydration of this URL entity fail?</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+<dt>def hydrationFailed(entity: UrlEntity): Boolean =</dt><dd><p>entity.expanded.contains(entity.url)</p>
+</dd>
+<dt>def update(entity: UrlEntity, expandedUrl: ExpandedUrl, toDisplayUrl: Truncator): UrlEntity =</dt><dd><dl class="simple">
+<dt>entity.copy(</dt><dd><p>expanded = Some(expandedUrl.text),
+display = toDisplayUrl(entity.url, expandedUrl.text)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>def getTcoSlug(entity: UrlEntity): Option[UrlSlug] =</dt><dd><p>TcoSlug.unapply(entity.url).map(UrlSlug(_))</p>
+</dd>
+<dt>def truncator(stats: StatsReceiver): Truncator = {</dt><dd><p>val truncationStats = stats.scope(“truncations”)
+val truncationsCounter = truncationStats.counter(“count”)
+val truncationExceptionsCounter = truncationStats.counter(“exceptions”)</p>
+<dl>
+<dt>(shortUrl, expandedUrl) =&gt;</dt><dd><dl>
+<dt>try {</dt><dd><p>truncationsCounter.incr()
+Some(DisplayUrl(shortUrl, Some(expandedUrl), true))</p>
+</dd>
+<dt>} catch {</dt><dd><dl>
+<dt>case NonFatal(ex) =&gt;</dt><dd><p>truncationExceptionsCounter.incr()
+truncationStats.counter(ex.getClass.getName).incr()
+ex match {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case InvalidUrlException(_) =&gt;</dt><dd><p>log.warn(s”failed to truncate: <cite>$shortUrl</cite> / <cite>$expandedUrl</cite>”)</p>
+</dd>
+<dt>case _ =&gt;</dt><dd><p>log.warn(s”failed to truncate: <cite>$shortUrl</cite> / <cite>$expandedUrl</cite>”, ex)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+None</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/tweetypie/server/src/main/scala/com/twitter/tweetypie/hydrator/UrlEntityHydrator.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

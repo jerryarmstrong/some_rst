@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../" id="documentation_options" src="../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>use arrayvec::ArrayVec;
+use itertools::Itertools;
+use log::info;
+use std::sync::Arc;
+use tokio::sync::oneshot::Sender;
+use tokio::time::Instant;</p>
+<p>use crate::bootstrap::{TensorInput, TensorInputEnum};
+use crate::cli_args::{ARGS, MODEL_SPECS};
+use crate::{Callback, MAX_NUM_INPUTS, PredictResult};
+use crate::metrics::{</p>
+<blockquote>
+<div><p>BATCH_SIZE, BATCH_SIZE_BY_MODEL, BLOCKING_REQUEST_NUM, MODEL_INFERENCE_TIME_COLLECTOR,
+NUM_BATCH_PREDICTION, NUM_BATCH_PREDICTION_BY_MODEL, NUM_BATCHES_DROPPED,
+NUM_BATCHES_DROPPED_BY_MODEL, NUM_PREDICTION_BY_MODEL, NUM_REQUESTS_DROPPED,
+NUM_REQUESTS_DROPPED_BY_MODEL,</p>
+</div></blockquote>
+<p>};
+use crate::predict_service::Model;
+use crate::tf_proto::tensorflow_serving::model_spec::VersionChoice;
+use crate::tf_proto::tensorflow_serving::PredictRequest;
+use crate::tf_proto::DataType;</p>
+<p>#[derive(Debug)]
+pub struct BatchPredictor&lt;T: Model&gt; {</p>
+<blockquote>
+<div><p>pub model: Arc&lt;T&gt;,
+pub input_tensors: Vec&lt;Vec&lt;TensorInput&gt;&gt;,
+pub callbacks: Vec&lt;Callback&gt;,
+pub cur_batch_size: usize,
+pub max_batch_size: usize,
+pub batch_time_out_millis: u64,
+pub queue_reset_ts: Instant,
+pub queue_earliest_rq_ts: Instant,</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>impl PredictRequest {</dt><dd><p>#[inline(always)]
+pub fn take_input_vals(</p>
+<blockquote>
+<div><p>&amp;mut self,
+inputs: &amp;ArrayVec&lt;String, MAX_NUM_INPUTS&gt;,</p>
+</div></blockquote>
+<dl>
+<dt>) -&gt; Vec&lt;TensorInput&gt; {</dt><dd><p>let mut model_inputs = Vec::&lt;TensorInput&gt;::new();
+for input_name in inputs.as_slice() {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>let input_tensor = self</dt><dd><p>.inputs
+.get_mut(input_name)
+.unwrap_or_else(|| panic!(“can’t find {:?}”, input_name));</p>
+</dd>
+<dt>let dims = match &amp;input_tensor.tensor_shape {</dt><dd><p>None =&gt; None,
+Some(data) =&gt; Some(data.dim.iter().map(<a href="#id3"><span class="problematic" id="id4">|d|</span></a> d.size).collect_vec()),</p>
+</dd>
+</dl>
+<p>};
+match input_tensor.dtype() {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>DataType::DtFloat =&gt; model_inputs.push(TensorInput::new(</dt><dd><p>TensorInputEnum::Float(std::mem::take(&amp;mut input_tensor.float_val)),
+input_name.to_string(),
+dims,</p>
+</dd>
+</dl>
+<p>)),
+DataType::DtDouble =&gt; model_inputs.push(TensorInput::new(</p>
+<blockquote>
+<div><p>TensorInputEnum::Double(std::mem::take(&amp;mut input_tensor.double_val)),
+input_name.to_string(),
+dims,</p>
+</div></blockquote>
+<p>)),
+DataType::DtInt32 =&gt; model_inputs.push(TensorInput::new(</p>
+<blockquote>
+<div><p>TensorInputEnum::Int(std::mem::take(&amp;mut input_tensor.int_val)),
+input_name.to_string(),
+dims,</p>
+</div></blockquote>
+<p>)),
+DataType::DtString =&gt; model_inputs.push(TensorInput::new(</p>
+<blockquote>
+<div><p>TensorInputEnum::String(std::mem::take(&amp;mut input_tensor.string_val)),
+input_name.to_string(),
+dims,</p>
+</div></blockquote>
+<p>)),
+DataType::DtInt64 =&gt; model_inputs.push(TensorInput::new(</p>
+<blockquote>
+<div><p>TensorInputEnum::Int64(std::mem::take(&amp;mut input_tensor.int64_val)),
+input_name.to_string(),
+dims,</p>
+</div></blockquote>
+<p>)),
+DataType::DtBool =&gt; model_inputs.push(TensorInput::new(</p>
+<blockquote>
+<div><p>TensorInputEnum::Boolean(std::mem::take(&amp;mut input_tensor.bool_val)),
+input_name.to_string(),
+dims,</p>
+</div></blockquote>
+<p>)),
+_ =&gt; panic!(“unsupport input tensor type {:?}”, input_tensor.dtype()),</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}
+model_inputs</p>
+</dd>
+</dl>
+<p>}
+#[inline(always)]
+pub fn take_model_spec(&amp;mut self) -&gt; (String, Option&lt;i64&gt;) {</p>
+<blockquote>
+<div><p>let model_spec = self.model_spec.as_mut().unwrap();
+let version = model_spec</p>
+<blockquote>
+<div><p>.version_choice
+.as_ref()
+.and_then(<a href="#id5"><span class="problematic" id="id6">|choice|</span></a> match choice {</p>
+<blockquote>
+<div><p>VersionChoice::Version(version) =&gt; Some(<a href="#id1"><span class="problematic" id="id2">*</span></a>version),
+_ =&gt; None,</p>
+</div></blockquote>
+<p>});</p>
+</div></blockquote>
+<p>(std::mem::take(&amp;mut model_spec.name), version)</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>impl&lt;T: Model&gt; Drop for BatchPredictor&lt;T&gt; {</dt><dd><dl>
+<dt>fn drop(&amp;mut self) {</dt><dd><dl class="simple">
+<dt>info!(</dt><dd><p>“drop old batch predictor for:{:}, queue:{}”,
+self.model,
+self.input_tensors.len()</p>
+</dd>
+</dl>
+<p>);
+if !self.input_tensors.is_empty() {</p>
+<blockquote>
+<div><p>info!(“now flush old predictor queue:{}”, self.input_tensors.len());
+self.batch_predict();</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>impl&lt;T: Model&gt; BatchPredictor&lt;T&gt; {</dt><dd><p>#[inline(always)]
+pub fn push(&amp;mut self, val: Vec&lt;TensorInput&gt;, resp: Sender&lt;PredictResult&gt;, ts: Instant) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if self.input_tensors.is_empty() {</dt><dd><p>//only when queue is empty then we update ts to represent first request time
+self.queue_reset_ts = Instant::now();
+self.queue_earliest_rq_ts = ts;</p>
+</dd>
+</dl>
+<p>}
+self.cur_batch_size += 1;
+self.input_tensors.push(val);
+self.callbacks.push(Callback(resp, self.cur_batch_size));</p>
+</div></blockquote>
+<p>}
+#[inline(always)]
+pub fn batch_predict(&amp;mut self) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>BATCH_SIZE_BY_MODEL</dt><dd><p>.with_label_values(&amp;[&amp;MODEL_SPECS[self.model.model_idx()]])
+.add(self.cur_batch_size as i64);</p>
+</dd>
+</dl>
+<p>BATCH_SIZE.add(self.cur_batch_size as i64);
+let mut batch_input_tensors = Vec::with_capacity(self.max_batch_size);
+let mut batch_callbacks = Vec::with_capacity(self.max_batch_size);
+let mut batch_size = 0;
+//now we swap so we can take two queues to the blocking-send thread and reset current queues
+std::mem::swap(&amp;mut self.input_tensors, &amp;mut batch_input_tensors);
+std::mem::swap(&amp;mut self.callbacks, &amp;mut batch_callbacks);
+std::mem::swap(&amp;mut self.cur_batch_size, &amp;mut batch_size);
+let model = self.model.clone();
+let batch_earliest_rq_ts = self.queue_earliest_rq_ts;
+//info!(“batch predict for model:{}, size:{}”, self.tf_model.export_dir, vals0.len());
+BLOCKING_REQUEST_NUM.inc();
+tokio::task::spawn_blocking(move || {</p>
+<blockquote>
+<div><p>//proactively drop stale batches, we drop the entire batch
+//as long as one request in that batch is stale. We may drop more than we could this way
+//but this should work fairly decently well
+if (batch_earliest_rq_ts.elapsed().as_millis() as u64) &lt; ARGS.batch_drop_millis {</p>
+<blockquote>
+<div><p>let model_inference_time_start = Instant::now();
+let (tensor_outs, batch_ends) =</p>
+<blockquote>
+<div><p>model.do_predict(batch_input_tensors, batch_size as u64);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>MODEL_INFERENCE_TIME_COLLECTOR</dt><dd><p>.with_label_values(&amp;[&amp;MODEL_SPECS[model.model_idx()]])
+.observe(model_inference_time_start.elapsed().as_millis() as f64);</p>
+</dd>
+</dl>
+<p>let mut batch_starts = vec![0; tensor_outs.len()];
+for (i, Callback(resp, _)) in batch_callbacks.into_iter().enumerate() {</p>
+<blockquote>
+<div><p>let mut tensors_send_back = vec![];
+for (j, tensor_out) in tensor_outs.iter().enumerate() {</p>
+<blockquote>
+<div><p>tensors_send_back.push(tensor_out.slice(batch_starts[j], batch_ends[j][i]));
+batch_starts[j] = batch_ends[j][i];</p>
+</div></blockquote>
+<p>}
+if resp</p>
+<blockquote>
+<div><p>.send(PredictResult::Ok(tensors_send_back, model.version()))
+.is_err()</p>
+</div></blockquote>
+<dl>
+<dt>{</dt><dd><p>//use dropped metrics here as this is expected under high load
+NUM_REQUESTS_DROPPED.inc();
+NUM_REQUESTS_DROPPED_BY_MODEL</p>
+<blockquote>
+<div><p>.with_label_values(&amp;[&amp;MODEL_SPECS[model.model_idx()]])
+.inc();</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<dl>
+<dt>} else {</dt><dd><dl>
+<dt>for Callback(resp, _) in batch_callbacks.into_iter() {</dt><dd><dl>
+<dt>if resp.send(PredictResult::DropDueToOverload).is_err() {</dt><dd><p>NUM_REQUESTS_DROPPED.inc();
+NUM_REQUESTS_DROPPED_BY_MODEL</p>
+<blockquote>
+<div><p>.with_label_values(&amp;[&amp;MODEL_SPECS[model.model_idx()]])
+.inc();</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}
+NUM_BATCHES_DROPPED.inc();
+NUM_BATCHES_DROPPED_BY_MODEL</p>
+<blockquote>
+<div><p>.with_label_values(&amp;[&amp;MODEL_SPECS[model.model_idx()]])
+.inc();</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}
+BLOCKING_REQUEST_NUM.dec();</p>
+</div></blockquote>
+<p>});
+NUM_BATCH_PREDICTION.inc();
+NUM_BATCH_PREDICTION_BY_MODEL</p>
+<blockquote>
+<div><p>.with_label_values(&amp;[&amp;MODEL_SPECS[self.model.model_idx()]])
+.inc();</p>
+</div></blockquote>
+<p>// Note:
+//  self.cur_batch_size is swapped with batch_size above
+//  Use the local variable batch_size here
+NUM_PREDICTION_BY_MODEL</p>
+<blockquote>
+<div><p>.with_label_values(&amp;[&amp;MODEL_SPECS[self.model.model_idx()]])
+.inc_by(batch_size as u64);</p>
+</div></blockquote>
+</div></blockquote>
+<p>}
+#[inline(always)]
+pub fn duration_past(&amp;self, millis: u64) -&gt; bool {</p>
+<blockquote>
+<div><p>self.queue_reset_ts.elapsed().as_millis() as u64 &gt;= millis</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../_sources/navi/navi/src/batch.rs.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

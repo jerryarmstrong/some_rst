@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.tweetypie
+package repository</p>
+<p>import com.twitter.snowflake.id.SnowflakeId
+import com.twitter.stitch.NotFound
+import com.twitter.stitch.Stitch
+import com.twitter.tweetypie
+import com.twitter.tweetypie.client_id.ClientIdHelper
+import com.twitter.tweetypie.core._
+import com.twitter.tweetypie.storage.TweetStorageClient.GetStoredTweet
+import com.twitter.tweetypie.storage.TweetStorageClient.GetTweet
+import com.twitter.tweetypie.storage._
+import scala.util.control.NoStackTrace</p>
+<dl>
+<dt>case class StorageGetTweetFailure(tweetId: TweetId, underlying: Throwable)</dt><dd><p>extends Exception(s”tweetId=$tweetId”, underlying)
+with NoStackTrace</p>
+</dd>
+<dt>object ManhattanTweetRepository {</dt><dd><p>private[this] val logger = Logger(getClass)</p>
+<dl>
+<dt>def apply(</dt><dd><p>getTweet: TweetStorageClient.GetTweet,
+getStoredTweet: TweetStorageClient.GetStoredTweet,
+shortCircuitLikelyPartialTweetReads: Gate[Duration],
+statsReceiver: StatsReceiver,
+clientIdHelper: ClientIdHelper,</p>
+</dd>
+<dt>): TweetResultRepository.Type = {</dt><dd><dl>
+<dt>def likelyAvailable(tweetId: TweetId): Boolean =</dt><dd><dl class="simple">
+<dt>if (SnowflakeId.isSnowflakeId(tweetId)) {</dt><dd><p>val tweetAge: Duration = Time.now.since(SnowflakeId(tweetId).time)
+!shortCircuitLikelyPartialTweetReads(tweetAge)</p>
+</dd>
+<dt>} else {</dt><dd><p>true // Not a snowflake id, so should definitely be available</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>val likelyPartialTweetReadsCounter = statsReceiver.counter(“likely_partial_tweet_reads”)</p>
+<dl>
+<dt>(tweetId, options) =&gt;</dt><dd><dl>
+<dt>if (!likelyAvailable(tweetId)) {</dt><dd><p>likelyPartialTweetReadsCounter.incr()
+val currentClient =</p>
+<blockquote>
+<div><p>clientIdHelper.effectiveClientId.getOrElse(ClientIdHelper.UnknownClientId)</p>
+</div></blockquote>
+<p>logger.debug(s”likely_partial_tweet_read $tweetId $currentClient”)
+Stitch.exception(NotFound)</p>
+</dd>
+<dt>} else if (options.fetchStoredTweets) {</dt><dd><p>getStoredTweet(tweetId).liftToTry.flatMap(handleGetStoredTweetResponse(tweetId, _))</p>
+</dd>
+<dt>} else {</dt><dd><p>getTweet(tweetId).liftToTry.flatMap(handleGetTweetResponse(tweetId, _))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def handleGetTweetResponse(</dt><dd><p>tweetId: tweetypie.TweetId,
+response: Try[GetTweet.Response]</p>
+</dd>
+<dt>): Stitch[TweetResult] = {</dt><dd><dl class="simple">
+<dt>response match {</dt><dd><dl class="simple">
+<dt>case Return(GetTweet.Response.Found(tweet)) =&gt;</dt><dd><p>Stitch.value(TweetResult(TweetData(tweet = tweet), HydrationState.modified))</p>
+</dd>
+<dt>case Return(GetTweet.Response.NotFound) =&gt;</dt><dd><p>Stitch.exception(NotFound)</p>
+</dd>
+<dt>case Return(GetTweet.Response.Deleted) =&gt;</dt><dd><p>Stitch.exception(FilteredState.Unavailable.TweetDeleted)</p>
+</dd>
+<dt>case Return(_: GetTweet.Response.BounceDeleted) =&gt;</dt><dd><p>Stitch.exception(FilteredState.Unavailable.BounceDeleted)</p>
+</dd>
+<dt>case Throw(_: storage.RateLimited) =&gt;</dt><dd><p>Stitch.exception(OverCapacity(s”Storage overcapacity, tweetId=$tweetId”))</p>
+</dd>
+<dt>case Throw(e) =&gt;</dt><dd><p>Stitch.exception(StorageGetTweetFailure(tweetId, e))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def handleGetStoredTweetResponse(</dt><dd><p>tweetId: tweetypie.TweetId,
+response: Try[GetStoredTweet.Response]</p>
+</dd>
+<dt>): Stitch[TweetResult] = {</dt><dd><dl>
+<dt>def translateErrors(</dt><dd><p>getStoredTweetErrs: Seq[GetStoredTweet.Error]</p>
+</dd>
+<dt>): Seq[StoredTweetResult.Error] = {</dt><dd><dl>
+<dt>getStoredTweetErrs.map {</dt><dd><p>case GetStoredTweet.Error.TweetIsCorrupt =&gt; StoredTweetResult.Error.Corrupt
+case GetStoredTweet.Error.ScrubbedFieldsPresent =&gt;</p>
+<blockquote>
+<div><p>StoredTweetResult.Error.ScrubbedFieldsPresent</p>
+</div></blockquote>
+<dl class="simple">
+<dt>case GetStoredTweet.Error.TweetFieldsMissingOrInvalid =&gt;</dt><dd><p>StoredTweetResult.Error.FieldsMissingOrInvalid</p>
+</dd>
+<dt>case GetStoredTweet.Error.TweetShouldBeHardDeleted =&gt;</dt><dd><p>StoredTweetResult.Error.ShouldBeHardDeleted</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def toTweetResult(</dt><dd><p>tweet: Tweet,
+state: Option[TweetStateRecord],
+errors: Seq[GetStoredTweet.Error]</p>
+</dd>
+<dt>): TweetResult = {</dt><dd><p>val translatedErrors = translateErrors(errors)
+val canHydrate: Boolean =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>!translatedErrors.contains(StoredTweetResult.Error.Corrupt) &amp;&amp;</dt><dd><p>!translatedErrors.contains(StoredTweetResult.Error.FieldsMissingOrInvalid)</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl>
+<dt>val storedTweetResult = state match {</dt><dd><p>case None =&gt; StoredTweetResult.Present(translatedErrors, canHydrate)
+case Some(TweetStateRecord.HardDeleted(_, softDeletedAtMsec, hardDeletedAtMsec)) =&gt;</p>
+<blockquote>
+<div><p>StoredTweetResult.HardDeleted(softDeletedAtMsec, hardDeletedAtMsec)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>case Some(TweetStateRecord.SoftDeleted(_, softDeletedAtMsec)) =&gt;</dt><dd><p>StoredTweetResult.SoftDeleted(softDeletedAtMsec, translatedErrors, canHydrate)</p>
+</dd>
+<dt>case Some(TweetStateRecord.BounceDeleted(_, deletedAtMsec)) =&gt;</dt><dd><p>StoredTweetResult.BounceDeleted(deletedAtMsec, translatedErrors, canHydrate)</p>
+</dd>
+<dt>case Some(TweetStateRecord.Undeleted(_, undeletedAtMsec)) =&gt;</dt><dd><p>StoredTweetResult.Undeleted(undeletedAtMsec, translatedErrors, canHydrate)</p>
+</dd>
+<dt>case Some(TweetStateRecord.ForceAdded(_, addedAtMsec)) =&gt;</dt><dd><p>StoredTweetResult.ForceAdded(addedAtMsec, translatedErrors, canHydrate)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>TweetResult(</dt><dd><p>TweetData(tweet = tweet, storedTweetResult = Some(storedTweetResult)),
+HydrationState.modified)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>val tweetResult = response match {</dt><dd><dl>
+<dt>case Return(GetStoredTweet.Response.FoundAny(tweet, state, _, _, errors)) =&gt;</dt><dd><p>toTweetResult(tweet, state, errors)</p>
+</dd>
+<dt>case Return(GetStoredTweet.Response.Failed(tweetId, _, _, _, errors)) =&gt;</dt><dd><dl class="simple">
+<dt>val tweetData = TweetData(</dt><dd><p>tweet = Tweet(tweetId),
+storedTweetResult = Some(StoredTweetResult.Failed(translateErrors(errors))))</p>
+</dd>
+</dl>
+<p>TweetResult(tweetData, HydrationState.modified)</p>
+</dd>
+<dt>case Return(GetStoredTweet.Response.HardDeleted(tweetId, state, _, _)) =&gt;</dt><dd><p>toTweetResult(Tweet(tweetId), state, Seq())</p>
+</dd>
+<dt>case Return(GetStoredTweet.Response.NotFound(tweetId)) =&gt; {</dt><dd><dl class="simple">
+<dt>val tweetData = TweetData(</dt><dd><p>tweet = Tweet(tweetId),
+storedTweetResult = Some(StoredTweetResult.NotFound)</p>
+</dd>
+</dl>
+<p>)
+TweetResult(tweetData, HydrationState.modified)</p>
+</dd>
+</dl>
+<p>}
+case _ =&gt; {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>val tweetData = TweetData(</dt><dd><p>tweet = Tweet(tweetId),
+storedTweetResult = Some(StoredTweetResult.Failed(Seq(StoredTweetResult.Error.Corrupt))))</p>
+</dd>
+</dl>
+<p>TweetResult(tweetData, HydrationState.modified)</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>Stitch.value(tweetResult)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/tweetypie/server/src/main/scala/com/twitter/tweetypie/repository/ManhattanTweetRepository.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>
