@@ -43,7 +43,7 @@ for repo in glob.glob('/tmp/repos/x/*'):
                     'contents': content
                 }, index=[len(df)])], ignore_index=True)
                 # link to file_path in rst as :ref: 
-                index_rst += f""" `Stack Overflow home <""" + file_path + """>`_ \n\n"""
+                index_rst += f""" `{file_path} <""" + file_path + """>`_ \n\n"""
                 
                 index_rst += f"""{'=' * len(file_path)} \n\n"""
                 index_rst += f"""Last edited: {last_edit_date} \n\n"""
