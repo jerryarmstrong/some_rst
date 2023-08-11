@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.tweetypie
+package handler</p>
+<p>import com.twitter.flockdb.client.Cursor
+import com.twitter.flockdb.client.PageResult
+import com.twitter.flockdb.client.Select
+import com.twitter.flockdb.client.StatusGraph
+import com.twitter.flockdb.client.UserTimelineGraph
+import com.twitter.flockdb.client.thriftscala.EdgeState
+import com.twitter.snowflake.id.SnowflakeId
+import com.twitter.stitch.Stitch
+import com.twitter.tweetypie.storage.TweetStorageClient
+import com.twitter.tweetypie.storage.TweetStorageClient.GetStoredTweet
+import com.twitter.tweetypie.thriftscala.GetStoredTweetsByUserOptions
+import com.twitter.tweetypie.thriftscala.GetStoredTweetsByUserRequest
+import com.twitter.tweetypie.thriftscala.GetStoredTweetsByUserResult
+import com.twitter.tweetypie.thriftscala.GetStoredTweetsOptions
+import com.twitter.tweetypie.thriftscala.GetStoredTweetsRequest</p>
+<dl>
+<dt>object GetStoredTweetsByUserHandler {</dt><dd><p>type Type = FutureArrow[GetStoredTweetsByUserRequest, GetStoredTweetsByUserResult]</p>
+<dl>
+<dt>def apply(</dt><dd><p>getStoredTweetsHandler: GetStoredTweetsHandler.Type,
+getStoredTweet: TweetStorageClient.GetStoredTweet,
+selectPage: FutureArrow[Select[StatusGraph], PageResult[Long]],
+maxPages: Int</p>
+</dd>
+<dt>): Type = {</dt><dd><dl>
+<dt>FutureArrow { request =&gt;</dt><dd><p>val options = request.options.getOrElse(GetStoredTweetsByUserOptions())</p>
+<p>val startTimeMsec: Long = options.startTimeMsec.getOrElse(0L)
+val endTimeMsec: Long = options.endTimeMsec.getOrElse(Time.now.inMillis)
+val cursor = options.cursor.map(Cursor(_)).getOrElse {</p>
+<blockquote>
+<div><p>if (options.startFromOldest) Cursor.lowest else Cursor.highest</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>getNextTweetIdsInTimeRange(</dt><dd><p>request.userId,
+startTimeMsec,
+endTimeMsec,
+cursor,
+selectPage,
+getStoredTweet,
+maxPages,
+numTries = 0</p>
+</dd>
+<dt>).flatMap {</dt><dd><dl>
+<dt>case (tweetIds, cursor) =&gt;</dt><dd><p>val getStoredTweetsRequest = toGetStoredTweetsRequest(tweetIds, request.userId, options)</p>
+<dl>
+<dt>getStoredTweetsHandler(getStoredTweetsRequest)</dt><dd><dl>
+<dt>.map { getStoredTweetsResults =&gt;</dt><dd><dl class="simple">
+<dt>GetStoredTweetsByUserResult(</dt><dd><p>storedTweets = getStoredTweetsResults.map(_.storedTweet),
+cursor = if (cursor.isEnd) None else Some(cursor.value)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private def toGetStoredTweetsRequest(</dt><dd><p>tweetIds: Seq[TweetId],
+userId: UserId,
+getStoredTweetsByUserOptions: GetStoredTweetsByUserOptions</p>
+</dd>
+</dl>
+<p>): GetStoredTweetsRequest = {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>val options: GetStoredTweetsOptions = GetStoredTweetsOptions(</dt><dd><p>bypassVisibilityFiltering = getStoredTweetsByUserOptions.bypassVisibilityFiltering,
+forUserId = if (getStoredTweetsByUserOptions.setForUserId) Some(userId) else None,
+additionalFieldIds = getStoredTweetsByUserOptions.additionalFieldIds</p>
+</dd>
+</dl>
+<p>)</p>
+<dl class="simple">
+<dt>GetStoredTweetsRequest(</dt><dd><p>tweetIds = tweetIds,
+options = Some(options)</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>private def getNextTweetIdsInTimeRange(</dt><dd><p>userId: UserId,
+startTimeMsec: Long,
+endTimeMsec: Long,
+cursor: Cursor,
+selectPage: FutureArrow[Select[StatusGraph], PageResult[Long]],
+getStoredTweet: TweetStorageClient.GetStoredTweet,
+maxPages: Int,
+numTries: Int</p>
+</dd>
+<dt>): Future[(Seq[TweetId], Cursor)] = {</dt><dd><dl>
+<dt>val select = Select(</dt><dd><p>sourceId = userId,
+graph = UserTimelineGraph,
+stateIds =</p>
+<blockquote>
+<div><p>Some(Seq(EdgeState.Archived.value, EdgeState.Positive.value, EdgeState.Removed.value))</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>).withCursor(cursor)</p>
+<dl>
+<dt>def inTimeRange(timestamp: Long): Boolean =</dt><dd><p>timestamp &gt;= startTimeMsec &amp;&amp; timestamp &lt;= endTimeMsec</p>
+</dd>
+<dt>def pastTimeRange(timestamps: Seq[Long]) = {</dt><dd><dl class="simple">
+<dt>if (cursor.isAscending) {</dt><dd><p>timestamps.max &gt; endTimeMsec</p>
+</dd>
+<dt>} else {</dt><dd><p>timestamps.min &lt; startTimeMsec</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>val pageResultFuture: Future[PageResult[Long]] = selectPage(select)</p>
+<dl>
+<dt>pageResultFuture.flatMap { pageResult =&gt;</dt><dd><p>val groupedIds = pageResult.entries.groupBy(SnowflakeId.isSnowflakeId)
+val nextCursor = if (cursor.isAscending) pageResult.previousCursor else pageResult.nextCursor</p>
+<p>// Timestamps for the creation of Tweets with snowflake IDs can be calculated from the IDs
+// themselves.
+val snowflakeIdsTimestamps: Seq[(Long, Long)] = groupedIds.getOrElse(true, Seq()).map { id =&gt;</p>
+<blockquote>
+<div><p>val snowflakeTimeMillis = SnowflakeId.unixTimeMillisFromId(id)
+(id, snowflakeTimeMillis)</p>
+</div></blockquote>
+<p>}</p>
+<p>// For non-snowflake Tweets, we need to fetch the Tweet data from Manhattan to see when the
+// Tweet was created.
+val nonSnowflakeIdsTimestamps: Future[Seq[(Long, Long)]] = Stitch.run(</p>
+<blockquote>
+<div><dl>
+<dt>Stitch</dt><dd><p>.traverse(groupedIds.getOrElse(false, Seq()))(getStoredTweet)
+.map {</p>
+<blockquote>
+<div><dl>
+<dt>_.flatMap {</dt><dd><dl>
+<dt>case GetStoredTweet.Response.FoundAny(tweet, _, _, _, _) =&gt; {</dt><dd><dl class="simple">
+<dt>if (tweet.coreData.exists(_.createdAtSecs &gt; 0)) {</dt><dd><p>Some((tweet.id, tweet.coreData.get.createdAtSecs))</p>
+</dd>
+</dl>
+<p>} else None</p>
+</dd>
+</dl>
+<p>}
+case _ =&gt; None</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>})</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl>
+<dt>nonSnowflakeIdsTimestamps.flatMap { nonSnowflakeList =&gt;</dt><dd><p>val allTweetIdsAndTimestamps = snowflakeIdsTimestamps ++ nonSnowflakeList
+val filteredTweetIds = allTweetIdsAndTimestamps</p>
+<blockquote>
+<div><dl class="simple">
+<dt>.filter {</dt><dd><p>case (_, ts) =&gt; inTimeRange(ts)</p>
+</dd>
+</dl>
+<p>}
+.map(_._1)</p>
+</div></blockquote>
+<dl>
+<dt>if (nextCursor.isEnd) {</dt><dd><p>// We’ve considered the last Tweet for this User. There are no more Tweets to return.
+Future.value((filteredTweetIds, Cursor.end))</p>
+</dd>
+<dt>} else if (allTweetIdsAndTimestamps.nonEmpty &amp;&amp;</dt><dd><p>pastTimeRange(allTweetIdsAndTimestamps.map(_._2))) {
+// At least one Tweet returned from Tflock has a timestamp past our time range, i.e.
+// greater than the end time (if we’re fetching in an ascending order) or lower than the
+// start time (if we’re fetching in a descending order). There is no point in looking at
+// any more Tweets from this User as they’ll all be outside the time range.
+Future.value((filteredTweetIds, Cursor.end))</p>
+</dd>
+<dt>} else if (filteredTweetIds.isEmpty) {</dt><dd><p>// We’re here because one of two things happened:
+// 1. allTweetIdsAndTimestamps is empty: Either Tflock has returned an empty page of Tweets
+//    or we weren’t able to fetch timestamps for any of the Tweets Tflock returned. In this
+//    case, we fetch the next page of Tweets.
+// 2. allTweetIdsAndTimestamps is non-empty but filteredTweetIds is empty: The current page
+//    has no Tweets inside the requested time range. We fetch the next page of Tweets and
+//    try again.
+// If we hit the limit for the maximum number of pages from tflock to be requested, we
+// return an empty list of Tweets with the cursor for the caller to try again.</p>
+<dl>
+<dt>if (numTries == maxPages) {</dt><dd><p>Future.value((filteredTweetIds, nextCursor))</p>
+</dd>
+<dt>} else {</dt><dd><dl class="simple">
+<dt>getNextTweetIdsInTimeRange(</dt><dd><p>userId = userId,
+startTimeMsec = startTimeMsec,
+endTimeMsec = endTimeMsec,
+cursor = nextCursor,
+selectPage = selectPage,
+getStoredTweet = getStoredTweet,
+maxPages = maxPages,
+numTries = numTries + 1</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>} else {</dt><dd><p>// filteredTweetIds is non-empty: There are some Tweets in this page that are within the
+// requested time range, and we aren’t out of the time range yet. We return the Tweets we
+// have and set the cursor forward for the next request.
+Future.value((filteredTweetIds, nextCursor))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/tweetypie/server/src/main/scala/com/twitter/tweetypie/handler/GetStoredTweetsByUserHandler.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

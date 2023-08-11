@@ -1,0 +1,1041 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../" id="documentation_options" src="../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.simclusters_v2.scalding.update_known_for</p>
+<p>import com.twitter.algebird.Max
+import com.twitter.hermit.candidate.thriftscala.Candidates
+import com.twitter.sbf.core.AlgorithmConfig
+import com.twitter.sbf.core.MHAlgorithm
+import com.twitter.sbf.core.SparseBinaryMatrix
+import com.twitter.sbf.core.SparseRealMatrix
+import com.twitter.sbf.graph.Graph
+import com.twitter.scalding.Days
+import com.twitter.scalding.Execution
+import com.twitter.scalding.Hdfs
+import com.twitter.scalding.Mode
+import com.twitter.scalding.Stat
+import com.twitter.scalding.TypedTsv
+import com.twitter.scalding.UniqueID
+import com.twitter.scalding.commons.source.VersionedKeyValSource
+import com.twitter.scalding.typed.TypedPipe
+import com.twitter.scalding_internal.dalv2.DAL
+import com.twitter.scalding_internal.dalv2.remote_access.ExplicitLocation
+import com.twitter.scalding_internal.dalv2.remote_access.ProcAtla
+import com.twitter.simclusters_v2.common.ClusterId
+import com.twitter.simclusters_v2.common.UserId
+import com.twitter.simclusters_v2.hdfs_sources.AdhocKeyValSources
+import com.twitter.simclusters_v2.scalding.CompareClusters
+import com.twitter.simclusters_v2.scalding.KnownForSources
+import com.twitter.simclusters_v2.scalding.TopUser
+import com.twitter.simclusters_v2.scalding.TopUserWithMappedId
+import com.twitter.simclusters_v2.scalding.TopUsersSimilarityGraph
+import com.twitter.simclusters_v2.scalding.common.Util
+import com.twitter.usersource.snapshot.flat.UsersourceFlatScalaDataset
+import java.io.PrintWriter
+import java.util.TimeZone
+import org.apache.commons.math3.random.JDKRandomGenerator
+import org.apache.commons.math3.random.RandomAdaptor
+import org.apache.hadoop.fs.FileSystem
+import org.apache.hadoop.fs.Path
+import scala.collection.mutable</p>
+<p>object UpdateKnownForSBFRunner {</p>
+<blockquote>
+<div><dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>The main logic of the job. It works as follows:</p></li>
+<li></li>
+<li><ol class="arabic simple">
+<li><p>read the top 20M users, and convert their UserIds to an integer Id from 0 to 20M in order to use the clustering library</p></li>
+</ol>
+</li>
+<li><ol class="arabic simple" start="2">
+<li><p>read the user similarity graph from Sims, and convert their UserIds to the same mapped integer Id</p></li>
+</ol>
+</li>
+<li><ol class="arabic simple" start="3">
+<li><p>read the previous known_for data set for initialization of the clustering algorithm;</p></li>
+</ol>
+</li>
+<li><p>for users without previous assignments, we randomly assign them to some unused clusters (if there are any).</p></li>
+<li><ol class="arabic simple" start="4">
+<li><p>run the clustering algorithm for x iterations (x = 4 in the prod setting)</p></li>
+</ol>
+</li>
+<li><ol class="arabic simple" start="5">
+<li><p>output of the clustering result as the new known_for.</p></li>
+</ol>
+</li>
+<li></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>def runUpdateKnownFor(</dt><dd><p>simsGraph: TypedPipe[Candidates],
+minActiveFollowers: Int,
+topK: Int,
+maxNeighbors: Int,
+tempLocationPath: String,
+previousKnownFor: TypedPipe[(UserId, Array[(ClusterId, Float)])],
+maxEpochsForClustering: Int,
+squareWeightsEnable: Boolean,
+wtCoeff: Double,
+mode: Mode</p>
+</dd>
+<dt>)(</dt><dd><p>implicit
+uniqueId: UniqueID,
+tz: TimeZone</p>
+</dd>
+</dl>
+<p>): Execution[TypedPipe[(UserId, Array[(ClusterId, Float)])]] = {</p>
+<blockquote>
+<div><p>val tempLocationPathSimsGraph = tempLocationPath + “/sims_graph”
+val tempLocationPathMappedIds = tempLocationPath + “/mapped_user_ids”
+val tempLocationPathClustering = tempLocationPath + “/clustering_output”</p>
+<dl>
+<dt>val mappedIdsToUserIds: TypedPipe[(Int, UserId)] =</dt><dd><dl>
+<dt>getTopFollowedUsersWithMappedIds(minActiveFollowers, topK)</dt><dd><dl class="simple">
+<dt>.map {</dt><dd><dl class="simple">
+<dt>case (id, mappedId) =&gt;</dt><dd><p>(mappedId, id)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+.shard(partitions = topK / 1e5.toInt)</p>
+</dd>
+</dl>
+</dd>
+<dt>val mappedSimsGraphInput: TypedPipe[(Int, List[(Int, Float)])] =</dt><dd><dl class="simple">
+<dt>getMappedSimsGraph(</dt><dd><p>mappedIdsToUserIds,
+simsGraph,
+maxNeighbors</p>
+</dd>
+</dl>
+<p>) // The simsGraph here consists of the mapped Ids and mapped ngbr Ids and not the original userIds</p>
+</dd>
+<dt>val mappedSimsGraphVersionedKeyVal: VersionedKeyValSource[Int, List[(Int, Float)]] =</dt><dd><p>AdhocKeyValSources.intermediateSBFResultsDevelSource(tempLocationPathSimsGraph)</p>
+</dd>
+<dt>val mappedIdsToUserIdsVersionedKeyVal: VersionedKeyValSource[Int, UserId] =</dt><dd><p>AdhocKeyValSources.mappedIndicesDevelSource(tempLocationPathMappedIds)</p>
+</dd>
+</dl>
+<p>// exec to write intermediate results for mapped Sims Graph and mappedIds
+val mappedSimsGraphAndMappedIdsWriteExec: Execution[Unit] = Execution</p>
+<blockquote>
+<div><dl class="simple">
+<dt>.zip(</dt><dd><p>mappedSimsGraphInput.writeExecution(mappedSimsGraphVersionedKeyVal),
+mappedIdsToUserIds.writeExecution(mappedIdsToUserIdsVersionedKeyVal)</p>
+</dd>
+</dl>
+<p>).unit</p>
+</div></blockquote>
+<dl>
+<dt>mappedSimsGraphAndMappedIdsWriteExec.flatMap { _ =&gt;</dt><dd><p>// The simsGraph and the mappedIds from userId(long) -&gt; mappedIds are
+// having to be written to a temporary location and read again before running
+// the clustering algorithm.</p>
+<dl>
+<dt>Execution</dt><dd><dl class="simple">
+<dt>.zip(</dt><dd><dl class="simple">
+<dt>readIntermediateExec(</dt><dd><p>TypedPipe.from(mappedSimsGraphVersionedKeyVal),
+mode,
+tempLocationPathSimsGraph),</p>
+</dd>
+<dt>readIntermediateExec(</dt><dd><p>TypedPipe.from(mappedIdsToUserIdsVersionedKeyVal),
+mode,
+tempLocationPathMappedIds)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>)
+.flatMap {</p>
+<blockquote>
+<div><dl>
+<dt>case (mappedSimsGraphInputReadAgain, mappedIdsToUserIdsReadAgain) =&gt;</dt><dd><dl>
+<dt>val previousKnownForMappedIdsAssignments: TypedPipe[(Int, List[(ClusterId, Float)])] =</dt><dd><dl class="simple">
+<dt>getKnownForWithMappedIds(</dt><dd><p>previousKnownFor,
+mappedIdsToUserIdsReadAgain,</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>val clusteringResults = getClusteringAssignments(</dt><dd><p>mappedSimsGraphInputReadAgain,
+previousKnownForMappedIdsAssignments,
+maxEpochsForClustering,
+squareWeightsEnable,
+wtCoeff</p>
+</dd>
+</dl>
+<p>)
+clusteringResults</p>
+<blockquote>
+<div><dl>
+<dt>.flatMap { updatedKnownFor =&gt;</dt><dd><p>// convert the list of updated KnownFor to a TypedPipe
+convertKnownForListToTypedPipe(</p>
+<blockquote>
+<div><p>updatedKnownFor,
+mode,
+tempLocationPathClustering</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>}
+.flatMap { updatedKnownForTypedPipe =&gt;</p>
+<blockquote>
+<div><p>// convert the mapped integer id to raw user ids
+val updatedKnownFor =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>updatedKnownForTypedPipe</dt><dd><p>.join(mappedIdsToUserIdsReadAgain)
+.values
+.swap
+.mapValues(_.toArray)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>Execution.from(updatedKnownFor)</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Helper function to compare newKnownFor with the previous week knownFor assignments</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>def evaluateUpdatedKnownFor(</dt><dd><p>newKnownFor: TypedPipe[(UserId, Array[(ClusterId, Float)])],
+inputKnownFor: TypedPipe[(UserId, Array[(ClusterId, Float)])]</p>
+</dd>
+<dt>)(</dt><dd><p>implicit uniqueId: UniqueID</p>
+</dd>
+</dl>
+<p>): Execution[String] = {</p>
+<blockquote>
+<div><p>val minSizeOfBiggerClusterForComparison = 10</p>
+<dl>
+<dt>val compareClusterExec = CompareClusters.summarize(</dt><dd><dl class="simple">
+<dt>CompareClusters.compare(</dt><dd><p>KnownForSources.transpose(inputKnownFor),
+KnownForSources.transpose(newKnownFor),
+minSizeOfBiggerCluster = minSizeOfBiggerClusterForComparison</p>
+</dd>
+</dl>
+<p>))</p>
+</dd>
+<dt>val compareProducerExec = CompareClusters.compareClusterAssignments(</dt><dd><p>newKnownFor.mapValues(_.toList),
+inputKnownFor.mapValues(_.toList)</p>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>Execution</dt><dd><p>.zip(compareClusterExec, compareProducerExec)
+.map {</p>
+<blockquote>
+<div><dl>
+<dt>case (compareClusterResults, compareProducerResult) =&gt;</dt><dd><dl>
+<dt>s”Cosine similarity distribution between cluster membership vectors for “ +</dt><dd><p>s”clusters with at least $minSizeOfBiggerClusterForComparison membersn” +
+Util.prettyJsonMapper</p>
+<blockquote>
+<div><p>.writeValueAsString(compareClusterResults) +</p>
+</div></blockquote>
+<p>“nn——————-nn” +
+“Custom counters:n” + compareProducerResult +
+“nn——————-nn”</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li></li>
+<li><p>Convert the list of updated KnownFor to a TypedPipe</p></li>
+<li></li>
+<li><p>This step should have been done using TypedPipe.from(updatedKnownForList), however, due to the</p></li>
+<li><p>large size of the list, TypedPipe would throw out-of-memory exceptions. So we have to first</p></li>
+<li><p>dump it to a temp file on HDFS and using a customized read function to load to TypedPipe</p></li>
+<li></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>def convertKnownForListToTypedPipe(</dt><dd><p>updatedKnownForList: List[(Int, List[(ClusterId, Float)])],
+mode: Mode,
+temporaryOutputStringPath: String</p>
+</dd>
+</dl>
+<p>): Execution[TypedPipe[(Int, List[(ClusterId, Float)])]] = {</p>
+<blockquote>
+<div><dl>
+<dt>val stringOutput = updatedKnownForList.map {</dt><dd><dl>
+<dt>case (mappedUserId, clusterArray) =&gt;</dt><dd><p>assert(clusterArray.isEmpty || clusterArray.length == 1)
+val str = if (clusterArray.nonEmpty) {</p>
+<blockquote>
+<div><p>clusterArray.head._1 + “ “ + clusterArray.head._2 // each user is known for at most 1 cluster</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>“”</p>
+</dd>
+</dl>
+<p>}
+if (mappedUserId % 100000 == 0)</p>
+<blockquote>
+<div><p>println(s”MappedIds:$mappedUserId  ClusterAssigned$str”)</p>
+</div></blockquote>
+<p>s”$mappedUserId $str”</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>// using Execution to enforce the order of the following 3 steps:
+// 1. write the list of strings to a temp file on HDFS
+// 2. read the strings to TypedPipe
+// 3. delete the temp file
+Execution</p>
+<blockquote>
+<div><dl>
+<dt>.from(</dt><dd><p>// write the output to HDFS; the data will be loaded to Typedpipe later;
+// the reason of doing this is that we can not just do TypePipe.from(stringOutput) which
+// results in OOM.
+TopUsersSimilarityGraph.writeToHDFSIfHDFS(</p>
+<blockquote>
+<div><p>stringOutput.toIterator,
+mode,
+temporaryOutputStringPath</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>)
+.flatMap { _ =&gt;</p>
+<blockquote>
+<div><p>println(s”Start loading the data from $temporaryOutputStringPath”)
+val clustersWithScores = TypedPipe.from(TypedTsv[String](temporaryOutputStringPath)).map {</p>
+<blockquote>
+<div><dl>
+<dt>mappedIdsWithArrays =&gt;</dt><dd><p>val strArray = mappedIdsWithArrays.trim().split(”\s+”)
+assert(strArray.length == 3 || strArray.length == 1)
+val rowId = strArray(0).toInt
+val clusterAssignment: List[(ClusterId, Float)] =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (strArray.length &gt; 1) {</dt><dd><p>List((strArray(1).toInt, strArray(2).toFloat))</p>
+</dd>
+<dt>} else {</dt><dd><p>// the knownFors will have users with Array.empty as their assignment if
+// the clustering step have empty results for that user.
+Nil</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<dl class="simple">
+<dt>if (rowId % 100000 == 0)</dt><dd><p>println(s”rowId:$rowId  ClusterAssigned: $clusterAssignment”)</p>
+</dd>
+</dl>
+<p>(rowId, clusterAssignment)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+// return the dataset as an execution and delete the temp location
+readIntermediateExec(clustersWithScores, mode, temporaryOutputStringPath)</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Helper function to read the dataset as execution and delete the temporary</p></li>
+<li><p>location on HDFS for PDP compliance</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+<dt>def readIntermediateExec[K, V](</dt><dd><p>dataset: TypedPipe[(K, V)],
+mode: Mode,
+tempLocationPath: String</p>
+</dd>
+<dt>): Execution[TypedPipe[(K, V)]] = {</dt><dd><dl>
+<dt>Execution</dt><dd><p>.from(dataset)
+.flatMap { output =&gt;</p>
+<blockquote>
+<div><p>// delete the temporary outputs for PDP compliance
+mode match {</p>
+<blockquote>
+<div><dl>
+<dt>case Hdfs(_, conf) =&gt;</dt><dd><p>val fs = FileSystem.newInstance(conf)
+if (fs.deleteOnExit(new Path(tempLocationPath))) {</p>
+<blockquote>
+<div><p>println(s”Successfully deleted the temporary folder $tempLocationPath!”)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>println(s”Failed to delete the temporary folder $tempLocationPath!”)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>case _ =&gt; ()</p>
+</div></blockquote>
+<p>}
+Execution.from(output)</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Converts the userIDs in the sims graph to their mapped integer indices.</p></li>
+<li><p>All the users who donot have a mapping are filtered out from the sims graph input</p></li>
+<li></li>
+<li><p>&#64;param mappedUsers mapping of long userIDs to their integer indices</p></li>
+<li><p>&#64;param allEdges sims graph</p></li>
+<li><p>&#64;param maxNeighborsPerNode number of neighbors for each user</p></li>
+<li></li>
+<li><p>&#64;return simsGraph of users and neighbors with their mapped interger ids</p></li>
+</ul>
+<p><a href="#id9"><span class="problematic" id="id10">*</span></a>/</p>
+</dd>
+<dt>def getMappedSimsGraph(</dt><dd><p>mappedUsers: TypedPipe[(Int, UserId)],
+allEdges: TypedPipe[Candidates],
+maxNeighborsPerNode: Int</p>
+</dd>
+<dt>)(</dt><dd><p>implicit uniqueId: UniqueID</p>
+</dd>
+</dl>
+<p>): TypedPipe[(Int, List[(Int, Float)])] = {</p>
+<blockquote>
+<div><p>val numEdgesAfterFirstJoin = Stat(“num_edges_after_first_join”)
+val numEdgesAfterSecondJoin = Stat(“num_edges_after_second_join”)
+val numEdgesLostTopKTruncated = Stat(“num_edges_lost_topk_truncated”)
+val finalNumEdges = Stat(“final_num_edges”)</p>
+<p>val mappedUserIdsToIds: TypedPipe[(UserId, Int)] = mappedUsers.swap
+allEdges</p>
+<blockquote>
+<div><p>.map { cs =&gt; (cs.userId, cs.candidates) }
+// filter the users not present in the mapped userIDs list
+.join(mappedUserIdsToIds)
+.withReducers(6000)
+.flatMap {</p>
+<blockquote>
+<div><dl>
+<dt>case (id, (neighbors, mappedId)) =&gt;</dt><dd><p>val before = neighbors.size
+val topKNeighbors = neighbors.sortBy(-_.score).take(maxNeighborsPerNode)
+val after = topKNeighbors.size
+numEdgesLostTopKTruncated.incBy(before - after)
+topKNeighbors.map { candidate =&gt;</p>
+<blockquote>
+<div><p>numEdgesAfterFirstJoin.inc()
+(candidate.userId, (mappedId, candidate.score.toFloat))</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+.join(mappedUserIdsToIds)
+.withReducers(9000)
+.flatMap {</p>
+<blockquote>
+<div><dl>
+<dt>case (id, ((mappedNeighborId, score), mappedId)) =&gt;</dt><dd><p>numEdgesAfterSecondJoin.inc()
+// to make the graph symmetric, add those edges back that might have been filtered
+// due to maxNeighborsPerNodefor a user but not for its neighbors
+List(</p>
+<blockquote>
+<div><p>(mappedId, Map(mappedNeighborId -&gt; Max(score))),
+(mappedNeighborId, Map(mappedId -&gt; Max(score)))</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+.sumByKey
+.withReducers(9100)
+.map {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case (id, nbrMap) =&gt;</dt><dd><p>// Graph initialization expects neighbors to be sorted in ascending order of ids
+val sorted = nbrMap.mapValues(_.get).toList.sortBy(_._1)
+finalNumEdges.incBy(sorted.size)
+(id, sorted)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>def getTopFollowedUsersWithMappedIds(</dt><dd><p>minActiveFollowers: Int,
+topK: Int</p>
+</dd>
+<dt>)(</dt><dd><p>implicit uniqueId: UniqueID,
+timeZone: TimeZone</p>
+</dd>
+<dt>): TypedPipe[(Long, Int)] = {</dt><dd><p>val numTopUsersMappings = Stat(“num_top_users_with_mapped_ids”)
+println(“Going to include mappedIds in output”)
+TopUsersSimilarityGraph</p>
+<blockquote>
+<div><dl>
+<dt>.topUsersWithMappedIdsTopK(</dt><dd><dl class="simple">
+<dt>DAL</dt><dd><dl class="simple">
+<dt>.readMostRecentSnapshotNoOlderThan(</dt><dd><p>UsersourceFlatScalaDataset,
+Days(30)).withRemoteReadPolicy(ExplicitLocation(ProcAtla)).toTypedPipe,</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>minActiveFollowers,
+topK</p>
+</dd>
+</dl>
+<p>)
+.map {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case TopUserWithMappedId(TopUser(id, activeFollowerCount, screenName), mappedId) =&gt;</dt><dd><p>numTopUsersMappings.inc()
+(id, mappedId)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Map the userIds in the knownFor dataset to their integer Ids   .</p></li>
+</ul>
+<p><a href="#id11"><span class="problematic" id="id12">*</span></a>/</p>
+</dd>
+<dt>def getKnownForWithMappedIds(</dt><dd><p>knownForDataset: TypedPipe[(UserId, Array[(ClusterId, Float)])], //original userId as the key
+mappedIdsWithUserId: TypedPipe[(Int, UserId)] //mapped userId as the key</p>
+</dd>
+<dt>): TypedPipe[(Int, List[(ClusterId, Float)])] = {</dt><dd><dl class="simple">
+<dt>val userIdsAndTheirMappedIndices = mappedIdsWithUserId.map {</dt><dd><p>case (mappedId, originalId) =&gt; (originalId, mappedId)</p>
+</dd>
+</dl>
+<p>}
+knownForDataset.join(userIdsAndTheirMappedIndices).map {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case (userId, (userClusterArray, mappedUserId)) =&gt;</dt><dd><p>(mappedUserId, userClusterArray.toList)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Attach the cluster assignments from knownFor dataset to the users in mapped Sims graph  .</p></li>
+</ul>
+<p><a href="#id13"><span class="problematic" id="id14">*</span></a>/</p>
+</dd>
+<dt>def attachClusterAssignments(</dt><dd><p>mappedSimsGraph: TypedPipe[(Int, List[(Int, Float)])],
+knownForAssignments: TypedPipe[(Int, List[(ClusterId, Float)])],
+squareWeights: Boolean</p>
+</dd>
+<dt>)(</dt><dd><p>implicit uniqueId: UniqueID</p>
+</dd>
+<dt>): TypedPipe[(Int, Array[Int], Array[Float], List[(ClusterId, Float)])] = {</dt><dd><dl>
+<dt>val numPopularUsersWithNoKnownForBefore = Stat(</dt><dd><p>“num_popular_users_with_no_knownfor_before_but_popular_now”)</p>
+</dd>
+<dt>val input = mappedSimsGraph.map {</dt><dd><dl>
+<dt>case (id, nbrsList) =&gt;</dt><dd><p>val ngbrIds = nbrsList.map(_._1).toArray
+val ngbrWts = if (squareWeights) {</p>
+<blockquote>
+<div><p>nbrsList.map(_._2).map(currWt =&gt; currWt * currWt * 10).toArray</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>nbrsList.map(_._2).toArray</p>
+</dd>
+</dl>
+<p>}
+(id, ngbrIds, ngbrWts)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>// input simsGraph consists of popular ppl with most followed users, who might not have been
+// a knownFor user in the previous week. So left join with the knownFor dataset, and these
+// new popular users will not have any prior cluster assignments while clustering this time
+input</p>
+<blockquote>
+<div><p>.groupBy(_._1)
+.leftJoin(knownForAssignments.groupBy(_._1))
+.toTypedPipe
+.map {</p>
+<blockquote>
+<div><dl>
+<dt>case (mappedUserId, ((mappedId, ngbrIds, ngbrWts), knownForResult)) =&gt;</dt><dd><dl>
+<dt>val clustersList: List[(Int, Float)] = knownForResult match {</dt><dd><p>case Some(values) =&gt; values._2
+case None =&gt;</p>
+<blockquote>
+<div><p>numPopularUsersWithNoKnownForBefore.inc()
+List.empty</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}
+(mappedUserId, ngbrIds, ngbrWts, clustersList)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Initialize graph with users and neighbors with edge weights  .</p></li>
+</ul>
+<p><a href="#id15"><span class="problematic" id="id16">*</span></a>/</p>
+</dd>
+<dt>def getGraphFromSimsInput(</dt><dd><dl class="simple">
+<dt>mappedSimsIter: Iterable[</dt><dd><p>(Int, Array[Int], Array[Float], List[(ClusterId, Float)])</p>
+</dd>
+</dl>
+<p>],
+numUsers: Int</p>
+</dd>
+<dt>): Graph = {</dt><dd><p>val nbrsIds: Array[Array[Int]] = new Array[Array[Int]](numUsers)
+val nbrsWts: Array[Array[Float]] = new Array[Array[Float]](numUsers)
+var numEdges = 0L
+var numVertices = 0
+var numVerticesWithNoNgbrs = 0
+mappedSimsIter.foreach {</p>
+<blockquote>
+<div><dl>
+<dt>case (id, nbrArrayIds, nbArrayScores, _) =&gt;</dt><dd><p>nbrsIds(id) = nbrArrayIds
+nbrsWts(id) = nbArrayScores
+numEdges += nbrArrayIds.length
+numVertices += 1
+if (numVertices % 100000 == 0) {</p>
+<blockquote>
+<div><p>println(s”Done loading $numVertices many vertices. Edges so far: $numEdges”)</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>(0 until numUsers).foreach { i =&gt;</dt><dd><dl class="simple">
+<dt>if (nbrsIds(i) == null) {</dt><dd><p>numVerticesWithNoNgbrs += 1
+nbrsIds(i) = Array[Int]()
+nbrsWts(i) = Array[Float]()</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>println(</dt><dd><p>s”Done loading graph with $numUsers nodes and $numEdges edges (counting each edge twice)”)</p>
+</dd>
+</dl>
+<p>println(“Number of nodes with at least one neighbor is “ + numVertices)
+println(“Number of nodes with at no neighbors is “ + numVerticesWithNoNgbrs)
+new Graph(numUsers, numEdges / 2, nbrsIds, nbrsWts)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Helper function that initializes users to clusters based on previous knownFor assignments</p></li>
+<li><p>and for users with no previous assignments, assign them randomly to any of the empty clusters</p></li>
+</ul>
+<p><a href="#id17"><span class="problematic" id="id18">*</span></a>/</p>
+</dd>
+<dt>def initializeSparseBinaryMatrix(</dt><dd><p>graph: Graph,
+mappedSimsGraphIter: Iterable[</p>
+<blockquote>
+<div><p>(Int, Array[Int], Array[Float], List[(ClusterId, Float)])</p>
+</div></blockquote>
+<p>], // user with neighbors, neighbor wts and previous knownfor assignments
+numUsers: Int,
+numClusters: Int,
+algoConfig: AlgorithmConfig,</p>
+</dd>
+<dt>): SparseBinaryMatrix = {</dt><dd><p>var clustersSeenFromPreviousWeek: Set[Int] = Set.empty
+var emptyClustersFromPreviousWeek: Set[Int] = Set.empty
+var usersWithNoAssignmentsFromPreviousWeek: Set[Int] = Set.empty
+mappedSimsGraphIter.foreach {</p>
+<blockquote>
+<div><dl>
+<dt>case (id, _, _, knownFor) =&gt;</dt><dd><dl class="simple">
+<dt>if (knownFor.isEmpty) {</dt><dd><p>usersWithNoAssignmentsFromPreviousWeek += id</p>
+</dd>
+</dl>
+<p>}
+knownFor.foreach {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case (clusterId, _) =&gt;</dt><dd><p>clustersSeenFromPreviousWeek += clusterId</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+(1 to numClusters).foreach { i =&gt;</p>
+<blockquote>
+<div><p>if (!clustersSeenFromPreviousWeek.contains(i)) emptyClustersFromPreviousWeek += i</p>
+</div></blockquote>
+<p>}
+var z = new SparseBinaryMatrix(numUsers, numClusters)
+println(“Going to initialize from previous KnownFor”)
+var zeroIndexedClusterIdsFromPreviousWeek: Set[Int] = Set.empty
+for (clusterIdOneIndexed &lt;- emptyClustersFromPreviousWeek) {</p>
+<blockquote>
+<div><p>zeroIndexedClusterIdsFromPreviousWeek += (clusterIdOneIndexed - 1)</p>
+</div></blockquote>
+<p>}
+// Initialize z - users with no previous assignments are assigned to empty clusters
+z.initFromSubsetOfRowsForSpecifiedColumns(</p>
+<blockquote>
+<div><p>graph,
+(gr: Graph, i: Integer) =&gt; algoConfig.rng.nextDouble,
+zeroIndexedClusterIdsFromPreviousWeek.toArray,
+usersWithNoAssignmentsFromPreviousWeek.toArray,
+new PrintWriter(System.err)</p>
+</div></blockquote>
+<p>)
+println(“Initialized the empty clusters”)
+mappedSimsGraphIter.foreach {</p>
+<blockquote>
+<div><dl>
+<dt>case (id, _, _, knownFor) =&gt;</dt><dd><p>val currClustersForUserZeroIndexed = knownFor.map(_._1).map(x =&gt; x - 1)
+// Users who have a previous cluster assignment are initialized with the same cluster
+if (currClustersForUserZeroIndexed.nonEmpty) {</p>
+<blockquote>
+<div><p>z.updateRow(id, currClustersForUserZeroIndexed.sorted.toArray)</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+println(“Done initializing from previous knownFor assignment”)
+z</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Optimize the sparseBinaryMatrix. This function runs the clustering epochs and computes the</p></li>
+<li><p>cluster assignments for the next week, based on the underlying user-user graph</p></li>
+</ul>
+<p><a href="#id19"><span class="problematic" id="id20">*</span></a>/</p>
+</dd>
+<dt>def optimizeSparseBinaryMatrix(</dt><dd><p>algoConfig: AlgorithmConfig,
+graph: Graph,
+z: SparseBinaryMatrix</p>
+</dd>
+<dt>): SparseBinaryMatrix = {</dt><dd><p>val prec0 = MHAlgorithm.clusterPrecision(graph, z, 0, 1000, algoConfig.rng)
+println(“Precision of cluster 0:” + prec0.precision)
+val prec1 = MHAlgorithm.clusterPrecision(graph, z, 1, 1000, algoConfig.rng)
+println(“Precision of cluster 1:” + prec1.precision)
+val algo = new MHAlgorithm(algoConfig, graph, z, new PrintWriter(System.err))
+val optimizedZ = algo.optimize
+optimizedZ</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Helper function that takes the heuristically scored association of user to a cluster</p></li>
+<li><p>and returns the knownFor result</p></li>
+<li><p>&#64;param srm SparseRealMatrix with (row, col) score denoting the membership score of user in the cluster</p></li>
+<li><p>&#64;return assignments of users (mapped integer indices) to clusters with knownFor scores.</p></li>
+</ul>
+<p><a href="#id21"><span class="problematic" id="id22">*</span></a>/</p>
+</dd>
+<dt>def getKnownForHeuristicScores(srm: SparseRealMatrix): List[(Int, List[(ClusterId, Float)])] = {</dt><dd><dl>
+<dt>val knownForAssignmentsFromClusterScores = (0 until srm.getNumRows).map { rowId =&gt;</dt><dd><p>val rowWithIndices = srm.getColIdsForRow(rowId)
+val rowWithScores = srm.getValuesForRow(rowId)
+val allClustersWithScores: Array[(ClusterId, Float)] =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>rowWithIndices.zip(rowWithScores).map {</dt><dd><p>case (colId, score) =&gt; (colId + 1, score.toFloat)</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<dl class="simple">
+<dt>if (rowId % 100000 == 0) {</dt><dd><p>println(“Inside outputIter:” + rowId + “ “ + srm.getNumRows)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>val clusterAssignmentWithMaxScore: List[(ClusterId, Float)] =</dt><dd><dl>
+<dt>if (allClustersWithScores.length &gt; 1) {</dt><dd><p>// if sparseBinaryMatrix z has rows with more than one non-zero column (i.e a user
+// initialized with more than one cluster), and the clustering algorithm doesnot find
+// a better proposal for cluster assignment, the user’s multi-cluster membership
+// from the initialization step can continue.
+// We found that this happens in ~0.1% of the knownFor users. Hence choose the
+// cluster with the highest score to deal with such edge cases.
+val result: (ClusterId, Float) = allClustersWithScores.maxBy(_._2)
+println(</p>
+<blockquote>
+<div><dl>
+<dt>“Found a user with mappedId: %s with more than 1 cluster assignment:%s; Assigned to the best cluster: %s”</dt><dd><dl>
+<dt>.format(</dt><dd><p>rowId.toString,
+allClustersWithScores.mkString(“Array(”, “, “, “)”),
+result</p>
+<blockquote>
+<div><p>.toString()))</p>
+</div></blockquote>
+</dd>
+</dl>
+</dd>
+</dl>
+</div></blockquote>
+<p>List(result)</p>
+</dd>
+<dt>} else {</dt><dd><p>allClustersWithScores.toList</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>(rowId, clusterAssignmentWithMaxScore)</p>
+</dd>
+</dl>
+<p>}
+knownForAssignmentsFromClusterScores.toList</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Function that computes the clustering assignments to users</p></li>
+<li></li>
+<li><p>&#64;param mappedSimsGraph user-user graph as input to clustering</p></li>
+<li><p>&#64;param previousKnownForAssignments previous week clustering assignments</p></li>
+<li><p>&#64;param maxEpochsForClustering number of neighbors for each user</p></li>
+<li><p>&#64;param squareWeights boolean flag for the edge weights in the sims graph</p></li>
+<li><p>&#64;param wtCoeff wtCoeff</p></li>
+<li></li>
+<li><p>&#64;return users with clusters assigned</p></li>
+</ul>
+<p><a href="#id23"><span class="problematic" id="id24">*</span></a>/</p>
+</dd>
+<dt>def getClusteringAssignments(</dt><dd><p>mappedSimsGraph: TypedPipe[(Int, List[(Int, Float)])],
+previousKnownForAssignments: TypedPipe[(Int, List[(ClusterId, Float)])],
+maxEpochsForClustering: Int,
+squareWeights: Boolean,
+wtCoeff: Double</p>
+</dd>
+<dt>)(</dt><dd><p>implicit uniqueId: UniqueID</p>
+</dd>
+</dl>
+<p>): Execution[List[(Int, List[(ClusterId, Float)])]] = {</p>
+<blockquote>
+<div><dl>
+<dt>attachClusterAssignments(</dt><dd><p>mappedSimsGraph,
+previousKnownForAssignments,
+squareWeights).toIterableExecution.flatMap { mappedSimsGraphWithClustersIter =&gt;
+val tic = System.currentTimeMillis
+var maxVertexId = 0
+var maxClusterIdInPreviousAssignment = 0
+mappedSimsGraphWithClustersIter.foreach {</p>
+<blockquote>
+<div><dl>
+<dt>case (id, _, _, knownFor) =&gt;</dt><dd><p>maxVertexId = Math.max(id, maxVertexId)
+knownFor.foreach {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case (clusterId, _) =&gt;</dt><dd><dl class="simple">
+<dt>maxClusterIdInPreviousAssignment =</dt><dd><p>Math.max(clusterId, maxClusterIdInPreviousAssignment)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>val numUsersToCluster =</dt><dd><p>maxVertexId + 1 //since users were mapped with index starting from 0, using zipWithIndex</p>
+</dd>
+</dl>
+<p>println(“Total number of topK users to be clustered this time:” + numUsersToCluster)
+println(</p>
+<blockquote>
+<div><p>“Total number of clusters in the previous knownFor assignment:” + maxClusterIdInPreviousAssignment)</p>
+</div></blockquote>
+<p>println(“Will set number of communities to “ + maxClusterIdInPreviousAssignment)</p>
+<p>// Initialize the graph with users, neighbors and the corresponding edge weights
+val graph = getGraphFromSimsInput(mappedSimsGraphWithClustersIter, numUsersToCluster)
+val toc = System.currentTimeMillis()
+println(“Time to load the graph “ + (toc - tic) / 1000.0 / 60.0 + “ minutes”)</p>
+<p>// define the algoConfig parameters
+val algoConfig = new AlgorithmConfig()</p>
+<blockquote>
+<div><p>.withCpu(16).withK(maxClusterIdInPreviousAssignment)
+.withWtCoeff(wtCoeff.toDouble)
+.withMaxEpoch(maxEpochsForClustering)</p>
+</div></blockquote>
+<p>algoConfig.divideResultIntoConnectedComponents = false
+algoConfig.minClusterSize = 1
+algoConfig.updateImmediately = true
+algoConfig.rng = new RandomAdaptor(new JDKRandomGenerator(1))</p>
+<p>// Initialize a sparseBinaryMatrix with users assigned to their previous week knownFor
+// assignments. For those users who do not a prior assignment, we assign
+// the (user + the neighbors from the graph) to the empty clusters.
+// Please note that this neighborhood-based initialization to empty clusters can
+// have a few cases where the same user was assigned to more than one cluster
+val z = initializeSparseBinaryMatrix(</p>
+<blockquote>
+<div><p>graph,
+mappedSimsGraphWithClustersIter,
+numUsersToCluster,
+maxClusterIdInPreviousAssignment,
+algoConfig</p>
+</div></blockquote>
+<p>)</p>
+<p>// Run the epochs of the clustering algorithm to find the new cluster assignments
+val tic2 = System.currentTimeMillis
+val optimizedZ = optimizeSparseBinaryMatrix(algoConfig, graph, z)
+val toc2 = System.currentTimeMillis
+println(“Time to optimize: %.2f secondsn”.format((toc2 - tic2) / 1000.0))
+println(“Time to initialize &amp; optimize: %.2f secondsn”.format((toc2 - toc) / 1000.0))</p>
+<p>// Attach scores to the cluster assignments
+val srm = MHAlgorithm.heuristicallyScoreClusterAssignments(graph, optimizedZ)</p>
+<p>// Get the knownfor assignments of users from the heuristic scores
+// assigned based on neigbhorhood of the user and their cluster assignments
+// The returned result has userIDs in the mapped integer indices
+val knownForAssignmentsFromClusterScores: List[(Int, List[(ClusterId, Float)])] =</p>
+<blockquote>
+<div><p>getKnownForHeuristicScores(srm)</p>
+</div></blockquote>
+<p>Execution.from(knownForAssignmentsFromClusterScores)</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../_sources/src/scala/com/twitter/simclusters_v2/scalding/update_known_for/UpdateKnownForSBFRunner.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

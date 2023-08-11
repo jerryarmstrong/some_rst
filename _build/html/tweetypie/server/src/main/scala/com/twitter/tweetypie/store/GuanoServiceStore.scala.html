@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.tweetypie
+package store</p>
+<p>import com.twitter.guano.thriftscala.NsfwTweetActionAction
+import com.twitter.tseng.withholding.thriftscala.TakedownReason
+import com.twitter.tweetypie.thriftscala._</p>
+<dl>
+<dt>trait GuanoServiceStore</dt><dd><blockquote>
+<div><p>extends TweetStoreBase[GuanoServiceStore]
+with AsyncDeleteTweet.Store
+with AsyncTakedown.Store
+with AsyncUpdatePossiblySensitiveTweet.Store {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>def wrap(w: TweetStore.Wrap): GuanoServiceStore =</dt><dd><dl class="simple">
+<dt>new TweetStoreWrapper(w, this)</dt><dd><p>with GuanoServiceStore
+with AsyncDeleteTweet.StoreWrapper
+with AsyncTakedown.StoreWrapper
+with AsyncUpdatePossiblySensitiveTweet.StoreWrapper</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>object GuanoServiceStore {</dt><dd><p>val Action: AsyncWriteAction.GuanoScribe.type = AsyncWriteAction.GuanoScribe</p>
+<dl>
+<dt>val toGuanoTakedown: (AsyncTakedown.Event, TakedownReason, Boolean) =&gt; Guano.Takedown =</dt><dd><dl>
+<dt>(event: AsyncTakedown.Event, reason: TakedownReason, takendown: Boolean) =&gt;</dt><dd><dl class="simple">
+<dt>Guano.Takedown(</dt><dd><p>tweetId = event.tweet.id,
+userId = getUserId(event.tweet),
+reason = reason,
+takendown = takendown,
+note = event.auditNote,
+host = event.host,
+byUserId = event.byUserId</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+<dt>val toGuanoUpdatePossiblySensitiveTweet: (</dt><dd><p>AsyncUpdatePossiblySensitiveTweet.Event,
+Boolean,
+NsfwTweetActionAction</p>
+</dd>
+<dt>) =&gt; Guano.UpdatePossiblySensitiveTweet =</dt><dd><dl>
+<dt>(</dt><dd><p>event: AsyncUpdatePossiblySensitiveTweet.Event,
+updatedValue: Boolean,
+action: NsfwTweetActionAction</p>
+</dd>
+<dt>) =&gt;</dt><dd><dl class="simple">
+<dt>Guano.UpdatePossiblySensitiveTweet(</dt><dd><p>tweetId = event.tweet.id,
+host = event.host.orElse(Some(“unknown”)),
+userId = event.user.id,
+byUserId = event.byUserId,
+action = action,
+enabled = updatedValue,
+note = event.note</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+<dt>def apply(guano: Guano, stats: StatsReceiver): GuanoServiceStore = {</dt><dd><p>val deleteByUserIdCounter = stats.counter(“deletes_with_by_user_id”)
+val deleteScribeCounter = stats.counter(“deletes_resulting_in_scribe”)</p>
+<dl>
+<dt>new GuanoServiceStore {</dt><dd><dl>
+<dt>override val asyncDeleteTweet: FutureEffect[AsyncDeleteTweet.Event] =</dt><dd><dl>
+<dt>FutureEffect[AsyncDeleteTweet.Event] { event =&gt;</dt><dd><p>val tweet = event.tweet</p>
+<p>event.byUserId.foreach(_ =&gt; deleteByUserIdCounter.incr())</p>
+<p>// Guano the tweet deletion action not initiated from the RetweetsDeletionStore
+event.byUserId match {</p>
+<blockquote>
+<div><dl>
+<dt>case Some(byUserId) =&gt;</dt><dd><p>deleteScribeCounter.incr()
+guano.scribeDestroyTweet(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>Guano.DestroyTweet(</dt><dd><p>tweet = tweet,
+userId = getUserId(tweet),
+byUserId = byUserId,
+passthrough = event.auditPassthrough</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+<dt>case _ =&gt;</dt><dd><p>Future.Unit</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}.onlyIf(_.cascadedFromTweetId.isEmpty)</p>
+</dd>
+<dt>override val retryAsyncDeleteTweet: FutureEffect[</dt><dd><p>TweetStoreRetryEvent[AsyncDeleteTweet.Event]</p>
+</dd>
+<dt>] =</dt><dd><p>TweetStore.retry(Action, asyncDeleteTweet)</p>
+</dd>
+<dt>override val asyncTakedown: FutureEffect[AsyncTakedown.Event] =</dt><dd><dl>
+<dt>FutureEffect[AsyncTakedown.Event] { event =&gt;</dt><dd><dl class="simple">
+<dt>val messages =</dt><dd><dl class="simple">
+<dt>event.reasonsToAdd.map(toGuanoTakedown(event, _, true)) ++</dt><dd><p>event.reasonsToRemove.map(toGuanoTakedown(event, _, false))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>Future.join(messages.map(guano.scribeTakedown))</p>
+</dd>
+</dl>
+<p>}.onlyIf(_.scribeForAudit)</p>
+</dd>
+<dt>override val retryAsyncTakedown: FutureEffect[TweetStoreRetryEvent[AsyncTakedown.Event]] =</dt><dd><p>TweetStore.retry(Action, asyncTakedown)</p>
+</dd>
+<dt>override val asyncUpdatePossiblySensitiveTweet: FutureEffect[</dt><dd><p>AsyncUpdatePossiblySensitiveTweet.Event</p>
+</dd>
+<dt>] =</dt><dd><dl>
+<dt>FutureEffect[AsyncUpdatePossiblySensitiveTweet.Event] { event =&gt;</dt><dd><dl>
+<dt>val messages =</dt><dd><dl>
+<dt>event.nsfwAdminChange.map(</dt><dd><p>toGuanoUpdatePossiblySensitiveTweet(event, _, NsfwTweetActionAction.NsfwAdmin)</p>
+</dd>
+<dt>) ++</dt><dd><dl class="simple">
+<dt>event.nsfwUserChange.map(</dt><dd><p>toGuanoUpdatePossiblySensitiveTweet(event, _, NsfwTweetActionAction.NsfwUser)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>Future.join(messages.toSeq.map(guano.scribeUpdatePossiblySensitiveTweet))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>override val retryAsyncUpdatePossiblySensitiveTweet: FutureEffect[</dt><dd><p>TweetStoreRetryEvent[AsyncUpdatePossiblySensitiveTweet.Event]</p>
+</dd>
+<dt>] =</dt><dd><p>TweetStore.retry(Action, asyncUpdatePossiblySensitiveTweet)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/tweetypie/server/src/main/scala/com/twitter/tweetypie/store/GuanoServiceStore.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

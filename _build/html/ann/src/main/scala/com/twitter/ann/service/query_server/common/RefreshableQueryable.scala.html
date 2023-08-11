@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../../" id="documentation_options" src="../../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.ann.service.query_server.common</p>
+<p>import com.google.common.annotations.VisibleForTesting
+import com.google.common.util.concurrent.ThreadFactoryBuilder
+import com.twitter.ann.common.EmbeddingType.EmbeddingVector
+import com.twitter.ann.common.Distance
+import com.twitter.ann.common.NeighborWithDistance
+import com.twitter.ann.common.Queryable
+import com.twitter.ann.common.QueryableGrouped
+import com.twitter.ann.common.RuntimeParams
+import com.twitter.conversions.DurationOps._
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.logging.Logger
+import com.twitter.search.common.file.AbstractFile
+import com.twitter.util.Duration
+import com.twitter.util.Future
+import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import scala.util.Random
+import scala.util.control.NonFatal</p>
+<dl>
+<dt>class RefreshableQueryable[T, P &lt;: RuntimeParams, D &lt;: Distance[D]](</dt><dd><p>grouped: Boolean,
+rootDir: AbstractFile,
+queryableProvider: QueryableProvider[T, P, D],
+indexPathProvider: IndexPathProvider,
+statsReceiver: StatsReceiver,
+updateInterval: Duration = 10.minutes)</p>
+<blockquote>
+<div><p>extends QueryableGrouped[T, P, D] {</p>
+</div></blockquote>
+<p>private val log = Logger.get(“RefreshableQueryable”)</p>
+<p>private val loadCounter = statsReceiver.counter(“load”)
+private val loadFailCounter = statsReceiver.counter(“load_error”)
+private val newIndexCounter = statsReceiver.counter(“new_index”)
+protected val random = new Random(System.currentTimeMillis())</p>
+<dl class="simple">
+<dt>private val threadFactory = new ThreadFactoryBuilder()</dt><dd><p>.setNameFormat(“refreshable-queryable-update-%d”)
+.build()</p>
+</dd>
+</dl>
+<p>// single thread to check and load index
+private val executor = Executors.newScheduledThreadPool(1, threadFactory)</p>
+<dl>
+<dt>private[common] val indexPathRef: AtomicReference[AbstractFile] =</dt><dd><p>new AtomicReference(indexPathProvider.provideIndexPath(rootDir, grouped).get())</p>
+</dd>
+<dt>private[common] val queryableRef: AtomicReference[Map[Option[String], Queryable[T, P, D]]] = {</dt><dd><dl>
+<dt>if (grouped) {</dt><dd><p>val mapping = getGroupMapping</p>
+<p>new AtomicReference(mapping)</p>
+</dd>
+<dt>} else {</dt><dd><p>new AtomicReference(Map(None -&gt; buildIndex(indexPathRef.get())))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private val servingIndexGauge = statsReceiver.addGauge(“serving_index_timestamp”) {</dt><dd><p>indexPathRef.get().getName.toFloat</p>
+</dd>
+</dl>
+<p>}</p>
+<p>log.info(“System.gc() before start”)
+System.gc()</p>
+<dl>
+<dt>private val reloadTask = new Runnable {</dt><dd><dl class="simple">
+<dt>override def run(): Unit = {</dt><dd><p>innerLoad()</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def start(): Unit = {</dt><dd><dl class="simple">
+<dt>executor.scheduleWithFixedDelay(</dt><dd><p>reloadTask,
+// init reloading with random delay
+computeRandomInitDelay().inSeconds,
+updateInterval.inSeconds,
+TimeUnit.SECONDS</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private def buildIndex(indexPath: AbstractFile): Queryable[T, P, D] = {</dt><dd><p>log.info(s”build index from ${indexPath.getPath}”)
+queryableProvider.provideQueryable(indexPath)</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;VisibleForTesting
+private[common] def innerLoad(): Unit = {</p>
+<blockquote>
+<div><p>log.info(“Check and load for new index”)
+loadCounter.incr()
+try {</p>
+<blockquote>
+<div><p>// Find the latest directory
+val latestPath = indexPathProvider.provideIndexPath(rootDir, grouped).get()
+if (indexPathRef.get() != latestPath) {</p>
+<blockquote>
+<div><p>log.info(s”loading index from: ${latestPath.getName}”)
+newIndexCounter.incr()
+if (grouped) {</p>
+<blockquote>
+<div><p>val mapping = getGroupMapping
+queryableRef.set(mapping)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>val queryable = buildIndex(latestPath)
+queryableRef.set(Map(None -&gt; queryable))</p>
+</dd>
+</dl>
+<p>}
+indexPathRef.set(latestPath)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>log.info(s”Current index already up to date: ${indexPathRef.get.getName}”)</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} catch {</dt><dd><dl class="simple">
+<dt>case NonFatal(err) =&gt;</dt><dd><p>loadFailCounter.incr()
+log.error(s”Failed to load index: $err”)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+log.info(s”Current index loaded from ${indexPathRef.get().getPath}”)</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;VisibleForTesting
+private[common] def computeRandomInitDelay(): Duration = {</p>
+<blockquote>
+<div><p>val bound = 5.minutes
+val nextUpdateSec = updateInterval + Duration.fromSeconds(</p>
+<blockquote>
+<div><p>random.nextInt(bound.inSeconds)</p>
+</div></blockquote>
+<p>)
+nextUpdateSec</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>ANN query for ids with key as group id</p></li>
+<li><p>&#64;param embedding: Embedding/Vector to be queried with.</p></li>
+<li><p>&#64;param numOfNeighbors: Number of neighbours to be queried for.</p></li>
+<li><p>&#64;param runtimeParams: Runtime params associated with index to control accuracy/latency etc.</p></li>
+<li><p>&#64;param key: Optional key to lookup specific ANN index and perform query there</p></li>
+<li><p>&#64;return List of approximate nearest neighbour ids.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>override def query(</dt><dd><p>embedding: EmbeddingVector,
+numOfNeighbors: Int,
+runtimeParams: P,
+key: Option[String]</p>
+</dd>
+<dt>): Future[List[T]] = {</dt><dd><p>val mapping = queryableRef.get()</p>
+<dl class="simple">
+<dt>if (!mapping.contains(key)) {</dt><dd><p>Future.value(List())</p>
+</dd>
+<dt>} else {</dt><dd><p>mapping.get(key).get.query(embedding, numOfNeighbors, runtimeParams)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>ANN query for ids with key as group id with distance</p></li>
+<li><p>&#64;param embedding: Embedding/Vector to be queried with.</p></li>
+<li><p>&#64;param numOfNeighbors: Number of neighbours to be queried for.</p></li>
+<li><p>&#64;param runtimeParams: Runtime params associated with index to control accuracy/latency etc.</p></li>
+<li><p>&#64;param key: Optional key to lookup specific ANN index and perform query there</p></li>
+<li><p>&#64;return List of approximate nearest neighbour ids with distance from the query embedding.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>override def queryWithDistance(</dt><dd><p>embedding: EmbeddingVector,
+numOfNeighbors: Int,
+runtimeParams: P,
+key: Option[String]</p>
+</dd>
+<dt>): Future[List[NeighborWithDistance[T, D]]] = {</dt><dd><p>val mapping = queryableRef.get()</p>
+<dl class="simple">
+<dt>if (!mapping.contains(key)) {</dt><dd><p>Future.value(List())</p>
+</dd>
+<dt>} else {</dt><dd><p>mapping.get(key).get.queryWithDistance(embedding, numOfNeighbors, runtimeParams)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def getGroupMapping(): Map[Option[String], Queryable[T, P, D]] = {</dt><dd><p>val groupDirs = indexPathProvider.provideIndexPathWithGroups(rootDir).get()
+val mapping = groupDirs.map { groupDir =&gt;</p>
+<blockquote>
+<div><p>val queryable = buildIndex(groupDir)
+Option(groupDir.getName) -&gt; queryable</p>
+</div></blockquote>
+<p>}.toMap</p>
+<p>mapping</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>ANN query for ids.</p></li>
+<li></li>
+<li><p>&#64;param embedding       : Embedding/Vector to be queried with.</p></li>
+<li><p>&#64;param numOfNeighbors  : Number of neighbours to be queried for.</p></li>
+<li><p>&#64;param runtimeParams   : Runtime params associated with index to control accuracy/latency etc.</p></li>
+<li></li>
+<li><p>&#64;return List of approximate nearest neighbour ids.</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>override def query(</dt><dd><p>embedding: EmbeddingVector,
+numOfNeighbors: Int,
+runtimeParams: P</p>
+</dd>
+<dt>): Future[List[T]] = {</dt><dd><p>query(embedding, numOfNeighbors, runtimeParams, None)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>ANN query for ids with distance.</p></li>
+<li></li>
+<li><p>&#64;param embedding      : Embedding/Vector to be queried with.</p></li>
+<li><p>&#64;param numOfNeighbors : Number of neighbours to be queried for.</p></li>
+<li><p>&#64;param runtimeParams  : Runtime params associated with index to control accuracy/latency etc.</p></li>
+<li></li>
+<li><p>&#64;return List of approximate nearest neighbour ids with distance from the query embedding.</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+<dt>override def queryWithDistance(</dt><dd><p>embedding: EmbeddingVector,
+numOfNeighbors: Int,
+runtimeParams: P</p>
+</dd>
+<dt>): Future[List[NeighborWithDistance[T, D]]] = {</dt><dd><p>queryWithDistance(embedding, numOfNeighbors, runtimeParams, None)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../../_sources/ann/src/main/scala/com/twitter/ann/service/query_server/common/RefreshableQueryable.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

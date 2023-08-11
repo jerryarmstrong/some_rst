@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../../../" id="documentation_options" src="../../../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.follow_recommendations.common.rankers.weighted_candidate_source_ranker
+import com.twitter.follow_recommendations.common.base.Ranker
+import com.twitter.follow_recommendations.common.models.CandidateUser
+import com.twitter.follow_recommendations.common.rankers.common.DedupCandidates
+import com.twitter.follow_recommendations.common.rankers.utils.Utils
+import com.twitter.product_mixer.core.model.common.identifier.CandidateSourceIdentifier
+import com.twitter.stitch.Stitch
+import com.twitter.timelines.configapi.HasParams</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Candidate Ranker that mixes and ranks multiple candidate lists from different candidate sources with the</p></li>
+<li><p>following steps:</p></li>
+<li><ol class="arabic simple">
+<li><p>generate a ranked candidate list of each candidate source by sorting and shuffling the candidate list</p></li>
+</ol>
+</li>
+<li><p>of the algorithm.</p></li>
+<li><ol class="arabic simple" start="2">
+<li><p>merge the ranked lists generated in 1) into a single list using weighted randomly sampling.</p></li>
+</ol>
+</li>
+<li><ol class="arabic simple" start="3">
+<li><p>If dedup is required, dedup the output from 2) by candidate id.</p></li>
+</ol>
+</li>
+<li></li>
+<li><p>&#64;param basedRanker base ranker</p></li>
+<li><p>&#64;param shuffleFn the shuffle function that will be used to shuffle each algorithm’s sorted candidate list.</p></li>
+<li><p>&#64;param dedup whether to remove duplicated candidates from the final output.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>class WeightedCandidateSourceRanker[Target &lt;: HasParams](</dt><dd><dl class="simple">
+<dt>basedRanker: WeightedCandidateSourceBaseRanker[</dt><dd><p>CandidateSourceIdentifier,
+CandidateUser</p>
+</dd>
+</dl>
+<p>],
+shuffleFn: Seq[CandidateUser] =&gt; Seq[CandidateUser],
+dedup: Boolean)</p>
+<blockquote>
+<div><p>extends Ranker[Target, CandidateUser] {</p>
+</div></blockquote>
+<p>val name: String = this.getClass.getSimpleName</p>
+<dl>
+<dt>override def rank(target: Target, candidates: Seq[CandidateUser]): Stitch[Seq[CandidateUser]] = {</dt><dd><dl class="simple">
+<dt>val scribeRankingInfo: Boolean =</dt><dd><p>target.params(WeightedCandidateSourceRankerParams.ScribeRankingInfoInWeightedRanker)</p>
+</dd>
+</dl>
+<p>val rankedCands = rankCandidates(group(candidates))
+Stitch.value(if (scribeRankingInfo) Utils.addRankingInfo(rankedCands, name) else rankedCands)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def group(</dt><dd><p>candidates: Seq[CandidateUser]</p>
+</dd>
+<dt>): Map[CandidateSourceIdentifier, Seq[CandidateUser]] = {</dt><dd><dl class="simple">
+<dt>val flattened = for {</dt><dd><p>candidate &lt;- candidates
+identifier &lt;- candidate.getPrimaryCandidateSource</p>
+</dd>
+</dl>
+<p>} yield (identifier, candidate)
+flattened.groupBy(_._1).mapValues(_.map(_._2))</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def rankCandidates(</dt><dd><p>input: Map[CandidateSourceIdentifier, Seq[CandidateUser]]</p>
+</dd>
+<dt>): Seq[CandidateUser] = {</dt><dd><p>// Sort and shuffle candidates per candidate source.
+// Note 1: Using map instead mapValue here since mapValue somehow caused infinite loop when used as part of Stream.
+val sortAndShuffledCandidates = input.map {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case (source, candidates) =&gt;</dt><dd><p>// Note 2: toList is required here since candidates is a view, and it will result in infinit loop when used as part of Stream.
+// Note 3: there is no real sorting logic here, it assumes the input is already sorted by candidate sources
+val sortedCandidates = candidates.toList
+source -&gt; shuffleFn(sortedCandidates).iterator</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+val rankedCandidates = basedRanker(sortAndShuffledCandidates)</p>
+<p>if (dedup) DedupCandidates(rankedCandidates) else rankedCandidates</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>object WeightedCandidateSourceRanker {</p>
+<blockquote>
+<div><dl>
+<dt>def build[Target &lt;: HasParams](</dt><dd><p>candidateSourceWeight: Map[CandidateSourceIdentifier, Double],
+shuffleFn: Seq[CandidateUser] =&gt; Seq[CandidateUser] = identity,
+dedup: Boolean = false,
+randomSeed: Option[Long] = None</p>
+</dd>
+<dt>): WeightedCandidateSourceRanker[Target] = {</dt><dd><dl>
+<dt>new WeightedCandidateSourceRanker(</dt><dd><dl class="simple">
+<dt>new WeightedCandidateSourceBaseRanker(</dt><dd><p>candidateSourceWeight,
+WeightMethod.WeightedRandomSampling,
+randomSeed = randomSeed),</p>
+</dd>
+</dl>
+<p>shuffleFn,
+dedup</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>object WeightedCandidateSourceRankerWithoutRandomSampling {</dt><dd><dl>
+<dt>def build[Target &lt;: HasParams](</dt><dd><p>candidateSourceWeight: Map[CandidateSourceIdentifier, Double]</p>
+</dd>
+<dt>): WeightedCandidateSourceRanker[Target] = {</dt><dd><dl>
+<dt>new WeightedCandidateSourceRanker(</dt><dd><dl class="simple">
+<dt>new WeightedCandidateSourceBaseRanker(</dt><dd><p>candidateSourceWeight,
+WeightMethod.WeightedRoundRobin,
+randomSeed = None),</p>
+</dd>
+</dl>
+<p>identity,
+false,</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../../../_sources/follow-recommendations-service/common/src/main/scala/com/twitter/follow_recommendations/common/rankers/weighted_candidate_source_ranker/WeightedCandidateSourceRanker.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

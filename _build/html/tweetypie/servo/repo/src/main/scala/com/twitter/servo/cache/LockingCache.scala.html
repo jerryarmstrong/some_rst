@@ -1,0 +1,723 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../../" id="documentation_options" src="../../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.servo.cache</p>
+<p>import com.twitter.conversions.DurationOps._
+import com.twitter.finagle.service.RetryPolicy
+import com.twitter.finagle.partitioning.FailureAccrualException
+import com.twitter.finagle.Backoff
+import com.twitter.finagle.stats.{NullStatsReceiver, Stat, StatsReceiver}
+import com.twitter.logging.{Level, Logger}
+import com.twitter.servo.util.{ExceptionCounter, RateLimitingLogger}
+import com.twitter.util._
+import scala.util.control.NoStackTrace</p>
+<p>object LockingCache {</p>
+<blockquote>
+<div><dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>first argument is value to store, second argument is value in cache,</p></li>
+<li><p>returns an Option of the value to be stored. None should be interpreted</p></li>
+<li><p>as “don’t store anything”</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+</dl>
+<p>type Picker[V] = (V, V) =&gt; Option[V]</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>argument is value, if any, in cache.</p></li>
+<li><p>return type is value, if any, to be stored in cache.</p></li>
+<li><p>returning None means nothing will be done.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+</dl>
+<p>type Handler[V] = Option[V] =&gt; Option[V]</p>
+<dl class="simple">
+<dt>case class AlwaysSetHandler[V](value: Option[V]) extends Handler[V] {</dt><dd><p>override def apply(ignored: Option[V]) = value</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>case class PickingHandler[V](newValue: V, pick: Picker[V]) extends Handler[V] {</dt><dd><dl>
+<dt>override def apply(inCache: Option[V]): Option[V] =</dt><dd><dl class="simple">
+<dt>inCache match {</dt><dd><dl class="simple">
+<dt>case None =&gt;</dt><dd><p>// if nothing in cache, go ahead and store!
+Some(newValue)</p>
+</dd>
+<dt>case Some(oldValue) =&gt;</dt><dd><p>// if something in cache, store a picked value based on
+// what’s in cache and what’s being stored
+pick(newValue, oldValue)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>// apparently case classes that extend functions don’t get pretty toString methods
+override lazy val toString = “PickingHandler(%s, %s)”.format(newValue, pick)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>case class UpdateOnlyPickingHandler[V](newValue: V, pick: Picker[V]) extends Handler[V] {</dt><dd><dl>
+<dt>override def apply(inCache: Option[V]): Option[V] =</dt><dd><dl class="simple">
+<dt>inCache match {</dt><dd><dl class="simple">
+<dt>case None =&gt;</dt><dd><p>// if nothing in cache, do not update
+None</p>
+</dd>
+<dt>case Some(oldValue) =&gt;</dt><dd><p>// if something in cache, store a picked value based on
+// what’s in cache and what’s being stored
+pick(newValue, oldValue)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>// apparently case classes that extend functions don’t get pretty toString methods
+override lazy val toString = “UpdateOnlyPickingHandler(%s, %s)”.format(newValue, pick)</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>trait LockingCacheFactory {</dt><dd><p>def apply[K, V](cache: Cache[K, V]): LockingCache[K, V]
+def scope(scopes: String*): LockingCacheFactory</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>A cache that enforces a consistent view of values between the time when a set</p></li>
+<li><p>is initiated and when the value is actually updated in cache.</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+</dl>
+<p>trait LockingCache[K, V] extends Cache[K, V] {</p>
+<blockquote>
+<div><dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Look up a value and dispatch based on the result. The particular locking</p></li>
+<li><p>approach is defined by the implementing class. May call handler multiple</p></li>
+<li><p>times as part of more elaborate locking and retry looping.</p></li>
+<li></li>
+<li><p>Overview of semantics:</p></li>
+<li><p><cite>handler(None)</cite> is called if no value is present in cache.</p></li>
+<li><p><cite>handler(Some(value))</cite> is called if a value is present.</p></li>
+<li><p><cite>handler(x)</cite> should return None if nothing should be done and <cite>Some(value)</cite></p></li>
+<li><p>if a value should be set.</p></li>
+<li></li>
+<li><p>&#64;return the value that was actually set</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+</dl>
+<p>def lockAndSet(key: K, handler: LockingCache.Handler[V]): Future[Option[V]]</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>class OptimisticLockingCacheObserver(statsReceiver: StatsReceiver) {</dt><dd><p>import OptimisticLockingCache._</p>
+<p>private[this] val scopedReceiver = statsReceiver.scope(“locking_cache”)</p>
+<p>private[this] val successCounter = scopedReceiver.counter(“success”)
+private[this] val failureCounter = scopedReceiver.counter(“failure”)
+private[this] val exceptionCounter = new ExceptionCounter(scopedReceiver)
+private[this] val lockAndSetStat = scopedReceiver.stat(“lockAndSet”)</p>
+<dl>
+<dt>def time[V](f: =&gt; Future[Option[V]]): Future[Option[V]] = {</dt><dd><dl class="simple">
+<dt>Stat.timeFuture(lockAndSetStat) {</dt><dd><p>f</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>def success(attempts: Seq[FailedAttempt]): Unit = {</dt><dd><p>successCounter.incr()
+countAttempts(attempts)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>def failure(attempts: Seq[FailedAttempt]): Unit = {</dt><dd><p>failureCounter.incr()
+countAttempts(attempts)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def scope(s: String*): OptimisticLockingCacheObserver =</dt><dd><dl>
+<dt>s.toList match {</dt><dd><p>case Nil =&gt; this
+case head :: tail =&gt;</p>
+<blockquote>
+<div><p>new OptimisticLockingCacheObserver(statsReceiver.scope(head)).scope(tail: _*)</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>private[this] def countAttempts(attempts: Seq[FailedAttempt]): Unit = {</dt><dd><dl>
+<dt>attempts foreach { attempt =&gt;</dt><dd><p>val name = attempt.getClass.getSimpleName
+scopedReceiver.counter(name).incr()
+attempt.maybeThrowable foreach { t =&gt;</p>
+<blockquote>
+<div><p>exceptionCounter(t)
+scopedReceiver.scope(name).counter(t.getClass.getName).incr()</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>case class OptimisticLockingCacheFactory(</dt><dd><p>backoffs: Backoff,
+observer: OptimisticLockingCacheObserver = new OptimisticLockingCacheObserver(NullStatsReceiver),
+timer: Timer = new NullTimer,
+// Enabling key logging may unintentionally cause inclusion of sensitive data
+// in service logs and any accompanying log sinks such as Splunk. By default, this is disabled,
+// however may be optionally enabled for the purpose of debugging. Caution is warranted.
+enableKeyLogging: Boolean = false)</p>
+<blockquote>
+<div><p>extends LockingCacheFactory {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>def this(</dt><dd><p>backoffs: Backoff,
+statsReceiver: StatsReceiver,
+timer: Timer,
+enableKeyLogging: Boolean</p>
+</dd>
+</dl>
+<p>) = this(backoffs, new OptimisticLockingCacheObserver(statsReceiver), timer, enableKeyLogging)</p>
+<dl class="simple">
+<dt>override def apply[K, V](cache: Cache[K, V]): LockingCache[K, V] = {</dt><dd><p>new OptimisticLockingCache(cache, backoffs, observer, timer, enableKeyLogging)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>override def scope(scopes: String*): LockingCacheFactory = {</dt><dd><p>new OptimisticLockingCacheFactory(backoffs, observer.scope(scopes: _*), timer)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>object OptimisticLockingCache {</dt><dd><p>private[this] val FutureNone = Future.value(None)</p>
+<p>def emptyFutureNone[V] = FutureNone.asInstanceOf[Future[Option[V]]]</p>
+<dl class="simple">
+<dt>sealed abstract class FailedAttempt(val maybeThrowable: Option[Throwable])</dt><dd><p>extends Exception
+with NoStackTrace</p>
+</dd>
+</dl>
+<p>case class GetWithChecksumException(t: Throwable) extends FailedAttempt(Some(t))
+case object GetWithChecksumEmpty extends FailedAttempt(None)
+case object CheckAndSetFailed extends FailedAttempt(None)
+case class CheckAndSetException(t: Throwable) extends FailedAttempt(Some(t))
+case class AddException(t: Throwable) extends FailedAttempt(Some(t))</p>
+<dl>
+<dt>case class LockAndSetFailure(str: String, attempts: Seq[FailedAttempt])</dt><dd><dl class="simple">
+<dt>extends Exception(</dt><dd><p>str,
+// if the last exception was an RPC exception, try to recover the stack trace
+attempts.lastOption.flatMap(_.maybeThrowable).orNull</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>private def retryPolicy(backoffs: Backoff): RetryPolicy[Try[Nothing]] =</dt><dd><dl class="simple">
+<dt>RetryPolicy.backoff(backoffs) {</dt><dd><p>case Throw(_: FailureAccrualException) =&gt; false
+case _ =&gt; true</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Implementation of a LockingCache using add/getWithChecksum/checkAndSet.</p></li>
+</ul>
+<p><a href="#id9"><span class="problematic" id="id10">*</span></a>/</p>
+</dd>
+<dt>class OptimisticLockingCache[K, V](</dt><dd><p>override val underlyingCache: Cache[K, V],
+retryPolicy: RetryPolicy[Try[Nothing]],
+observer: OptimisticLockingCacheObserver,
+timer: Timer,
+enableKeyLogging: Boolean)</p>
+<blockquote>
+<div><p>extends LockingCache[K, V]
+with CacheWrapper[K, V] {</p>
+</div></blockquote>
+<p>import LockingCache._
+import OptimisticLockingCache._</p>
+<dl>
+<dt>def this(</dt><dd><p>underlyingCache: Cache[K, V],
+retryPolicy: RetryPolicy[Try[Nothing]],
+observer: OptimisticLockingCacheObserver,
+timer: Timer,</p>
+</dd>
+<dt>) =</dt><dd><dl class="simple">
+<dt>this(</dt><dd><p>underlyingCache: Cache[K, V],
+retryPolicy: RetryPolicy[Try[Nothing]],
+observer: OptimisticLockingCacheObserver,
+timer: Timer,
+false</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>def this(</dt><dd><p>underlyingCache: Cache[K, V],
+backoffs: Backoff,
+observer: OptimisticLockingCacheObserver,
+timer: Timer</p>
+</dd>
+<dt>) =</dt><dd><dl class="simple">
+<dt>this(</dt><dd><p>underlyingCache,
+OptimisticLockingCache.retryPolicy(backoffs),
+observer,
+timer,
+false</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>def this(</dt><dd><p>underlyingCache: Cache[K, V],
+backoffs: Backoff,
+observer: OptimisticLockingCacheObserver,
+timer: Timer,
+enableKeyLogging: Boolean</p>
+</dd>
+<dt>) =</dt><dd><dl class="simple">
+<dt>this(</dt><dd><p>underlyingCache,
+OptimisticLockingCache.retryPolicy(backoffs),
+observer,
+timer,
+enableKeyLogging</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>private[this] val log = Logger.get(“OptimisticLockingCache”)
+private[this] val rateLimitedLogger = new RateLimitingLogger(logger = log)</p>
+<p>&#64;deprecated(“use RetryPolicy-based constructor”, “0.1.2”)
+def this(underlyingCache: Cache[K, V], maxTries: Int = 10, enableKeyLogging: Boolean) = {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>this(</dt><dd><p>underlyingCache,
+Backoff.const(0.milliseconds).take(maxTries),
+new OptimisticLockingCacheObserver(NullStatsReceiver),
+new NullTimer,
+enableKeyLogging</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>override def lockAndSet(key: K, handler: Handler[V]): Future[Option[V]] = {</dt><dd><dl class="simple">
+<dt>observer.time {</dt><dd><p>dispatch(key, handler, retryPolicy, Nil)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>&#64;param key</p></li>
+<li><p>The key to look up in cache</p></li>
+<li><p>&#64;param handler</p></li>
+<li><p>The handler that is applied to values from cache</p></li>
+<li><p>&#64;param retryPolicy</p></li>
+<li><p>Used to determine if more attempts should be made.</p></li>
+<li><p>&#64;param attempts</p></li>
+<li><p>Contains representations of the causes of previous dispatch failures</p></li>
+</ul>
+<p><a href="#id11"><span class="problematic" id="id12">*</span></a>/</p>
+</dd>
+<dt>protected[this] def retry(</dt><dd><p>key: K,
+failure: Try[Nothing],
+handler: Handler[V],
+retryPolicy: RetryPolicy[Try[Nothing]],
+attempts: Seq[FailedAttempt]</p>
+</dd>
+<dt>): Future[Option[V]] =</dt><dd><dl>
+<dt>retryPolicy(failure) match {</dt><dd><dl>
+<dt>case None =&gt;</dt><dd><p>observer.failure(attempts)
+if (enableKeyLogging) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>rateLimitedLogger.log(</dt><dd><p>s”failed attempts for ${key}:n ${attempts.mkString(”n “)}”,
+level = Level.INFO)</p>
+</dd>
+</dl>
+<p>Future.exception(LockAndSetFailure(“lockAndSet failed for “ + key, attempts))</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>Future.exception(LockAndSetFailure(“lockAndSet failed”, attempts))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>case Some((backoff, tailPolicy)) =&gt;</dt><dd><dl>
+<dt>timer</dt><dd><dl class="simple">
+<dt>.doLater(backoff) {</dt><dd><p>dispatch(key, handler, tailPolicy, attempts)</p>
+</dd>
+</dl>
+<p>}
+.flatten</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>&#64;param key</p></li>
+<li><p>The key to look up in cache</p></li>
+<li><p>&#64;param handler</p></li>
+<li><p>The handler that is applied to values from cache</p></li>
+<li><p>&#64;param retryPolicy</p></li>
+<li><p>Used to determine if more attempts should be made.</p></li>
+<li><p>&#64;param attempts</p></li>
+<li><p>Contains representations of the causes of previous dispatch failures</p></li>
+</ul>
+<p><a href="#id13"><span class="problematic" id="id14">*</span></a>/</p>
+</dd>
+<dt>protected[this] def dispatch(</dt><dd><p>key: K,
+handler: Handler[V],
+retryPolicy: RetryPolicy[Try[Nothing]],
+attempts: Seq[FailedAttempt]</p>
+</dd>
+<dt>): Future[Option[V]] = {</dt><dd><p>// get the value if nothing’s there
+handler(None) match {</p>
+<blockquote>
+<div><dl>
+<dt>case None =&gt;</dt><dd><p>// if nothing should be done when missing, go straight to getAndConditionallySet,
+// since there’s nothing to attempt an add with
+getAndConditionallySet(key, handler, retryPolicy, attempts)</p>
+</dd>
+<dt>case some &#64; Some(value) =&gt;</dt><dd><p>// otherwise, try to do an atomic add, which will return false if something’s there
+underlyingCache.add(key, value) transform {</p>
+<blockquote>
+<div><dl>
+<dt>case Return(added) =&gt;</dt><dd><dl class="simple">
+<dt>if (added) {</dt><dd><p>// if added, return the value
+observer.success(attempts)
+Future.value(some)</p>
+</dd>
+<dt>} else {</dt><dd><p>// otherwise, do a checkAndSet based on the current value
+getAndConditionallySet(key, handler, retryPolicy, attempts)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>case Throw(t) =&gt;</dt><dd><p>// count exception against retries
+if (enableKeyLogging)</p>
+<blockquote>
+<div><p>rateLimitedLogger.logThrowable(t, s”add($key) returned exception. will retry”)</p>
+</div></blockquote>
+<p>retry(key, Throw(t), handler, retryPolicy, attempts :+ AddException(t))</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>&#64;param key</p></li>
+<li><p>The key to look up in cache</p></li>
+<li><p>&#64;param handler</p></li>
+<li><p>The handler that is applied to values from cache</p></li>
+<li><p>&#64;param retryPolicy</p></li>
+<li><p>Used to determine if more attempts should be made.</p></li>
+<li><p>&#64;param attempts</p></li>
+<li><p>Contains representations of the causes of previous dispatch failures</p></li>
+</ul>
+<p><a href="#id15"><span class="problematic" id="id16">*</span></a>/</p>
+</dd>
+<dt>protected[this] def getAndConditionallySet(</dt><dd><p>key: K,
+handler: Handler[V],
+retryPolicy: RetryPolicy[Try[Nothing]],
+attempts: Seq[FailedAttempt]</p>
+</dd>
+<dt>): Future[Option[V]] = {</dt><dd><p>// look in the cache to see what’s there
+underlyingCache.getWithChecksum(Seq(key)) handle {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case t =&gt;</dt><dd><p>// treat global failure as key-based failure
+KeyValueResult(failed = Map(key -&gt; t))</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl>
+<dt>} flatMap { lr =&gt;</dt><dd><dl>
+<dt>lr(key) match {</dt><dd><dl>
+<dt>case Return.None =&gt;</dt><dd><dl class="simple">
+<dt>handler(None) match {</dt><dd><dl class="simple">
+<dt>case Some(_) =&gt;</dt><dd><p>// if there’s nothing in the cache now, but handler(None) return Some,
+// that means something has changed since we attempted the add, so try again
+val failure = GetWithChecksumEmpty
+retry(key, Throw(failure), handler, retryPolicy, attempts :+ failure)</p>
+</dd>
+<dt>case None =&gt;</dt><dd><p>// if there’s nothing in the cache now, but handler(None) returns None,
+// that means we don’t want to store anything when there’s nothing already
+// in cache, so return None
+observer.success(attempts)
+emptyFutureNone</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>case Return(Some((Return(current), checksum))) =&gt;</dt><dd><p>// the cache entry is present
+dispatchCheckAndSet(Some(current), checksum, key, handler, retryPolicy, attempts)</p>
+</dd>
+<dt>case Return(Some((Throw(t), checksum))) =&gt;</dt><dd><p>// the cache entry failed to deserialize; treat it as a None and overwrite.
+if (enableKeyLogging)</p>
+<blockquote>
+<div><dl class="simple">
+<dt>rateLimitedLogger.logThrowable(</dt><dd><p>t,
+s”getWithChecksum(${key}) returned a bad value. overwriting.”)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>dispatchCheckAndSet(None, checksum, key, handler, retryPolicy, attempts)</p>
+</dd>
+<dt>case Throw(t) =&gt;</dt><dd><p>// lookup failure counts against numTries
+if (enableKeyLogging)</p>
+<blockquote>
+<div><dl class="simple">
+<dt>rateLimitedLogger.logThrowable(</dt><dd><p>t,
+s”getWithChecksum(${key}) returned exception. will retry.”)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>retry(key, Throw(t), handler, retryPolicy, attempts :+ GetWithChecksumException(t))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>&#64;param current</p></li>
+<li><p>The value currently cached under key <cite>key</cite>, if any</p></li>
+<li><p>&#64;param checksum</p></li>
+<li><p>The checksum of the currently-cached value</p></li>
+<li><p>&#64;param key</p></li>
+<li><p>The key mapping to <cite>current</cite></p></li>
+<li><p>&#64;param handler</p></li>
+<li><p>The handler that is applied to values from cache</p></li>
+<li><p>&#64;param retryPolicy</p></li>
+<li><p>Used to determine if more attempts should be made.</p></li>
+<li><p>&#64;param attempts</p></li>
+<li><p>Contains representations of the causes of previous dispatch failures</p></li>
+</ul>
+<p><a href="#id17"><span class="problematic" id="id18">*</span></a>/</p>
+</dd>
+<dt>protected[this] def dispatchCheckAndSet(</dt><dd><p>current: Option[V],
+checksum: Checksum,
+key: K,
+handler: Handler[V],
+retryPolicy: RetryPolicy[Try[Nothing]],
+attempts: Seq[FailedAttempt]</p>
+</dd>
+<dt>): Future[Option[V]] = {</dt><dd><dl>
+<dt>handler(current) match {</dt><dd><dl>
+<dt>case None =&gt;</dt><dd><p>// if nothing should be done based on the current value, don’t do anything
+observer.success(attempts)
+emptyFutureNone</p>
+</dd>
+<dt>case some &#64; Some(value) =&gt;</dt><dd><p>// otherwise, try a check and set with the checksum
+underlyingCache.checkAndSet(key, value, checksum) transform {</p>
+<blockquote>
+<div><dl>
+<dt>case Return(added) =&gt;</dt><dd><dl class="simple">
+<dt>if (added) {</dt><dd><p>// if added, return the value
+observer.success(attempts)
+Future.value(some)</p>
+</dd>
+<dt>} else {</dt><dd><p>// otherwise, something has changed, try again
+val failure = CheckAndSetFailed
+retry(key, Throw(failure), handler, retryPolicy, attempts :+ failure)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>case Throw(t) =&gt;</dt><dd><p>// count exception against retries
+if (enableKeyLogging)</p>
+<blockquote>
+<div><dl class="simple">
+<dt>rateLimitedLogger.logThrowable(</dt><dd><p>t,
+s”checkAndSet(${key}) returned exception. will retry.”)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>retry(key, Throw(t), handler, retryPolicy, attempts :+ CheckAndSetException(t))</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>object NonLockingCacheFactory extends LockingCacheFactory {</dt><dd><p>override def apply[K, V](cache: Cache[K, V]): LockingCache[K, V] = new NonLockingCache(cache)
+override def scope(scopes: String*) = this</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>class NonLockingCache[K, V](override val underlyingCache: Cache[K, V])</dt><dd><blockquote>
+<div><p>extends LockingCache[K, V]
+with CacheWrapper[K, V] {</p>
+</div></blockquote>
+<dl>
+<dt>override def lockAndSet(key: K, handler: LockingCache.Handler[V]): Future[Option[V]] = {</dt><dd><dl>
+<dt>handler(None) match {</dt><dd><dl>
+<dt>case None =&gt;</dt><dd><p>// if nothing should be done when nothing’s there, don’t do anything
+Future.value(None)</p>
+</dd>
+<dt>case some &#64; Some(value) =&gt;</dt><dd><dl class="simple">
+<dt>set(key, value) map { _ =&gt;</dt><dd><p>some</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../../_sources/tweetypie/servo/repo/src/main/scala/com/twitter/servo/cache/LockingCache.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

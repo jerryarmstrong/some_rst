@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../" id="documentation_options" src="../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.interaction_graph.scio.ml.labels</p>
+<p>import com.google.api.services.bigquery.model.TimePartitioning
+import com.spotify.scio.ScioContext
+import com.spotify.scio.values.SCollection
+import com.twitter.beam.io.dal.DAL
+import com.twitter.beam.io.fs.multiformat.DiskFormat
+import com.twitter.beam.io.fs.multiformat.PathLayout
+import com.twitter.beam.io.fs.multiformat.WriteOptions
+import com.twitter.beam.job.ServiceIdentifierOptions
+import com.twitter.cde.scio.dal_read.SourceUtil
+import com.twitter.conversions.DurationOps._
+import com.twitter.dal.client.dataset.TimePartitionedDALDataset
+import com.twitter.interaction_graph.scio.agg_client_event_logs.InteractionGraphAggClientEventLogsEdgeDailyScalaDataset
+import com.twitter.interaction_graph.scio.agg_direct_interactions.InteractionGraphAggDirectInteractionsEdgeDailyScalaDataset
+import com.twitter.interaction_graph.scio.agg_notifications.InteractionGraphAggNotificationsEdgeDailyScalaDataset
+import com.twitter.interaction_graph.thriftscala.Edge
+import com.twitter.interaction_graph.thriftscala.EdgeLabel
+import com.twitter.scio_internal.job.ScioBeamJob
+import com.twitter.socialgraph.event.thriftscala.FollowEvent
+import com.twitter.socialgraph.hadoop.SocialgraphFollowEventsScalaDataset
+import com.twitter.statebird.v2.thriftscala.Environment
+import com.twitter.tcdc.bqblaster.beam.syntax._
+import com.twitter.tcdc.bqblaster.core.avro.TypedProjection
+import com.twitter.tcdc.bqblaster.core.transform.RootTransform
+import org.apache.beam.sdk.io.gcp.bigquery.BigQueryIO
+import org.joda.time.Interval</p>
+<p>object InteractionGraphLabelsJob extends ScioBeamJob[InteractionGraphLabelsOption] {</p>
+<blockquote>
+<div><dl>
+<dt>override protected def configurePipeline(</dt><dd><p>scioContext: ScioContext,
+pipelineOptions: InteractionGraphLabelsOption</p>
+</dd>
+<dt>): Unit = {</dt><dd><p>&#64;transient
+implicit lazy val sc: ScioContext = scioContext
+implicit lazy val dateInterval: Interval = pipelineOptions.interval</p>
+<p>val bqTableName: String = pipelineOptions.getBqTableName
+val dalEnvironment: String = pipelineOptions</p>
+<blockquote>
+<div><p>.as(classOf[ServiceIdentifierOptions])
+.getEnvironment()</p>
+</div></blockquote>
+<dl class="simple">
+<dt>val dalWriteEnvironment = if (pipelineOptions.getDALWriteEnvironment != null) {</dt><dd><p>pipelineOptions.getDALWriteEnvironment</p>
+</dd>
+<dt>} else {</dt><dd><p>dalEnvironment</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def readPartition[T: Manifest](dataset: TimePartitionedDALDataset[T]): SCollection[T] = {</dt><dd><dl class="simple">
+<dt>SourceUtil.readDALDataset[T](</dt><dd><p>dataset = dataset,
+interval = dateInterval,
+dalEnvironment = dalEnvironment</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>val follows = readPartition[FollowEvent](SocialgraphFollowEventsScalaDataset)</dt><dd><p>.flatMap(LabelUtil.fromFollowEvent)</p>
+</dd>
+<dt>val directInteractions =</dt><dd><dl class="simple">
+<dt>readPartition[Edge](InteractionGraphAggDirectInteractionsEdgeDailyScalaDataset)</dt><dd><p>.flatMap(LabelUtil.fromInteractionGraphEdge)</p>
+</dd>
+</dl>
+</dd>
+<dt>val clientEvents =</dt><dd><dl class="simple">
+<dt>readPartition[Edge](InteractionGraphAggClientEventLogsEdgeDailyScalaDataset)</dt><dd><p>.flatMap(LabelUtil.fromInteractionGraphEdge)</p>
+</dd>
+</dl>
+</dd>
+<dt>val pushEvents =</dt><dd><dl class="simple">
+<dt>readPartition[Edge](InteractionGraphAggNotificationsEdgeDailyScalaDataset)</dt><dd><p>.flatMap(LabelUtil.fromInteractionGraphEdge)</p>
+</dd>
+</dl>
+</dd>
+<dt>val labels = groupLabels(</dt><dd><dl class="simple">
+<dt>follows ++</dt><dd><p>directInteractions ++
+clientEvents ++
+pushEvents)</p>
+</dd>
+</dl>
+</dd>
+<dt>labels.saveAsCustomOutput(</dt><dd><p>“Write Edge Labels”,
+DAL.write[EdgeLabel](</p>
+<blockquote>
+<div><p>InteractionGraphLabelsDailyScalaDataset,
+PathLayout.DailyPath(pipelineOptions.getOutputPath),
+dateInterval,
+DiskFormat.Parquet,
+Environment.valueOf(dalWriteEnvironment),
+writeOption = WriteOptions(numOfShards = Some(pipelineOptions.getNumberOfShards))</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>)</p>
+<p>// save to BQ
+if (pipelineOptions.getBqTableName != null) {</p>
+<blockquote>
+<div><p>val ingestionTime = pipelineOptions.getDate().value.getStart.toDate
+val bqFieldsTransform = RootTransform</p>
+<blockquote>
+<div><p>.Builder()
+.withPrependedFields(“dateHour” -&gt; TypedProjection.fromConstant(ingestionTime))</p>
+</div></blockquote>
+<dl>
+<dt>val timePartitioning = new TimePartitioning()</dt><dd><p>.setType(“DAY”).setField(“dateHour”).setExpirationMs(90.days.inMilliseconds)</p>
+</dd>
+<dt>val bqWriter = BigQueryIO</dt><dd><p>.write[EdgeLabel]
+.to(bqTableName)
+.withExtendedErrorInfo()
+.withTimePartitioning(timePartitioning)
+.withLoadJobProjectId(“twttr-recos-ml-prod”)
+.withThriftSupport(bqFieldsTransform.build(), AvroConverter.Legacy)
+.withCreateDisposition(BigQueryIO.Write.CreateDisposition.CREATE_IF_NEEDED)
+.withWriteDisposition(BigQueryIO.Write.WriteDisposition.WRITE_APPEND)</p>
+</dd>
+<dt>labels</dt><dd><dl class="simple">
+<dt>.saveAsCustomOutput(</dt><dd><p>s”Save Recommendations to BQ $bqTableName”,
+bqWriter</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>def groupLabels(labels: SCollection[EdgeLabel]): SCollection[EdgeLabel] = {</dt><dd><dl class="simple">
+<dt>labels</dt><dd><p>.map { e: EdgeLabel =&gt; ((e.sourceId, e.destinationId), e.labels.toSet) }
+.sumByKey
+.map { case ((srcId, destId), labels) =&gt; EdgeLabel(srcId, destId, labels) }</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../_sources/src/scala/com/twitter/interaction_graph/scio/ml/labels/InteractionGraphLabelsJob.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

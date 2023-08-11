@@ -1,0 +1,665 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../" id="documentation_options" src="../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.simclusters_v2.scalding</p>
+<p>import com.twitter.dal.client.dataset.KeyValDALDataset
+import com.twitter.hermit.candidate.thriftscala.Candidates
+import com.twitter.pluck.source.cassowary.FollowingsCosineSimilaritiesManhattanSource
+import com.twitter.pluck.source.cassowary.SimsCandidatesSource
+import com.twitter.scalding._
+import com.twitter.scalding_internal.dalv2.DAL
+import com.twitter.scalding_internal.dalv2.DALWrite._
+import com.twitter.scalding_internal.job.TwitterExecutionApp
+import com.twitter.scalding_internal.job.analytics_batch.AnalyticsBatchExecution
+import com.twitter.scalding_internal.job.analytics_batch.AnalyticsBatchExecutionArgs
+import com.twitter.scalding_internal.job.analytics_batch.BatchDescription
+import com.twitter.scalding_internal.job.analytics_batch.BatchFirstTime
+import com.twitter.scalding_internal.job.analytics_batch.BatchIncrement
+import com.twitter.scalding_internal.job.analytics_batch.TwitterScheduledExecutionApp
+import com.twitter.scalding_internal.multiformat.format.keyval.KeyVal
+import com.twitter.simclusters_v2.common.ModelVersions
+import com.twitter.simclusters_v2.hdfs_sources._
+import com.twitter.simclusters_v2.scalding.UpdateKnownFor.ClusterScoresForNode
+import com.twitter.simclusters_v2.scalding.UpdateKnownFor.NeighborhoodInformation
+import com.twitter.simclusters_v2.scalding.common.TypedRichPipe._
+import com.twitter.simclusters_v2.scalding.common.Util
+import com.twitter.simclusters_v2.thriftscala.ClustersUserIsKnownFor
+import com.twitter.usersource.snapshot.flat.UsersourceFlatScalaDataset
+import scala.util.Success</p>
+<p>object UpdateKnownForApps {</p>
+<blockquote>
+<div><dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Average edge weight of an input graph</p></li>
+<li><p>&#64;param graph a TypedPipe with nodeId as key and adjacency list as value. We don’t care about</p></li>
+<li><p>the keys in this method.</p></li>
+<li><p>&#64;return avg edge weight wrapped in an option in an execution</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>def getGlobalAvgWeight(graph: TypedPipe[(Long, Map[Long, Float])]): Execution[Option[Double]] = {</dt><dd><dl>
+<dt>graph.values</dt><dd><p>.flatMap(_.values)
+.map { x =&gt; (x.toDouble, 1L) }
+.sum
+.toOptionExecution
+.map {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case Some((sum, cnt)) =&gt;</dt><dd><p>val res = sum / cnt
+println(“globalAvgWeight is “ + res)
+Some(res)</p>
+</dd>
+<dt>case _ =&gt;</dt><dd><p>println(“Input graph to globalAvgWeight seems to be empty”)
+None</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Average membership score for a particular knownFor assignment</p></li>
+<li><p>&#64;param knownFor TypedPipe from nodeId to the clusters it’s been assigned to along with</p></li>
+<li><p>membership scores. We don’t care about the keys in this method.</p></li>
+<li><p>&#64;return average membership score</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>def getAvgMembershipScore(knownFor: TypedPipe[(Long, Array[(Int, Float)])]): Execution[Double] = {</dt><dd><dl>
+<dt>knownFor.values</dt><dd><p>.flatMap(_.map(_._2))
+.map { x =&gt; (x, 1L) }
+.sum
+.map { case (num, den) =&gt; num / den.toDouble }
+.getExecution
+.onComplete {</p>
+<blockquote>
+<div><p>case Success(x) =&gt; println(“Avg. membership score is “ + x)
+case _ =&gt; println(“Failed to calculate avg. membership score”)</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>For each cluster, get two statistics about it: the number of nodes assigned to it, and the</p></li>
+<li><p>sum of the membership scores</p></li>
+<li></li>
+<li><p>&#64;param knownFor TypedPipe from nodeId to the clusters it’s been assigned to along with</p></li>
+<li><p>membership scores.</p></li>
+<li><p>&#64;return Map giving the NeighborhoodInformation for each cluster. The nodeCount and</p></li>
+<li><p>sumOfMembershipWeights fields in NeighborhoodInformation are populated, others are 0.</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>def getClusterStats(</dt><dd><p>knownFor: TypedPipe[(Long, Array[(Int, Float)])]</p>
+</dd>
+<dt>): Execution[Map[Int, NeighborhoodInformation]] = {</dt><dd><dl>
+<dt>knownFor</dt><dd><dl>
+<dt>.flatMap {</dt><dd><dl>
+<dt>case (_, clusterArray) =&gt;</dt><dd><dl class="simple">
+<dt>clusterArray.map {</dt><dd><dl class="simple">
+<dt>case (clusterId, score) =&gt;</dt><dd><p>Map(clusterId -&gt; (1, score))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+.sum
+.getExecution
+.map { map =&gt;</p>
+<blockquote>
+<div><dl class="simple">
+<dt>map.mapValues {</dt><dd><dl class="simple">
+<dt>case (count, sum) =&gt;</dt><dd><p>NeighborhoodInformation(count, 0, 0, sum)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Adds self-loops and also potentially raises all edge weights to an exponent</p></li>
+<li><p>(typically exponent &gt; 1, and has the effect of increasing inequality in edge weights to</p></li>
+<li><p>“clarify” structure in the graph - currently we just set exponent to 1).</p></li>
+<li><p>&#64;param symmetrizedSims input symmetrized similarity graph</p></li>
+<li><p>&#64;param exponentForEdgeWeight exponent to raise all edge weights to.</p></li>
+<li><p>Set to 1.0 to make this a no-op</p></li>
+<li><p>&#64;param maxWtToSelfLoopWtMultFactor What to multiply the max wt among non-self-loop edges to</p></li>
+<li><p>derive the weight on the self-loop edge.</p></li>
+<li><p>&#64;return New graph</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+<dt>def simsGraphForUpdateFromSymmetrizedSims(</dt><dd><p>symmetrizedSims: TypedPipe[(Long, Map[Long, Float])],
+exponentForEdgeWeight: Float,
+maxWtToSelfLoopWtMultFactor: Float</p>
+</dd>
+<dt>): TypedPipe[(Long, Map[Long, Float])] = {</dt><dd><dl class="simple">
+<dt>val expWeighted = symmetrizedSims.mapValues { y =&gt;</dt><dd><p>y.mapValues { x =&gt; math.pow(x, exponentForEdgeWeight).toFloat }</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>TopUsersSimilarityGraph.addSelfLoop(</dt><dd><p>input = expWeighted,
+maxToSelfLoopWeight = { x: Float =&gt; x * maxWtToSelfLoopWtMultFactor }</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Runs the job</p></li>
+<li><p>&#64;param args args which specify many parameters</p></li>
+<li><p>&#64;param inputKnownFor</p></li>
+<li><p>&#64;param inputSimsGraph</p></li>
+<li><p>&#64;param defaultEmailAddress by default, the email address to send an to email to, which has</p></li>
+<li><p>a bunch of evaluation metrics</p></li>
+<li><p>&#64;param writeKnownForFunction function that takes a knownFor and writes to some</p></li>
+<li><p>persistent location</p></li>
+<li><p>&#64;param readKnownForFunction function that reads the knownFor which was written to using the</p></li>
+<li><p>writeKnownForFunction</p></li>
+<li><p>&#64;param dateRange dateRange, used for reading UserSource</p></li>
+<li><p>&#64;param uniqueID need for creating stats</p></li>
+<li><p>&#64;return Execution[Unit] encapsulating the whole job</p></li>
+</ul>
+<p><a href="#id9"><span class="problematic" id="id10">*</span></a>/</p>
+</dd>
+<dt>def runUpdateKnownForGeneric(</dt><dd><p>args: Args,
+inputKnownFor: TypedPipe[(Long, Array[(Int, Float)])],
+inputSimsGraph: TypedPipe[Candidates],
+defaultEmailAddress: String,
+writeKnownForFunction: TypedPipe[(Long, Array[(Int, Float)])] =&gt; Execution[Unit],
+readKnownForFunction: =&gt; TypedPipe[(Long, Array[(Int, Float)])],
+includeEvaluationResultsInEmail: Boolean</p>
+</dd>
+<dt>)(</dt><dd><p>implicit dateRange: DateRange,
+uniqueID: UniqueID</p>
+</dd>
+<dt>): Execution[Unit] = {</dt><dd><p>val minActiveFollowers = args.int(“minActiveFollowers”, 400)
+val topK = args.int(“topK”)
+val maxSimsNeighborsForUpdate =</p>
+<blockquote>
+<div><p>args.int(“maxSimsNeighborsForUpdate”, 40)</p>
+</div></blockquote>
+<p>val minNeighborsInCluster = args.int(“minNeighborsInCluster”, 2)
+val maxWtToSelfLoopWtMultFactor =</p>
+<blockquote>
+<div><p>args.float(“maxWtToSelfLoopWtMultFactor”, 2)</p>
+</div></blockquote>
+<p>val exponentForEdgeWeight = args.float(“exponentForEdgeWeights”, 1.0f)
+val updateMethod: ClusterScoresForNode =&gt; Double = args(“updateMethod”) match {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case “sumScoreIgnoringMembershipScores” =&gt; { x: ClusterScoresForNode =&gt;</dt><dd><p>x.sumScoreIgnoringMembershipScores</p>
+</dd>
+</dl>
+<p>}
+case “ratioScoreIgnoringMembershipScores” =&gt; { x: ClusterScoresForNode =&gt;</p>
+<blockquote>
+<div><p>x.ratioScoreIgnoringMembershipScores</p>
+</div></blockquote>
+<p>}
+case “ratioScoreUsingMembershipScores” =&gt; { x: ClusterScoresForNode =&gt;</p>
+<blockquote>
+<div><p>x.ratioScoreUsingMembershipScores</p>
+</div></blockquote>
+<p>}
+case x &#64; _ =&gt;</p>
+<blockquote>
+<div><dl class="simple">
+<dt>throw new Exception(s”value for –updateMethod $x is unknown. It must be one of “ +</dt><dd><p>s”[sumScoreIgnoringMembershipScores, ratioScoreIgnoringMembershipScores, ratioScoreUsingMembershipScores]”)</p>
+</dd>
+</dl>
+</div></blockquote>
+</div></blockquote>
+<p>}
+val truePositiveWtFactor = args.float(“truePositiveWtFactor”, 10)
+val modelVersion = args(“outputModelVersion”)
+val emailAddress =</p>
+<blockquote>
+<div><p>args.optional(“emailAddress”).getOrElse(defaultEmailAddress)</p>
+</div></blockquote>
+<dl>
+<dt>val topUsers = TopUsersSimilarityGraph</dt><dd><dl>
+<dt>.topUserIds(</dt><dd><dl class="simple">
+<dt>DAL</dt><dd><p>.readMostRecentSnapshot(UsersourceFlatScalaDataset, dateRange)
+.toTypedPipe,</p>
+</dd>
+</dl>
+<p>minActiveFollowers,
+topK).count(“num_top_users”)</p>
+</dd>
+</dl>
+</dd>
+<dt>TopUsersSimilarityGraph</dt><dd><dl class="simple">
+<dt>.getSubgraphFromUserGroupedInput(</dt><dd><p>fullGraph = inputSimsGraph,
+usersToInclude = topUsers,
+maxNeighborsPerNode = maxSimsNeighborsForUpdate,
+degreeThresholdForStat = minNeighborsInCluster</p>
+</dd>
+</dl>
+<p>)
+.forceToDiskExecution
+.flatMap { symmetrizedSims =&gt;</p>
+<blockquote>
+<div><dl>
+<dt>val modifiedSims =</dt><dd><dl class="simple">
+<dt>UpdateKnownForApps.simsGraphForUpdateFromSymmetrizedSims(</dt><dd><p>symmetrizedSims = symmetrizedSims,
+exponentForEdgeWeight = exponentForEdgeWeight,
+maxWtToSelfLoopWtMultFactor = maxWtToSelfLoopWtMultFactor</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>val previouslyFamousUsersExec = inputKnownFor</dt><dd><p>.leftJoin(topUsers.asKeys)
+.collect { case (userId, (clusters, None)) =&gt; userId }
+.getSummaryString(</p>
+<blockquote>
+<div><p>“Users previously in known for but not in topUsers anymore”,
+numRecords = 20)</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>val clusterStatsExec = UpdateKnownForApps.getClusterStats(inputKnownFor)</p>
+<dl class="simple">
+<dt>val globalAvgWeightExec =</dt><dd><p>UpdateKnownForApps.getGlobalAvgWeight(modifiedSims)</p>
+</dd>
+</dl>
+<p>val globalAvgMembershipScoreExec = UpdateKnownForApps.getAvgMembershipScore(inputKnownFor)</p>
+<dl>
+<dt>Execution.zip(globalAvgWeightExec, clusterStatsExec, globalAvgMembershipScoreExec).flatMap {</dt><dd><dl>
+<dt>case (Some(globalAvgWeight), clusterStats, globalAvgMembershipScore) =&gt;</dt><dd><p>println(“Size of clusterStats: “ + clusterStats.size)
+println(“First few entries from clusterStats: “ + clusterStats.take(5))
+println(“globalAvgWeight: “ + globalAvgWeight)
+println(“globalAvgMembershipScore: “ + globalAvgMembershipScore)</p>
+<dl>
+<dt>val knownForWithUnnormalizedScores = UpdateKnownFor</dt><dd><dl class="simple">
+<dt>.newKnownForScores(</dt><dd><p>inputKnownFor,
+modifiedSims,
+globalAvgWeight,
+clusterStats,
+globalAvgMembershipScore</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>val writeNewKnownForExec = writeKnownForFunction(</dt><dd><dl class="simple">
+<dt>UpdateKnownFor.updateGeneric(</dt><dd><p>modifiedSims,
+knownForWithUnnormalizedScores,
+clusterStats,
+minNeighborsInCluster,
+globalAvgWeight,
+globalAvgMembershipScore,
+truePositiveWtFactor,
+updateMethod</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>writeNewKnownForExec.flatMap { _ =&gt;</dt><dd><dl>
+<dt>Util.getCustomCountersString(writeNewKnownForExec).flatMap { customCountersString =&gt;</dt><dd><dl>
+<dt>if (includeEvaluationResultsInEmail) {</dt><dd><p>// It’s unfortunate that we’re not using the newKnownFor directly, but are instead
+// first writing it out and then reading it back in. The reason for doing it in this
+// convoluted way is that when we directly use the newKnownFor, the clusterEvaluation
+// metrics are being incorrectly computed.</p>
+<p>val newKnownFor = readKnownForFunction</p>
+<dl class="simple">
+<dt>val newResultsExec =</dt><dd><dl class="simple">
+<dt>ClusterEvaluation</dt><dd><p>.overallEvaluation(symmetrizedSims, newKnownFor, “newKnownForEval”)</p>
+</dd>
+</dl>
+</dd>
+<dt>val oldResultsExec =</dt><dd><dl class="simple">
+<dt>ClusterEvaluation</dt><dd><p>.overallEvaluation(symmetrizedSims, inputKnownFor, “oldKnownForEval”)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>val minSizeOfBiggerClusterForComparison = 10
+val compareExec = CompareClusters.summarize(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>CompareClusters.compare(</dt><dd><p>KnownForSources.transpose(inputKnownFor),
+KnownForSources.transpose(newKnownFor),
+minSizeOfBiggerCluster = minSizeOfBiggerClusterForComparison</p>
+</dd>
+</dl>
+<p>))</p>
+</div></blockquote>
+<dl>
+<dt>Execution</dt><dd><p>.zip(oldResultsExec, newResultsExec, compareExec, previouslyFamousUsersExec)
+.map {</p>
+<blockquote>
+<div><dl>
+<dt>case (oldResults, newResults, compareResults, previouslyFamousUsersString) =&gt;</dt><dd><dl>
+<dt>val emailText = “Evaluation Results for existing knownFor:n” +</dt><dd><p>Util.prettyJsonMapper.writeValueAsString(oldResults) +
+“nn——————-nn” +
+“Evaluation Results for new knownFor:n” +
+Util.prettyJsonMapper.writeValueAsString(newResults) +
+“nn——————-nn” +
+s”Cosine similarity distribution between cluster membership vectors for “ +
+s”clusters with at least $minSizeOfBiggerClusterForComparison membersn” +
+Util.prettyJsonMapper</p>
+<blockquote>
+<div><p>.writeValueAsString(compareResults) +</p>
+</div></blockquote>
+<p>“nn——————-nn” +
+“Custom counters:n” + customCountersString +
+“nn——————-nn” +
+previouslyFamousUsersString</p>
+</dd>
+<dt>Util</dt><dd><dl class="simple">
+<dt>.sendEmail(</dt><dd><p>emailText,
+s”Evaluation results of new knownFor $modelVersion”,
+emailAddress)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+<dt>} else {</dt><dd><dl>
+<dt>Util</dt><dd><dl class="simple">
+<dt>.sendEmail(</dt><dd><p>customCountersString,
+s”Change in cluster assignments for update of knownFor $modelVersion”,
+emailAddress</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>Execution.unit</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>trait UpdateKnownForBatch extends TwitterScheduledExecutionApp {</dt><dd><p>implicit val tz: java.util.TimeZone = DateOps.UTC
+implicit val dp = DateParser.default</p>
+<p>def firstTime: String</p>
+<p>val batchIncrement: Duration = Days(30)</p>
+<p>def batchDescription: String</p>
+<dl class="simple">
+<dt>private lazy val execArgs = AnalyticsBatchExecutionArgs(</dt><dd><p>batchDesc = BatchDescription(batchDescription),
+firstTime = BatchFirstTime(RichDate(firstTime)),
+lastTime = None,
+batchIncrement = BatchIncrement(batchIncrement)</p>
+</dd>
+</dl>
+<p>)</p>
+<p>val emailAddress: String = “<a class="reference external" href="mailto:no-reply&#37;&#52;&#48;twitter&#46;com">no-reply<span>&#64;</span>twitter<span>&#46;</span>com</a>”</p>
+<p>def inputDALDataset: KeyValDALDataset[KeyVal[Long, ClustersUserIsKnownFor]]</p>
+<p>def inputModelVersion: String</p>
+<p>def outputModelVersion: String</p>
+<p>def outputPath: String</p>
+<p>def outputDALDataset: KeyValDALDataset[KeyVal[Long, ClustersUserIsKnownFor]]</p>
+<dl>
+<dt>override def scheduledJob: Execution[Unit] =</dt><dd><dl>
+<dt>AnalyticsBatchExecution(execArgs) { implicit dateRange =&gt;</dt><dd><dl>
+<dt>Execution.withId { implicit uniqueId =&gt;</dt><dd><dl>
+<dt>Execution.withArgs { args =&gt;</dt><dd><dl>
+<dt>val inputKnownFor =</dt><dd><p>KnownForSources.readDALDataset(inputDALDataset, Days(30), inputModelVersion)</p>
+</dd>
+<dt>val inputSimsGraph = TypedPipe</dt><dd><p>.from(FollowingsCosineSimilaritiesManhattanSource())
+.map(_._2)</p>
+</dd>
+<dt>def writeKnownFor(knownFor: TypedPipe[(Long, Array[(Int, Float)])]): Execution[Unit] = {</dt><dd><dl>
+<dt>KnownForSources</dt><dd><p>.toKeyVal(knownFor, outputModelVersion)
+.writeDALVersionedKeyValExecution(</p>
+<blockquote>
+<div><p>outputDALDataset,
+D.Suffix(outputPath)</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>def readKnownFor =</dt><dd><p>KnownForSources.readDALDataset(outputDALDataset, Days(1), outputModelVersion)</p>
+</dd>
+<dt>UpdateKnownForApps.runUpdateKnownForGeneric(</dt><dd><p>args,
+inputKnownFor,
+inputSimsGraph,
+emailAddress,
+writeKnownFor,
+readKnownFor,
+includeEvaluationResultsInEmail = false</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>/**
+capesospy-v2 update –build_locally –start_cron update_known_for_20M_145k </p>
+<blockquote>
+<div><p>src/scala/com/twitter/simclusters_v2/capesos_config/atla_proc.yaml
+<a href="#id11"><span class="problematic" id="id12">*</span></a>/</p>
+</div></blockquote>
+<dl>
+<dt>object UpdateKnownFor20M145K extends UpdateKnownForBatch {</dt><dd><p>override val firstTime: String = “2019-06-06”</p>
+<p>override val batchIncrement: Duration = Days(7)</p>
+<dl class="simple">
+<dt>override val batchDescription: String =</dt><dd><p>“com.twitter.simclusters_v2.scalding.UpdateKnownFor20M145K”</p>
+</dd>
+</dl>
+<p>override val inputModelVersion: String = ModelVersions.Model20M145KUpdated</p>
+<dl class="simple">
+<dt>override val inputDALDataset: KeyValDALDataset[KeyVal[Long, ClustersUserIsKnownFor]] =</dt><dd><p>SimclustersV2RawKnownFor20M145KUpdatedScalaDataset</p>
+</dd>
+</dl>
+<p>override val outputModelVersion: String = ModelVersions.Model20M145KUpdated</p>
+<dl class="simple">
+<dt>override val outputDALDataset: KeyValDALDataset[KeyVal[Long, ClustersUserIsKnownFor]] =</dt><dd><p>SimclustersV2RawKnownFor20M145KUpdatedScalaDataset</p>
+</dd>
+</dl>
+<p>override val outputPath: String = InternalDataPaths.RawKnownForUpdatedPath</p>
+</dd>
+</dl>
+<p>}</p>
+<p>/** This one’s end-to-end, doesn’t save any intermediate data etc. <a href="#id13"><span class="problematic" id="id14">**</span></a>/
+object UpdateKnownForAdhoc extends TwitterExecutionApp {</p>
+<blockquote>
+<div><p>implicit val tz: java.util.TimeZone = DateOps.UTC
+implicit val dp = DateParser.default</p>
+<dl>
+<dt>def job: Execution[Unit] =</dt><dd><dl>
+<dt>Execution.getConfigMode.flatMap {</dt><dd><dl>
+<dt>case (config, mode) =&gt;</dt><dd><dl>
+<dt>Execution.withId { implicit uniqueId =&gt;</dt><dd><p>val args = config.getArgs
+implicit val date: DateRange = DateRange.parse(args(“date”))
+val defaultEmailAddress = “<a class="reference external" href="mailto:your_ldap&#37;&#52;&#48;twitter&#46;com">your_ldap<span>&#64;</span>twitter<span>&#46;</span>com</a>”</p>
+<dl class="simple">
+<dt>val inputKnownFor = args.optional(“inputKnownForDir”) match {</dt><dd><p>case Some(inputKnownForDir) =&gt; KnownForSources.readKnownFor(inputKnownForDir)
+case None =&gt; KnownForSources.knownFor_20M_Dec11_145K</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>val inputSimsGraph = TopUsersSimilarityGraph.readSimsInput(</dt><dd><p>args.boolean(“simsInputIsKeyValSource”),
+args(“simsInputDir”)</p>
+</dd>
+</dl>
+<p>)</p>
+<p>def readKnownFor() = KnownForSources.readKnownFor(args(“outputDir”))</p>
+<dl>
+<dt>UpdateKnownForApps.runUpdateKnownForGeneric(</dt><dd><p>args,
+inputKnownFor,
+inputSimsGraph,
+defaultEmailAddress,
+{ input: TypedPipe[(Long, Array[(Int, Float)])] =&gt;</p>
+<blockquote>
+<div><p>KnownForSources.writeKnownForTypedTsv(input, args(“outputDir”))</p>
+</div></blockquote>
+<p>},
+readKnownFor,
+includeEvaluationResultsInEmail = true</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../_sources/src/scala/com/twitter/simclusters_v2/scalding/UpdateKnownForApps.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

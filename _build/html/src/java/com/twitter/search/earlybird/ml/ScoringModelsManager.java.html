@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../" id="documentation_options" src="../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.earlybird.ml;</p>
+<p>import java.io.IOException;</p>
+<p>import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Optional;</p>
+<p>import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;</p>
+<p>import com.twitter.search.common.file.AbstractFile;
+import com.twitter.search.common.file.FileUtils;
+import com.twitter.search.common.metrics.SearchStatsReceiver;
+import com.twitter.search.common.schema.DynamicSchema;
+import com.twitter.search.common.util.ml.prediction_engine.CompositeFeatureContext;
+import com.twitter.search.common.util.ml.prediction_engine.LightweightLinearModel;
+import com.twitter.search.common.util.ml.prediction_engine.ModelLoader;</p>
+<p>import static com.twitter.search.modeling.tweet_ranking.TweetScoringFeatures.CONTEXT;
+import static com.twitter.search.modeling.tweet_ranking.TweetScoringFeatures.FeatureContextVersion.CURRENT_VERSION;</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Loads the scoring models for tweets and provides access to them.</p></li>
+<li></li>
+<li><p>This class relies on a list of ModelLoader objects to retrieve the objects from them. It will</p></li>
+<li><p>return the first model found according to the order in the list.</p></li>
+<li></li>
+<li><p>For production, we load models from 2 sources: classpath and HDFS. If a model is available</p></li>
+<li><p>from HDFS, we return it, otherwise we use the model from the classpath.</p></li>
+<li></li>
+<li><p>The models used for default requests (i.e. not experiments) MUST be present in the</p></li>
+<li><p>classpath, this allows us to avoid errors if they can’t be loaded from HDFS.</p></li>
+<li><p>Models for experiments can live only in HDFS, so we don’t need to redeploy Earlybird if we</p></li>
+<li><p>want to test them.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+</dl>
+<p>public class ScoringModelsManager {</p>
+<blockquote>
+<div><p>private static final Logger LOG = LoggerFactory.getLogger(ScoringModelsManager.class);</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Used when</p></li>
+<li><ol class="arabic simple">
+<li><p>Testing</p></li>
+</ol>
+</li>
+<li><ol class="arabic simple" start="2">
+<li><p>The scoring models are disabled in the config</p></li>
+</ol>
+</li>
+<li><ol class="arabic simple" start="3">
+<li><p>Exceptions thrown during loading the scoring models</p></li>
+</ol>
+</li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>public static final ScoringModelsManager NO_OP_MANAGER = new ScoringModelsManager() {</dt><dd><p>&#64;Override
+public boolean isEnabled() {</p>
+<blockquote>
+<div><p>return false;</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>};</p>
+<p>private final ModelLoader[] loaders;
+private final DynamicSchema dynamicSchema;</p>
+<dl class="simple">
+<dt>public ScoringModelsManager(ModelLoader… loaders) {</dt><dd><p>this.loaders = loaders;
+this.dynamicSchema = null;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public ScoringModelsManager(DynamicSchema dynamicSchema, ModelLoader… loaders) {</dt><dd><p>this.loaders = loaders;
+this.dynamicSchema = dynamicSchema;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Indicates that the scoring models were enabled in the config and were loaded successfully</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>public boolean isEnabled() {</dt><dd><p>return true;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>public void reload() {</dt><dd><dl class="simple">
+<dt>for (ModelLoader loader<span class="classifier">loaders) {</span></dt><dd><p>loader.run();</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Loads and returns the model with the given name, if one exists.</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+<dt>public Optional&lt;LightweightLinearModel&gt; getModel(String modelName) {</dt><dd><dl>
+<dt>for (ModelLoader loader<span class="classifier">loaders) {</span></dt><dd><p>Optional&lt;LightweightLinearModel&gt; model = loader.getModel(modelName);
+if (model.isPresent()) {</p>
+<blockquote>
+<div><p>return model;</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}
+return Optional.absent();</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Creates an instance that loads models first from HDFS and the classpath resources.</p></li>
+<li></li>
+<li><p>If the models are not found in HDFS, it uses the models from the classpath as fallback.</p></li>
+</ul>
+<p><a href="#id9"><span class="problematic" id="id10">*</span></a>/</p>
+</dd>
+<dt>public static ScoringModelsManager create(</dt><dd><blockquote>
+<div><p>SearchStatsReceiver serverStats,
+String hdfsNameNode,
+String hdfsBasedPath,
+DynamicSchema dynamicSchema) throws IOException {</p>
+</div></blockquote>
+<p>// Create a composite feature context so we can load both legacy and schema-based models
+CompositeFeatureContext featureContext = new CompositeFeatureContext(</p>
+<blockquote>
+<div><p>CONTEXT, dynamicSchema::getSearchFeatureSchema);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>ModelLoader hdfsLoader = createHdfsLoader(</dt><dd><p>serverStats, hdfsNameNode, hdfsBasedPath, featureContext);</p>
+</dd>
+<dt>ModelLoader classpathLoader = createClasspathLoader(</dt><dd><p>serverStats, featureContext);</p>
+</dd>
+</dl>
+<p>// Explicitly load the models from the classpath
+classpathLoader.run();</p>
+<p>ScoringModelsManager manager = new ScoringModelsManager(hdfsLoader, classpathLoader);
+LOG.info(“Initialized ScoringModelsManager for loading models from HDFS and the classpath”);
+return manager;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>protected static ModelLoader createHdfsLoader(</dt><dd><blockquote>
+<div><p>SearchStatsReceiver serverStats,
+String hdfsNameNode,
+String hdfsBasedPath,
+CompositeFeatureContext featureContext) {</p>
+</div></blockquote>
+<p>String hdfsVersionedPath = hdfsBasedPath + “/” + CURRENT_VERSION.getVersionDirectory();
+LOG.info(“Starting to load scoring models from HDFS: {}:{}”,</p>
+<blockquote>
+<div><p>hdfsNameNode, hdfsVersionedPath);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>return ModelLoader.forHdfsDirectory(</dt><dd><p>hdfsNameNode,
+hdfsVersionedPath,
+featureContext,
+“<a href="#id13"><span class="problematic" id="id14">scoring_models_hdfs_</span></a>”,
+serverStats);</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Creates a loader that loads models from a default location in the classpath.</p></li>
+</ul>
+<p><a href="#id11"><span class="problematic" id="id12">*</span></a>/</p>
+</dd>
+</dl>
+<p>&#64;VisibleForTesting
+public static ModelLoader createClasspathLoader(</p>
+<blockquote>
+<div><blockquote>
+<div><p>SearchStatsReceiver serverStats, CompositeFeatureContext featureContext)
+throws IOException {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>AbstractFile defaultModelsBaseDir = FileUtils.getTmpDirHandle(</dt><dd><p>ScoringModelsManager.class,
+“/com/twitter/search/earlybird/ml/default_models”);</p>
+</dd>
+<dt>AbstractFile defaultModelsDir = defaultModelsBaseDir.getChild(</dt><dd><p>CURRENT_VERSION.getVersionDirectory());</p>
+</dd>
+<dt>LOG.info(“Starting to load scoring models from the classpath: {}”,</dt><dd><p>defaultModelsDir.getPath());</p>
+</dd>
+<dt>return ModelLoader.forDirectory(</dt><dd><p>defaultModelsDir,
+featureContext,
+“<a href="#id15"><span class="problematic" id="id16">scoring_models_classpath_</span></a>”,
+serverStats);</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../_sources/src/java/com/twitter/search/earlybird/ml/ScoringModelsManager.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

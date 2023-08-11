@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>/** Copyright 2010 Twitter, Inc. <a href="#id1"><span class="problematic" id="id2">*</span></a>/
+package com.twitter.tweetypie
+package store</p>
+<p>import com.twitter.stitch.Stitch
+import com.twitter.tweetypie.additionalfields.AdditionalFields
+import com.twitter.tweetypie.storage.Field
+import com.twitter.tweetypie.storage.Response.TweetResponse
+import com.twitter.tweetypie.storage.Response.TweetResponseCode
+import com.twitter.tweetypie.storage.TweetStorageClient
+import com.twitter.tweetypie.storage.TweetStorageClient.GetTweet
+import com.twitter.tweetypie.storage.TweetStorageException
+import com.twitter.tweetypie.thriftscala._
+import com.twitter.util.Future</p>
+<p>case class UpdateTweetNotFoundException(tweetId: TweetId) extends Exception</p>
+<dl>
+<dt>trait ManhattanTweetStore</dt><dd><blockquote>
+<div><p>extends TweetStoreBase[ManhattanTweetStore]
+with InsertTweet.Store
+with AsyncDeleteTweet.Store
+with ScrubGeo.Store
+with SetAdditionalFields.Store
+with DeleteAdditionalFields.Store
+with AsyncDeleteAdditionalFields.Store
+with Takedown.Store
+with UpdatePossiblySensitiveTweet.Store
+with AsyncUpdatePossiblySensitiveTweet.Store {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>def wrap(w: TweetStore.Wrap): ManhattanTweetStore =</dt><dd><dl class="simple">
+<dt>new TweetStoreWrapper(w, this)</dt><dd><p>with ManhattanTweetStore
+with InsertTweet.StoreWrapper
+with AsyncDeleteTweet.StoreWrapper
+with ScrubGeo.StoreWrapper
+with SetAdditionalFields.StoreWrapper
+with DeleteAdditionalFields.StoreWrapper
+with AsyncDeleteAdditionalFields.StoreWrapper
+with Takedown.StoreWrapper
+with UpdatePossiblySensitiveTweet.StoreWrapper
+with AsyncUpdatePossiblySensitiveTweet.StoreWrapper</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>A TweetStore implementation that writes to Manhattan.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>object ManhattanTweetStore {</dt><dd><p>val Action: AsyncWriteAction.TbirdUpdate.type = AsyncWriteAction.TbirdUpdate</p>
+<p>private val log = Logger(getClass)
+private val successResponses = Set(TweetResponseCode.Success, TweetResponseCode.Deleted)</p>
+<p>case class AnnotationFailure(message: String) extends Exception(message)</p>
+<p>def apply(tweetStorageClient: TweetStorageClient): ManhattanTweetStore = {</p>
+<blockquote>
+<div><dl>
+<dt>def handleStorageResponses(</dt><dd><p>responsesStitch: Stitch[Seq[TweetResponse]],
+action: String</p>
+</dd>
+<dt>): Future[Unit] =</dt><dd><dl>
+<dt>Stitch</dt><dd><p>.run(responsesStitch)
+.onFailure {</p>
+<blockquote>
+<div><p>case ex: TweetStorageException =&gt; log.warn(“failed on: “ + action, ex)
+case _ =&gt;</p>
+</div></blockquote>
+<p>}
+.flatMap { responses =&gt;</p>
+<blockquote>
+<div><dl class="simple">
+<dt>Future.when(responses.exists(resp =&gt; !successResponses(resp.overallResponse))) {</dt><dd><p>Future.exception(AnnotationFailure(s”$action gets failure response $responses”))</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+<dt>def updateTweetMediaIds(mutation: Mutation[MediaEntity]): Tweet =&gt; Tweet =</dt><dd><p>tweet =&gt; tweet.copy(media = tweet.media.map(entities =&gt; entities.map(mutation.endo)))</p>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Does a get and set, and only sets fields that are allowed to be</p></li>
+<li><p>changed. This also prevents incoming tweets containing incomplete</p></li>
+<li><p>fields from being saved to Manhattan.</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>def updateOneTweetByIdAction(tweetId: TweetId, copyFields: Tweet =&gt; Tweet): Future[Unit] = {</dt><dd><dl>
+<dt>Stitch.run {</dt><dd><dl>
+<dt>tweetStorageClient.getTweet(tweetId).flatMap {</dt><dd><dl>
+<dt>case GetTweet.Response.Found(tweet) =&gt;</dt><dd><p>val updatedTweet = copyFields(tweet)</p>
+<dl class="simple">
+<dt>if (updatedTweet != tweet) {</dt><dd><p>tweetStorageClient.addTweet(updatedTweet)</p>
+</dd>
+<dt>} else {</dt><dd><p>Stitch.Unit</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>case _ =&gt; Stitch.exception(UpdateTweetNotFoundException(tweetId))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// This should NOT be used in parallel with other write operations.
+// A race condition can occur after changes to the storage library to
+// return all additional fields. The resulting behavior can cause
+// fields that were modified by other writes to revert to their old value.
+def updateOneTweetAction(update: Tweet, copyFields: Tweet =&gt; Tweet =&gt; Tweet): Future[Unit] =</p>
+<blockquote>
+<div><p>updateOneTweetByIdAction(update.id, copyFields(update))</p>
+</div></blockquote>
+<dl>
+<dt>def tweetStoreUpdateTweet(tweet: Tweet): Future[Unit] = {</dt><dd><p>val setFields = AdditionalFields.nonEmptyAdditionalFieldIds(tweet).map(Field.additionalField)
+handleStorageResponses(</p>
+<blockquote>
+<div><p>tweetStorageClient.updateTweet(tweet, setFields).map(Seq(_)),
+s”updateTweet($tweet, $setFields)”</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// This is an edit so update the initial Tweet’s control
+def updateInitialTweet(event: InsertTweet.Event): Future[Unit] = {</p>
+<blockquote>
+<div><dl>
+<dt>event.initialTweetUpdateRequest match {</dt><dd><dl>
+<dt>case Some(request) =&gt;</dt><dd><dl class="simple">
+<dt>updateOneTweetByIdAction(</dt><dd><p>request.initialTweetId,
+tweet =&gt; InitialTweetUpdate.updateTweet(tweet, request)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>case None =&gt; Future.Unit</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>new ManhattanTweetStore {</dt><dd><dl>
+<dt>override val insertTweet: FutureEffect[InsertTweet.Event] =</dt><dd><dl>
+<dt>FutureEffect[InsertTweet.Event] { event =&gt;</dt><dd><dl>
+<dt>Stitch</dt><dd><dl class="simple">
+<dt>.run(</dt><dd><p>tweetStorageClient.addTweet(event.internalTweet.tweet)</p>
+</dd>
+</dl>
+<p>).flatMap(_ =&gt; updateInitialTweet(event))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>override val asyncDeleteTweet: FutureEffect[AsyncDeleteTweet.Event] =</dt><dd><dl>
+<dt>FutureEffect[AsyncDeleteTweet.Event] { event =&gt;</dt><dd><dl class="simple">
+<dt>if (event.isBounceDelete) {</dt><dd><p>Stitch.run(tweetStorageClient.bounceDelete(event.tweet.id))</p>
+</dd>
+<dt>} else {</dt><dd><p>Stitch.run(tweetStorageClient.softDelete(event.tweet.id))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>override val retryAsyncDeleteTweet: FutureEffect[</dt><dd><p>TweetStoreRetryEvent[AsyncDeleteTweet.Event]</p>
+</dd>
+<dt>] =</dt><dd><p>TweetStore.retry(Action, asyncDeleteTweet)</p>
+</dd>
+<dt>override val scrubGeo: FutureEffect[ScrubGeo.Event] =</dt><dd><dl class="simple">
+<dt>FutureEffect[ScrubGeo.Event] { event =&gt;</dt><dd><p>Stitch.run(tweetStorageClient.scrub(event.tweetIds, Seq(Field.Geo)))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>override val setAdditionalFields: FutureEffect[SetAdditionalFields.Event] =</dt><dd><dl class="simple">
+<dt>FutureEffect[SetAdditionalFields.Event] { event =&gt;</dt><dd><p>tweetStoreUpdateTweet(event.additionalFields)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>override val deleteAdditionalFields: FutureEffect[DeleteAdditionalFields.Event] =</dt><dd><dl>
+<dt>FutureEffect[DeleteAdditionalFields.Event] { event =&gt;</dt><dd><dl>
+<dt>handleStorageResponses(</dt><dd><dl class="simple">
+<dt>tweetStorageClient.deleteAdditionalFields(</dt><dd><p>Seq(event.tweetId),
+event.fieldIds.map(Field.additionalField)</p>
+</dd>
+</dl>
+<p>),
+s”deleteAdditionalFields(${event.tweetId}, ${event.fieldIds}})”</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>override val asyncDeleteAdditionalFields: FutureEffect[AsyncDeleteAdditionalFields.Event] =</dt><dd><dl>
+<dt>FutureEffect[AsyncDeleteAdditionalFields.Event] { event =&gt;</dt><dd><dl>
+<dt>handleStorageResponses(</dt><dd><dl class="simple">
+<dt>tweetStorageClient.deleteAdditionalFields(</dt><dd><p>Seq(event.tweetId),
+event.fieldIds.map(Field.additionalField)</p>
+</dd>
+</dl>
+<p>),
+s”deleteAdditionalFields(Seq(${event.tweetId}), ${event.fieldIds}})”</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>override val retryAsyncDeleteAdditionalFields: FutureEffect[</dt><dd><p>TweetStoreRetryEvent[AsyncDeleteAdditionalFields.Event]</p>
+</dd>
+<dt>] =</dt><dd><p>TweetStore.retry(Action, asyncDeleteAdditionalFields)</p>
+</dd>
+<dt>override val takedown: FutureEffect[Takedown.Event] =</dt><dd><dl>
+<dt>FutureEffect[Takedown.Event] { event =&gt;</dt><dd><dl class="simple">
+<dt>val (fieldsToUpdate, fieldsToDelete) =</dt><dd><dl class="simple">
+<dt>Seq(</dt><dd><p>Field.TweetypieOnlyTakedownCountryCodes,
+Field.TweetypieOnlyTakedownReasons</p>
+</dd>
+<dt>).filter(_ =&gt; event.updateCodesAndReasons)</dt><dd><p>.partition(f =&gt; event.tweet.getFieldBlob(f.id).isDefined)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>val allFieldsToUpdate = Seq(Field.HasTakedown) ++ fieldsToUpdate</p>
+<dl>
+<dt>Future</dt><dd><dl>
+<dt>.join(</dt><dd><dl>
+<dt>handleStorageResponses(</dt><dd><dl class="simple">
+<dt>tweetStorageClient</dt><dd><p>.updateTweet(event.tweet, allFieldsToUpdate)
+.map(Seq(_)),</p>
+</dd>
+</dl>
+<p>s”updateTweet(${event.tweet}, $allFieldsToUpdate)”</p>
+</dd>
+</dl>
+<p>),
+Future.when(fieldsToDelete.nonEmpty) {</p>
+<blockquote>
+<div><dl>
+<dt>handleStorageResponses(</dt><dd><dl class="simple">
+<dt>tweetStorageClient</dt><dd><p>.deleteAdditionalFields(Seq(event.tweet.id), fieldsToDelete),</p>
+</dd>
+</dl>
+<p>s”deleteAdditionalFields(Seq(${event.tweet.id}), $fieldsToDelete)”</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>).unit</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>override val updatePossiblySensitiveTweet: FutureEffect[UpdatePossiblySensitiveTweet.Event] =</dt><dd><dl class="simple">
+<dt>FutureEffect[UpdatePossiblySensitiveTweet.Event] { event =&gt;</dt><dd><p>updateOneTweetAction(event.tweet, TweetUpdate.copyNsfwFieldsForUpdate)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>override val asyncUpdatePossiblySensitiveTweet: FutureEffect[</dt><dd><p>AsyncUpdatePossiblySensitiveTweet.Event</p>
+</dd>
+<dt>] =</dt><dd><dl class="simple">
+<dt>FutureEffect[AsyncUpdatePossiblySensitiveTweet.Event] { event =&gt;</dt><dd><p>updateOneTweetAction(event.tweet, TweetUpdate.copyNsfwFieldsForUpdate)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>override val retryAsyncUpdatePossiblySensitiveTweet: FutureEffect[</dt><dd><p>TweetStoreRetryEvent[AsyncUpdatePossiblySensitiveTweet.Event]</p>
+</dd>
+<dt>] =</dt><dd><p>TweetStore.retry(Action, asyncUpdatePossiblySensitiveTweet)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/tweetypie/server/src/main/scala/com/twitter/tweetypie/store/ManhattanTweetStore.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../" id="documentation_options" src="../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.tweetypie.util</p>
+<p>import com.twitter.conversions.DurationOps._
+import com.twitter.logging.Logger
+import com.twitter.mediaservices.commons.mediainformation.thriftscala.UserDefinedProductMetadata
+import com.twitter.scrooge.BinaryThriftStructSerializer
+import com.twitter.servo.cache.ScopedCacheKey
+import com.twitter.servo.util.Transformer
+import com.twitter.tweetypie.thriftscala.PostTweetRequest
+import com.twitter.util.Base64Long
+import com.twitter.util.Time
+import java.nio.ByteBuffer
+import java.security.MessageDigest
+import org.apache.commons.codec.binary.Base64
+import scala.collection.immutable.SortedMap</p>
+<dl>
+<dt>object TweetCreationLock {</dt><dd><dl>
+<dt>case class Key private (userId: UserId, typeCode: String, idOrMd5: String)</dt><dd><blockquote>
+<div><p>extends ScopedCacheKey(“t”, “locker”, 2, Base64Long.toBase64(userId), typeCode, idOrMd5) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>def uniquenessId: Option[String] =</dt><dd><p>if (typeCode == Key.TypeCode.UniquenessId) Some(idOrMd5) else None</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>object Key {</dt><dd><p>private[this] val log = Logger(getClass)</p>
+<dl class="simple">
+<dt>object TypeCode {</dt><dd><p>val SourceTweetId = “r”
+val UniquenessId = “u”
+val PostTweetRequest = “p”</p>
+</dd>
+</dl>
+<p>}</p>
+<p>private[this] val serializer = BinaryThriftStructSerializer(PostTweetRequest)</p>
+<p>// normalize the representation of no media ids.
+private[util] def sanitizeMediaUploadIds(mediaUploadIds: Option[Seq[Long]]) =</p>
+<blockquote>
+<div><p>mediaUploadIds.filter(_.nonEmpty)</p>
+</div></blockquote>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Request deduplication depends on the hash of a serialized Thrift value.</p></li>
+<li></li>
+<li><p>In order to guarantee that a Map has a reproducible serialized form,</p></li>
+<li><p>it’s necessary to fix the ordering of its keys.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>private[util] def sanitizeMediaMetadata(</dt><dd><p>mediaMetadata: Option[scala.collection.Map[MediaId, UserDefinedProductMetadata]]</p>
+</dd>
+<dt>): Option[scala.collection.Map[MediaId, UserDefinedProductMetadata]] =</dt><dd><p>mediaMetadata.map(m =&gt; SortedMap(m.toSeq: _*))</p>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Make sure to sanitize request fields with map/set since serialized</p></li>
+<li><p>bytes ordering is not guaranteed for same thrift values.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>private[util] def sanitizeRequest(request: PostTweetRequest): PostTweetRequest =</dt><dd><dl class="simple">
+<dt>PostTweetRequest(</dt><dd><p>userId = request.userId,
+text = request.text,
+createdVia = “”,
+inReplyToTweetId = request.inReplyToTweetId,
+geo = request.geo,
+mediaUploadIds = sanitizeMediaUploadIds(request.mediaUploadIds),
+narrowcast = request.narrowcast,
+nullcast = request.nullcast,
+additionalFields = request.additionalFields,
+attachmentUrl = request.attachmentUrl,
+mediaMetadata = sanitizeMediaMetadata(request.mediaMetadata),
+conversationControl = request.conversationControl,
+underlyingCreativesContainerId = request.underlyingCreativesContainerId,
+editOptions = request.editOptions,
+noteTweetOptions = request.noteTweetOptions</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>def bySourceTweetId(userId: UserId, sourceTweetId: TweetId): Key =</dt><dd><p>Key(userId, TypeCode.SourceTweetId, Base64Long.toBase64(sourceTweetId))</p>
+</dd>
+<dt>def byRequest(request: PostTweetRequest): Key =</dt><dd><dl class="simple">
+<dt>request.uniquenessId match {</dt><dd><dl class="simple">
+<dt>case Some(uqid) =&gt;</dt><dd><p>byUniquenessId(request.userId, uqid)</p>
+</dd>
+<dt>case None =&gt;</dt><dd><p>val sanitized = sanitizeRequest(request)
+val sanitizedBytes = serializer.toBytes(sanitized)
+val digested = MessageDigest.getInstance(“SHA-256”).digest(sanitizedBytes)
+val base64Digest = Base64.encodeBase64String(digested)
+val key = Key(request.userId, TypeCode.PostTweetRequest, base64Digest)
+log.ifDebug(s”Generated key $key from request:n${sanitized}”)
+key</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Key for tweets that have a uniqueness id set. There is only one</p></li>
+<li><p>namespace of uniqueness ids, across all clients. They are</p></li>
+<li><p>expected to be Snowflake ids, in order to avoid cache</p></li>
+<li><p>collisions.</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>def byUniquenessId(userId: UserId, uniquenessId: Long): Key =</dt><dd><p>Key(userId, TypeCode.UniquenessId, Base64Long.toBase64(uniquenessId))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>The state of tweet creation for a given Key (request).</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+</dl>
+<p>sealed trait State</p>
+<p>object State {</p>
+<blockquote>
+<div><dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>There is no tweet creation currently in progress. (This can</p></li>
+<li><p>either be represented by no entry in the cache, or this special</p></li>
+<li><p>marker. This lets us use checkAndSet for deletion to avoid</p></li>
+<li><p>accidentally overwriting other process’ values.)</p></li>
+</ul>
+<p><a href="#id9"><span class="problematic" id="id10">*</span></a>/</p>
+</dd>
+</dl>
+<p>case object Unlocked extends State</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Some process is attempting to create the tweet.</p></li>
+</ul>
+<p><a href="#id11"><span class="problematic" id="id12">*</span></a>/</p>
+</dd>
+</dl>
+<p>case class InProgress(token: Long, timestamp: Time) extends State</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>The tweet has already been successfully created, and has the</p></li>
+<li><p>specified id.</p></li>
+</ul>
+<p><a href="#id13"><span class="problematic" id="id14">*</span></a>/</p>
+</dd>
+</dl>
+<p>case class AlreadyCreated(tweetId: TweetId, timestamp: Time) extends State</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>When stored in cache, each state is prefixed by a byte</p></li>
+<li><p>indicating the type of the entry.</p></li>
+</ul>
+<p><a href="#id15"><span class="problematic" id="id16">*</span></a>/</p>
+</dd>
+<dt>object TypeCode {</dt><dd><p>val Unlocked: Byte = 0.toByte
+val InProgress: Byte = 1.toByte // + random long + timestamp
+val AlreadyCreated: Byte = 2.toByte // + tweet id + timestamp</p>
+</dd>
+</dl>
+<p>}</p>
+<p>private[this] val BufferSize = 17 // type byte + 64-bit value + 64-bit timestamp</p>
+<p>// Constant buffer to use for storing the serialized form on
+// Unlocked.
+private[this] val UnlockedBuf = Array[Byte](TypeCode.Unlocked)</p>
+<p>// Store the serialization function in a ThreadLocal so that we can
+// reuse the buffer between invocations.
+private[this] val threadLocalSerialize = new ThreadLocal[State =&gt; Array[Byte]] {</p>
+<blockquote>
+<div><dl>
+<dt>override def initialValue(): State =&gt; Array[Byte] = {</dt><dd><p>// Allocate the thread-local state
+val ary = new Array[Byte](BufferSize)
+val buf = ByteBuffer.wrap(ary)</p>
+<dl>
+<dt>{</dt><dd><p>case Unlocked =&gt; UnlockedBuf
+case InProgress(token, timestamp) =&gt;</p>
+<blockquote>
+<div><p>buf.clear()
+buf</p>
+<blockquote>
+<div><p>.put(TypeCode.InProgress)
+.putLong(token)
+.putLong(timestamp.sinceEpoch.inNanoseconds)</p>
+</div></blockquote>
+<p>ary</p>
+</div></blockquote>
+<dl>
+<dt>case AlreadyCreated(tweetId, timestamp) =&gt;</dt><dd><p>buf.clear()
+buf</p>
+<blockquote>
+<div><p>.put(TypeCode.AlreadyCreated)
+.putLong(tweetId)
+.putLong(timestamp.sinceEpoch.inNanoseconds)</p>
+</div></blockquote>
+<p>ary</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Convert this State to the cache representation.</p></li>
+</ul>
+<p><a href="#id17"><span class="problematic" id="id18">*</span></a>/</p>
+</dd>
+<dt>private[this] def toBytes(state: State): Array[Byte] =</dt><dd><p>threadLocalSerialize.get()(state)</p>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Convert this byte array into a LockState.</p></li>
+<li></li>
+<li><p>&#64;throws RuntimeException if the buffer is not of the right size</p></li>
+<li><p>and format</p></li>
+</ul>
+<p><a href="#id19"><span class="problematic" id="id20">*</span></a>/</p>
+</dd>
+<dt>private[this] def fromBytes(bytes: Array[Byte]): State = {</dt><dd><p>val buf = ByteBuffer.wrap(bytes)
+val result = buf.get() match {</p>
+<blockquote>
+<div><p>case TypeCode.Unlocked =&gt; Unlocked
+case TypeCode.InProgress =&gt; InProgress(buf.getLong(), buf.getLong().nanoseconds.afterEpoch)
+case TypeCode.AlreadyCreated =&gt;</p>
+<blockquote>
+<div><p>AlreadyCreated(buf.getLong(), buf.getLong().nanoseconds.afterEpoch)</p>
+</div></blockquote>
+<p>case other =&gt; throw new RuntimeException(“Invalid type code: “ + other)</p>
+</div></blockquote>
+<p>}
+if (buf.remaining != 0) {</p>
+<blockquote>
+<div><p>throw new RuntimeException(“Extra data in buffer: “ + bytes)</p>
+</div></blockquote>
+<p>}
+result</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>How to serialize the State for storage in cache.</p></li>
+</ul>
+<p><a href="#id21"><span class="problematic" id="id22">*</span></a>/</p>
+</dd>
+<dt>val Serializer: Transformer[State, Array[Byte]] =</dt><dd><p>Transformer[State, Array[Byte]](tTo = toBytes _, tFrom = fromBytes _)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../_sources/tweetypie/common/src/scala/com/twitter/tweetypie/util/TweetCreationLock.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.tweetypie.federated</p>
+<p>import com.twitter.ads.internal.pcl.service.CallbackPromotedContentLogger
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.scrooge.ThriftStructFieldInfo
+import com.twitter.servo.util.Gate
+import com.twitter.strato.catalog.Catalog
+import com.twitter.strato.client.Client
+import com.twitter.strato.fed.StratoFed
+import com.twitter.strato.thrift.ScroogeConv
+import com.twitter.tweetypie.ThriftTweetService
+import com.twitter.tweetypie.Tweet
+import com.twitter.tweetypie.backends.Gizmoduck
+import com.twitter.tweetypie.federated.columns._
+import com.twitter.tweetypie.federated.context.GetRequestContext
+import com.twitter.tweetypie.federated.prefetcheddata.PrefetchedDataRepositoryBuilder
+import com.twitter.tweetypie.federated.promotedcontent.TweetPromotedContentLogger
+import com.twitter.tweetypie.repository.UnmentionInfoRepository
+import com.twitter.tweetypie.repository.VibeRepository
+import com.twitter.util.Activity
+import com.twitter.util.logging.Logger</p>
+<p>object StratoCatalogBuilder {</p>
+<blockquote>
+<div><dl>
+<dt>def catalog(</dt><dd><p>thriftTweetService: ThriftTweetService,
+stratoClient: Client,
+getUserResultsById: Gizmoduck.GetById,
+callbackPromotedContentLogger: CallbackPromotedContentLogger,
+statsReceiver: StatsReceiver,
+enableCommunityTweetCreatesDecider: Gate[Unit],</p>
+</dd>
+<dt>): Activity[Catalog[StratoFed.Column]] = {</dt><dd><p>val log = Logger(getClass)</p>
+<p>val getRequestContext = new GetRequestContext()
+val prefetchedDataRepository =</p>
+<blockquote>
+<div><p>PrefetchedDataRepositoryBuilder(getUserResultsById, statsReceiver)</p>
+</div></blockquote>
+<p>val unmentionInfoRepository = UnmentionInfoRepository(stratoClient)
+val vibeRepository = VibeRepository(stratoClient)</p>
+<dl class="simple">
+<dt>val tweetPromotedContentLogger =</dt><dd><p>TweetPromotedContentLogger(callbackPromotedContentLogger)</p>
+</dd>
+</dl>
+<p>// A stitch group builder to be used for Federated Field Column requests. The handler must be the same across
+// all Federated Field Columns to ensure requests are batched across columns for different fields
+val federatedFieldGroupBuilder: FederatedFieldGroupBuilder.Type = FederatedFieldGroupBuilder(</p>
+<blockquote>
+<div><p>thriftTweetService.getTweetFields)</p>
+</div></blockquote>
+<dl>
+<dt>val columns: Seq[StratoFed.Column] = Seq(</dt><dd><dl class="simple">
+<dt>new UnretweetColumn(</dt><dd><p>thriftTweetService.unretweet,
+getRequestContext,</p>
+</dd>
+</dl>
+<p>),
+new CreateRetweetColumn(</p>
+<blockquote>
+<div><p>thriftTweetService.postRetweet,
+getRequestContext,
+prefetchedDataRepository,
+tweetPromotedContentLogger,
+statsReceiver</p>
+</div></blockquote>
+<p>),
+new CreateTweetColumn(</p>
+<blockquote>
+<div><p>thriftTweetService.postTweet,
+getRequestContext,
+prefetchedDataRepository,
+unmentionInfoRepository,
+vibeRepository,
+tweetPromotedContentLogger,
+statsReceiver,
+enableCommunityTweetCreatesDecider,</p>
+</div></blockquote>
+<p>),
+new DeleteTweetColumn(</p>
+<blockquote>
+<div><p>thriftTweetService.deleteTweets,
+getRequestContext,</p>
+</div></blockquote>
+<p>),
+new GetTweetFieldsColumn(thriftTweetService.getTweetFields, statsReceiver),
+new GetStoredTweetsColumn(thriftTweetService.getStoredTweets),
+new GetStoredTweetsByUserColumn(thriftTweetService.getStoredTweetsByUser)</p>
+</dd>
+</dl>
+<p>)</p>
+<p>// Gather tweet field ids that are eligible to be federated field columns
+val federatedFieldInfos =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>Tweet.fieldInfos</dt><dd><dl class="simple">
+<dt>.filter((info: ThriftStructFieldInfo) =&gt;</dt><dd><p>FederatedFieldColumn.isFederatedField(info.tfield.id))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</div></blockquote>
+<p>// Instantiate the federated field columns
+val federatedFieldColumns: Seq[FederatedFieldColumn] =</p>
+<blockquote>
+<div><dl>
+<dt>federatedFieldInfos.map { fieldInfo: ThriftStructFieldInfo =&gt;</dt><dd><p>val path = FederatedFieldColumn.makeColumnPath(fieldInfo.tfield)
+val stratoType = ScroogeConv.typeOfFieldInfo(fieldInfo)
+log.info(f”creating federated column: $path”)
+new FederatedFieldColumn(</p>
+<blockquote>
+<div><p>federatedFieldGroupBuilder,
+thriftTweetService.setAdditionalFields,
+stratoType,
+fieldInfo.tfield,</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>// Instantiate the federated V1 field columns
+val federatedV1FieldColumns: Seq[FederatedFieldColumn] =</p>
+<blockquote>
+<div><dl>
+<dt>federatedFieldInfos</dt><dd><p>.filter(f =&gt; FederatedFieldColumn.isMigrationFederatedField(f.tfield))
+.map { fieldInfo: ThriftStructFieldInfo =&gt;</p>
+<blockquote>
+<div><p>val v1Path = FederatedFieldColumn.makeV1ColumnPath(fieldInfo.tfield)
+val stratoType = ScroogeConv.typeOfFieldInfo(fieldInfo)
+log.info(f”creating V1 federated column: $v1Path”)
+new FederatedFieldColumn(</p>
+<blockquote>
+<div><p>federatedFieldGroupBuilder,
+thriftTweetService.setAdditionalFields,
+stratoType,
+fieldInfo.tfield,
+Some(v1Path)</p>
+</div></blockquote>
+<p>)</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>// Combine the dynamic and hard coded federated columns
+val allColumns: Seq[StratoFed.Column] =</p>
+<blockquote>
+<div><p>columns ++ federatedFieldColumns ++ federatedV1FieldColumns</p>
+</div></blockquote>
+<dl>
+<dt>Activity.value(</dt><dd><dl>
+<dt>Catalog(</dt><dd><dl class="simple">
+<dt>allColumns.map { column =&gt;</dt><dd><p>column.path -&gt; column</p>
+</dd>
+</dl>
+<p>}: _*</p>
+</dd>
+</dl>
+<p>))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/tweetypie/server/src/main/scala/com/twitter/tweetypie/federated/StratoCatalogBuilder.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

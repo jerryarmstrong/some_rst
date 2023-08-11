@@ -1,0 +1,544 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.recosinjector.edges</p>
+<p>import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.frigate.common.store.TweetCreationTimeMHStore
+import com.twitter.frigate.common.util.SnowflakeUtils
+import com.twitter.recos.internal.thriftscala.{RecosUserTweetInfo, TweetType}
+import com.twitter.recos.util.Action
+import com.twitter.recosinjector.decider.RecosInjectorDecider
+import com.twitter.recosinjector.decider.RecosInjectorDeciderConstants
+import com.twitter.recosinjector.util.TweetCreateEventDetails
+import com.twitter.util.{Future, Time}</p>
+<dl>
+<dt>class TweetEventToUserTweetEntityGraphBuilder(</dt><dd><p>userTweetEntityEdgeBuilder: UserTweetEntityEdgeBuilder,
+tweetCreationStore: TweetCreationTimeMHStore,
+decider: RecosInjectorDecider</p>
+</dd>
+<dt>)(</dt><dd><dl class="simple">
+<dt>override implicit val statsReceiver: StatsReceiver)</dt><dd><p>extends EventToMessageBuilder[TweetCreateEventDetails, UserTweetEntityEdge] {</p>
+</dd>
+</dl>
+<p>// TweetCreationStore counters
+private val lastTweetTimeNotInMh = statsReceiver.counter(“last_tweet_time_not_in_mh”)
+private val tweetCreationStoreInserts = statsReceiver.counter(“tweet_creation_store_inserts”)</p>
+<p>private val numInvalidActionCounter = statsReceiver.counter(“num_invalid_tweet_action”)</p>
+<p>private val numTweetEdgesCounter = statsReceiver.counter(“num_tweet_edge”)
+private val numRetweetEdgesCounter = statsReceiver.counter(“num_retweet_edge”)
+private val numReplyEdgesCounter = statsReceiver.counter(“num_reply_edge”)
+private val numQuoteEdgesCounter = statsReceiver.counter(“num_quote_edge”)
+private val numIsMentionedEdgesCounter = statsReceiver.counter(“num_isMentioned_edge”)
+private val numIsMediataggedEdgesCounter = statsReceiver.counter(“num_isMediatagged_edge”)</p>
+<p>private val numIsDecider = statsReceiver.counter(“num_decider_enabled”)
+private val numIsNotDecider = statsReceiver.counter(“num_decider_not_enabled”)</p>
+<dl>
+<dt>override def shouldProcessEvent(event: TweetCreateEventDetails): Future[Boolean] = {</dt><dd><dl class="simple">
+<dt>val isDecider = decider.isAvailable(</dt><dd><p>RecosInjectorDeciderConstants.TweetEventTransformerUserTweetEntityEdgesDecider</p>
+</dd>
+</dl>
+<p>)
+if (isDecider) {</p>
+<blockquote>
+<div><p>numIsDecider.incr()
+Future(true)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>numIsNotDecider.incr()
+Future(false)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Build edges Reply event. Reply event emits 2 edges:</p></li>
+<li><p>author -&gt; Reply -&gt; SourceTweetId</p></li>
+<li><p>author -&gt; Tweet -&gt; ReplyId</p></li>
+<li><p>Do not associate entities in reply tweet to the source tweet</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>private def buildReplyEdge(event: TweetCreateEventDetails) = {</dt><dd><p>val userTweetEngagement = event.userTweetEngagement
+val authorId = userTweetEngagement.engageUserId</p>
+<dl>
+<dt>val replyEdgeFut = event.sourceTweetDetails</dt><dd><dl>
+<dt>.map { sourceTweetDetails =&gt;</dt><dd><p>val sourceTweetId = sourceTweetDetails.tweet.id
+val sourceTweetEntitiesMapFut = userTweetEntityEdgeBuilder.getEntitiesMapAndUpdateCache(</p>
+<blockquote>
+<div><p>tweetId = sourceTweetId,
+tweetDetails = Some(sourceTweetDetails)</p>
+</div></blockquote>
+<p>)</p>
+<dl>
+<dt>sourceTweetEntitiesMapFut.map { sourceTweetEntitiesMap =&gt;</dt><dd><dl class="simple">
+<dt>val replyEdge = UserTweetEntityEdge(</dt><dd><p>sourceUser = authorId,
+targetTweet = sourceTweetId,
+action = Action.Reply,
+metadata = Some(userTweetEngagement.tweetId),
+cardInfo = Some(sourceTweetDetails.cardInfo.toByte),
+entitiesMap = sourceTweetEntitiesMap,
+tweetDetails = Some(sourceTweetDetails)</p>
+</dd>
+</dl>
+<p>)
+numReplyEdgesCounter.incr()
+Some(replyEdge)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}.getOrElse(Future.None)</p>
+</dd>
+<dt>val tweetCreationEdgeFut =</dt><dd><dl>
+<dt>if (decider.isAvailable(RecosInjectorDeciderConstants.EnableEmitTweetEdgeFromReply)) {</dt><dd><dl>
+<dt>getAndUpdateLastTweetCreationTime(</dt><dd><p>authorId = authorId,
+tweetId = userTweetEngagement.tweetId,
+tweetType = TweetType.Reply</p>
+</dd>
+<dt>).map { lastTweetTime =&gt;</dt><dd><dl class="simple">
+<dt>val edge = UserTweetEntityEdge(</dt><dd><p>sourceUser = authorId,
+targetTweet = userTweetEngagement.tweetId,
+action = Action.Tweet,
+metadata = lastTweetTime,
+cardInfo = userTweetEngagement.tweetDetails.map(_.cardInfo.toByte),
+entitiesMap = None,
+tweetDetails = userTweetEngagement.tweetDetails</p>
+</dd>
+</dl>
+<p>)
+numTweetEdgesCounter.incr()
+Some(edge)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>} else {</dt><dd><p>Future.None</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>Future.join(replyEdgeFut, tweetCreationEdgeFut).map {</dt><dd><dl class="simple">
+<dt>case (replyEdgeOpt, tweetCreationEdgeOpt) =&gt;</dt><dd><p>tweetCreationEdgeOpt.toSeq ++ replyEdgeOpt.toSeq</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Build a Retweet UTEG edge: author -&gt; RT -&gt; SourceTweetId.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>private def buildRetweetEdge(event: TweetCreateEventDetails) = {</dt><dd><p>val userTweetEngagement = event.userTweetEngagement
+val tweetId = userTweetEngagement.tweetId</p>
+<dl>
+<dt>event.sourceTweetDetails</dt><dd><dl>
+<dt>.map { sourceTweetDetails =&gt;</dt><dd><p>val sourceTweetId = sourceTweetDetails.tweet.id // Id of the tweet being Retweeted
+val sourceTweetEntitiesMapFut = userTweetEntityEdgeBuilder.getEntitiesMapAndUpdateCache(</p>
+<blockquote>
+<div><p>tweetId = sourceTweetId,
+tweetDetails = Some(sourceTweetDetails)</p>
+</div></blockquote>
+<p>)</p>
+<dl>
+<dt>sourceTweetEntitiesMapFut.map { sourceTweetEntitiesMap =&gt;</dt><dd><dl class="simple">
+<dt>val edge = UserTweetEntityEdge(</dt><dd><p>sourceUser = userTweetEngagement.engageUserId,
+targetTweet = sourceTweetId,
+action = Action.Retweet,
+metadata = Some(tweetId), // metadata is the tweetId
+cardInfo = Some(sourceTweetDetails.cardInfo.toByte),
+entitiesMap = sourceTweetEntitiesMap,
+tweetDetails = Some(sourceTweetDetails)</p>
+</dd>
+</dl>
+<p>)
+numRetweetEdgesCounter.incr()
+Seq(edge)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}.getOrElse(Future.Nil)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Build edges for a Quote event. Quote tweet emits 2 edges:</p></li>
+<li><ol class="arabic simple">
+<li><p>A quote social proof: author -&gt; Quote -&gt; SourceTweetId</p></li>
+</ol>
+</li>
+<li><ol class="arabic simple" start="2">
+<li><p>A tweet creation edge: author -&gt; Tweet -&gt; QuoteTweetId</p></li>
+</ol>
+</li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>private def buildQuoteEdges(</dt><dd><p>event: TweetCreateEventDetails</p>
+</dd>
+<dt>): Future[Seq[UserTweetEntityEdge]] = {</dt><dd><p>val userTweetEngagement = event.userTweetEngagement
+val tweetId = userTweetEngagement.tweetId
+val authorId = userTweetEngagement.engageUserId</p>
+<p>// do not associate entities in quote tweet to the source tweet,
+// but associate entities to quote tweet in tweet creation event
+val quoteTweetEdgeFut = event.sourceTweetDetails</p>
+<blockquote>
+<div><dl>
+<dt>.map { sourceTweetDetails =&gt;</dt><dd><p>val sourceTweetId = sourceTweetDetails.tweet.id // Id of the tweet being quoted
+val sourceTweetEntitiesMapFut = userTweetEntityEdgeBuilder.getEntitiesMapAndUpdateCache(</p>
+<blockquote>
+<div><p>tweetId = sourceTweetId,
+tweetDetails = event.sourceTweetDetails</p>
+</div></blockquote>
+<p>)</p>
+<dl>
+<dt>sourceTweetEntitiesMapFut.map { sourceTweetEntitiesMap =&gt;</dt><dd><dl class="simple">
+<dt>val edge = UserTweetEntityEdge(</dt><dd><p>sourceUser = authorId,
+targetTweet = sourceTweetId,
+action = Action.Quote,
+metadata = Some(tweetId), // metadata is tweetId
+cardInfo = Some(sourceTweetDetails.cardInfo.toByte), // cardInfo of the source tweet
+entitiesMap = sourceTweetEntitiesMap,
+tweetDetails = Some(sourceTweetDetails)</p>
+</dd>
+</dl>
+<p>)
+numQuoteEdgesCounter.incr()
+Seq(edge)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}.getOrElse(Future.Nil)</p>
+</div></blockquote>
+<dl>
+<dt>val tweetCreationEdgeFut = getAndUpdateLastTweetCreationTime(</dt><dd><p>authorId = authorId,
+tweetId = tweetId,
+tweetType = TweetType.Quote</p>
+</dd>
+<dt>).map { lastTweetTime =&gt;</dt><dd><p>val metadata = lastTweetTime
+val cardInfo = userTweetEngagement.tweetDetails.map(_.cardInfo.toByte)
+val edge = UserTweetEntityEdge(</p>
+<blockquote>
+<div><p>sourceUser = authorId,
+targetTweet = tweetId,
+action = Action.Tweet,
+metadata = metadata,
+cardInfo = cardInfo,
+entitiesMap = None,
+tweetDetails = userTweetEngagement.tweetDetails</p>
+</div></blockquote>
+<p>)
+numTweetEdgesCounter.incr()
+Seq(edge)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>Future.join(quoteTweetEdgeFut, tweetCreationEdgeFut).map {</dt><dd><dl class="simple">
+<dt>case (quoteEdge, creationEdge) =&gt;</dt><dd><p>quoteEdge ++ creationEdge</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Build edges for a Tweet event. A Tweet emits 3 tyes edges:</p></li>
+<li><ol class="arabic simple">
+<li><p>A tweet creation edge: author -&gt; Tweet -&gt; TweetId</p></li>
+</ol>
+</li>
+<li><ol class="arabic simple" start="2">
+<li><p>IsMentioned edges: mentionedUserId -&gt; IsMentioned -&gt; TweetId</p></li>
+</ol>
+</li>
+<li><ol class="arabic simple" start="3">
+<li><p>IsMediatagged edges: mediataggedUserId -&gt; IsMediatagged -&gt; TweetId</p></li>
+</ol>
+</li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+<dt>private def buildTweetEdges(event: TweetCreateEventDetails): Future[Seq[UserTweetEntityEdge]] = {</dt><dd><p>val userTweetEngagement = event.userTweetEngagement
+val tweetDetails = userTweetEngagement.tweetDetails
+val tweetId = userTweetEngagement.tweetId
+val authorId = userTweetEngagement.engageUserId</p>
+<p>val cardInfo = tweetDetails.map(_.cardInfo.toByte)</p>
+<dl class="simple">
+<dt>val entitiesMapFut = userTweetEntityEdgeBuilder.getEntitiesMapAndUpdateCache(</dt><dd><p>tweetId = tweetId,
+tweetDetails = tweetDetails</p>
+</dd>
+</dl>
+<p>)</p>
+<dl class="simple">
+<dt>val lastTweetTimeFut = getAndUpdateLastTweetCreationTime(</dt><dd><p>authorId = authorId,
+tweetId = tweetId,
+tweetType = TweetType.Tweet</p>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>Future.join(entitiesMapFut, lastTweetTimeFut).map {</dt><dd><dl>
+<dt>case (entitiesMap, lastTweetTime) =&gt;</dt><dd><dl class="simple">
+<dt>val tweetCreationEdge = UserTweetEntityEdge(</dt><dd><p>sourceUser = authorId,
+targetTweet = tweetId,
+action = Action.Tweet,
+metadata = lastTweetTime,
+cardInfo = cardInfo,
+entitiesMap = entitiesMap,
+tweetDetails = userTweetEngagement.tweetDetails</p>
+</dd>
+</dl>
+<p>)
+numTweetEdgesCounter.incr()</p>
+<dl>
+<dt>val isMentionedEdges = event.validMentionUserIds</dt><dd><dl>
+<dt>.map(_.map { mentionedUserId =&gt;</dt><dd><dl class="simple">
+<dt>UserTweetEntityEdge(</dt><dd><p>sourceUser = mentionedUserId,
+targetTweet = tweetId,
+action = Action.IsMentioned,
+metadata = Some(tweetId),
+cardInfo = cardInfo,
+entitiesMap = entitiesMap,
+tweetDetails = userTweetEngagement.tweetDetails</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}).getOrElse(Nil)</p>
+</dd>
+</dl>
+<p>numIsMentionedEdgesCounter.incr(isMentionedEdges.size)</p>
+<dl>
+<dt>val isMediataggedEdges = event.validMediatagUserIds</dt><dd><dl>
+<dt>.map(_.map { mediataggedUserId =&gt;</dt><dd><dl class="simple">
+<dt>UserTweetEntityEdge(</dt><dd><p>sourceUser = mediataggedUserId,
+targetTweet = tweetId,
+action = Action.IsMediaTagged,
+metadata = Some(tweetId),
+cardInfo = cardInfo,
+entitiesMap = entitiesMap,
+tweetDetails = userTweetEngagement.tweetDetails</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}).getOrElse(Nil)</p>
+</dd>
+</dl>
+<p>numIsMediataggedEdgesCounter.incr(isMediataggedEdges.size)</p>
+<p>Seq(tweetCreationEdge) ++ isMentionedEdges ++ isMediataggedEdges</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>For a given user, read the user’s last time tweeted from the MH store, and</p></li>
+<li><p>write the new tweet time into the MH store before returning.</p></li>
+<li><p>Note this function is async, so the MH write operations will continue to execute on its own.</p></li>
+<li><p>This might create a read/write race condition, but it’s expected.</p></li>
+</ul>
+<p><a href="#id9"><span class="problematic" id="id10">*</span></a>/</p>
+</dd>
+<dt>private def getAndUpdateLastTweetCreationTime(</dt><dd><p>authorId: Long,
+tweetId: Long,
+tweetType: TweetType</p>
+</dd>
+<dt>): Future[Option[Long]] = {</dt><dd><dl class="simple">
+<dt>val newTweetInfo = RecosUserTweetInfo(</dt><dd><p>authorId,
+tweetId,
+tweetType,
+SnowflakeUtils.tweetCreationTime(tweetId).map(_.inMillis).getOrElse(Time.now.inMillis)</p>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>tweetCreationStore</dt><dd><p>.get(authorId)
+.map(_.map { previousTweetInfoSeq =&gt;</p>
+<blockquote>
+<div><dl>
+<dt>val lastTweetTime = previousTweetInfoSeq</dt><dd><p>.filter(info =&gt; info.tweetType == TweetType.Tweet || info.tweetType == TweetType.Quote)
+.map(_.tweetTimestamp)
+.sortBy(-_)
+.headOption // Fetch the latest time user Tweeted or Quoted
+.getOrElse(</p>
+<blockquote>
+<div><p>Time.Bottom.inMillis</p>
+</div></blockquote>
+<p>) // Last tweet time never recorded in MH, default to oldest point in time</p>
+</dd>
+</dl>
+<p>if (lastTweetTime == Time.Bottom.inMillis) lastTweetTimeNotInMh.incr()
+lastTweetTime</p>
+</div></blockquote>
+<p>})
+.ensure {</p>
+<blockquote>
+<div><dl>
+<dt>tweetCreationStore</dt><dd><p>.put(authorId, newTweetInfo)
+.onSuccess(_ =&gt; tweetCreationStoreInserts.incr())
+.onFailure { e =&gt;</p>
+<blockquote>
+<div><p>statsReceiver.counter(“write_failed_with_ex:” + e.getClass.getName).incr()</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>override def buildEdges(event: TweetCreateEventDetails): Future[Seq[UserTweetEntityEdge]] = {</dt><dd><p>val userTweetEngagement = event.userTweetEngagement
+userTweetEngagement.action match {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case Action.Reply =&gt;</dt><dd><p>buildReplyEdge(event)</p>
+</dd>
+<dt>case Action.Retweet =&gt;</dt><dd><p>buildRetweetEdge(event)</p>
+</dd>
+<dt>case Action.Tweet =&gt;</dt><dd><p>buildTweetEdges(event)</p>
+</dd>
+<dt>case Action.Quote =&gt;</dt><dd><p>buildQuoteEdges(event)</p>
+</dd>
+<dt>case _ =&gt;</dt><dd><p>numInvalidActionCounter.incr()
+Future.Nil</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>override def filterEdges(</dt><dd><p>event: TweetCreateEventDetails,
+edges: Seq[UserTweetEntityEdge]</p>
+</dd>
+<dt>): Future[Seq[UserTweetEntityEdge]] = {</dt><dd><p>Future(edges) // No filtering for now. Add more if needed</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/recos-injector/server/src/main/scala/com/twitter/recosinjector/edges/TweetEventToUserTweetEntityGraphBuilder.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

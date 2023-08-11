@@ -1,0 +1,544 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../" id="documentation_options" src="../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.earlybird.archive;</p>
+<p>import java.io.FileNotFoundException;
+import java.io.IOException;
+import java.util.Comparator;
+import java.util.Date;
+import java.util.List;
+import java.util.concurrent.TimeUnit;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;</p>
+<p>import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Function;
+import com.google.common.base.Predicate;
+import com.google.common.collect.ComparisonChain;
+import com.google.common.collect.Lists;</p>
+<p>import org.apache.commons.io.IOUtils;
+import org.apache.hadoop.fs.FileStatus;
+import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.fs.PathFilter;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;</p>
+<p>import com.twitter.search.common.config.Config;
+import com.twitter.search.common.metrics.SearchCounter;
+import com.twitter.search.common.partitioning.snowflakeparser.SnowflakeIdParser;
+import com.twitter.search.common.schema.earlybird.EarlybirdThriftDocumentUtil;
+import com.twitter.search.common.schema.thriftjava.ThriftIndexingEvent;
+import com.twitter.search.common.util.date.DateUtil;
+import com.twitter.search.common.util.io.EmptyRecordReader;
+import com.twitter.search.common.util.io.LzoThriftBlockFileReader;
+import com.twitter.search.common.util.io.MergingSortedRecordReader;
+import com.twitter.search.common.util.io.TransformingRecordReader;
+import com.twitter.search.common.util.io.recordreader.RecordReader;
+import com.twitter.search.earlybird.common.config.EarlybirdConfig;
+import com.twitter.search.earlybird.document.DocumentFactory;
+import com.twitter.search.earlybird.document.TweetDocument;
+import com.twitter.search.earlybird.partition.HdfsUtil;</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>A batch of pre-processed tweets for a single hash partition from a particular day.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>public class PartitionedBatch {</dt><dd><p>private static final Logger LOG = LoggerFactory.getLogger(PartitionedBatch.class);
+private static final Date START_DATE_INCLUSIVE = DateUtil.toDate(2006, 03, 21);
+private static final String STATUS_COUNT_FILE_PREFIX = “_status_count_”;
+private static final Pattern STATUS_COUNT_FILE_PATTERN =</p>
+<blockquote>
+<div><p>Pattern.compile(STATUS_COUNT_FILE_PREFIX + “(\d+)_minid_(\d+)_maxid_(\d+)”);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>private static final int MAXIMUM_OUT_OF_ORDER_TOLERANCE_HOURS =</dt><dd><p>EarlybirdConfig.getInt(“archive_max_out_of_order_tolerance_hours”, 12);</p>
+</dd>
+</dl>
+<p>private static final int READER_INIT_IOEXCEPTION_RETRIES = 20;
+private static final PathFilter LZO_DATA_FILES_FILTER = file -&gt; file.getName().endsWith(“.lzo”);
+private static final PathFilter TXT_DATA_FILES_FILTER = file -&gt; file.getName().endsWith(“.txt”);</p>
+<dl class="simple">
+<dt>private static final Comparator&lt;ThriftIndexingEvent&gt; DESC_THRIFT_INDEXING_EVENT_COMPARATOR =</dt><dd><dl class="simple">
+<dt>(o1, o2) -&gt; ComparisonChain.start()</dt><dd><p>.compare(o2.getSortId(), o1.getSortId())
+.compare(o2.getUid(), o1.getUid())
+.result();</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>// Number archive tweets skipped because they are too out-of-order.
+private static final SearchCounter OUT_OF_ORDER_STATUSES_SKIPPED =</p>
+<blockquote>
+<div><p>SearchCounter.export(“out_of_order_archive_statuses_skipped”);</p>
+</div></blockquote>
+<p>&#64;VisibleForTesting
+protected static final long MAXIMUM_OUT_OF_ORDER_TOLERANCE_MILLIS =</p>
+<blockquote>
+<div><p>TimeUnit.HOURS.toMillis(MAXIMUM_OUT_OF_ORDER_TOLERANCE_HOURS);</p>
+</div></blockquote>
+<p>private final Date date;
+private final Path path;
+private int statusCount;
+private long minStatusID;
+private long maxStatusID;
+private final int hashPartitionID;
+private boolean hasStatusCountFile;
+private final int numHashPartitions;</p>
+<p>&#64;VisibleForTesting
+public PartitionedBatch(</p>
+<blockquote>
+<div><blockquote>
+<div><p>Path path,
+int hashPartitionID,
+int numHashPartitions,
+Date date) {</p>
+</div></blockquote>
+<p>this.path = path;
+this.hashPartitionID = hashPartitionID;
+this.numHashPartitions = numHashPartitions;
+this.date = date;</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Loads all the information (tweet count, etc.) for this partition and day from HDFS.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>public void load(FileSystem hdfs) throws IOException {</dt><dd><p>FileStatus[] dailyBatchFiles = null;
+try {</p>
+<blockquote>
+<div><p>// listStatus() javadoc says it throws FileNotFoundException when path does not exist.
+// However, the actual implementations return null or an empty array instead.
+// We handle all 3 cases: null, empty array, or FileNotFoundException.
+dailyBatchFiles = hdfs.listStatus(path);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} catch (FileNotFoundException e) {</dt><dd><p>// don’t do anything here and the day will be handled as empty.</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>if (dailyBatchFiles != null &amp;&amp; dailyBatchFiles.length &gt; 0) {</dt><dd><dl>
+<dt>for (FileStatus file<span class="classifier">dailyBatchFiles) {</span></dt><dd><p>String fileName = file.getPath().getName();
+if (fileName.equals(STATUS_COUNT_FILE_PREFIX)) {</p>
+<blockquote>
+<div><p>// zero tweets in this partition - this can happen for early days in 2006
+handleEmptyPartition();</p>
+</div></blockquote>
+<dl>
+<dt>} else {</dt><dd><p>Matcher matcher = STATUS_COUNT_FILE_PATTERN.matcher(fileName);
+if (matcher.matches()) {</p>
+<blockquote>
+<div><dl>
+<dt>try {</dt><dd><p>statusCount = Integer.parseInt(matcher.group(1));
+// Only adjustMinStatusId in production. For tests, this makes the tests harder to
+// understand.
+minStatusID = Config.environmentIsTest() ? Long.parseLong(matcher.group(2))</p>
+<blockquote>
+<div><p>: adjustMinStatusId(Long.parseLong(matcher.group(2)), date);</p>
+</div></blockquote>
+<p>maxStatusID = Long.parseLong(matcher.group(3));
+hasStatusCountFile = true;</p>
+</dd>
+<dt>} catch (NumberFormatException e) {</dt><dd><p>// invalid file - ignore
+LOG.warn(“Could not parse status count file name.”, e);</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>} else {</dt><dd><p>// Partition folder does not exist. This case can happen for early days of twitter
+// where some partitions are empty. Set us to having a status count file, the validity of
+// the parent DailyStatusBatch will still be determined by whether there was a _SUCCESS file
+// in the day root.
+handleEmptyPartition();</p>
+<dl class="simple">
+<dt>if (date.after(getEarliestDenseDay())) {</dt><dd><p>LOG.error(“Unexpected empty directory {} for {}”, path, date);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private void handleEmptyPartition() {</dt><dd><p>statusCount = 0;
+minStatusID = DailyStatusBatch.EMPTY_BATCH_STATUS_ID;
+maxStatusID = DailyStatusBatch.EMPTY_BATCH_STATUS_ID;
+hasStatusCountFile = true;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Sometimes tweets are out-of-order (E.g. a tweet from Sep 2012 got into a</p></li>
+<li><p>batch in July 2013). See SEARCH-1750 for more details.</p></li>
+<li><p>This adjust the minStatusID if it is badly out-of-order.</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+</dl>
+<p>&#64;VisibleForTesting
+protected static long adjustMinStatusId(long minStatusID, Date date) {</p>
+<blockquote>
+<div><p>long dateTime = date.getTime();
+// If the daily batch is for a day before we started using snow flake IDs. Never adjust.
+if (!SnowflakeIdParser.isUsableSnowflakeTimestamp(dateTime)) {</p>
+<blockquote>
+<div><p>return minStatusID;</p>
+</div></blockquote>
+<p>}</p>
+<p>long earliestStartTime = dateTime - MAXIMUM_OUT_OF_ORDER_TOLERANCE_MILLIS;
+long minStatusTime = SnowflakeIdParser.getTimestampFromTweetId(minStatusID);
+if (minStatusTime &lt; earliestStartTime) {</p>
+<blockquote>
+<div><p>long newMinId =  SnowflakeIdParser.generateValidStatusId(earliestStartTime, 0);
+LOG.info(“Daily batch for “ + date + “ has badly out of order tweet: “ + minStatusID</p>
+<blockquote>
+<div><ul class="simple">
+<li><p>“. The minStatusID for the day this batch is adjusted to “ + newMinId);</p></li>
+</ul>
+</div></blockquote>
+<p>return newMinId;</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>return minStatusID;</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Returns a reader that reads tweets from the given directory.</p></li>
+<li></li>
+<li><p>&#64;param archiveSegment Determines the timeslice ID of all read tweets.</p></li>
+<li><p>&#64;param tweetsPath The path to the directory where the tweets for this day are stored.</p></li>
+<li><p>&#64;param documentFactory The ThriftIndexingEvent to TweetDocument converter.</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+<dt>public RecordReader&lt;TweetDocument&gt; getTweetReaders(</dt><dd><blockquote>
+<div><p>ArchiveSegment archiveSegment,
+Path tweetsPath,
+DocumentFactory&lt;ThriftIndexingEvent&gt; documentFactory) throws IOException {</p>
+</div></blockquote>
+<dl>
+<dt>RecordReader&lt;TweetDocument&gt; tweetDocumentReader =</dt><dd><dl>
+<dt>new TransformingRecordReader&lt;&gt;(</dt><dd><blockquote>
+<div><p>createTweetReader(tweetsPath), new Function&lt;ThriftIndexingEvent, TweetDocument&gt;() {</p>
+</div></blockquote>
+<p>&#64;Override
+public TweetDocument apply(ThriftIndexingEvent event) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>return new TweetDocument(</dt><dd><p>event.getSortId(),
+archiveSegment.getTimeSliceID(),
+EarlybirdThriftDocumentUtil.getCreatedAtMs(event.getDocument()),
+documentFactory.newDocument(event)</p>
+</dd>
+</dl>
+<p>);</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>});</p>
+</dd>
+</dl>
+<p>tweetDocumentReader.setExhaustStream(true);
+return tweetDocumentReader;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private RecordReader&lt;ThriftIndexingEvent&gt; createTweetReader(Path tweetsPath) throws IOException {</dt><dd><dl class="simple">
+<dt>if (date.before(START_DATE_INCLUSIVE)) {</dt><dd><p>return new EmptyRecordReader&lt;&gt;();</p>
+</dd>
+</dl>
+<p>}</p>
+<p>List&lt;RecordReader&lt;ThriftIndexingEvent&gt;&gt; readers = Lists.newArrayList();
+FileSystem hdfs = HdfsUtil.getHdfsFileSystem();
+try {</p>
+<blockquote>
+<div><p>Path dayPath = new Path(tweetsPath, ArchiveHDFSUtils.dateToPath(date, “/”));
+Path partitionPath =</p>
+<blockquote>
+<div><p>new Path(dayPath, String.format(“p_%d_of_%d”, hashPartitionID, numHashPartitions));</p>
+</div></blockquote>
+<dl class="simple">
+<dt>PathFilter pathFilter =</dt><dd><p>Config.environmentIsTest() ? TXT_DATA_FILES_FILTER : LZO_DATA_FILES_FILTER;</p>
+</dd>
+</dl>
+<p>FileStatus[] files = hdfs.listStatus(partitionPath, pathFilter);
+for (FileStatus fileStatus : files) {</p>
+<blockquote>
+<div><p>String fileStatusPath = fileStatus.getPath().toString().replaceAll(”<a class="reference external" href="file:/">file:/</a>”, “/”);
+RecordReader&lt;ThriftIndexingEvent&gt; reader = createRecordReaderWithRetries(fileStatusPath);
+readers.add(reader);</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} finally {</dt><dd><p>IOUtils.closeQuietly(hdfs);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>if (readers.isEmpty()) {</dt><dd><p>return new EmptyRecordReader&lt;&gt;();</p>
+</dd>
+</dl>
+<p>}</p>
+<p>return new MergingSortedRecordReader&lt;&gt;(DESC_THRIFT_INDEXING_EVENT_COMPARATOR, readers);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private RecordReader&lt;ThriftIndexingEvent&gt; createRecordReaderWithRetries(String filePath)</dt><dd><blockquote>
+<div><p>throws IOException {</p>
+</div></blockquote>
+<p>Predicate&lt;ThriftIndexingEvent&gt; recordFilter = getRecordFilter();
+int numTries = 0;
+while (true) {</p>
+<blockquote>
+<div><dl>
+<dt>try {</dt><dd><p>++numTries;
+return new LzoThriftBlockFileReader&lt;&gt;(filePath, ThriftIndexingEvent.class, recordFilter);</p>
+</dd>
+<dt>} catch (IOException e) {</dt><dd><dl>
+<dt>if (numTries &lt; READER_INIT_IOEXCEPTION_RETRIES) {</dt><dd><p>LOG.warn(“Failed to open LzoThriftBlockFileReader for “ + filePath + “. Will retry.”, e);</p>
+</dd>
+<dt>} else {</dt><dd><dl class="simple">
+<dt>LOG.error(“Failed to open LzoThriftBlockFileReader for “ + filePath</dt><dd><ul class="simple">
+<li><p>“ after too many retries.”, e);</p></li>
+</ul>
+</dd>
+</dl>
+<p>throw e;</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private Predicate&lt;ThriftIndexingEvent&gt; getRecordFilter() {</dt><dd><dl>
+<dt>return Config.environmentIsTest() ? null<span class="classifier">input -&gt; {</span></dt><dd><dl class="simple">
+<dt>if (input == null) {</dt><dd><p>return false;</p>
+</dd>
+</dl>
+<p>}
+// We only guard against status IDs that are too small, because it is possible
+// for a very old tweet to get into today’s batch, but not possible for a very
+// large ID (a future tweet ID that is not yet published) to get in today’s
+// batch, unless tweet ID generation messed up.
+long statusId = input.getSortId();
+boolean keep = statusId &gt;= minStatusID;
+if (!keep) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>LOG.debug(“Out of order documentId: {} minStatusID: {} Date: {} Path: {}”,</dt><dd><p>statusId, minStatusID, date, path);</p>
+</dd>
+</dl>
+<p>OUT_OF_ORDER_STATUSES_SKIPPED.increment();</p>
+</div></blockquote>
+<p>}
+return keep;</p>
+</dd>
+</dl>
+<p>};</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Returns the number of statuses in this batch</p></li>
+</ul>
+<p><a href="#id9"><span class="problematic" id="id10">*</span></a>/</p>
+</dd>
+<dt>public int getStatusCount() {</dt><dd><p>return statusCount;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Was the _status_count file was found in this folder.</p></li>
+</ul>
+<p><a href="#id11"><span class="problematic" id="id12">*</span></a>/</p>
+</dd>
+<dt>public boolean hasStatusCount() {</dt><dd><p>return hasStatusCountFile;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public long getMinStatusID() {</dt><dd><p>return minStatusID;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public long getMaxStatusID() {</dt><dd><p>return maxStatusID;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public Date getDate() {</dt><dd><p>return date;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public Path getPath() {</dt><dd><p>return path;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Check whether the partition is</p></li>
+<li><p>. empty and</p></li>
+<li><p>. it is disallowed (empty partition can only happen before 2010)</p></li>
+<li><p>(Empty partition means that the directory is missing when scan happens.)</p></li>
+<li></li>
+<li><p>&#64;return true if the partition has no documents and it is not allowed.</p></li>
+</ul>
+<p><a href="#id13"><span class="problematic" id="id14">*</span></a>/</p>
+</dd>
+<dt>public boolean isDisallowedEmptyPartition() {</dt><dd><dl class="simple">
+<dt>return hasStatusCountFile</dt><dd><p>&amp;&amp; statusCount == 0
+&amp;&amp; minStatusID == DailyStatusBatch.EMPTY_BATCH_STATUS_ID
+&amp;&amp; maxStatusID == DailyStatusBatch.EMPTY_BATCH_STATUS_ID
+&amp;&amp; date.after(getEarliestDenseDay());</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;Override
+public String toString() {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>return “PartitionedBatch[hashPartitionId=” + hashPartitionID</dt><dd><ul class="simple">
+<li><p>“,numHashPartitions=” + numHashPartitions</p></li>
+<li><p>“,date=” + date</p></li>
+<li><p>“,path=” + path</p></li>
+<li><p>“,hasStatusCountFile=” + hasStatusCountFile</p></li>
+<li><p>“,statusCount=” + statusCount + “]”;</p></li>
+</ul>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>private Date getEarliestDenseDay() {</dt><dd><p>return EarlybirdConfig.getDate(“archive_search_earliest_dense_day”);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../_sources/src/java/com/twitter/search/earlybird/archive/PartitionedBatch.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

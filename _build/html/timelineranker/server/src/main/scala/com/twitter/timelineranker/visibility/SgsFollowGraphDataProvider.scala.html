@@ -1,0 +1,439 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.timelineranker.visibility</p>
+<p>import com.twitter.finagle.stats.Stat
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.timelineranker.core.FollowGraphData
+import com.twitter.timelineranker.core.FollowGraphDataFuture
+import com.twitter.timelines.clients.socialgraph.ScopedSocialGraphClientFactory
+import com.twitter.timelines.model._
+import com.twitter.timelines.util.FailOpenHandler
+import com.twitter.timelines.util.stats._
+import com.twitter.timelines.visibility._
+import com.twitter.util.Future</p>
+<dl>
+<dt>object SgsFollowGraphDataProvider {</dt><dd><p>val EmptyUserIdsSet: Set[UserId] = Set.empty[UserId]
+val EmptyUserIdsSetFuture: Future[Set[UserId]] = Future.value(EmptyUserIdsSet)
+val EmptyUserIdsSeq: Seq[UserId] = Seq.empty[UserId]
+val EmptyUserIdsSeqFuture: Future[Seq[UserId]] = Future.value(EmptyUserIdsSeq)
+val EmptyVisibilityProfiles: Map[UserId, VisibilityProfile] = Map.empty[UserId, VisibilityProfile]
+val EmptyVisibilityProfilesFuture: Future[Map[UserId, VisibilityProfile]] =</p>
+<blockquote>
+<div><p>Future.value(EmptyVisibilityProfiles)</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>object SgsFollowGraphDataFields extends Enumeration {</dt><dd><p>val FollowedUserIds: Value = Value
+val MutuallyFollowingUserIds: Value = Value
+val MutedUserIds: Value = Value
+val RetweetsMutedUserIds: Value = Value</p>
+<p>val None: ValueSet = SgsFollowGraphDataFields.ValueSet()</p>
+<dl>
+<dt>def throwIfInvalid(fields: SgsFollowGraphDataFields.ValueSet): Unit = {</dt><dd><dl>
+<dt>if (fields.contains(MutuallyFollowingUserIds) &amp;&amp; !fields.contains(FollowedUserIds)) {</dt><dd><dl class="simple">
+<dt>throw new IllegalArgumentException(</dt><dd><p>“MutuallyFollowingUserIds field requires FollowedUserIds field to be defined.”</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Provides information on the follow graph of a given user.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>class SgsFollowGraphDataProvider(</dt><dd><p>socialGraphClientFactory: ScopedSocialGraphClientFactory,
+visibilityProfileHydratorFactory: VisibilityProfileHydratorFactory,
+fieldsToFetch: SgsFollowGraphDataFields.ValueSet,
+scope: RequestScope,
+statsReceiver: StatsReceiver)</p>
+<blockquote>
+<div><p>extends FollowGraphDataProvider
+with RequestStats {</p>
+</div></blockquote>
+<p>SgsFollowGraphDataFields.throwIfInvalid(fieldsToFetch)</p>
+<p>private[this] val stats = scope.stats(“followGraphDataProvider”, statsReceiver)
+private[this] val scopedStatsReceiver = stats.scopedStatsReceiver</p>
+<p>private[this] val followingScope = scopedStatsReceiver.scope(“following”)
+private[this] val followingLatencyStat = followingScope.stat(LatencyMs)
+private[this] val followingSizeStat = followingScope.stat(Size)
+private[this] val followingTruncatedCounter = followingScope.counter(“numTruncated”)</p>
+<p>private[this] val mutuallyFollowingScope = scopedStatsReceiver.scope(“mutuallyFollowing”)
+private[this] val mutuallyFollowingLatencyStat = mutuallyFollowingScope.stat(LatencyMs)
+private[this] val mutuallyFollowingSizeStat = mutuallyFollowingScope.stat(Size)</p>
+<p>private[this] val visibilityScope = scopedStatsReceiver.scope(“visibility”)
+private[this] val visibilityLatencyStat = visibilityScope.stat(LatencyMs)
+private[this] val mutedStat = visibilityScope.stat(“muted”)
+private[this] val retweetsMutedStat = visibilityScope.stat(“retweetsMuted”)</p>
+<p>private[this] val socialGraphClient = socialGraphClientFactory.scope(scope)
+private[this] val visibilityProfileHydrator =</p>
+<blockquote>
+<div><p>createVisibilityProfileHydrator(visibilityProfileHydratorFactory, scope, fieldsToFetch)</p>
+</div></blockquote>
+<p>private[this] val failOpenScope = scopedStatsReceiver.scope(“failOpen”)
+private[this] val mutuallyFollowingHandler =</p>
+<blockquote>
+<div><p>new FailOpenHandler(failOpenScope, “mutuallyFollowing”)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>private[this] val obtainVisibilityProfiles = fieldsToFetch.contains(</dt><dd><p>SgsFollowGraphDataFields.MutedUserIds</p>
+</dd>
+</dl>
+<p>) || fieldsToFetch.contains(SgsFollowGraphDataFields.RetweetsMutedUserIds)</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Gets follow graph data for the given user.</p></li>
+<li></li>
+<li><p>&#64;param userId user whose follow graph details are to be obtained.</p></li>
+<li><p>&#64;param maxFollowingCount Maximum number of followed user IDs to fetch.</p></li>
+<li><p>If the given user follows more than these many users,</p></li>
+<li><p>then the most recent maxFollowingCount users are returned.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>def get(</dt><dd><p>userId: UserId,
+maxFollowingCount: Int</p>
+</dd>
+<dt>): Future[FollowGraphData] = {</dt><dd><dl class="simple">
+<dt>getAsync(</dt><dd><p>userId,
+maxFollowingCount</p>
+</dd>
+</dl>
+<p>).get()</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>def getAsync(</dt><dd><p>userId: UserId,
+maxFollowingCount: Int</p>
+</dd>
+</dl>
+<p>): FollowGraphDataFuture = {</p>
+<blockquote>
+<div><p>stats.statRequest()
+val followedUserIdsFuture =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (fieldsToFetch.contains(SgsFollowGraphDataFields.FollowedUserIds)) {</dt><dd><p>getFollowing(userId, maxFollowingCount)</p>
+</dd>
+<dt>} else {</dt><dd><p>SgsFollowGraphDataProvider.EmptyUserIdsSeqFuture</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<dl>
+<dt>val mutuallyFollowingUserIdsFuture =</dt><dd><dl>
+<dt>if (fieldsToFetch.contains(SgsFollowGraphDataFields.MutuallyFollowingUserIds)) {</dt><dd><dl class="simple">
+<dt>followedUserIdsFuture.flatMap { followedUserIds =&gt;</dt><dd><p>getMutuallyFollowingUserIds(userId, followedUserIds)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>} else {</dt><dd><p>SgsFollowGraphDataProvider.EmptyUserIdsSetFuture</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>val visibilityProfilesFuture = if (obtainVisibilityProfiles) {</dt><dd><dl class="simple">
+<dt>followedUserIdsFuture.flatMap { followedUserIds =&gt;</dt><dd><p>getVisibilityProfiles(userId, followedUserIds)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>} else {</dt><dd><p>SgsFollowGraphDataProvider.EmptyVisibilityProfilesFuture</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>val mutedUserIdsFuture = if (fieldsToFetch.contains(SgsFollowGraphDataFields.MutedUserIds)) {</dt><dd><dl class="simple">
+<dt>getMutedUsers(visibilityProfilesFuture).map { mutedUserIds =&gt;</dt><dd><p>mutedStat.add(mutedUserIds.size)
+mutedUserIds</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>} else {</dt><dd><p>SgsFollowGraphDataProvider.EmptyUserIdsSetFuture</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>val retweetsMutedUserIdsFuture =</dt><dd><dl>
+<dt>if (fieldsToFetch.contains(SgsFollowGraphDataFields.RetweetsMutedUserIds)) {</dt><dd><dl class="simple">
+<dt>getRetweetsMutedUsers(visibilityProfilesFuture).map { retweetsMutedUserIds =&gt;</dt><dd><p>retweetsMutedStat.add(retweetsMutedUserIds.size)
+retweetsMutedUserIds</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>} else {</dt><dd><p>SgsFollowGraphDataProvider.EmptyUserIdsSetFuture</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>FollowGraphDataFuture(</dt><dd><p>userId,
+followedUserIdsFuture,
+mutuallyFollowingUserIdsFuture,
+mutedUserIdsFuture,
+retweetsMutedUserIdsFuture</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>private[this] def getVisibilityProfiles(</dt><dd><p>userId: UserId,
+followingIds: Seq[UserId]</p>
+</dd>
+<dt>): Future[Map[UserId, VisibilityProfile]] = {</dt><dd><dl class="simple">
+<dt>Stat.timeFuture(visibilityLatencyStat) {</dt><dd><p>visibilityProfileHydrator(Some(userId), Future.value(followingIds.toSeq))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def getFollowing(userId: UserId, maxFollowingCount: Int): Future[Seq[UserId]] = {</dt><dd><dl>
+<dt>Stat.timeFuture(followingLatencyStat) {</dt><dd><p>// We fetch 1 more than the limit so that we can decide if we ended up
+// truncating the followings.
+val followingIdsFuture = socialGraphClient.getFollowing(userId, Some(maxFollowingCount + 1))
+followingIdsFuture.map { followingIds =&gt;</p>
+<blockquote>
+<div><p>followingSizeStat.add(followingIds.length)
+if (followingIds.length &gt; maxFollowingCount) {</p>
+<blockquote>
+<div><p>followingTruncatedCounter.incr()
+followingIds.take(maxFollowingCount)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>followingIds</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def getMutuallyFollowingUserIds(</dt><dd><p>userId: UserId,
+followingIds: Seq[UserId]</p>
+</dd>
+<dt>): Future[Set[UserId]] = {</dt><dd><dl>
+<dt>Stat.timeFuture(mutuallyFollowingLatencyStat) {</dt><dd><dl>
+<dt>mutuallyFollowingHandler {</dt><dd><dl class="simple">
+<dt>val mutuallyFollowingIdsFuture =</dt><dd><p>socialGraphClient.getFollowOverlap(followingIds.toSeq, userId)</p>
+</dd>
+<dt>mutuallyFollowingIdsFuture.map { mutuallyFollowingIds =&gt;</dt><dd><p>mutuallyFollowingSizeStat.add(mutuallyFollowingIds.size)</p>
+</dd>
+</dl>
+<p>}
+mutuallyFollowingIdsFuture</p>
+</dd>
+</dl>
+<p>} { e: Throwable =&gt; SgsFollowGraphDataProvider.EmptyUserIdsSetFuture }</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private[this] def getRetweetsMutedUsers(</dt><dd><p>visibilityProfilesFuture: Future[Map[UserId, VisibilityProfile]]</p>
+</dd>
+<dt>): Future[Set[UserId]] = {</dt><dd><p>// If the hydrator is not able to fetch retweets-muted status, we default to true.
+getUsersMatchingVisibilityPredicate(</p>
+<blockquote>
+<div><p>visibilityProfilesFuture,
+(visibilityProfile: VisibilityProfile) =&gt; visibilityProfile.areRetweetsMuted.getOrElse(true)</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private[this] def getMutedUsers(</dt><dd><p>visibilityProfilesFuture: Future[Map[UserId, VisibilityProfile]]</p>
+</dd>
+<dt>): Future[Set[UserId]] = {</dt><dd><p>// If the hydrator is not able to fetch muted status, we default to true.
+getUsersMatchingVisibilityPredicate(</p>
+<blockquote>
+<div><p>visibilityProfilesFuture,
+(visibilityProfile: VisibilityProfile) =&gt; visibilityProfile.isMuted.getOrElse(true)</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private[this] def getUsersMatchingVisibilityPredicate(</dt><dd><p>visibilityProfilesFuture: Future[Map[UserId, VisibilityProfile]],
+predicate: (VisibilityProfile =&gt; Boolean)</p>
+</dd>
+<dt>): Future[Set[UserId]] = {</dt><dd><dl>
+<dt>visibilityProfilesFuture.map { visibilityProfiles =&gt;</dt><dd><dl>
+<dt>visibilityProfiles</dt><dd><dl class="simple">
+<dt>.filter {</dt><dd><dl class="simple">
+<dt>case (_, visibilityProfile) =&gt;</dt><dd><p>predicate(visibilityProfile)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+.collect { case (userId, _) =&gt; userId }
+.toSet</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private[this] def createVisibilityProfileHydrator(</dt><dd><p>factory: VisibilityProfileHydratorFactory,
+scope: RequestScope,
+fieldsToFetch: SgsFollowGraphDataFields.ValueSet</p>
+</dd>
+<dt>): VisibilityProfileHydrator = {</dt><dd><dl class="simple">
+<dt>val hydrationProfileRequest = HydrationProfileRequest(</dt><dd><p>getMuted = fieldsToFetch.contains(SgsFollowGraphDataFields.MutedUserIds),
+getRetweetsMuted = fieldsToFetch.contains(SgsFollowGraphDataFields.RetweetsMutedUserIds)</p>
+</dd>
+</dl>
+<p>)
+factory(hydrationProfileRequest, scope)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>class ScopedSgsFollowGraphDataProviderFactory(</dt><dd><p>socialGraphClientFactory: ScopedSocialGraphClientFactory,
+visibilityProfileHydratorFactory: VisibilityProfileHydratorFactory,
+fieldsToFetch: SgsFollowGraphDataFields.ValueSet,
+statsReceiver: StatsReceiver)</p>
+<blockquote>
+<div><p>extends ScopedFactory[SgsFollowGraphDataProvider] {</p>
+</div></blockquote>
+<dl>
+<dt>override def scope(scope: RequestScope): SgsFollowGraphDataProvider = {</dt><dd><dl class="simple">
+<dt>new SgsFollowGraphDataProvider(</dt><dd><p>socialGraphClientFactory,
+visibilityProfileHydratorFactory,
+fieldsToFetch,
+scope,
+statsReceiver</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/timelineranker/server/src/main/scala/com/twitter/timelineranker/visibility/SgsFollowGraphDataProvider.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

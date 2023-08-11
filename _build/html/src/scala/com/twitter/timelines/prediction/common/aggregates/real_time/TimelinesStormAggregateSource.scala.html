@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.timelines.prediction.common.aggregates.real_time</p>
+<p>import com.twitter.clientapp.thriftscala.LogEvent
+import com.twitter.conversions.DurationOps._
+import com.twitter.finagle.stats.Counter
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.ml.api.DataRecord
+import com.twitter.ml.api.constant.SharedFeatures
+import com.twitter.snowflake.id.SnowflakeId
+import com.twitter.summingbird._
+import com.twitter.summingbird.storm.Storm
+import com.twitter.summingbird_internal.sources.AppId
+import com.twitter.summingbird_internal.sources.storm.remote.ClientEventSourceScrooge2
+import com.twitter.timelines.data_processing.ad_hoc.suggests.common.AllScribeProcessor
+import com.twitter.timelines.data_processing.ml_util.aggregation_framework.heron.RealTimeAggregatesJobConfig
+import com.twitter.timelines.data_processing.ml_util.aggregation_framework.heron.StormAggregateSource
+import com.twitter.timelines.prediction.adapters.client_log_event.ClientLogEventAdapter
+import com.twitter.timelines.prediction.adapters.client_log_event.ProfileClientLogEventAdapter
+import com.twitter.timelines.prediction.adapters.client_log_event.SearchClientLogEventAdapter
+import com.twitter.timelines.prediction.adapters.client_log_event.UuaEventAdapter
+import com.twitter.unified_user_actions.client.config.KafkaConfigs
+import com.twitter.unified_user_actions.client.summingbird.UnifiedUserActionsSourceScrooge
+import com.twitter.unified_user_actions.thriftscala.UnifiedUserAction
+import scala.collection.JavaConverters._</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Storm Producer for client events generated on Home, Profile, and Search</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+</dl>
+<p>class TimelinesStormAggregateSource extends StormAggregateSource {</p>
+<blockquote>
+<div><p>override val name = “timelines_rta”
+override val timestampFeature = SharedFeatures.TIMESTAMP</p>
+<p>private lazy val TimelinesClientEventSourceName = “TL_EVENTS_SOURCE”
+private lazy val ProfileClientEventSourceName = “PROFILE_EVENTS_SOURCE”
+private lazy val SearchClientEventSourceName = “SEARCH_EVENTS_SOURCE”
+private lazy val UuaEventSourceName = “UUA_EVENTS_SOURCE”
+private lazy val CombinedProducerName = “COMBINED_PRODUCER”
+private lazy val FeatureStoreProducerName = “FEATURE_STORE_PRODUCER”</p>
+<dl class="simple">
+<dt>private def isNewUserEvent(event: LogEvent): Boolean = {</dt><dd><p>event.logBase.flatMap(_.userId).flatMap(SnowflakeId.timeFromIdOpt).exists(_.untilNow &lt; 30.days)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def mkDataRecords(event: LogEvent, dataRecordCounter: Counter): Seq[DataRecord] = {</dt><dd><dl>
+<dt>val dataRecords: Seq[DataRecord] =</dt><dd><dl class="simple">
+<dt>if (AllScribeProcessor.isValidSuggestTweetEvent(event)) {</dt><dd><p>ClientLogEventAdapter.adaptToDataRecords(event).asScala</p>
+</dd>
+<dt>} else {</dt><dd><p>Seq.empty[DataRecord]</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>dataRecordCounter.incr(dataRecords.size)
+dataRecords</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def mkProfileDataRecords(</dt><dd><p>event: LogEvent,
+dataRecordCounter: Counter</p>
+</dd>
+<dt>): Seq[DataRecord] = {</dt><dd><dl class="simple">
+<dt>val dataRecords: Seq[DataRecord] =</dt><dd><p>ProfileClientLogEventAdapter.adaptToDataRecords(event).asScala</p>
+</dd>
+</dl>
+<p>dataRecordCounter.incr(dataRecords.size)
+dataRecords</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def mkSearchDataRecords(</dt><dd><p>event: LogEvent,
+dataRecordCounter: Counter</p>
+</dd>
+<dt>): Seq[DataRecord] = {</dt><dd><dl class="simple">
+<dt>val dataRecords: Seq[DataRecord] =</dt><dd><p>SearchClientLogEventAdapter.adaptToDataRecords(event).asScala</p>
+</dd>
+</dl>
+<p>dataRecordCounter.incr(dataRecords.size)
+dataRecords</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def mkUuaDataRecords(</dt><dd><p>event: UnifiedUserAction,
+dataRecordCounter: Counter</p>
+</dd>
+<dt>): Seq[DataRecord] = {</dt><dd><dl class="simple">
+<dt>val dataRecords: Seq[DataRecord] =</dt><dd><p>UuaEventAdapter.adaptToDataRecords(event).asScala</p>
+</dd>
+</dl>
+<p>dataRecordCounter.incr(dataRecords.size)
+dataRecords</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>override def build(</dt><dd><p>statsReceiver: StatsReceiver,
+jobConfig: RealTimeAggregatesJobConfig</p>
+</dd>
+<dt>): Producer[Storm, DataRecord] = {</dt><dd><p>lazy val scopedStatsReceiver = statsReceiver.scope(getClass.getSimpleName)
+lazy val dataRecordCounter = scopedStatsReceiver.counter(“dataRecord”)</p>
+<p>// Home Timeline Engagements
+// Step 1: =&gt; LogEvent
+lazy val clientEventProducer: Producer[Storm, HomeEvent[LogEvent]] =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>ClientEventSourceScrooge2(</dt><dd><p>appId = AppId(jobConfig.appId),
+topic = “julep_client_event_suggests”,
+resumeAtLastReadOffset = false,
+enableTls = true</p>
+</dd>
+</dl>
+<p>).source.map(HomeEvent[LogEvent]).name(TimelinesClientEventSourceName)</p>
+</div></blockquote>
+<p>// Profile Engagements
+// Step 1: =&gt; LogEvent
+lazy val profileClientEventProducer: Producer[Storm, ProfileEvent[LogEvent]] =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>ClientEventSourceScrooge2(</dt><dd><p>appId = AppId(jobConfig.appId),
+topic = “julep_client_event_profile_real_time_engagement_metrics”,
+resumeAtLastReadOffset = false,
+enableTls = true</p>
+</dd>
+<dt>).source</dt><dd><p>.map(ProfileEvent[LogEvent])
+.name(ProfileClientEventSourceName)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>// Search Engagements
+// Step 1: =&gt; LogEvent
+// Only process events for all users to save resource
+lazy val searchClientEventProducer: Producer[Storm, SearchEvent[LogEvent]] =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>ClientEventSourceScrooge2(</dt><dd><p>appId = AppId(jobConfig.appId),
+topic = “julep_client_event_search_real_time_engagement_metrics”,
+resumeAtLastReadOffset = false,
+enableTls = true</p>
+</dd>
+<dt>).source</dt><dd><p>.map(SearchEvent[LogEvent])
+.name(SearchClientEventSourceName)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>// Unified User Actions (includes Home and other product surfaces)
+lazy val uuaEventProducer: Producer[Storm, UuaEvent[UnifiedUserAction]] =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>UnifiedUserActionsSourceScrooge(</dt><dd><p>appId = AppId(jobConfig.appId),
+parallelism = 10,
+kafkaConfig = KafkaConfigs.ProdUnifiedUserActionsEngagementOnly</p>
+</dd>
+<dt>).source</dt><dd><p>.filter(StormAggregateSourceUtils.isUuaBCEEventsFromHome(_))
+.map(UuaEvent[UnifiedUserAction])
+.name(UuaEventSourceName)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>// Combined
+// Step 2:
+// (a) Combine
+// (b) Transform LogEvent =&gt; Seq[DataRecord]
+// (c) Apply sampler
+lazy val combinedClientEventDataRecordProducer: Producer[Storm, Event[DataRecord]] =</p>
+<blockquote>
+<div><dl>
+<dt>profileClientEventProducer // This becomes the bottom branch</dt><dd><p>.merge(clientEventProducer) // This becomes the middle branch
+.merge(searchClientEventProducer)
+.merge(uuaEventProducer) // This becomes the top
+.flatMap { // LogEvent =&gt; Seq[DataRecord]</p>
+<blockquote>
+<div><dl>
+<dt>case e: HomeEvent[LogEvent] =&gt;</dt><dd><p>mkDataRecords(e.event, dataRecordCounter).map(HomeEvent[DataRecord])</p>
+</dd>
+<dt>case e: ProfileEvent[LogEvent] =&gt;</dt><dd><p>mkProfileDataRecords(e.event, dataRecordCounter).map(ProfileEvent[DataRecord])</p>
+</dd>
+<dt>case e: SearchEvent[LogEvent] =&gt;</dt><dd><p>mkSearchDataRecords(e.event, dataRecordCounter).map(SearchEvent[DataRecord])</p>
+</dd>
+<dt>case e: UuaEvent[UnifiedUserAction] =&gt;</dt><dd><dl class="simple">
+<dt>mkUuaDataRecords(</dt><dd><p>e.event,
+dataRecordCounter</p>
+</dd>
+</dl>
+<p>).map(UuaEvent[DataRecord])</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+.flatMap { // Apply sampler</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case e: HomeEvent[DataRecord] =&gt;</dt><dd><p>jobConfig.sequentiallyTransform(e.event).map(HomeEvent[DataRecord])</p>
+</dd>
+<dt>case e: ProfileEvent[DataRecord] =&gt;</dt><dd><p>jobConfig.sequentiallyTransform(e.event).map(ProfileEvent[DataRecord])</p>
+</dd>
+<dt>case e: SearchEvent[DataRecord] =&gt;</dt><dd><p>jobConfig.sequentiallyTransform(e.event).map(SearchEvent[DataRecord])</p>
+</dd>
+<dt>case e: UuaEvent[DataRecord] =&gt;</dt><dd><p>jobConfig.sequentiallyTransform(e.event).map(UuaEvent[DataRecord])</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+.name(CombinedProducerName)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>// Step 3: Join with Feature Store features
+lazy val featureStoreDataRecordProducer: Producer[Storm, DataRecord] =</p>
+<blockquote>
+<div><dl>
+<dt>StormAggregateSourceUtils</dt><dd><dl class="simple">
+<dt>.wrapByFeatureStoreClient(</dt><dd><p>underlyingProducer = combinedClientEventDataRecordProducer,
+jobConfig = jobConfig,
+scopedStatsReceiver = scopedStatsReceiver</p>
+</dd>
+</dl>
+<p>).map(_.event).name(FeatureStoreProducerName)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>featureStoreDataRecordProducer</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/src/scala/com/twitter/timelines/prediction/common/aggregates/real_time/TimelinesStormAggregateSource.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

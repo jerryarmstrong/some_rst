@@ -1,0 +1,711 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../" id="documentation_options" src="../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.earlybird.queryparser;</p>
+<p>import java.util.ArrayList;
+import java.util.IdentityHashMap;
+import java.util.List;
+import java.util.Set;</p>
+<p>import javax.annotation.Nullable;</p>
+<p>import com.google.common.collect.Lists;
+import com.google.common.collect.Maps;</p>
+<p>import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;</p>
+<p>import com.twitter.search.common.metrics.SearchRateCounter;
+import com.twitter.search.common.util.text.HighFrequencyTermPairs;
+import com.twitter.search.earlybird.common.config.EarlybirdConfig;
+import com.twitter.search.queryparser.parser.SerializedQueryParser;
+import com.twitter.search.queryparser.query.BooleanQuery;
+import com.twitter.search.queryparser.query.Conjunction;
+import com.twitter.search.queryparser.query.Disjunction;
+import com.twitter.search.queryparser.query.Operator;
+import com.twitter.search.queryparser.query.Phrase;
+import com.twitter.search.queryparser.query.Query;
+import com.twitter.search.queryparser.query.QueryNodeUtils;
+import com.twitter.search.queryparser.query.QueryParserException;
+import com.twitter.search.queryparser.query.QueryVisitor;
+import com.twitter.search.queryparser.query.SpecialTerm;
+import com.twitter.search.queryparser.query.Term;
+import com.twitter.search.queryparser.query.search.SearchOperator;</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Iterates over the Query, modifying it to include high frequency term pairs, replacing</p></li>
+<li><p>singular high frequency terms where possible.</p></li>
+<li></li>
+<li><p>Assumes that this will be used IMMEDIATELY after using HighFrequencyTermPairExtractor</p></li>
+<li></li>
+<li><p>There are two primary functions of this visitor:</p></li>
+<li><ol class="arabic simple">
+<li><p>Append hf_term_pairs to each group’s root node.</p></li>
+</ol>
+</li>
+<li><ol class="arabic simple" start="2">
+<li><p>Remove all unnecessary term queries (unnecessary as they are captured by an hf_term_pair)</p></li>
+</ol>
+</li>
+<li></li>
+<li><p>Every time the visitor finishes visiting a node, HighFrequencyTermQueryGroup.numVisits will be</p></li>
+<li><p>incremented for that node’s group. When numVisits == numChildren, we know we have just finished</p></li>
+<li><p>processing the root of the group. At this point, we must append relevant hf_term_pairs to this</p></li>
+<li><p>node.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>public class HighFrequencyTermPairRewriteVisitor extends QueryVisitor&lt;Query&gt; {</dt><dd><dl class="simple">
+<dt>private static final Logger LOG = LoggerFactory.getLogger(</dt><dd><p>HighFrequencyTermPairRewriteVisitor.class);</p>
+</dd>
+<dt>private static final SearchRateCounter SEARCH_HF_PAIR_COUNTER =</dt><dd><p>SearchRateCounter.export(“hf_pair_rewrite”);</p>
+</dd>
+</dl>
+<p>private final ArrayList&lt;HighFrequencyTermQueryGroup&gt; groupList;
+private final IdentityHashMap&lt;Query, Integer&gt; groupIds;
+private final boolean allowNegativeOrRewrite;</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Creates a new HighFrequencyTermPairRewriteVisitor. Should be used only IMMEDIATELY after using</p></li>
+<li><p>a HighFrequencyTermPairExtractor</p></li>
+<li><p>&#64;param groupList The groups extracted using HighFrequencyTermPairExtractor</p></li>
+<li><p>&#64;param groupIds the mapping from query to the HF term query group</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>public HighFrequencyTermPairRewriteVisitor(ArrayList&lt;HighFrequencyTermQueryGroup&gt; groupList,</dt><dd><blockquote>
+<div><p>IdentityHashMap&lt;Query, Integer&gt; groupIds) {</p>
+</div></blockquote>
+<p>this(groupList, groupIds, true);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Creates a new HighFrequencyTermPairRewriteVisitor. Should be used only IMMEDIATELY after using</p></li>
+<li><p>a HighFrequencyTermPairExtractor</p></li>
+<li><p>&#64;param groupList The groups extracted using HighFrequencyTermPairExtractor</p></li>
+<li><p>&#64;param groupIds the mapping from query to the HF term query group</p></li>
+<li><p>&#64;param allowNegativeOrRewrite whether to allow rewrite for ‘or (-terms)’</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>public HighFrequencyTermPairRewriteVisitor(ArrayList&lt;HighFrequencyTermQueryGroup&gt; groupList,</dt><dd><blockquote>
+<div><p>IdentityHashMap&lt;Query, Integer&gt; groupIds,
+boolean allowNegativeOrRewrite) {</p>
+</div></blockquote>
+<p>this.groupList = groupList;
+this.groupIds = groupIds;
+this.allowNegativeOrRewrite = allowNegativeOrRewrite;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>This method logs successful rewrites, and protects against unsuccessful ones by</p></li>
+<li><p>catching all exceptions and restoring the previous query.</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+<dt>public static Query safeRewrite(Query safeQuery, boolean allowNegativeOrRewrite)</dt><dd><blockquote>
+<div><p>throws QueryParserException {</p>
+</div></blockquote>
+<p>Query query = safeQuery;</p>
+<p>ArrayList&lt;HighFrequencyTermQueryGroup&gt; groups = Lists.newArrayList();
+IdentityHashMap&lt;Query, Integer&gt; groupIds = Maps.newIdentityHashMap();</p>
+<p>// Step 1: extract high frequency term pairs and phrases.
+try {</p>
+<blockquote>
+<div><p>int hfTermsFound = query.accept(new HighFrequencyTermPairExtractor(groups, groupIds));
+if (hfTermsFound &lt; 2) {</p>
+<blockquote>
+<div><p>return query;</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} catch (Exception e) {</dt><dd><p>LOG.error(“Exception while extracting high frequency term pairs”, e);
+return query;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// Step 2: rewrite (safely).
+String original = query.serialize();
+try {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>query = query.accept(</dt><dd><p>new HighFrequencyTermPairRewriteVisitor(groups, groupIds, allowNegativeOrRewrite))
+.simplify();</p>
+</dd>
+</dl>
+<p>String rewrite = query.serialize();
+if (LOG.isDebugEnabled()) {</p>
+<blockquote>
+<div><p>LOG.debug(“Optimized query: “ + original + “ -&gt; “ + rewrite);</p>
+</div></blockquote>
+<p>}
+SEARCH_HF_PAIR_COUNTER.increment();
+return query;</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} catch (Exception e) {</dt><dd><p>LOG.error(“Exception rewriting high frequency term pairs”, e);
+return new SerializedQueryParser(EarlybirdConfig.getPenguinVersion()).parse(original);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>The rewritten query to use the hf_term_pair operators.</p></li>
+<li></li>
+<li><p>&#64;param disjunction query node which must have been previously visited by</p></li>
+<li><p>HighFrequencyTermPairExtractor and not had its visitor data cleared.</p></li>
+</ul>
+<p><a href="#id9"><span class="problematic" id="id10">*</span></a>/</p>
+</dd>
+</dl>
+<p>&#64;Override
+public Query visit(Disjunction disjunction) throws QueryParserException {</p>
+<blockquote>
+<div><p>return visit((BooleanQuery) disjunction);</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>The rewritten query to use the hf_term_pair operators.</p></li>
+<li></li>
+<li><p>&#64;param conjunction query node which must have been previously visited by</p></li>
+<li><p>HighFrequencyTermPairExtractor and not had its visitor data cleared.</p></li>
+</ul>
+<p><a href="#id11"><span class="problematic" id="id12">*</span></a>/</p>
+</dd>
+</dl>
+<p>&#64;Override
+public Query visit(Conjunction conjunction) throws QueryParserException {</p>
+<blockquote>
+<div><p>return visit((BooleanQuery) conjunction);</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Applies this visitor to a BooleanQuery.</p></li>
+</ul>
+<p><a href="#id13"><span class="problematic" id="id14">*</span></a>/</p>
+</dd>
+<dt>public Query visit(BooleanQuery booleanQuery) throws QueryParserException {</dt><dd><p>HighFrequencyTermQueryGroup group = groupList.get(groupIds.get(booleanQuery));
+queryPreprocess(group);</p>
+<p>ArrayList&lt;Query&gt; children = Lists.newArrayList();
+for (Query node : booleanQuery.getChildren()) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (booleanQuery.isTypeOf(Query.QueryType.DISJUNCTION) &amp;&amp; node.mustOccur()) {</dt><dd><p>// Potential Example: (* a (+ +b not_c)) =&gt; (* (+ +b not_c) [hf_term_pair a b 0.05])
+// Implementation is too difficult and would make this rewriter even MORE complicated for
+// a rarely used query. For now, we ignore it completely. We might gain some benefit in the
+// future if we decide to create a new extractor and rewriter and rewrite this subquery, and
+// that wouldn’t complicate things too much.
+children.add(node);
+continue;</p>
+</dd>
+</dl>
+<p>}
+Query child = node.accept(this);
+if (child != null) {</p>
+<blockquote>
+<div><p>children.add(child);</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>Query newBooleanQuery = booleanQuery.newBuilder().setChildren(children).build();</p>
+<p>return queryPostprocess(newBooleanQuery, group);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>The rewritten query to use the hf_term_pair operators.</p></li>
+<li></li>
+<li><p>&#64;param phraseToVisit query node which must have been previously visited by</p></li>
+<li><p>HighFrequencyTermPairExtractor and not had its visitor data cleared.</p></li>
+</ul>
+<p><a href="#id15"><span class="problematic" id="id16">*</span></a>/</p>
+</dd>
+</dl>
+<p>&#64;Override
+public Query visit(Phrase phraseToVisit) throws QueryParserException {</p>
+<blockquote>
+<div><p>Phrase phrase = phraseToVisit;</p>
+<p>HighFrequencyTermQueryGroup group = groupList.get(groupIds.get(phrase));
+queryPreprocess(group);</p>
+<p>// Remove all high frequency phrases from the query that do not have any annotations.
+// This will cause phrase de-duping, which we probably don’t care about.
+if (!hasAnnotations(phrase) &amp;&amp; (</p>
+<blockquote>
+<div><blockquote>
+<div><p>group.hfPhrases.contains(phrase.getPhraseValue())
+|| group.preusedHFPhrases.contains(phrase.getPhraseValue()))) {</p>
+</div></blockquote>
+<p>// This term will be appended to the end of the query in the form of a pair.
+phrase = null;</p>
+</div></blockquote>
+<p>}</p>
+<p>return queryPostprocess(phrase, group);</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>The rewritten query to use the hf_term_pair operators.</p></li>
+<li></li>
+<li><p>&#64;param termToVisit query node which must have been previously visited by</p></li>
+<li><p>HighFrequencyTermPairExtractor and not had its visitor data cleared.</p></li>
+</ul>
+<p><a href="#id17"><span class="problematic" id="id18">*</span></a>/</p>
+</dd>
+</dl>
+<p>&#64;Override
+public Query visit(Term termToVisit) throws QueryParserException {</p>
+<blockquote>
+<div><p>Term term = termToVisit;</p>
+<p>HighFrequencyTermQueryGroup group = groupList.get(groupIds.get(term));
+queryPreprocess(group);</p>
+<p>// Remove all high frequency terms from the query that do not have any annotations. This will
+// do term de-duping within a group, which may effect scoring, but since these are high df
+// terms, they don’t have much of an impact anyways.
+if (!hasAnnotations(term)</p>
+<blockquote>
+<div><blockquote>
+<div><dl class="simple">
+<dt>&amp;&amp; (group.preusedHFTokens.contains(term.getValue())</dt><dd><p>|| group.hfTokens.contains(term.getValue()))) {</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>// This term will be appended to the end of the query in the form of a pair.
+term = null;</p>
+</div></blockquote>
+<p>}</p>
+<p>return queryPostprocess(term, group);</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>The rewritten query to use the hf_term_pair operators.</p></li>
+<li></li>
+<li><p>&#64;param operator query node which must have been previously visited by</p></li>
+<li><p>HighFrequencyTermPairExtractor and not had its visitor data cleared.</p></li>
+</ul>
+<p><a href="#id19"><span class="problematic" id="id20">*</span></a>/</p>
+</dd>
+</dl>
+<p>&#64;Override
+public Query visit(Operator operator) throws QueryParserException {</p>
+<blockquote>
+<div><p>HighFrequencyTermQueryGroup group = groupList.get(groupIds.get(operator));
+queryPreprocess(group);</p>
+<p>return queryPostprocess(operator, group);</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>The rewritten query to use the hf_term_pair operators.</p></li>
+<li></li>
+<li><p>&#64;param special query node which must have been previously visited by</p></li>
+<li><p>HighFrequencyTermPairExtractor and not had its visitor data cleared.</p></li>
+</ul>
+<p><a href="#id21"><span class="problematic" id="id22">*</span></a>/</p>
+</dd>
+</dl>
+<p>&#64;Override
+public Query visit(SpecialTerm special) throws QueryParserException {</p>
+<blockquote>
+<div><p>HighFrequencyTermQueryGroup group = groupList.get(groupIds.get(special));
+queryPreprocess(group);</p>
+<p>return queryPostprocess(special, group);</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Before visiting a node’s children, we must process its group’s distributiveToken. This way, a</p></li>
+<li><p>node only has to check its grandparent group for a distributiveToken instead of recursing all</p></li>
+<li><p>of the way up to the root of the tree.</p></li>
+</ul>
+<p><a href="#id23"><span class="problematic" id="id24">*</span></a>/</p>
+</dd>
+<dt>private void queryPreprocess(HighFrequencyTermQueryGroup group) {</dt><dd><dl class="simple">
+<dt>if (group.distributiveToken == null) {</dt><dd><p>group.distributiveToken = getAncestorDistributiveToken(group);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>If the query isn’t the root of the group, returns the query. Otherwise, if the query’s</p></li>
+<li><p>group has at most one hf term, return the query. Otherwise, returns the query with hf_term_pair</p></li>
+<li><p>operators created from the group’s hf terms appended to it.</p></li>
+</ul>
+<p><a href="#id25"><span class="problematic" id="id26">*</span></a>/</p>
+</dd>
+<dt>private Query queryPostprocess(&#64;Nullable Query query, HighFrequencyTermQueryGroup group)</dt><dd><blockquote>
+<div><p>throws QueryParserException {</p>
+</div></blockquote>
+<p>group.numVisits++;
+if (group.numMembers == group.numVisits</p>
+<blockquote>
+<div><blockquote>
+<div><p>&amp;&amp; (!group.hfTokens.isEmpty() || !group.preusedHFTokens.isEmpty()
+|| group.hasPhrases())) {</p>
+</div></blockquote>
+<p>group.removePreusedTokens();
+String ancestorDistributiveToken = getAncestorDistributiveToken(group);</p>
+<p>// Need at least 2 tokens to perform a pair rewrite.  Try to get one
+// additional token from ancestors, and if that fails, from phrases.
+if ((group.hfTokens.size() + group.preusedHFTokens.size()) == 1</p>
+<blockquote>
+<div><blockquote>
+<div><p>&amp;&amp; ancestorDistributiveToken != null) {</p>
+</div></blockquote>
+<p>group.preusedHFTokens.add(ancestorDistributiveToken);</p>
+</div></blockquote>
+<p>}
+if ((group.hfTokens.size() + group.preusedHFTokens.size()) == 1) {</p>
+<blockquote>
+<div><p>String tokenFromPhrase = group.getTokenFromPhrase();
+if (tokenFromPhrase != null) {</p>
+<blockquote>
+<div><p>group.preusedHFTokens.add(tokenFromPhrase);</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>return appendPairs(query, group);</p>
+</div></blockquote>
+<p>}</p>
+<p>return query;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Returns the distributiveToken of group’s grandparent.</p></li>
+</ul>
+<p><a href="#id27"><span class="problematic" id="id28">*</span></a>/</p>
+</dd>
+<dt>private String getAncestorDistributiveToken(HighFrequencyTermQueryGroup group) {</dt><dd><p>String ancestorDistributiveToken = null;
+if (group.parentGroupIdx &gt;= 0 &amp;&amp; groupList.get(group.parentGroupIdx).parentGroupIdx &gt;= 0) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>ancestorDistributiveToken =</dt><dd><p>groupList.get(groupList.get(group.parentGroupIdx).parentGroupIdx).distributiveToken;</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+return ancestorDistributiveToken;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Returns the hf_term_pair operators created using the hf terms of the group appended to query.</p></li>
+<li></li>
+<li><p>&#64;param query The query which the new hf_term_pair operators will be appended to.</p></li>
+<li><p>&#64;param group The group which this query belongs to.</p></li>
+<li><p>&#64;return The hf_term_pair operators created using the hf terms of the group appended to query.</p></li>
+</ul>
+<p><a href="#id29"><span class="problematic" id="id30">*</span></a>/</p>
+</dd>
+<dt>private Query appendPairs(&#64;Nullable Query query, HighFrequencyTermQueryGroup group)</dt><dd><blockquote>
+<div><p>throws QueryParserException {</p>
+</div></blockquote>
+<p>BooleanQuery query2 = createQueryFromGroup(group);</p>
+<p>// If either of the queries are null, do not have to worry about combining them.
+if (query2 == null) {</p>
+<blockquote>
+<div><p>return query;</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else if (query == null) {</dt><dd><p>return query2;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>Query newQuery;</p>
+<dl>
+<dt>if (query.isTypeOf(Query.QueryType.CONJUNCTION)</dt><dd><blockquote>
+<div><p>|| query.isTypeOf(Query.QueryType.DISJUNCTION)) {</p>
+</div></blockquote>
+<p>// Adding children in this way is safer when its query is a conjunction or disjunction
+// ex. Other way: (+ +de -la -the) =&gt; (+ (+ +de -la -the) -[hf_term_pair la the 0.005])
+//     This way: (+ +de -la -the) =&gt; (+ +de -la -the -[hf_term_pair la the 0.005])
+return ((BooleanQuery.Builder) query.newBuilder()).addChildren(query2.getChildren()).build();</p>
+</dd>
+<dt>} else if (!group.isPositive) {</dt><dd><p>// In lucene, [+ (-term1, -term2, …)] has non-deterministic behavior and the rewrite is not
+// efficient from query execution perspective.  So, we will not do this rewrite if it is
+// configured that way.
+if (!allowNegativeOrRewrite) {</p>
+<blockquote>
+<div><p>return query;</p>
+</div></blockquote>
+<p>}</p>
+<p>// Negate both queries to combine, and the append as a conjunction, followed by negating
+// whole query. Equivalent to appending as a disjunction.
+newQuery = QueryNodeUtils.appendAsConjunction(</p>
+<blockquote>
+<div><p>query.negate(),
+query2.negate()</p>
+</div></blockquote>
+<p>);
+newQuery = newQuery.makeMustNot();</p>
+</dd>
+<dt>} else {</dt><dd><p>newQuery = QueryNodeUtils.appendAsConjunction(query, query2);
+newQuery = newQuery.makeDefault();</p>
+</dd>
+</dl>
+<p>}</p>
+<p>return newQuery;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Creates a conjunction of term_pairs using the sets of hf terms in HighFrequencyTermQueryGroup</p></li>
+<li><p>group. If !group.isPositive, will return a disjunction of negated pairs. If there aren’t enough</p></li>
+<li><p>hfTokens, will return null.</p></li>
+</ul>
+<p><a href="#id31"><span class="problematic" id="id32">*</span></a>/</p>
+</dd>
+<dt>private BooleanQuery createQueryFromGroup(HighFrequencyTermQueryGroup group)</dt><dd><blockquote>
+<div><p>throws QueryParserException {</p>
+</div></blockquote>
+<dl>
+<dt>if (!group.hfTokens.isEmpty() || group.preusedHFTokens.size() &gt; 1 || group.hasPhrases()) {</dt><dd><dl class="simple">
+<dt>List&lt;Query&gt;  terms = createTermPairsForGroup(group.hfTokens,</dt><dd><p>group.preusedHFTokens,
+group.hfPhrases,
+group.preusedHFPhrases);</p>
+</dd>
+<dt>if (group.isPositive) {</dt><dd><p>return new Conjunction(terms);</p>
+</dd>
+<dt>} else {</dt><dd><p>return new Disjunction(Lists.transform(terms, QueryNodeUtils.NEGATE_QUERY));</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>return null;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Creates HF_TERM_PAIR terms out of hfTokens and optHFTokens. Attempts to create the minimal</p></li>
+<li><p>amount of tokens necessary. optHFToken pairs should be given a weight of 0.0 and not be scored,</p></li>
+<li><p>as they are likely already included in the query in a phrase or an annotated term.</p></li>
+<li><p>&#64;param hfTokens</p></li>
+<li><p>&#64;param optHFTokens</p></li>
+<li><p>&#64;return A list of hf_term_pair operators.</p></li>
+</ul>
+<p><a href="#id33"><span class="problematic" id="id34">*</span></a>/</p>
+</dd>
+<dt>private List&lt;Query&gt; createTermPairsForGroup(Set&lt;String&gt; hfTokens,</dt><dd><blockquote>
+<div><p>Set&lt;String&gt; optHFTokens,
+Set&lt;String&gt; hfPhrases,
+Set&lt;String&gt; optHFPhrases) {</p>
+</div></blockquote>
+<p>// Handle sets with only one token.
+if (optHFTokens.size() == 1 &amp;&amp; hfTokens.size() &gt; 0) {</p>
+<blockquote>
+<div><p>// (* “a not_hf” b c) =&gt; (* “a not_hf” [hf_term_pair a b 0.05] [hf_term_pair b c 0.05])
+// optHFTokens: [a] hfTokens: [b, c] =&gt; optHFTokens: [] hfTokens: [a, b, c]
+hfTokens.addAll(optHFTokens);
+optHFTokens.clear();</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else if (hfTokens.size() == 1 &amp;&amp; optHFTokens.size() &gt; 0) {</dt><dd><p>// (* “a b” not_hf c) =&gt; (* “a b” not_hf [hf_term_pair a b 0.0] [hf_term_pair a c 0.005])
+// optHFTokens: [a, b] hfTokens: [c] =&gt; optHFTokens: [a, b] hfTokens: [a, c]
+String term = optHFTokens.iterator().next();
+hfTokens.add(term);</p>
+</dd>
+</dl>
+<p>}</p>
+<p>List&lt;Query&gt; terms = createTermPairs(hfTokens, true, HighFrequencyTermPairs.HF_DEFAULT_WEIGHT);
+terms.addAll(createTermPairs(optHFTokens, false, 0));
+terms.addAll(createPhrasePairs(hfPhrases, HighFrequencyTermPairs.HF_DEFAULT_WEIGHT));
+terms.addAll(createPhrasePairs(optHFPhrases, 0));</p>
+<p>return terms;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Turns a set of hf terms into a list of hf_term_pair operators. Each term will be used at least</p></li>
+<li><p>once in as few pairs as possible.</p></li>
+<li><p>&#64;param tokens</p></li>
+<li><p>&#64;param createSingle If the set contains only one query, the returned list will contain a single</p></li>
+<li><p>Term for that query if createSingle is true, and an empty list otherwise.</p></li>
+<li><p>&#64;param weight Each term pair will be given a score boost of serializedWeight.</p></li>
+<li><p>&#64;return</p></li>
+</ul>
+<p><a href="#id35"><span class="problematic" id="id36">*</span></a>/</p>
+</dd>
+<dt>private static List&lt;Query&gt; createTermPairs(Set&lt;String&gt; tokens, boolean createSingle,</dt><dd><blockquote>
+<div><p>double weight) {</p>
+</div></blockquote>
+<p>List&lt;Query&gt; terms = Lists.newArrayList();
+if (tokens.size() &gt;= 2) {</p>
+<blockquote>
+<div><p>int tokensLeft = tokens.size();
+String token1 = null;
+for (String token2 : tokens) {</p>
+<blockquote>
+<div><dl>
+<dt>if (token1 == null) {</dt><dd><p>token1 = token2;</p>
+</dd>
+<dt>} else {</dt><dd><p>terms.add(createHFTermPair(token1, token2, weight));</p>
+<dl class="simple">
+<dt>if (tokensLeft &gt; 2) { // Only reset if there is more than one token remaining.</dt><dd><p>token1 = null;</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}
+tokensLeft–;</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else if (createSingle &amp;&amp; !tokens.isEmpty()) { // Only one high frequency token</dt><dd><p>// Need to add token as a term because it was removed from the query earlier in rewriting.
+Term newTerm = new Term(tokens.iterator().next());
+terms.add(newTerm);</p>
+</dd>
+</dl>
+<p>}</p>
+<p>return terms;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private static List&lt;Query&gt; createPhrasePairs(Set&lt;String&gt; phrases, double weight) {</dt><dd><p>List&lt;Query&gt; ops = Lists.newArrayList();
+for (String phrase : phrases) {</p>
+<blockquote>
+<div><p>String[] terms = phrase.split(” “);
+assert terms.length == 2;
+SearchOperator op = new SearchOperator(SearchOperator.Type.HF_PHRASE_PAIR,</p>
+<blockquote>
+<div><p>terms[0], terms[1], Double.toString(weight));</p>
+</div></blockquote>
+<p>ops.add(op);</p>
+</div></blockquote>
+<p>}
+return ops;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private static SearchOperator createHFTermPair(String token1, String token2, double weight) {</dt><dd><dl class="simple">
+<dt>SearchOperator op = new SearchOperator(SearchOperator.Type.HF_TERM_PAIR,</dt><dd><p>token1, token2, Double.toString(weight));</p>
+</dd>
+</dl>
+<p>return op;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private static boolean hasAnnotations(com.twitter.search.queryparser.query.Query node) {</dt><dd><p>return node.hasAnnotations();</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../_sources/src/java/com/twitter/search/earlybird/queryparser/HighFrequencyTermPairRewriteVisitor.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

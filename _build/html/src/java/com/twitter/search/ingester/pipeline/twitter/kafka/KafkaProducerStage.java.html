@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.ingester.pipeline.twitter.kafka;</p>
+<p>import java.util.Collection;
+import java.util.Map;</p>
+<p>import javax.naming.NamingException;</p>
+<p>import scala.runtime.BoxedUnit;</p>
+<p>import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Preconditions;
+import com.google.common.collect.Maps;</p>
+<p>import org.apache.commons.pipeline.StageException;
+import org.apache.kafka.clients.producer.ProducerRecord;
+import org.apache.kafka.clients.producer.RecordMetadata;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;</p>
+<p>import com.twitter.finatra.kafka.producers.BlockingFinagleKafkaProducer;
+import com.twitter.search.common.debug.DebugEventUtil;
+import com.twitter.search.common.debug.thriftjava.DebugEvents;
+import com.twitter.search.common.decider.DeciderUtil;
+import com.twitter.search.common.indexing.thriftjava.ThriftVersionedEvents;
+import com.twitter.search.common.metrics.Percentile;
+import com.twitter.search.common.metrics.PercentileUtil;
+import com.twitter.search.common.metrics.SearchCounter;
+import com.twitter.search.common.schema.thriftjava.ThriftIndexingEvent;
+import com.twitter.search.common.schema.thriftjava.ThriftIndexingEventType;
+import com.twitter.search.common.util.io.kafka.CompactThriftSerializer;
+import com.twitter.search.ingester.model.IngesterThriftVersionedEvents;
+import com.twitter.search.ingester.pipeline.twitter.TwitterBaseStage;
+import com.twitter.search.ingester.pipeline.util.PipelineStageException;
+import com.twitter.search.ingester.pipeline.wire.IngesterPartitioner;
+import com.twitter.util.Await;
+import com.twitter.util.Future;</p>
+<dl>
+<dt>public class KafkaProducerStage&lt;T&gt; extends TwitterBaseStage&lt;T, Void&gt; {</dt><dd><p>private static final Logger LOG = LoggerFactory.getLogger(KafkaProducerStage.class);</p>
+<dl class="simple">
+<dt>private static final Logger LATE_EVENTS_LOG = LoggerFactory.getLogger(</dt><dd><p>KafkaProducerStage.class.getName() + “.LateEvents”);</p>
+</dd>
+<dt>private final Map&lt;ThriftIndexingEventType, Percentile&lt;Long&gt;&gt; processingLatenciesStats =</dt><dd><p>Maps.newEnumMap(ThriftIndexingEventType.class);</p>
+</dd>
+</dl>
+<p>private String kafkaClientId;
+private String kafkaTopicName;
+private String kafkaClusterPath;
+private SearchCounter sendCount;
+private String perPartitionSendCountFormat;
+private String deciderKey;</p>
+<p>protected BlockingFinagleKafkaProducer&lt;Long, ThriftVersionedEvents&gt; kafkaProducer;</p>
+<p>private int processingLatencyThresholdMillis = 10000;</p>
+<p>public KafkaProducerStage() { }</p>
+<dl class="simple">
+<dt>public KafkaProducerStage(String topicName, String clientId, String clusterPath) {</dt><dd><p>this.kafkaTopicName = topicName;
+this.kafkaClientId = clientId;
+this.kafkaClusterPath = clusterPath;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;Override
+protected void initStats() {</p>
+<blockquote>
+<div><p>super.initStats();
+setupCommonStats();</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>private void setupCommonStats() {</dt><dd><p>sendCount = SearchCounter.export(getStageNamePrefix() + “_send_count”);
+perPartitionSendCountFormat = getStageNamePrefix() + “_partition_%d_send_count”;
+for (ThriftIndexingEventType eventType : ThriftIndexingEventType.values()) {</p>
+<blockquote>
+<div><dl>
+<dt>processingLatenciesStats.put(</dt><dd><p>eventType,
+PercentileUtil.createPercentile(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>getStageNamePrefix() + “_” + eventType.name().toLowerCase()</dt><dd><ul class="simple">
+<li><p>“_processing_latency_ms”));</p></li>
+</ul>
+</dd>
+</dl>
+</div></blockquote>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;Override
+protected void innerSetupStats() {</p>
+<blockquote>
+<div><p>setupCommonStats();</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>private boolean isEnabled() {</dt><dd><dl class="simple">
+<dt>if (this.deciderKey != null) {</dt><dd><p>return DeciderUtil.isAvailableForRandomRecipient(decider, deciderKey);</p>
+</dd>
+<dt>} else {</dt><dd><p>// No decider means it’s enabled.
+return true;</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;Override
+protected void doInnerPreprocess() throws StageException, NamingException {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>try {</dt><dd><p>innerSetup();</p>
+</dd>
+<dt>} catch (PipelineStageException e) {</dt><dd><p>throw new StageException(this, e);</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+protected void innerSetup() throws PipelineStageException, NamingException {</p>
+<blockquote>
+<div><p>Preconditions.checkNotNull(kafkaClientId);
+Preconditions.checkNotNull(kafkaClusterPath);
+Preconditions.checkNotNull(kafkaTopicName);</p>
+<dl class="simple">
+<dt>kafkaProducer = wireModule.newFinagleKafkaProducer(</dt><dd><p>kafkaClusterPath,
+new CompactThriftSerializer&lt;ThriftVersionedEvents&gt;(),
+kafkaClientId,
+IngesterPartitioner.class);</p>
+</dd>
+</dl>
+<p>int numPartitions = wireModule.getPartitionMappingManager().getNumPartitions();
+int numKafkaPartitions = kafkaProducer.partitionsFor(kafkaTopicName).size();
+if (numPartitions != numKafkaPartitions) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>throw new PipelineStageException(String.format(</dt><dd><p>“Number of partitions for Kafka topic %s (%d) != number of expected partitions (%d)”,
+kafkaTopicName, numKafkaPartitions, numPartitions));</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public void innerProcess(Object obj) throws StageException {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (!(obj instanceof IngesterThriftVersionedEvents)) {</dt><dd><p>throw new StageException(this, “Object is not IngesterThriftVersionedEvents: “ + obj);</p>
+</dd>
+</dl>
+<p>}</p>
+<p>IngesterThriftVersionedEvents events = (IngesterThriftVersionedEvents) obj;
+tryToSendEventsToKafka(events);</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>protected void tryToSendEventsToKafka(IngesterThriftVersionedEvents events) {</dt><dd><dl class="simple">
+<dt>if (!isEnabled()) {</dt><dd><p>return;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>DebugEvents debugEvents = events.getDebugEvents();
+// We don’t propagate debug events to Kafka, because they take about 50%
+// of the storage space.
+events.unsetDebugEvents();</p>
+<dl class="simple">
+<dt>ProducerRecord&lt;Long, ThriftVersionedEvents&gt; record = new ProducerRecord&lt;&gt;(</dt><dd><p>kafkaTopicName,
+null,
+clock.nowMillis(),
+null,
+events);</p>
+</dd>
+<dt>sendRecordToKafka(record).ensure(() -&gt; {</dt><dd><p>updateEventProcessingLatencyStats(events, debugEvents);
+return null;</p>
+</dd>
+</dl>
+<p>});</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private Future&lt;RecordMetadata&gt; sendRecordToKafka(</dt><dd><blockquote>
+<div><p>ProducerRecord&lt;Long, ThriftVersionedEvents&gt; record) {</p>
+</div></blockquote>
+<p>Future&lt;RecordMetadata&gt; result;
+try {</p>
+<blockquote>
+<div><p>result = kafkaProducer.send(record);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} catch (Exception e) {</dt><dd><p>// Even though KafkaProducer.send() returns a Future, it can throw a synchronous exception,
+// so we translate synchronous exceptions into a Future.exception so we handle all exceptions
+// consistently.
+result = Future.exception(e);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>return result.onSuccess(recordMetadata -&gt; {</dt><dd><p>sendCount.increment();
+SearchCounter.export(</p>
+<blockquote>
+<div><p>String.format(perPartitionSendCountFormat, recordMetadata.partition())).increment();</p>
+</div></blockquote>
+<p>return BoxedUnit.UNIT;</p>
+</dd>
+<dt>}).onFailure(e -&gt; {</dt><dd><p>stats.incrementExceptions();
+LOG.error(“Sending a record failed.”, e);
+return BoxedUnit.UNIT;</p>
+</dd>
+</dl>
+<p>});</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private void updateEventProcessingLatencyStats(IngesterThriftVersionedEvents events,</dt><dd><blockquote>
+<div><p>DebugEvents debugEvents) {</p>
+</div></blockquote>
+<dl>
+<dt>if ((debugEvents != null) &amp;&amp; debugEvents.isSetProcessingStartedAt()) {</dt><dd><p>// Get the one indexing event out of all events we’re sending.
+Collection&lt;ThriftIndexingEvent&gt; indexingEvents = events.getVersionedEvents().values();
+Preconditions.checkState(!indexingEvents.isEmpty());
+ThriftIndexingEventType eventType = indexingEvents.iterator().next().getEventType();</p>
+<p>// Check if the event took too much time to get to this current point.
+long processingLatencyMillis =</p>
+<blockquote>
+<div><p>clock.nowMillis() - debugEvents.getProcessingStartedAt().getEventTimestampMillis();</p>
+</div></blockquote>
+<p>processingLatenciesStats.get(eventType).record(processingLatencyMillis);</p>
+<dl class="simple">
+<dt>if (processingLatencyMillis &gt;= processingLatencyThresholdMillis) {</dt><dd><dl class="simple">
+<dt>LATE_EVENTS_LOG.warn(“Event of type {} for tweet {} was processed in {}ms: {}”,</dt><dd><p>eventType.name(),
+events.getTweetId(),
+processingLatencyMillis,
+DebugEventUtil.debugEventsToString(debugEvents));</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public void setProcessingLatencyThresholdMillis(int processingLatencyThresholdMillis) {</dt><dd><p>this.processingLatencyThresholdMillis = processingLatencyThresholdMillis;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;Override
+public void innerPostprocess() throws StageException {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>try {</dt><dd><p>commonCleanup();</p>
+</dd>
+<dt>} catch (Exception e) {</dt><dd><p>throw new StageException(this, e);</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public void cleanupStageV2()  {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>try {</dt><dd><p>commonCleanup();</p>
+</dd>
+<dt>} catch (Exception e) {</dt><dd><p>LOG.error(“Error trying to clean up KafkaProducerStage.”, e);</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>private void commonCleanup() throws Exception {</dt><dd><p>Await.result(kafkaProducer.close());</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;SuppressWarnings(“unused”)  // set from pipeline config
+public void setKafkaClientId(String kafkaClientId) {</p>
+<blockquote>
+<div><p>this.kafkaClientId = kafkaClientId;</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;SuppressWarnings(“unused”)  // set from pipeline config
+public void setKafkaTopicName(String kafkaTopicName) {</p>
+<blockquote>
+<div><p>this.kafkaTopicName = kafkaTopicName;</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;VisibleForTesting
+public BlockingFinagleKafkaProducer&lt;Long, ThriftVersionedEvents&gt; getKafkaProducer() {</p>
+<blockquote>
+<div><p>return kafkaProducer;</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;SuppressWarnings(“unused”)  // set from pipeline config
+public void setDeciderKey(String deciderKey) {</p>
+<blockquote>
+<div><p>this.deciderKey = deciderKey;</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;SuppressWarnings(“unused”)  // set from pipeline config
+public void setKafkaClusterPath(String kafkaClusterPath) {</p>
+<blockquote>
+<div><p>this.kafkaClusterPath = kafkaClusterPath;</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/src/java/com/twitter/search/ingester/pipeline/twitter/kafka/KafkaProducerStage.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

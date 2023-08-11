@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.tweetypie
+package backends</p>
+<p>import com.twitter.finagle.Backoff
+import com.twitter.finagle.service.RetryPolicy
+import com.twitter.servo.util.FutureArrow
+import com.twitter.timelineservice.thriftscala.Event
+import com.twitter.timelineservice.thriftscala.PerspectiveQuery
+import com.twitter.timelineservice.thriftscala.PerspectiveResult
+import com.twitter.timelineservice.thriftscala.ProcessEventResult
+import com.twitter.timelineservice.thriftscala.StatusTimelineResult
+import com.twitter.timelineservice.thriftscala.TimelineQuery
+import com.twitter.timelineservice.{thriftscala =&gt; tls}
+import com.twitter.tweetypie.util.RetryPolicyBuilder</p>
+<dl>
+<dt>object TimelineService {</dt><dd><p>import Backend._</p>
+<p>type GetStatusTimeline = FutureArrow[Seq[tls.TimelineQuery], Seq[tls.StatusTimelineResult]]
+type GetPerspectives = FutureArrow[Seq[tls.PerspectiveQuery], Seq[tls.PerspectiveResult]]
+type ProcessEvent2 = FutureArrow[tls.Event, tls.ProcessEventResult]</p>
+<dl>
+<dt>private val warmupQuery =</dt><dd><p>// we need a non-empty query, since tls treats empty queries as an error
+tls.TimelineQuery(</p>
+<blockquote>
+<div><p>timelineType = tls.TimelineType.User,
+timelineId = 620530287L, // same user id that timelineservice-api uses for warmup
+maxCount = 1</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+<dt>def fromClient(client: tls.TimelineService.MethodPerEndpoint): TimelineService =</dt><dd><dl>
+<dt>new TimelineService {</dt><dd><p>val processEvent2 = FutureArrow(client.processEvent2 _)
+val getStatusTimeline = FutureArrow(client.getStatusTimeline _)
+val getPerspectives = FutureArrow(client.getPerspectives _)
+def ping(): Future[Unit] =</p>
+<blockquote>
+<div><p>client.touchTimeline(Seq(warmupQuery)).handle { case _: tls.InternalServerError =&gt; }</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>case class Config(writeRequestPolicy: Policy, readRequestPolicy: Policy) {</p>
+<blockquote>
+<div><dl>
+<dt>def apply(svc: TimelineService, ctx: Backend.Context): TimelineService = {</dt><dd><p>val build = new PolicyAdvocate(“TimelineService”, ctx, svc)
+new TimelineService {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>val processEvent2: FutureArrow[Event, ProcessEventResult] =</dt><dd><p>build(“processEvent2”, writeRequestPolicy, _.processEvent2)</p>
+</dd>
+<dt>val getStatusTimeline: FutureArrow[Seq[TimelineQuery], Seq[StatusTimelineResult]] =</dt><dd><p>build(“getStatusTimeline”, readRequestPolicy, _.getStatusTimeline)</p>
+</dd>
+<dt>val getPerspectives: FutureArrow[Seq[PerspectiveQuery], Seq[PerspectiveResult]] =</dt><dd><p>build(“getPerspectives”, readRequestPolicy, _.getPerspectives)</p>
+</dd>
+</dl>
+<p>def ping(): Future[Unit] = svc.ping()</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>case class FailureBackoffsPolicy(</dt><dd><p>timeoutBackoffs: Stream[Duration] = Stream.empty,
+tlsExceptionBackoffs: Stream[Duration] = Stream.empty)</p>
+<blockquote>
+<div><p>extends Policy {</p>
+</div></blockquote>
+<dl>
+<dt>def toFailureRetryPolicy: FailureRetryPolicy =</dt><dd><dl>
+<dt>FailureRetryPolicy(</dt><dd><dl>
+<dt>RetryPolicy.combine(</dt><dd><p>RetryPolicyBuilder.timeouts(timeoutBackoffs),
+RetryPolicy.backoff(Backoff.fromStream(tlsExceptionBackoffs)) {</p>
+<blockquote>
+<div><p>case Throw(ex: tls.InternalServerError) =&gt; true</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>def apply[A, B](name: String, ctx: Context): Builder[A, B] =</dt><dd><p>toFailureRetryPolicy(name, ctx)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>implicit val warmup: Warmup[TimelineService] =</dt><dd><p>Warmup[TimelineService](“timelineservice”)(_.ping())</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>trait TimelineService {</dt><dd><p>import TimelineService._
+val processEvent2: ProcessEvent2
+val getStatusTimeline: GetStatusTimeline
+val getPerspectives: GetPerspectives
+def ping(): Future[Unit]</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/tweetypie/server/src/main/scala/com/twitter/tweetypie/backends/TimelineService.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

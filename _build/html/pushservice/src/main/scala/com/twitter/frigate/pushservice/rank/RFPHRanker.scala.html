@@ -1,0 +1,493 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.frigate.pushservice.rank
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.frigate.common.base.CandidateDetails
+import com.twitter.frigate.common.base.Ranker
+import com.twitter.frigate.common.rec_types.RecTypes
+import com.twitter.frigate.pushservice.model.PushTypes.PushCandidate
+import com.twitter.frigate.pushservice.model.PushTypes.Target
+import com.twitter.frigate.pushservice.ml.HealthFeatureGetter
+import com.twitter.frigate.pushservice.ml.PushMLModelScorer
+import com.twitter.frigate.pushservice.params.MrQualityUprankingPartialTypeEnum
+import com.twitter.frigate.pushservice.params.PushFeatureSwitchParams
+import com.twitter.frigate.pushservice.params.PushMLModel
+import com.twitter.frigate.pushservice.params.PushModelName
+import com.twitter.frigate.pushservice.params.PushParams
+import com.twitter.frigate.pushservice.util.MediaAnnotationsUtil.updateMediaCategoryStats
+import com.twitter.frigate.thriftscala.CommonRecommendationType
+import com.twitter.util.Future
+import com.twitter.frigate.pushservice.params.MrQualityUprankingTransformTypeEnum
+import com.twitter.storehaus.ReadableStore
+import com.twitter.frigate.thriftscala.UserMediaRepresentation
+import com.twitter.hss.api.thriftscala.UserHealthSignalResponse</p>
+<dl>
+<dt>class RFPHRanker(</dt><dd><p>randomRanker: Ranker[Target, PushCandidate],
+weightedOpenOrNtabClickModelScorer: PushMLModelScorer,
+subscriptionCreatorRanker: SubscriptionCreatorRanker,
+userHealthSignalStore: ReadableStore[Long, UserHealthSignalResponse],
+producerMediaRepresentationStore: ReadableStore[Long, UserMediaRepresentation],
+stats: StatsReceiver)</p>
+<blockquote>
+<div><p>extends PushserviceRanker[Target, PushCandidate] {</p>
+</div></blockquote>
+<p>private val statsReceiver = stats.scope(this.getClass.getSimpleName)</p>
+<p>private val boostCRTsRanker = CRTBoostRanker(statsReceiver.scope(“boost_desired_crts”))
+private val crtDownRanker = CRTDownRanker(statsReceiver.scope(“down_rank_desired_crts”))</p>
+<p>private val crtsToDownRank = statsReceiver.stat(“crts_to_downrank”)
+private val crtsToUprank = statsReceiver.stat(“crts_to_uprank”)</p>
+<p>private val randomRankingCounter = stats.counter(“randomRanking”)
+private val mlRankingCounter = stats.counter(“mlRanking”)
+private val disableAllRelevanceCounter = stats.counter(“disableAllRelevance”)
+private val disableHeavyRankingCounter = stats.counter(“disableHeavyRanking”)</p>
+<p>private val heavyRankerCandidateCounter = stats.counter(“heavy_ranker_candidate_count”)
+private val heavyRankerScoreStats = statsReceiver.scope(“heavy_ranker_prediction_scores”)</p>
+<p>private val producerUprankingCounter = statsReceiver.counter(“producer_quality_upranking”)
+private val producerBoostedCounter = statsReceiver.counter(“producer_boosted_candidates”)
+private val producerDownboostedCounter = statsReceiver.counter(“producer_downboosted_candidates”)</p>
+<dl class="simple">
+<dt>override def initialRank(</dt><dd><p>target: Target,
+candidates: Seq[CandidateDetails[PushCandidate]]</p>
+</dd>
+</dl>
+<p>): Future[Seq[CandidateDetails[PushCandidate]]] = {</p>
+<blockquote>
+<div><p>heavyRankerCandidateCounter.incr(candidates.size)</p>
+<p>updateMediaCategoryStats(candidates)(stats)
+target.targetUserState</p>
+<blockquote>
+<div><dl>
+<dt>.flatMap { targetUserState =&gt;</dt><dd><dl class="simple">
+<dt>val useRandomRanking = target.skipMlRanker || target.params(</dt><dd><p>PushParams.UseRandomRankingParam</p>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>if (useRandomRanking) {</dt><dd><p>randomRankingCounter.incr()
+randomRanker.rank(target, candidates)</p>
+</dd>
+<dt>} else if (target.params(PushParams.DisableAllRelevanceParam)) {</dt><dd><p>disableAllRelevanceCounter.incr()
+Future.value(candidates)</p>
+</dd>
+<dt>} else if (target.params(PushParams.DisableHeavyRankingParam) || target.params(</dt><dd><blockquote>
+<div><p>PushFeatureSwitchParams.DisableHeavyRankingModelFSParam)) {</p>
+</div></blockquote>
+<p>disableHeavyRankingCounter.incr()
+Future.value(candidates)</p>
+</dd>
+<dt>} else {</dt><dd><p>mlRankingCounter.incr()</p>
+<p>val scoredCandidatesFut = scoring(target, candidates)</p>
+<dl>
+<dt>target.rankingModelParam.map { rankingModelParam =&gt;</dt><dd><dl class="simple">
+<dt>val modelName = PushModelName(</dt><dd><p>PushMLModel.WeightedOpenOrNtabClickProbability,
+target.params(rankingModelParam)).toString</p>
+</dd>
+<dt>ModelBasedRanker.populateMrWeightedOpenOrNtabClickScoreStats(</dt><dd><p>candidates,
+heavyRankerScoreStats.scope(modelName)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>if (target.params(</dt><dd><blockquote>
+<div><p>PushFeatureSwitchParams.EnableQualityUprankingCrtScoreStatsForHeavyRankingParam)) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>val modelName = PushModelName(</dt><dd><p>PushMLModel.FilteringProbability,
+target.params(PushFeatureSwitchParams.QualityUprankingModelTypeParam)</p>
+</dd>
+</dl>
+<p>).toString
+ModelBasedRanker.populateMrQualityUprankingScoreStats(</p>
+<blockquote>
+<div><p>candidates,
+heavyRankerScoreStats.scope(modelName)</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>val ooncRankedCandidatesFut =</dt><dd><p>scoredCandidatesFut.flatMap(ModelBasedRanker.rankByMrWeightedOpenOrNtabClickScore)</p>
+</dd>
+<dt>val qualityUprankedCandidatesFut =</dt><dd><dl>
+<dt>if (target.params(PushFeatureSwitchParams.EnableQualityUprankingForHeavyRankingParam)) {</dt><dd><dl>
+<dt>ooncRankedCandidatesFut.flatMap { ooncRankedCandidates =&gt;</dt><dd><dl>
+<dt>val transformFunc: Double =&gt; Double =</dt><dd><dl>
+<dt>target.params(PushFeatureSwitchParams.QualityUprankingTransformTypeParam) match {</dt><dd><dl>
+<dt>case MrQualityUprankingTransformTypeEnum.Linear =&gt;</dt><dd><dl>
+<dt>ModelBasedRanker.transformLinear(</dt><dd><p>_,
+bar = target.params(</p>
+<blockquote>
+<div><p>PushFeatureSwitchParams.QualityUprankingLinearBarForHeavyRankingParam))</p>
+</div></blockquote>
+</dd>
+</dl>
+</dd>
+<dt>case MrQualityUprankingTransformTypeEnum.Sigmoid =&gt;</dt><dd><dl>
+<dt>ModelBasedRanker.transformSigmoid(</dt><dd><p>_,
+weight = target.params(</p>
+<blockquote>
+<div><p>PushFeatureSwitchParams.QualityUprankingSigmoidWeightForHeavyRankingParam),</p>
+</div></blockquote>
+<dl class="simple">
+<dt>bias = target.params(</dt><dd><p>PushFeatureSwitchParams.QualityUprankingSigmoidBiasForHeavyRankingParam)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>case _ =&gt; ModelBasedRanker.transformIdentity</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>ModelBasedRanker.rankByQualityOoncCombinedScore(</dt><dd><p>ooncRankedCandidates,
+transformFunc,
+target.params(PushFeatureSwitchParams.QualityUprankingBoostForHeavyRankingParam)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>} else ooncRankedCandidatesFut</p>
+</dd>
+<dt>if (target.params(</dt><dd><blockquote>
+<div><p>PushFeatureSwitchParams.EnableProducersQualityBoostingForHeavyRankingParam)) {</p>
+</div></blockquote>
+<p>producerUprankingCounter.incr()
+qualityUprankedCandidatesFut.flatMap(cands =&gt;</p>
+<blockquote>
+<div><p>ModelBasedRanker.rerankByProducerQualityOoncCombinedScore(cands)(statsReceiver))</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>} else qualityUprankedCandidatesFut</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>private def scoring(</dt><dd><p>target: Target,
+candidates: Seq[CandidateDetails[PushCandidate]]</p>
+</dd>
+</dl>
+<p>): Future[Seq[CandidateDetails[PushCandidate]]] = {</p>
+<blockquote>
+<div><dl>
+<dt>val ooncScoredCandidatesFut = target.rankingModelParam.map { rankingModelParam =&gt;</dt><dd><dl class="simple">
+<dt>weightedOpenOrNtabClickModelScorer.scoreByBatchPredictionForModelVersion(</dt><dd><p>target,
+candidates,
+rankingModelParam</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>val scoredCandidatesFut = {</dt><dd><dl>
+<dt>if (target.params(PushFeatureSwitchParams.EnableQualityUprankingForHeavyRankingParam)) {</dt><dd><dl>
+<dt>ooncScoredCandidatesFut.map { candidates =&gt;</dt><dd><dl class="simple">
+<dt>weightedOpenOrNtabClickModelScorer.scoreByBatchPredictionForModelVersion(</dt><dd><p>target = target,
+candidatesDetails = candidates,
+modelVersionParam = PushFeatureSwitchParams.QualityUprankingModelTypeParam,
+overridePushMLModelOpt = Some(PushMLModel.FilteringProbability)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>} else ooncScoredCandidatesFut</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>scoredCandidatesFut.foreach { candidates =&gt;</dt><dd><dl class="simple">
+<dt>val oonCandidates = candidates.filter {</dt><dd><dl class="simple">
+<dt>case CandidateDetails(pushCandidate: PushCandidate, _) =&gt;</dt><dd><dl class="simple">
+<dt>ModelBasedRanker.tweetCandidateSelector(</dt><dd><p>pushCandidate,
+MrQualityUprankingPartialTypeEnum.Oon)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+setProducerQuality(</p>
+<blockquote>
+<div><p>target,
+oonCandidates,
+userHealthSignalStore,
+producerMediaRepresentationStore)</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>private def setProducerQuality(</dt><dd><p>target: Target,
+candidates: Seq[CandidateDetails[PushCandidate]],
+userHealthSignalStore: ReadableStore[Long, UserHealthSignalResponse],
+producerMediaRepresentationStore: ReadableStore[Long, UserMediaRepresentation]</p>
+</dd>
+<dt>): Unit = {</dt><dd><dl>
+<dt>lazy val boostRatio =</dt><dd><p>target.params(PushFeatureSwitchParams.QualityUprankingBoostForHighQualityProducersParam)</p>
+</dd>
+<dt>lazy val downboostRatio =</dt><dd><p>target.params(PushFeatureSwitchParams.QualityUprankingDownboostForLowQualityProducersParam)</p>
+</dd>
+<dt>candidates.foreach {</dt><dd><dl>
+<dt>case CandidateDetails(pushCandidate, _) =&gt;</dt><dd><dl>
+<dt>HealthFeatureGetter</dt><dd><dl>
+<dt>.getFeatures(pushCandidate, producerMediaRepresentationStore, userHealthSignalStore).map {</dt><dd><dl>
+<dt>featureMap =&gt;</dt><dd><p>val agathaNsfwScore = featureMap.numericFeatures.getOrElse(“agathaNsfwScore”, 0.5)
+val textNsfwScore = featureMap.numericFeatures.getOrElse(“textNsfwScore”, 0.15)
+val nudityRate = featureMap.numericFeatures.getOrElse(“nudityRate”, 0.0)
+val activeFollowers = featureMap.numericFeatures.getOrElse(“activeFollowers”, 0.0)
+val favorsRcvd28Days = featureMap.numericFeatures.getOrElse(“favorsRcvd28Days”, 0.0)
+val tweets28Days = featureMap.numericFeatures.getOrElse(“tweets28Days”, 0.0)
+val authorDislikeCount = featureMap.numericFeatures</p>
+<blockquote>
+<div><p>.getOrElse(“authorDislikeCount”, 0.0)</p>
+</div></blockquote>
+<p>val authorDislikeRate = featureMap.numericFeatures.getOrElse(“authorDislikeRate”, 0.0)
+val authorReportRate = featureMap.numericFeatures.getOrElse(“authorReportRate”, 0.0)
+val abuseStrikeTop2Percent =</p>
+<blockquote>
+<div><p>featureMap.booleanFeatures.getOrElse(“abuseStrikeTop2Percent”, false)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>val abuseStrikeTop1Percent =</dt><dd><p>featureMap.booleanFeatures.getOrElse(“abuseStrikeTop1Percent”, false)</p>
+</dd>
+</dl>
+<p>val hasNsfwToken = featureMap.booleanFeatures.getOrElse(“hasNsfwToken”, false)</p>
+<dl class="simple">
+<dt>if ((activeFollowers &gt; 3000000) ||</dt><dd><p>(activeFollowers &gt; 1000000 &amp;&amp; agathaNsfwScore &lt; 0.7 &amp;&amp; nudityRate &lt; 0.01 &amp;&amp; !hasNsfwToken &amp;&amp; !abuseStrikeTop2Percent) ||
+(activeFollowers &gt; 100000 &amp;&amp; agathaNsfwScore &lt; 0.7 &amp;&amp; nudityRate &lt; 0.01 &amp;&amp; !hasNsfwToken &amp;&amp; !abuseStrikeTop2Percent &amp;&amp;
+tweets28Days &gt; 0 &amp;&amp; favorsRcvd28Days / tweets28Days &gt; 3000 &amp;&amp; authorReportRate &lt; 0.000001 &amp;&amp; authorDislikeRate &lt; 0.0005)) {
+producerBoostedCounter.incr()
+pushCandidate.setProducerQualityUprankingBoost(boostRatio)</p>
+</dd>
+<dt>} else if (activeFollowers &lt; 5 || agathaNsfwScore &gt; 0.9 || nudityRate &gt; 0.03 || hasNsfwToken || abuseStrikeTop1Percent ||</dt><dd><p>textNsfwScore &gt; 0.4 || (authorDislikeRate &gt; 0.005 &amp;&amp; authorDislikeCount &gt; 5) ||
+(tweets28Days &gt; 56 &amp;&amp; favorsRcvd28Days / tweets28Days &lt; 100)) {
+producerDownboostedCounter.incr()
+pushCandidate.setProducerQualityUprankingBoost(downboostRatio)</p>
+</dd>
+</dl>
+<p>} else pushCandidate.setProducerQualityUprankingBoost(1.0)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private def rerankBySubscriptionCreatorRanker(</dt><dd><p>target: Target,
+rankedCandidates: Future[Seq[CandidateDetails[PushCandidate]]],</p>
+</dd>
+<dt>): Future[Seq[CandidateDetails[PushCandidate]]] = {</dt><dd><dl class="simple">
+<dt>if (target.params(PushFeatureSwitchParams.SoftRankCandidatesFromSubscriptionCreators)) {</dt><dd><p>val factor = target.params(PushFeatureSwitchParams.SoftRankFactorForSubscriptionCreators)
+subscriptionCreatorRanker.boostByScoreFactor(rankedCandidates, factor)</p>
+</dd>
+<dt>} else</dt><dd><p>subscriptionCreatorRanker.boostSubscriptionCreator(rankedCandidates)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>override def reRank(</dt><dd><p>target: Target,
+rankedCandidates: Seq[CandidateDetails[PushCandidate]]</p>
+</dd>
+<dt>): Future[Seq[CandidateDetails[PushCandidate]]] = {</dt><dd><dl>
+<dt>val numberOfF1Candidates =</dt><dd><dl class="simple">
+<dt>rankedCandidates.count(candidateDetails =&gt;</dt><dd><p>RecTypes.isF1Type(candidateDetails.candidate.commonRecType))</p>
+</dd>
+</dl>
+</dd>
+<dt>lazy val threshold =</dt><dd><p>target.params(PushFeatureSwitchParams.NumberOfF1CandidatesThresholdForOONBackfill)</p>
+</dd>
+<dt>lazy val enableOONBackfillBasedOnF1 =</dt><dd><p>target.params(PushFeatureSwitchParams.EnableOONBackfillBasedOnF1Candidates)</p>
+</dd>
+<dt>val f1BoostedCandidates =</dt><dd><dl class="simple">
+<dt>if (enableOONBackfillBasedOnF1 &amp;&amp; numberOfF1Candidates &gt; threshold) {</dt><dd><dl class="simple">
+<dt>boostCRTsRanker.boostCrtsToTopStableOrder(</dt><dd><p>rankedCandidates,
+RecTypes.f1FirstDegreeTypes.toSeq)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>} else rankedCandidates</p>
+</dd>
+<dt>val topTweetsByGeoDownRankedCandidates =</dt><dd><dl>
+<dt>if (target.params(PushFeatureSwitchParams.BackfillRankTopTweetsByGeoCandidates)) {</dt><dd><dl class="simple">
+<dt>crtDownRanker.downRank(</dt><dd><p>f1BoostedCandidates,
+Seq(CommonRecommendationType.GeoPopTweet)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>} else f1BoostedCandidates</p>
+</dd>
+<dt>val reRankedCandidatesWithBoostedCrts = {</dt><dd><dl class="simple">
+<dt>val listOfCrtsToUpRank = target</dt><dd><p>.params(PushFeatureSwitchParams.ListOfCrtsToUpRank)
+.flatMap(CommonRecommendationType.valueOf)</p>
+</dd>
+</dl>
+<p>crtsToUprank.add(listOfCrtsToUpRank.size)
+boostCRTsRanker.boostCrtsToTop(topTweetsByGeoDownRankedCandidates, listOfCrtsToUpRank)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>val reRankedCandidatesWithDownRankedCrts = {</dt><dd><dl class="simple">
+<dt>val listOfCrtsToDownRank = target</dt><dd><p>.params(PushFeatureSwitchParams.ListOfCrtsToDownRank)
+.flatMap(CommonRecommendationType.valueOf)</p>
+</dd>
+</dl>
+<p>crtsToDownRank.add(listOfCrtsToDownRank.size)
+crtDownRanker.downRank(reRankedCandidatesWithBoostedCrts, listOfCrtsToDownRank)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>val rerankBySubscriptionCreatorFut = {</dt><dd><dl class="simple">
+<dt>if (target.params(PushFeatureSwitchParams.BoostCandidatesFromSubscriptionCreators)) {</dt><dd><dl class="simple">
+<dt>rerankBySubscriptionCreatorRanker(</dt><dd><p>target,
+Future.value(reRankedCandidatesWithDownRankedCrts))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>} else Future.value(reRankedCandidatesWithDownRankedCrts)</p>
+</dd>
+</dl>
+<p>}</p>
+<p>rerankBySubscriptionCreatorFut</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/pushservice/src/main/scala/com/twitter/frigate/pushservice/rank/RFPHRanker.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

@@ -1,0 +1,824 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../" id="documentation_options" src="../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.timelines.prediction.common.aggregates</p>
+<p>import com.twitter.conversions.DurationOps._
+import com.twitter.ml.api.constant.SharedFeatures.AUTHOR_ID
+import com.twitter.ml.api.constant.SharedFeatures.USER_ID
+import com.twitter.timelines.data_processing.ml_util.aggregation_framework._
+import com.twitter.timelines.data_processing.ml_util.aggregation_framework.metrics._
+import com.twitter.timelines.data_processing.ml_util.transforms.DownsampleTransform
+import com.twitter.timelines.data_processing.ml_util.transforms.RichRemoveAuthorIdZero
+import com.twitter.timelines.data_processing.ml_util.transforms.RichRemoveUserIdZero
+import com.twitter.timelines.prediction.features.common.TimelinesSharedFeatures
+import com.twitter.timelines.prediction.features.engagement_features.EngagementDataRecordFeatures
+import com.twitter.timelines.prediction.features.engagement_features.EngagementDataRecordFeatures.RichUnifyPublicEngagersTransform
+import com.twitter.timelines.prediction.features.list_features.ListFeatures
+import com.twitter.timelines.prediction.features.recap.RecapFeatures
+import com.twitter.timelines.prediction.features.request_context.RequestContextFeatures
+import com.twitter.timelines.prediction.features.semantic_core_features.SemanticCoreFeatures
+import com.twitter.timelines.prediction.transform.filter.FilterInNetworkTransform
+import com.twitter.timelines.prediction.transform.filter.FilterImageTweetTransform
+import com.twitter.timelines.prediction.transform.filter.FilterVideoTweetTransform
+import com.twitter.timelines.prediction.transform.filter.FilterOutImageVideoTweetTransform
+import com.twitter.util.Duration</p>
+<p>trait TimelinesAggregationConfigDetails extends Serializable {</p>
+<blockquote>
+<div><p>import TimelinesAggregationSources._</p>
+<p>def outputHdfsPath: String</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Converts the given logical store to a physical store. The reason we do not specify the</p></li>
+<li><p>physical store directly with the [[AggregateGroup]] is because of a cyclic dependency when</p></li>
+<li><p>create physical stores that are DalDataset with PersonalDataType annotations derived from</p></li>
+<li><p>the [[AggregateGroup]].</p></li>
+<li></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+</dl>
+<p>def mkPhysicalStore(store: AggregateStore): AggregateStore</p>
+<p>def defaultMaxKvSourceFailures: Int = 100</p>
+<dl>
+<dt>val timelinesOfflineAggregateSink = new OfflineStoreCommonConfig {</dt><dd><dl class="simple">
+<dt>override def apply(startDate: String) = OfflineAggregateStoreCommonConfig(</dt><dd><p>outputHdfsPathPrefix = outputHdfsPath,
+dummyAppId = “timelines_aggregates_v2_ro”,
+dummyDatasetPrefix = “timelines_aggregates_v2_ro”,
+startDate = startDate</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<p>val UserAggregateStore = “user_aggregates”
+val UserAuthorAggregateStore = “user_author_aggregates”
+val UserOriginalAuthorAggregateStore = “user_original_author_aggregates”
+val OriginalAuthorAggregateStore = “original_author_aggregates”
+val UserEngagerAggregateStore = “user_engager_aggregates”
+val UserMentionAggregateStore = “user_mention_aggregates”
+val TwitterWideUserAggregateStore = “twitter_wide_user_aggregates”
+val TwitterWideUserAuthorAggregateStore = “twitter_wide_user_author_aggregates”
+val UserRequestHourAggregateStore = “user_request_hour_aggregates”
+val UserRequestDowAggregateStore = “user_request_dow_aggregates”
+val UserListAggregateStore = “user_list_aggregates”
+val AuthorTopicAggregateStore = “author_topic_aggregates”
+val UserTopicAggregateStore = “user_topic_aggregates”
+val UserInferredTopicAggregateStore = “user_inferred_topic_aggregates”
+val UserMediaUnderstandingAnnotationAggregateStore =</p>
+<blockquote>
+<div><p>“user_media_understanding_annotation_aggregates”</p>
+</div></blockquote>
+<p>val AuthorCountryCodeAggregateStore = “author_country_code_aggregates”
+val OriginalAuthorCountryCodeAggregateStore = “original_author_country_code_aggregates”</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Step 3: Configure all aggregates to compute.</p></li>
+<li><p>Note that different subsets of aggregates in this list</p></li>
+<li><p>can be launched by different summingbird job instances.</p></li>
+<li><p>Any given job can be responsible for a set of AggregateGroup</p></li>
+<li><p>configs whose outputStores share the same exact startDate.</p></li>
+<li><p>AggregateGroups that do not share the same inputSource,</p></li>
+<li><p>outputStore or startDate MUST be launched using different</p></li>
+<li><p>summingbird jobs and passed in a different –start-time argument</p></li>
+<li><p>See science/scalding/mesos/timelines/prod.yaml for an example</p></li>
+<li><p>of how to configure your own job.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>val negativeDownsampleTransform =</dt><dd><dl class="simple">
+<dt>DownsampleTransform(</dt><dd><p>negativeSamplingRate = 0.03,
+keepLabels = RecapUserFeatureAggregation.LabelsV2)</p>
+</dd>
+</dl>
+</dd>
+<dt>val negativeRecTweetDownsampleTransform = DownsampleTransform(</dt><dd><p>negativeSamplingRate = 0.03,
+keepLabels = RectweetUserFeatureAggregation.RectweetLabelsForAggregation</p>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>val userAggregatesV2: AggregateGroup =</dt><dd><dl>
+<dt>AggregateGroup(</dt><dd><p>inputSource = timelinesDailyRecapMinimalSource,
+aggregatePrefix = “user_aggregate_v2”,
+preTransforms = Seq(RichRemoveUserIdZero), /* Eliminates reducer skew <a href="#id5"><span class="problematic" id="id6">*</span></a>/
+keys = Set(USER_ID),
+features = RecapUserFeatureAggregation.UserFeaturesV2,
+labels = RecapUserFeatureAggregation.LabelsV2,
+metrics = Set(CountMetric, SumMetric),
+halfLives = Set(50.days),
+outputStore = mkPhysicalStore(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>OfflineAggregateDataRecordStore(</dt><dd><p>name = UserAggregateStore,
+startDate = “2016-07-15 00:00”,
+commonConfig = timelinesOfflineAggregateSink,
+maxKvSourceFailures = defaultMaxKvSourceFailures</p>
+</dd>
+</dl>
+<p>))</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>val userAuthorAggregatesV2: Set[AggregateGroup] = {</p>
+<blockquote>
+<div><dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>NOTE: We need to remove records from out-of-network authors from the recap input</p></li>
+<li><p>records (which now include out-of-network records as well after merging recap and</p></li>
+<li><p>rectweet models) that are used to compute user-author aggregates. This is necessary</p></li>
+<li><p>to limit the growth rate of user-author aggregates.</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+<dt>val allFeatureAggregates = Set(</dt><dd><dl>
+<dt>AggregateGroup(</dt><dd><p>inputSource = timelinesDailyRecapMinimalSource,
+aggregatePrefix = “user_author_aggregate_v2”,
+preTransforms = Seq(FilterInNetworkTransform, RichRemoveUserIdZero),
+keys = Set(USER_ID, AUTHOR_ID),
+features = RecapUserFeatureAggregation.UserAuthorFeaturesV2,
+labels = RecapUserFeatureAggregation.LabelsV2,
+metrics = Set(SumMetric),
+halfLives = Set(50.days),
+outputStore = mkPhysicalStore(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>OfflineAggregateDataRecordStore(</dt><dd><p>name = UserAuthorAggregateStore,
+startDate = “2016-07-15 00:00”,
+commonConfig = timelinesOfflineAggregateSink,
+maxKvSourceFailures = defaultMaxKvSourceFailures</p>
+</dd>
+</dl>
+<p>))</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>val countAggregates: Set[AggregateGroup] = Set(</dt><dd><dl>
+<dt>AggregateGroup(</dt><dd><p>inputSource = timelinesDailyRecapMinimalSource,
+aggregatePrefix = “user_author_aggregate_v2”,
+preTransforms = Seq(FilterInNetworkTransform, RichRemoveUserIdZero),
+keys = Set(USER_ID, AUTHOR_ID),
+features = RecapUserFeatureAggregation.UserAuthorFeaturesV2Count,
+labels = RecapUserFeatureAggregation.LabelsV2,
+metrics = Set(CountMetric),
+halfLives = Set(50.days),
+outputStore = mkPhysicalStore(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>OfflineAggregateDataRecordStore(</dt><dd><p>name = UserAuthorAggregateStore,
+startDate = “2016-07-15 00:00”,
+commonConfig = timelinesOfflineAggregateSink,
+maxKvSourceFailures = defaultMaxKvSourceFailures</p>
+</dd>
+</dl>
+<p>))</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>)</p>
+<p>allFeatureAggregates ++ countAggregates</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>val userAggregatesV5Continuous: AggregateGroup =</dt><dd><dl>
+<dt>AggregateGroup(</dt><dd><p>inputSource = timelinesDailyRecapMinimalSource,
+aggregatePrefix = “user_aggregate_v5.continuous”,
+preTransforms = Seq(RichRemoveUserIdZero),
+keys = Set(USER_ID),
+features = RecapUserFeatureAggregation.UserFeaturesV5Continuous,
+labels = RecapUserFeatureAggregation.LabelsV2,
+metrics = Set(CountMetric, SumMetric, SumSqMetric),
+halfLives = Set(50.days),
+outputStore = mkPhysicalStore(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>OfflineAggregateDataRecordStore(</dt><dd><p>name = UserAggregateStore,
+startDate = “2016-07-15 00:00”,
+commonConfig = timelinesOfflineAggregateSink,
+maxKvSourceFailures = defaultMaxKvSourceFailures</p>
+</dd>
+</dl>
+<p>))</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>val userAuthorAggregatesV5: AggregateGroup =</dt><dd><dl>
+<dt>AggregateGroup(</dt><dd><p>inputSource = timelinesDailyRecapMinimalSource,
+aggregatePrefix = “user_author_aggregate_v5”,
+preTransforms = Seq(FilterInNetworkTransform, RichRemoveUserIdZero),
+keys = Set(USER_ID, AUTHOR_ID),
+features = RecapUserFeatureAggregation.UserAuthorFeaturesV5,
+labels = RecapUserFeatureAggregation.LabelsV2,
+metrics = Set(CountMetric),
+halfLives = Set(50.days),
+outputStore = mkPhysicalStore(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>OfflineAggregateDataRecordStore(</dt><dd><p>name = UserAuthorAggregateStore,
+startDate = “2016-07-15 00:00”,
+commonConfig = timelinesOfflineAggregateSink,
+maxKvSourceFailures = defaultMaxKvSourceFailures</p>
+</dd>
+</dl>
+<p>))</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>val tweetSourceUserAuthorAggregatesV1: AggregateGroup =</dt><dd><dl>
+<dt>AggregateGroup(</dt><dd><p>inputSource = timelinesDailyRecapMinimalSource,
+aggregatePrefix = “user_author_aggregate_tweetsource_v1”,
+preTransforms = Seq(FilterInNetworkTransform, RichRemoveUserIdZero),
+keys = Set(USER_ID, AUTHOR_ID),
+features = RecapUserFeatureAggregation.UserAuthorTweetSourceFeaturesV1,
+labels = RecapUserFeatureAggregation.LabelsV2,
+metrics = Set(CountMetric, SumMetric),
+halfLives = Set(50.days),
+outputStore = mkPhysicalStore(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>OfflineAggregateDataRecordStore(</dt><dd><p>name = UserAuthorAggregateStore,
+startDate = “2016-07-15 00:00”,
+commonConfig = timelinesOfflineAggregateSink,
+maxKvSourceFailures = defaultMaxKvSourceFailures</p>
+</dd>
+</dl>
+<p>))</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>val userEngagerAggregates = AggregateGroup(</dt><dd><p>inputSource = timelinesDailyRecapMinimalSource,
+aggregatePrefix = “user_engager_aggregate”,
+keys = Set(USER_ID, EngagementDataRecordFeatures.PublicEngagementUserIds),
+features = Set.empty,
+labels = RecapUserFeatureAggregation.LabelsV2,
+metrics = Set(CountMetric),
+halfLives = Set(50.days),
+outputStore = mkPhysicalStore(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>OfflineAggregateDataRecordStore(</dt><dd><p>name = UserEngagerAggregateStore,
+startDate = “2016-09-02 00:00”,
+commonConfig = timelinesOfflineAggregateSink,
+maxKvSourceFailures = defaultMaxKvSourceFailures</p>
+</dd>
+</dl>
+<p>)),</p>
+</div></blockquote>
+<dl class="simple">
+<dt>preTransforms = Seq(</dt><dd><p>RichRemoveUserIdZero,
+RichUnifyPublicEngagersTransform</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>val userMentionAggregates = AggregateGroup(</dt><dd><p>inputSource = timelinesDailyRecapMinimalSource,
+preTransforms = Seq(RichRemoveUserIdZero), /* Eliminates reducer skew <a href="#id9"><span class="problematic" id="id10">*</span></a>/
+aggregatePrefix = “user_mention_aggregate”,
+keys = Set(USER_ID, RecapFeatures.MENTIONED_SCREEN_NAMES),
+features = Set.empty,
+labels = RecapUserFeatureAggregation.LabelsV2,
+metrics = Set(CountMetric),
+halfLives = Set(50.days),
+outputStore = mkPhysicalStore(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>OfflineAggregateDataRecordStore(</dt><dd><p>name = UserMentionAggregateStore,
+startDate = “2017-03-01 00:00”,
+commonConfig = timelinesOfflineAggregateSink,
+maxKvSourceFailures = defaultMaxKvSourceFailures</p>
+</dd>
+</dl>
+<p>)),</p>
+</div></blockquote>
+<p>includeAnyLabel = false</p>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>val twitterWideUserAggregates = AggregateGroup(</dt><dd><p>inputSource = timelinesDailyTwitterWideSource,
+preTransforms = Seq(RichRemoveUserIdZero), /* Eliminates reducer skew <a href="#id11"><span class="problematic" id="id12">*</span></a>/
+aggregatePrefix = “twitter_wide_user_aggregate”,
+keys = Set(USER_ID),
+features = RecapUserFeatureAggregation.TwitterWideFeatures,
+labels = RecapUserFeatureAggregation.TwitterWideLabels,
+metrics = Set(CountMetric, SumMetric),
+halfLives = Set(50.days),
+outputStore = mkPhysicalStore(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>OfflineAggregateDataRecordStore(</dt><dd><p>name = TwitterWideUserAggregateStore,
+startDate = “2016-12-28 00:00”,
+commonConfig = timelinesOfflineAggregateSink,
+maxKvSourceFailures = defaultMaxKvSourceFailures</p>
+</dd>
+</dl>
+<p>))</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>val twitterWideUserAuthorAggregates = AggregateGroup(</dt><dd><p>inputSource = timelinesDailyTwitterWideSource,
+preTransforms = Seq(RichRemoveUserIdZero), /* Eliminates reducer skew <a href="#id13"><span class="problematic" id="id14">*</span></a>/
+aggregatePrefix = “twitter_wide_user_author_aggregate”,
+keys = Set(USER_ID, AUTHOR_ID),
+features = RecapUserFeatureAggregation.TwitterWideFeatures,
+labels = RecapUserFeatureAggregation.TwitterWideLabels,
+metrics = Set(CountMetric),
+halfLives = Set(50.days),
+outputStore = mkPhysicalStore(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>OfflineAggregateDataRecordStore(</dt><dd><p>name = TwitterWideUserAuthorAggregateStore,
+startDate = “2016-12-28 00:00”,
+commonConfig = timelinesOfflineAggregateSink,
+maxKvSourceFailures = defaultMaxKvSourceFailures</p>
+</dd>
+</dl>
+<p>)),</p>
+</div></blockquote>
+<p>includeAnyLabel = false</p>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>User-HourOfDay and User-DayOfWeek aggregations, both for recap and rectweet</p></li>
+</ul>
+<p><a href="#id15"><span class="problematic" id="id16">*</span></a>/</p>
+</dd>
+<dt>val userRequestHourAggregates = AggregateGroup(</dt><dd><p>inputSource = timelinesDailyRecapMinimalSource,
+aggregatePrefix = “user_request_context_aggregate.hour”,
+preTransforms = Seq(RichRemoveUserIdZero, negativeDownsampleTransform),
+keys = Set(USER_ID, RequestContextFeatures.TIMESTAMP_GMT_HOUR),
+features = Set.empty,
+labels = RecapUserFeatureAggregation.LabelsV2,
+metrics = Set(CountMetric),
+halfLives = Set(50.days),
+outputStore = mkPhysicalStore(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>OfflineAggregateDataRecordStore(</dt><dd><p>name = UserRequestHourAggregateStore,
+startDate = “2017-08-01 00:00”,
+commonConfig = timelinesOfflineAggregateSink,
+maxKvSourceFailures = defaultMaxKvSourceFailures</p>
+</dd>
+</dl>
+<p>))</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>val userRequestDowAggregates = AggregateGroup(</dt><dd><p>inputSource = timelinesDailyRecapMinimalSource,
+aggregatePrefix = “user_request_context_aggregate.dow”,
+preTransforms = Seq(RichRemoveUserIdZero, negativeDownsampleTransform),
+keys = Set(USER_ID, RequestContextFeatures.TIMESTAMP_GMT_DOW),
+features = Set.empty,
+labels = RecapUserFeatureAggregation.LabelsV2,
+metrics = Set(CountMetric),
+halfLives = Set(50.days),
+outputStore = mkPhysicalStore(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>OfflineAggregateDataRecordStore(</dt><dd><p>name = UserRequestDowAggregateStore,
+startDate = “2017-08-01 00:00”,
+commonConfig = timelinesOfflineAggregateSink,
+maxKvSourceFailures = defaultMaxKvSourceFailures</p>
+</dd>
+</dl>
+<p>))</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>val authorTopicAggregates = AggregateGroup(</dt><dd><p>inputSource = timelinesDailyRecapMinimalSource,
+aggregatePrefix = “author_topic_aggregate”,
+preTransforms = Seq(RichRemoveUserIdZero),
+keys = Set(AUTHOR_ID, TimelinesSharedFeatures.TOPIC_ID),
+features = Set.empty,
+labels = RecapUserFeatureAggregation.LabelsV2,
+metrics = Set(CountMetric),
+halfLives = Set(50.days),
+outputStore = mkPhysicalStore(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>OfflineAggregateDataRecordStore(</dt><dd><p>name = AuthorTopicAggregateStore,
+startDate = “2020-05-19 00:00”,
+commonConfig = timelinesOfflineAggregateSink,
+maxKvSourceFailures = defaultMaxKvSourceFailures</p>
+</dd>
+</dl>
+<p>))</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>val userTopicAggregates = AggregateGroup(</dt><dd><p>inputSource = timelinesDailyRecapMinimalSource,
+aggregatePrefix = “user_topic_aggregate”,
+preTransforms = Seq(RichRemoveUserIdZero),
+keys = Set(USER_ID, TimelinesSharedFeatures.TOPIC_ID),
+features = Set.empty,
+labels = RecapUserFeatureAggregation.LabelsV2,
+metrics = Set(CountMetric),
+halfLives = Set(50.days),
+outputStore = mkPhysicalStore(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>OfflineAggregateDataRecordStore(</dt><dd><p>name = UserTopicAggregateStore,
+startDate = “2020-05-23 00:00”,
+commonConfig = timelinesOfflineAggregateSink,
+maxKvSourceFailures = defaultMaxKvSourceFailures</p>
+</dd>
+</dl>
+<p>))</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>val userTopicAggregatesV2 = AggregateGroup(</dt><dd><p>inputSource = timelinesDailyRecapMinimalSource,
+aggregatePrefix = “user_topic_aggregate_v2”,
+preTransforms = Seq(RichRemoveUserIdZero),
+keys = Set(USER_ID, TimelinesSharedFeatures.TOPIC_ID),
+features = RecapUserFeatureAggregation.UserTopicFeaturesV2Count,
+labels = RecapUserFeatureAggregation.LabelsV2,
+includeAnyFeature = false,
+includeAnyLabel = false,
+metrics = Set(CountMetric),
+halfLives = Set(50.days),
+outputStore = mkPhysicalStore(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>OfflineAggregateDataRecordStore(</dt><dd><p>name = UserTopicAggregateStore,
+startDate = “2020-05-23 00:00”,
+commonConfig = timelinesOfflineAggregateSink,
+maxKvSourceFailures = defaultMaxKvSourceFailures</p>
+</dd>
+</dl>
+<p>))</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>val userInferredTopicAggregates = AggregateGroup(</dt><dd><p>inputSource = timelinesDailyRecapMinimalSource,
+aggregatePrefix = “user_inferred_topic_aggregate”,
+preTransforms = Seq(RichRemoveUserIdZero),
+keys = Set(USER_ID, TimelinesSharedFeatures.INFERRED_TOPIC_IDS),
+features = Set.empty,
+labels = RecapUserFeatureAggregation.LabelsV2,
+metrics = Set(CountMetric),
+halfLives = Set(50.days),
+outputStore = mkPhysicalStore(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>OfflineAggregateDataRecordStore(</dt><dd><p>name = UserInferredTopicAggregateStore,
+startDate = “2020-09-09 00:00”,
+commonConfig = timelinesOfflineAggregateSink,
+maxKvSourceFailures = defaultMaxKvSourceFailures</p>
+</dd>
+</dl>
+<p>))</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>val userInferredTopicAggregatesV2 = AggregateGroup(</dt><dd><p>inputSource = timelinesDailyRecapMinimalSource,
+aggregatePrefix = “user_inferred_topic_aggregate_v2”,
+preTransforms = Seq(RichRemoveUserIdZero),
+keys = Set(USER_ID, TimelinesSharedFeatures.INFERRED_TOPIC_IDS),
+features = RecapUserFeatureAggregation.UserTopicFeaturesV2Count,
+labels = RecapUserFeatureAggregation.LabelsV2,
+includeAnyFeature = false,
+includeAnyLabel = false,
+metrics = Set(CountMetric),
+halfLives = Set(50.days),
+outputStore = mkPhysicalStore(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>OfflineAggregateDataRecordStore(</dt><dd><p>name = UserInferredTopicAggregateStore,
+startDate = “2020-09-09 00:00”,
+commonConfig = timelinesOfflineAggregateSink,
+maxKvSourceFailures = defaultMaxKvSourceFailures</p>
+</dd>
+</dl>
+<p>))</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>val userReciprocalEngagementAggregates = AggregateGroup(</dt><dd><p>inputSource = timelinesDailyRecapMinimalSource,
+aggregatePrefix = “user_aggregate_v6”,
+preTransforms = Seq(RichRemoveUserIdZero),
+keys = Set(USER_ID),
+features = Set.empty,
+labels = RecapUserFeatureAggregation.ReciprocalLabels,
+metrics = Set(CountMetric),
+halfLives = Set(50.days),
+outputStore = mkPhysicalStore(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>OfflineAggregateDataRecordStore(</dt><dd><p>name = UserAggregateStore,
+startDate = “2016-07-15 00:00”,
+commonConfig = timelinesOfflineAggregateSink,
+maxKvSourceFailures = defaultMaxKvSourceFailures</p>
+</dd>
+</dl>
+<p>)),</p>
+</div></blockquote>
+<p>includeAnyLabel = false</p>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>val userOriginalAuthorReciprocalEngagementAggregates = AggregateGroup(</dt><dd><p>inputSource = timelinesDailyRecapMinimalSource,
+aggregatePrefix = “user_original_author_aggregate_v1”,
+preTransforms = Seq(RichRemoveUserIdZero, RichRemoveAuthorIdZero),
+keys = Set(USER_ID, TimelinesSharedFeatures.ORIGINAL_AUTHOR_ID),
+features = Set.empty,
+labels = RecapUserFeatureAggregation.ReciprocalLabels,
+metrics = Set(CountMetric),
+halfLives = Set(50.days),
+outputStore = mkPhysicalStore(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>OfflineAggregateDataRecordStore(</dt><dd><p>name = UserOriginalAuthorAggregateStore,
+startDate = “2018-12-26 00:00”,
+commonConfig = timelinesOfflineAggregateSink,
+maxKvSourceFailures = defaultMaxKvSourceFailures</p>
+</dd>
+</dl>
+<p>)),</p>
+</div></blockquote>
+<p>includeAnyLabel = false</p>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>val originalAuthorReciprocalEngagementAggregates = AggregateGroup(</dt><dd><p>inputSource = timelinesDailyRecapMinimalSource,
+aggregatePrefix = “original_author_aggregate_v1”,
+preTransforms = Seq(RichRemoveUserIdZero, RichRemoveAuthorIdZero),
+keys = Set(TimelinesSharedFeatures.ORIGINAL_AUTHOR_ID),
+features = Set.empty,
+labels = RecapUserFeatureAggregation.ReciprocalLabels,
+metrics = Set(CountMetric),
+halfLives = Set(50.days),
+outputStore = mkPhysicalStore(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>OfflineAggregateDataRecordStore(</dt><dd><p>name = OriginalAuthorAggregateStore,
+startDate = “2023-02-25 00:00”,
+commonConfig = timelinesOfflineAggregateSink,
+maxKvSourceFailures = defaultMaxKvSourceFailures</p>
+</dd>
+</dl>
+<p>)),</p>
+</div></blockquote>
+<p>includeAnyLabel = false</p>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>val originalAuthorNegativeEngagementAggregates = AggregateGroup(</dt><dd><p>inputSource = timelinesDailyRecapMinimalSource,
+aggregatePrefix = “original_author_aggregate_v2”,
+preTransforms = Seq(RichRemoveUserIdZero, RichRemoveAuthorIdZero),
+keys = Set(TimelinesSharedFeatures.ORIGINAL_AUTHOR_ID),
+features = Set.empty,
+labels = RecapUserFeatureAggregation.NegativeEngagementLabels,
+metrics = Set(CountMetric),
+halfLives = Set(50.days),
+outputStore = mkPhysicalStore(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>OfflineAggregateDataRecordStore(</dt><dd><p>name = OriginalAuthorAggregateStore,
+startDate = “2023-02-25 00:00”,
+commonConfig = timelinesOfflineAggregateSink,
+maxKvSourceFailures = defaultMaxKvSourceFailures</p>
+</dd>
+</dl>
+<p>)),</p>
+</div></blockquote>
+<p>includeAnyLabel = false</p>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>val userListAggregates: AggregateGroup =</dt><dd><dl>
+<dt>AggregateGroup(</dt><dd><p>inputSource = timelinesDailyRecapMinimalSource,
+aggregatePrefix = “user_list_aggregate”,
+keys = Set(USER_ID, ListFeatures.LIST_ID),
+features = Set.empty,
+labels = RecapUserFeatureAggregation.LabelsV2,
+metrics = Set(CountMetric),
+halfLives = Set(50.days),
+outputStore = mkPhysicalStore(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>OfflineAggregateDataRecordStore(</dt><dd><p>name = UserListAggregateStore,
+startDate = “2020-05-28 00:00”,
+commonConfig = timelinesOfflineAggregateSink,
+maxKvSourceFailures = defaultMaxKvSourceFailures</p>
+</dd>
+</dl>
+<p>)),</p>
+</div></blockquote>
+<p>preTransforms = Seq(RichRemoveUserIdZero)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>val userMediaUnderstandingAnnotationAggregates: AggregateGroup = AggregateGroup(</dt><dd><p>inputSource = timelinesDailyRecapMinimalSource,
+aggregatePrefix = “user_media_annotation_aggregate”,
+preTransforms = Seq(RichRemoveUserIdZero),
+keys =</p>
+<blockquote>
+<div><p>Set(USER_ID, SemanticCoreFeatures.mediaUnderstandingHighRecallNonSensitiveEntityIdsFeature),</p>
+</div></blockquote>
+<p>features = Set.empty,
+labels = RecapUserFeatureAggregation.LabelsV2,
+metrics = Set(CountMetric),
+halfLives = Set(50.days),
+outputStore = mkPhysicalStore(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>OfflineAggregateDataRecordStore(</dt><dd><p>name = UserMediaUnderstandingAnnotationAggregateStore,
+startDate = “2021-03-20 00:00”,
+commonConfig = timelinesOfflineAggregateSink</p>
+</dd>
+</dl>
+<p>))</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>val userAuthorGoodClickAggregates = AggregateGroup(</dt><dd><p>inputSource = timelinesDailyRecapMinimalSource,
+aggregatePrefix = “user_author_good_click_aggregate”,
+preTransforms = Seq(FilterInNetworkTransform, RichRemoveUserIdZero),
+keys = Set(USER_ID, AUTHOR_ID),
+features = RecapUserFeatureAggregation.UserAuthorFeaturesV2,
+labels = RecapUserFeatureAggregation.GoodClickLabels,
+metrics = Set(SumMetric),
+halfLives = Set(14.days),
+outputStore = mkPhysicalStore(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>OfflineAggregateDataRecordStore(</dt><dd><p>name = UserAuthorAggregateStore,
+startDate = “2016-07-15 00:00”,
+commonConfig = timelinesOfflineAggregateSink,
+maxKvSourceFailures = defaultMaxKvSourceFailures</p>
+</dd>
+</dl>
+<p>))</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>val userEngagerGoodClickAggregates = AggregateGroup(</dt><dd><p>inputSource = timelinesDailyRecapMinimalSource,
+aggregatePrefix = “user_engager_good_click_aggregate”,
+keys = Set(USER_ID, EngagementDataRecordFeatures.PublicEngagementUserIds),
+features = Set.empty,
+labels = RecapUserFeatureAggregation.GoodClickLabels,
+metrics = Set(CountMetric),
+halfLives = Set(14.days),
+outputStore = mkPhysicalStore(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>OfflineAggregateDataRecordStore(</dt><dd><p>name = UserEngagerAggregateStore,
+startDate = “2016-09-02 00:00”,
+commonConfig = timelinesOfflineAggregateSink,
+maxKvSourceFailures = defaultMaxKvSourceFailures</p>
+</dd>
+</dl>
+<p>)),</p>
+</div></blockquote>
+<dl class="simple">
+<dt>preTransforms = Seq(</dt><dd><p>RichRemoveUserIdZero,
+RichUnifyPublicEngagersTransform</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../_sources/src/scala/com/twitter/timelines/prediction/common/aggregates/TimelinesAggregationConfigDetails.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

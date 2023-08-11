@@ -1,0 +1,498 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../" id="documentation_options" src="../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.simclusters_v2.scalding</p>
+<p>import com.twitter.dal.client.dataset.KeyValDALDataset
+import com.twitter.scalding.Execution
+import com.twitter.scalding.TypedTsv
+import com.twitter.scalding._
+import com.twitter.scalding_internal.dalv2.DAL
+import com.twitter.scalding_internal.dalv2.DALWrite._
+import com.twitter.scalding_internal.dalv2.remote_access.ExplicitLocation
+import com.twitter.scalding_internal.dalv2.remote_access.ProcAtla
+import com.twitter.scalding_internal.multiformat.format.keyval.KeyVal
+import com.twitter.simclusters_v2.common.ModelVersions
+import com.twitter.simclusters_v2.common.UserId
+import com.twitter.simclusters_v2.hdfs_sources.ProducerEmbeddingSources
+import com.twitter.simclusters_v2.hdfs_sources.AdhocKeyValSources
+import com.twitter.simclusters_v2.hdfs_sources.DataSources
+import com.twitter.simclusters_v2.hdfs_sources.SimclustersV2InterestedInFromProducerEmbeddings20M145KUpdatedScalaDataset
+import com.twitter.simclusters_v2.hdfs_sources.UserAndNeighborsFixedPathSource
+import com.twitter.simclusters_v2.hdfs_sources.UserUserNormalizedGraphScalaDataset
+import com.twitter.simclusters_v2.scalding.common.Util
+import com.twitter.simclusters_v2.thriftscala.ClustersUserIsInterestedIn
+import com.twitter.simclusters_v2.thriftscala.EmbeddingType
+import com.twitter.simclusters_v2.thriftscala.SimClusterWithScore
+import com.twitter.simclusters_v2.thriftscala.TopSimClustersWithScore
+import com.twitter.simclusters_v2.thriftscala.UserToInterestedInClusterScores
+import com.twitter.wtf.scalding.jobs.common.AdhocExecutionApp
+import com.twitter.wtf.scalding.jobs.common.ScheduledExecutionApp
+import java.util.TimeZone
+import scala.util.Random</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>This file implements the job for computing users’ interestedIn vector from the producerEmbeddings data set.</p></li>
+<li></li>
+<li><p>It reads the UserUserNormalizedGraphScalaDataset to get user-user follow + fav graph, and then</p></li>
+<li><p>based on the producerEmbedding clusters of each followed/faved user, we calculate how much a user is</p></li>
+<li><p>interestedIn a cluster. To compute the engagement and determine the clusters for the user, we reuse</p></li>
+<li><p>the functions defined in InterestedInKnownFor.</p></li>
+<li></li>
+<li><p>Using producerEmbeddings instead of knownFor to obtain interestedIn increases the coverage (especially</p></li>
+<li><p>for medium and light users) and also the density of the cluster embeddings for the user.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Adhoc job to generate the interestedIn from producer embeddings for the model version 20M145KUpdated</p></li>
+<li></li>
+</ul>
+<dl class="simple">
+<dt>scalding remote run </dt><dd><p>–target src/scala/com/twitter/simclusters_v2/scalding:interested_in_from_producer_embeddings –main-class com.twitter.simclusters_v2.scalding.InterestedInFromProducerEmbeddingsAdhocApp –user cassowary –cluster bluebird-qus1 –keytab /var/lib/tss/keys/fluffy/keytabs/client/cassowary.keytab –principal service_acoount&#64;TWITTER.BIZ – –outputDir /gcs/user/cassowary/adhoc/interested_in_from_prod_embeddings/ –date 2020-08-25 –typedTsv true</p>
+</dd>
+</dl>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>object InterestedInFromProducerEmbeddingsAdhocApp extends AdhocExecutionApp {</dt><dd><dl class="simple">
+<dt>override def runOnDateRange(</dt><dd><p>args: Args</p>
+</dd>
+<dt>)(</dt><dd><p>implicit dateRange: DateRange,
+timeZone: TimeZone,
+uniqueID: UniqueID</p>
+</dd>
+</dl>
+<p>): Execution[Unit] = {</p>
+<blockquote>
+<div><p>val outputDir = args(“outputDir”)
+val inputGraph = args.optional(“graphInputDir”) match {</p>
+<blockquote>
+<div><p>case Some(inputDir) =&gt; TypedPipe.from(UserAndNeighborsFixedPathSource(inputDir))
+case None =&gt;</p>
+<blockquote>
+<div><dl class="simple">
+<dt>DAL</dt><dd><p>.readMostRecentSnapshotNoOlderThan(UserUserNormalizedGraphScalaDataset, Days(30))
+.toTypedPipe</p>
+</dd>
+</dl>
+</div></blockquote>
+</div></blockquote>
+<p>}
+val socialProofThreshold = args.int(“socialProofThreshold”, 2)
+val maxClustersPerUserFinalResult = args.int(“maxInterestedInClustersPerUser”, 50)
+val maxClustersFromProducer = args.int(“maxClustersPerProducer”, 25)
+val typedTsvTag = args.boolean(“typedTsv”)</p>
+<dl class="simple">
+<dt>val embeddingType =</dt><dd><p>EmbeddingType.ProducerFavBasedSemanticCoreEntity</p>
+</dd>
+</dl>
+<p>val modelVersion = ModelVersions.Model20M145KUpdated
+val producerEmbeddings = ProducerEmbeddingSources</p>
+<blockquote>
+<div><dl class="simple">
+<dt>.producerEmbeddingSourceLegacy(embeddingType, ModelVersions.toModelVersion(modelVersion))(</dt><dd><p>dateRange.embiggen(Days(7)))</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>import InterestedInFromProducerEmbeddingsBatchApp._</p>
+<p>val numProducerMappings = Stat(“num_producer_embeddings_total”)
+val numProducersWithLargeClusterMappings = Stat(</p>
+<blockquote>
+<div><p>“num_producers_with_more_clusters_than_threshold”)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>val numProducersWithSmallClusterMappings = Stat(</dt><dd><p>“num_producers_with_clusters_less_than_threshold”)</p>
+</dd>
+</dl>
+<p>val totalClustersCoverageProducerEmbeddings = Stat(“num_clusters_total_producer_embeddings”)</p>
+<dl>
+<dt>val producerEmbeddingsWithScore = producerEmbeddings.map {</dt><dd><dl>
+<dt>case (userId: Long, topSimClusters: TopSimClustersWithScore) =&gt;</dt><dd><dl>
+<dt>(</dt><dd><p>userId,
+topSimClusters.topClusters.toArray</p>
+<blockquote>
+<div><dl class="simple">
+<dt>.map {</dt><dd><dl class="simple">
+<dt>case (simCluster: SimClusterWithScore) =&gt;</dt><dd><p>(simCluster.clusterId, simCluster.score.toFloat)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+val producerEmbeddingsPruned = producerEmbeddingsWithScore.map {</p>
+<blockquote>
+<div><dl>
+<dt>case (producerId, clusterArray) =&gt;</dt><dd><p>numProducerMappings.inc()
+val clusterSize = clusterArray.size
+totalClustersCoverageProducerEmbeddings.incBy(clusterSize)
+val prunedList = if (clusterSize &gt; maxClustersFromProducer) {</p>
+<blockquote>
+<div><p>numProducersWithLargeClusterMappings.inc()
+clusterArray</p>
+<blockquote>
+<div><dl class="simple">
+<dt>.sortBy {</dt><dd><p>case (_, knownForScore) =&gt; -knownForScore</p>
+</dd>
+</dl>
+<p>}.take(maxClustersFromProducer)</p>
+</div></blockquote>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>numProducersWithSmallClusterMappings.inc()
+clusterArray</p>
+</dd>
+</dl>
+<p>}
+(producerId, prunedList)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>val result = InterestedInFromKnownFor</dt><dd><dl class="simple">
+<dt>.run(</dt><dd><p>inputGraph,
+producerEmbeddingsPruned,
+socialProofThreshold,
+maxClustersPerUserFinalResult,
+modelVersion</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>val resultWithoutSocial = getInterestedInDiscardSocial(result)</p>
+<dl>
+<dt>if (typedTsvTag) {</dt><dd><dl>
+<dt>Util.printCounters(</dt><dd><dl>
+<dt>resultWithoutSocial</dt><dd><dl>
+<dt>.map {</dt><dd><dl>
+<dt>case (userId: Long, clusters: ClustersUserIsInterestedIn) =&gt;</dt><dd><dl class="simple">
+<dt>(</dt><dd><p>userId,
+clusters.clusterIdToScores.keys.toString()</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+.writeExecution(</p>
+<blockquote>
+<div><p>TypedTsv(outputDir)</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>} else {</dt><dd><dl>
+<dt>Util.printCounters(</dt><dd><dl>
+<dt>resultWithoutSocial</dt><dd><dl class="simple">
+<dt>.writeExecution(</dt><dd><p>AdhocKeyValSources.interestedInSource(outputDir)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Production job for computing interestedIn data set from the producer embeddings for the model version 20M145KUpdated.</p></li>
+<li><p>It writes the data set in KeyVal format to produce a MH DAL data set.</p></li>
+<li></li>
+<li><p>To deploy the job:</p></li>
+<li></li>
+<li><p>capesospy-v2 update –build_locally –start_cron</p></li>
+<li><p>–start_cron interested_in_from_producer_embeddings</p></li>
+<li><p>src/scala/com/twitter/simclusters_v2/capesos_config/atla_proc3.yaml</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>object InterestedInFromProducerEmbeddingsBatchApp extends ScheduledExecutionApp {</dt><dd><p>override val firstTime: RichDate = RichDate(“2019-11-01”)</p>
+<p>override val batchIncrement: Duration = Days(7)</p>
+<dl>
+<dt>def getPrunedEmbeddings(</dt><dd><p>producerEmbeddings: TypedPipe[(Long, TopSimClustersWithScore)],
+maxClustersFromProducer: Int</p>
+</dd>
+<dt>): TypedPipe[(Long, TopSimClustersWithScore)] = {</dt><dd><dl>
+<dt>producerEmbeddings.map {</dt><dd><dl>
+<dt>case (producerId, producerClusters) =&gt;</dt><dd><dl>
+<dt>val prunedProducerClusters =</dt><dd><dl>
+<dt>producerClusters.topClusters</dt><dd><dl class="simple">
+<dt>.sortBy {</dt><dd><p>case simCluster =&gt; -simCluster.score.toFloat</p>
+</dd>
+</dl>
+<p>}.take(maxClustersFromProducer)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>(producerId, TopSimClustersWithScore(prunedProducerClusters, producerClusters.modelVersion))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def getInterestedInDiscardSocial(</dt><dd><p>interestedInFromProducersResult: TypedPipe[(UserId, ClustersUserIsInterestedIn)]</p>
+</dd>
+<dt>): TypedPipe[(UserId, ClustersUserIsInterestedIn)] = {</dt><dd><dl>
+<dt>interestedInFromProducersResult.map {</dt><dd><dl>
+<dt>case (srcId, fullClusterList) =&gt;</dt><dd><dl>
+<dt>val fullClusterListWithoutSocial = fullClusterList.clusterIdToScores.map {</dt><dd><dl>
+<dt>case (clusterId, clusterDetails) =&gt;</dt><dd><dl>
+<dt>val clusterDetailsWithoutSocial = UserToInterestedInClusterScores(</dt><dd><p>followScore = clusterDetails.followScore,
+followScoreClusterNormalizedOnly = clusterDetails.followScoreClusterNormalizedOnly,
+followScoreProducerNormalizedOnly = clusterDetails.followScoreProducerNormalizedOnly,
+followScoreClusterAndProducerNormalized =</p>
+<blockquote>
+<div><p>clusterDetails.followScoreClusterAndProducerNormalized,</p>
+</div></blockquote>
+<p>favScore = clusterDetails.favScore,
+favScoreClusterNormalizedOnly = clusterDetails.favScoreClusterNormalizedOnly,
+favScoreProducerNormalizedOnly = clusterDetails.favScoreProducerNormalizedOnly,
+favScoreClusterAndProducerNormalized =</p>
+<blockquote>
+<div><p>clusterDetails.favScoreClusterAndProducerNormalized,</p>
+</div></blockquote>
+<p>// Social proof is currently not being used anywhere else, hence being discarded to reduce space for this dataset
+usersBeingFollowed = None,
+usersThatWereFaved = None,
+numUsersInterestedInThisClusterUpperBound =</p>
+<blockquote>
+<div><p>clusterDetails.numUsersInterestedInThisClusterUpperBound,</p>
+</div></blockquote>
+<p>logFavScore = clusterDetails.logFavScore,
+logFavScoreClusterNormalizedOnly = clusterDetails.logFavScoreClusterNormalizedOnly,
+// Counts of the social proof are maintained
+numUsersBeingFollowed = Some(clusterDetails.usersBeingFollowed.getOrElse(Nil).size),
+numUsersThatWereFaved = Some(clusterDetails.usersThatWereFaved.getOrElse(Nil).size)</p>
+</dd>
+</dl>
+<p>)
+(clusterId, clusterDetailsWithoutSocial)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<blockquote>
+<div><p>srcId,
+ClustersUserIsInterestedIn(</p>
+<blockquote>
+<div><p>fullClusterList.knownForModelVersion,
+fullClusterListWithoutSocial))</p>
+</div></blockquote>
+</div></blockquote>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>override def runOnDateRange(</dt><dd><p>args: Args</p>
+</dd>
+<dt>)(</dt><dd><p>implicit dateRange: DateRange,
+timeZone: TimeZone,
+uniqueID: UniqueID</p>
+</dd>
+</dl>
+<p>): Execution[Unit] = {</p>
+<blockquote>
+<div><p>//Input args for the run
+val socialProofThreshold = args.int(“socialProofThreshold”, 2)
+val maxClustersFromProducer = args.int(“maxClustersPerProducer”, 25)
+val maxClustersPerUserFinalResult = args.int(“maxInterestedInClustersPerUser”, 50)</p>
+<p>//Path variables
+val modelVersionUpdated = ModelVersions.toModelVersion(ModelVersions.Model20M145KUpdated)
+val rootPath: String = s”/user/cassowary/manhattan_sequence_files”
+val interestedInFromProducersPath =</p>
+<blockquote>
+<div><p>rootPath + “/interested_in_from_producer_embeddings/” + modelVersionUpdated</p>
+</div></blockquote>
+<p>//Input adjacency list and producer embeddings
+val userUserNormalGraph =</p>
+<blockquote>
+<div><p>DataSources.userUserNormalizedGraphSource(dateRange.prepend(Days(7))).forceToDisk</p>
+</div></blockquote>
+<dl class="simple">
+<dt>val outputKVDataset: KeyValDALDataset[KeyVal[Long, ClustersUserIsInterestedIn]] =</dt><dd><p>SimclustersV2InterestedInFromProducerEmbeddings20M145KUpdatedScalaDataset</p>
+</dd>
+<dt>val producerEmbeddings = ProducerEmbeddingSources</dt><dd><dl class="simple">
+<dt>.producerEmbeddingSourceLegacy(</dt><dd><p>EmbeddingType.ProducerFavBasedSemanticCoreEntity,
+modelVersionUpdated)(dateRange.embiggen(Days(7)))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>val producerEmbeddingsPruned = getPrunedEmbeddings(producerEmbeddings, maxClustersFromProducer)
+val producerEmbeddingsWithScore = producerEmbeddingsPruned.map {</p>
+<blockquote>
+<div><dl>
+<dt>case (userId: Long, topSimClusters: TopSimClustersWithScore) =&gt;</dt><dd><dl>
+<dt>(</dt><dd><p>userId,
+topSimClusters.topClusters.toArray</p>
+<blockquote>
+<div><dl class="simple">
+<dt>.map {</dt><dd><dl class="simple">
+<dt>case (simCluster: SimClusterWithScore) =&gt;</dt><dd><p>(simCluster.clusterId, simCluster.score.toFloat)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>val interestedInFromProducersResult =</dt><dd><dl class="simple">
+<dt>InterestedInFromKnownFor.run(</dt><dd><p>userUserNormalGraph,
+producerEmbeddingsWithScore,
+socialProofThreshold,
+maxClustersPerUserFinalResult,
+modelVersionUpdated.toString</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>val interestedInFromProducersWithoutSocial =</dt><dd><p>getInterestedInDiscardSocial(interestedInFromProducersResult)</p>
+</dd>
+<dt>val writeKeyValResultExec = interestedInFromProducersWithoutSocial</dt><dd><p>.map { case (userId, clusters) =&gt; KeyVal(userId, clusters) }
+.writeDALVersionedKeyValExecution(</p>
+<blockquote>
+<div><p>outputKVDataset,
+D.Suffix(interestedInFromProducersPath)</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>writeKeyValResultExec</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../_sources/src/scala/com/twitter/simclusters_v2/scalding/InterestedInFromProducerEmbeddingsAdhocApp.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

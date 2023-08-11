@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../" id="documentation_options" src="../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.ingester.pipeline.util;</p>
+<p>import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Optional;</p>
+<p>import com.google.common.base.Preconditions;</p>
+<p>import com.twitter.search.common.indexing.thriftjava.ThriftGeoLocationSource;
+import com.twitter.search.common.indexing.thriftjava.ThriftGeoPoint;
+import com.twitter.search.common.indexing.thriftjava.ThriftGeocodeRecord;
+import com.twitter.search.common.metrics.SearchCounter;
+import com.twitter.search.common.relevance.entities.GeoObject;
+import com.twitter.search.common.util.geocoding.ManhattanGeocodeRecordStore;
+import com.twitter.search.ingester.model.IngesterTwitterMessage;
+import com.twitter.stitch.Stitch;
+import com.twitter.storage.client.manhattan.kv.JavaManhattanKVEndpoint;
+import com.twitter.storage.client.manhattan.kv.ManhattanValue;
+import com.twitter.util.Function;
+import com.twitter.util.Future;</p>
+<p>public final class ManhattanCodedLocationProvider {</p>
+<blockquote>
+<div><p>private final ManhattanGeocodeRecordStore store;
+private final SearchCounter locationsCounter;</p>
+<p>private static final String LOCATIONS_POPULATED_STAT_NAME = “_locations_populated_count”;</p>
+<dl>
+<dt>public static ManhattanCodedLocationProvider createWithEndpoint(</dt><dd><blockquote>
+<div><p>JavaManhattanKVEndpoint endpoint, String metricsPrefix, String datasetName) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>return new ManhattanCodedLocationProvider(</dt><dd><p>ManhattanGeocodeRecordStore.create(endpoint, datasetName), metricsPrefix);</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private ManhattanCodedLocationProvider(ManhattanGeocodeRecordStore store, String metricPrefix) {</dt><dd><p>this.locationsCounter = SearchCounter.export(metricPrefix + LOCATIONS_POPULATED_STAT_NAME);
+this.store = store;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Iterates through all given messages, and for each message that has a location set, retrieves</p></li>
+<li><p>the coordinates of that location from Manhattan and sets them back on that message.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>public Future&lt;Collection&lt;IngesterTwitterMessage&gt;&gt; populateCodedLatLon(</dt><dd><blockquote>
+<div><p>Collection&lt;IngesterTwitterMessage&gt; messages) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>if (messages.isEmpty()) {</dt><dd><p>return Future.value(messages);</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// Batch read requests
+List&lt;Stitch&lt;Optional&lt;ManhattanValue&lt;ThriftGeocodeRecord&gt;&gt;&gt;&gt; readRequests =</p>
+<blockquote>
+<div><p>new ArrayList&lt;&gt;(messages.size());</p>
+</div></blockquote>
+<dl class="simple">
+<dt>for (IngesterTwitterMessage message<span class="classifier">messages) {</span></dt><dd><p>readRequests.add(store.asyncReadFromManhattan(message.getLocation()));</p>
+</dd>
+</dl>
+<p>}
+Future&lt;List&lt;Optional&lt;ManhattanValue&lt;ThriftGeocodeRecord&gt;&gt;&gt;&gt; batchedRequest =</p>
+<blockquote>
+<div><p>Stitch.run(Stitch.collect(readRequests));</p>
+</div></blockquote>
+<dl>
+<dt>return batchedRequest.map(Function.func(optGeoLocations -&gt; {</dt><dd><p>// Iterate over messages and responses simultaneously
+Preconditions.checkState(messages.size() == optGeoLocations.size());
+Iterator&lt;IngesterTwitterMessage&gt; messageIterator = messages.iterator();
+Iterator&lt;Optional&lt;ManhattanValue&lt;ThriftGeocodeRecord&gt;&gt;&gt; optGeoLocationIterator =</p>
+<blockquote>
+<div><p>optGeoLocations.iterator();</p>
+</div></blockquote>
+<dl>
+<dt>while (messageIterator.hasNext() &amp;&amp; optGeoLocationIterator.hasNext()) {</dt><dd><p>IngesterTwitterMessage message = messageIterator.next();
+Optional&lt;ManhattanValue&lt;ThriftGeocodeRecord&gt;&gt; optGeoLocation =</p>
+<blockquote>
+<div><p>optGeoLocationIterator.next();</p>
+</div></blockquote>
+<dl class="simple">
+<dt>if (setGeoLocationForMessage(message, optGeoLocation)) {</dt><dd><p>locationsCounter.increment();</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}
+return messages;</p>
+</dd>
+</dl>
+<p>}));</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Returns whether a valid geolocation was successfully found and saved in the message.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>private boolean setGeoLocationForMessage(</dt><dd><blockquote>
+<div><p>IngesterTwitterMessage message,
+Optional&lt;ManhattanValue&lt;ThriftGeocodeRecord&gt;&gt; optGeoLocation) {</p>
+</div></blockquote>
+<dl>
+<dt>if (optGeoLocation.isPresent()) {</dt><dd><p>ThriftGeocodeRecord geoLocation = optGeoLocation.get().contents();
+ThriftGeoPoint geoTags = geoLocation.getGeoPoint();</p>
+<dl>
+<dt>if ((geoTags.getLatitude() == GeoObject.DOUBLE_FIELD_NOT_PRESENT)</dt><dd><blockquote>
+<div><p>&amp;&amp; (geoTags.getLongitude() == GeoObject.DOUBLE_FIELD_NOT_PRESENT)) {</p>
+</div></blockquote>
+<p>// This case indicates that we have “negative cache” in coded_locations table, so
+// don’t try to geocode again.
+message.setUncodeableLocation();
+return false;</p>
+</dd>
+<dt>} else {</dt><dd><dl class="simple">
+<dt>GeoObject code = new GeoObject(</dt><dd><p>geoTags.getLatitude(),
+geoTags.getLongitude(),
+geoTags.getAccuracy(),
+ThriftGeoLocationSource.USER_PROFILE);</p>
+</dd>
+</dl>
+<p>message.setGeoLocation(code);
+return true;</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>} else {</dt><dd><p>message.setGeocodeRequired();
+return false;</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../_sources/src/java/com/twitter/search/ingester/pipeline/util/ManhattanCodedLocationProvider.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

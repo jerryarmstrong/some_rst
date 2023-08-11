@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../../" id="documentation_options" src="../../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.unified_user_actions.enricher.hydrator
+import com.twitter.dynmap.DynMap
+import com.twitter.finagle.stats.NullStatsReceiver
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.graphql.thriftscala.AuthHeaders
+import com.twitter.graphql.thriftscala.Authentication
+import com.twitter.graphql.thriftscala.Document
+import com.twitter.graphql.thriftscala.GraphQlRequest
+import com.twitter.graphql.thriftscala.GraphqlExecutionService
+import com.twitter.graphql.thriftscala.Variables
+import com.twitter.unified_user_actions.enricher.ImplementationException
+import com.twitter.unified_user_actions.enricher.graphql.GraphqlRspParser
+import com.twitter.unified_user_actions.enricher.hcache.LocalCache
+import com.twitter.unified_user_actions.enricher.internal.thriftscala.EnrichmentEnvelop
+import com.twitter.unified_user_actions.enricher.internal.thriftscala.EnrichmentIdType
+import com.twitter.unified_user_actions.enricher.internal.thriftscala.EnrichmentInstruction
+import com.twitter.unified_user_actions.enricher.internal.thriftscala.EnrichmentKey
+import com.twitter.unified_user_actions.thriftscala.AuthorInfo
+import com.twitter.unified_user_actions.thriftscala.Item
+import com.twitter.util.Future</p>
+<dl>
+<dt>class DefaultHydrator(</dt><dd><p>cache: LocalCache[EnrichmentKey, DynMap],
+graphqlClient: GraphqlExecutionService.FinagledClient,
+scopedStatsReceiver: StatsReceiver = NullStatsReceiver)</p>
+<blockquote>
+<div><p>extends AbstractHydrator(scopedStatsReceiver) {</p>
+</div></blockquote>
+<dl>
+<dt>private def constructGraphqlReq(</dt><dd><p>enrichmentKey: EnrichmentKey</p>
+</dd>
+<dt>): GraphQlRequest =</dt><dd><dl>
+<dt>enrichmentKey.keyType match {</dt><dd><dl>
+<dt>case EnrichmentIdType.TweetId =&gt;</dt><dd><dl>
+<dt>GraphQlRequest(</dt><dd><p>// see go/graphiql/M5sHxua-RDiRtTn48CAhng
+document = Document.DocumentId(“M5sHxua-RDiRtTn48CAhng”),
+operationName = Some(“TweetHydration”),
+variables = Some(</p>
+<blockquote>
+<div><p>Variables.JsonEncodedVariables(s”””{“rest_id”: “${enrichmentKey.id}”}”””)</p>
+</div></blockquote>
+<p>),
+authentication = Authentication.AuthHeaders(</p>
+<blockquote>
+<div><p>AuthHeaders()</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>case _ =&gt;</dt><dd><dl class="simple">
+<dt>throw new ImplementationException(</dt><dd><p>s”Missing implementation for hydration of type ${enrichmentKey.keyType}”)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>private def hydrateAuthorInfo(item: Item.TweetInfo, authorId: Option[Long]): Item.TweetInfo = {</dt><dd><dl>
+<dt>item.tweetInfo.actionTweetAuthorInfo match {</dt><dd><p>case Some(_) =&gt; item
+case _ =&gt;</p>
+<blockquote>
+<div><dl class="simple">
+<dt>item.copy(tweetInfo = item.tweetInfo.copy(</dt><dd><p>actionTweetAuthorInfo = Some(AuthorInfo(authorId = authorId))</p>
+</dd>
+</dl>
+<p>))</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>override protected def safelyHydrate(</dt><dd><p>instruction: EnrichmentInstruction,
+key: EnrichmentKey,
+envelop: EnrichmentEnvelop</p>
+</dd>
+<dt>): Future[EnrichmentEnvelop] = {</dt><dd><dl>
+<dt>instruction match {</dt><dd><dl>
+<dt>case EnrichmentInstruction.TweetEnrichment =&gt;</dt><dd><dl>
+<dt>val dynMapFuture = cache.getOrElseUpdate(key) {</dt><dd><dl>
+<dt>graphqlClient</dt><dd><p>.graphql(constructGraphqlReq(enrichmentKey = key))
+.map { body =&gt;</p>
+<blockquote>
+<div><dl class="simple">
+<dt>body.response.flatMap { r =&gt;</dt><dd><p>GraphqlRspParser.toDynMapOpt(r)</p>
+</dd>
+</dl>
+<p>}.get</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>dynMapFuture.map(map =&gt; {</dt><dd><dl>
+<dt>val authorIdOpt =</dt><dd><p>map.getLongOpt(“data.tweet_result_by_rest_id.result.core.user.legacy.id_str”)</p>
+</dd>
+<dt>val hydratedEnvelop = envelop.uua.item match {</dt><dd><dl class="simple">
+<dt>case item: Item.TweetInfo =&gt;</dt><dd><p>envelop.copy(uua = envelop.uua.copy(item = hydrateAuthorInfo(item, authorIdOpt)))</p>
+</dd>
+</dl>
+<p>case _ =&gt; envelop</p>
+</dd>
+</dl>
+<p>}
+hydratedEnvelop</p>
+</dd>
+</dl>
+<p>})</p>
+</dd>
+</dl>
+<p>case _ =&gt; Future.value(envelop)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../../_sources/unified_user_actions/enricher/src/main/scala/com/twitter/unified_user_actions/enricher/hydrator/DefaultHydrator.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

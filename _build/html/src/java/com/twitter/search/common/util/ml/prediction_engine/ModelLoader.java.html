@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.common.util.ml.prediction_engine;</p>
+<p>import java.io.IOException;
+import java.util.List;
+import java.util.Map;</p>
+<p>import com.google.common.base.Optional;
+import com.google.common.base.Supplier;
+import com.google.common.base.Suppliers;
+import com.google.common.collect.Lists;
+import com.google.common.collect.Maps;</p>
+<p>import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;</p>
+<p>import com.twitter.search.common.file.AbstractFile;
+import com.twitter.search.common.file.FileUtils;
+import com.twitter.search.common.metrics.SearchCounter;
+import com.twitter.search.common.metrics.SearchLongGauge;
+import com.twitter.search.common.metrics.SearchStatsReceiver;</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Loads LightweightLinearModel objects from a directory and provides an interface for reloading</p></li>
+<li><p>them periodically.</p></li>
+<li></li>
+<li><p>All the models must support the same features (defined by a FeatureContext) and they are</p></li>
+<li><p>identified by the name of the subdirectory. This is the required directory structure:</p></li>
+<li></li>
+<li><p>/path/to/base-directory</p></li>
+<li><p>one-model/model.tsv</p></li>
+<li><p>another-model/model.tsv</p></li>
+<li><p>experimental-model/model.tsv</p></li>
+<li></li>
+<li><p>Each subdirectory must contain a file named ‘model.tsv’ in the format required by</p></li>
+<li><p>LightweightLinearModel.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+</dl>
+<p>public class ModelLoader implements Runnable {</p>
+<blockquote>
+<div><p>private static final Logger LOG = LoggerFactory.getLogger(ModelLoader.class);
+private static final String MODEL_FILE_NAME = “model.tsv”;</p>
+<p>private final CompositeFeatureContext featureContext;
+private final Supplier&lt;AbstractFile&gt; directorySupplier;</p>
+<p>private final Map&lt;String, LightweightLinearModel&gt; models;
+private final Map&lt;String, Long&gt; lastModifiedMsByModel;</p>
+<p>private final SearchLongGauge lastModelLoadedAtMs;
+private final SearchLongGauge numModels;
+private final SearchCounter numLoads;
+private final SearchCounter numErrors;</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Creates a new instance for a feature context and a base directory.</p></li>
+<li></li>
+<li><p>It exports 4 counters:</p></li>
+<li></li>
+<li><p>${counterPrefix}_last_loaded:</p></li>
+<li><p>Timestamp (in ms) when the last model was loaded.</p></li>
+<li><p>${counterPrefix}_num_models:</p></li>
+<li><p>Number of models currently loaded.</p></li>
+<li><p>${counterPrefix}_num_loads:</p></li>
+<li><p>Number of succesful model loads.</p></li>
+<li><p>${counterPrefix}_num_errors:</p></li>
+<li><p>Number of errors occurred while loading the models.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>protected ModelLoader(</dt><dd><blockquote>
+<div><p>CompositeFeatureContext featureContext,
+Supplier&lt;AbstractFile&gt; directorySupplier,
+String counterPrefix,
+SearchStatsReceiver statsReceiver) {</p>
+</div></blockquote>
+<p>this.featureContext = featureContext;</p>
+<p>// This function returns the base directory every time we call ‘run’. We use a function instead
+// of using directly an AbstractFile instance, in case that we can’t obtain an instance at
+// initialization time (e.g. if there’s an issue with HDFS).
+this.directorySupplier = directorySupplier;
+this.models = Maps.newConcurrentMap();
+this.lastModifiedMsByModel = Maps.newConcurrentMap();</p>
+<p>this.lastModelLoadedAtMs = statsReceiver.getLongGauge(counterPrefix + “last_loaded”);
+this.numModels = statsReceiver.getLongGauge(counterPrefix + “num_models”);
+this.numLoads = statsReceiver.getCounter(counterPrefix + “num_loads”);
+this.numErrors = statsReceiver.getCounter(counterPrefix + “num_errors”);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public Optional&lt;LightweightLinearModel&gt; getModel(String name) {</dt><dd><p>return Optional.fromNullable(models.get(name));</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Loads the models from the base directory.</p></li>
+<li></li>
+<li><p>It doesn’t load a model if its file has not been modified since the last time it was loaded.</p></li>
+<li></li>
+<li><p>This method doesn’t delete previously loaded models if their directories are not available.</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+</dl>
+<p>&#64;Override
+public void run() {</p>
+<blockquote>
+<div><dl>
+<dt>try {</dt><dd><p>AbstractFile baseDirectory = directorySupplier.get();
+List&lt;AbstractFile&gt; modelDirectories =</p>
+<blockquote>
+<div><p>Lists.newArrayList(baseDirectory.listFiles(IS_MODEL_DIR));</p>
+</div></blockquote>
+<dl>
+<dt>for (AbstractFile directory<span class="classifier">modelDirectories) {</span></dt><dd><dl>
+<dt>try {</dt><dd><p>// Note that the modelName is the directory name, if it ends with “.schema_based”, the
+// model will be loaded as a schema-based model.
+String modelName = directory.getName();
+AbstractFile modelFile = directory.getChild(MODEL_FILE_NAME);
+long currentLastModified = modelFile.getLastModified();
+Long lastModified = lastModifiedMsByModel.get(modelName);
+if (lastModified == null || lastModified &lt; currentLastModified) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>LightweightLinearModel model =</dt><dd><p>LightweightLinearModel.load(modelName, featureContext, modelFile);</p>
+</dd>
+<dt>if (!models.containsKey(modelName)) {</dt><dd><p>LOG.info(“Loading model {}.”, modelName);</p>
+</dd>
+</dl>
+<p>}
+models.put(modelName, model);
+lastModifiedMsByModel.put(modelName, currentLastModified);
+lastModelLoadedAtMs.set(System.currentTimeMillis());
+numLoads.increment();
+LOG.debug(“Model: {}”, model);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>LOG.debug(“Directory for model {} has not changed.”, modelName);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>} catch (Exception e) {</dt><dd><p>LOG.error(“Error loading model from directory: “ + directory.getPath(), e);
+this.numErrors.increment();</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}
+if (numModels.get() != models.size()) {</p>
+<blockquote>
+<div><p>LOG.info(“Finished loading models. Model names: {}”, models.keySet());</p>
+</div></blockquote>
+<p>}
+this.numModels.set(models.size());</p>
+</dd>
+<dt>} catch (IOException e) {</dt><dd><p>LOG.error(“Error loading models”, e);
+this.numErrors.increment();</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Creates an instance that loads models from a directory (local or from HDFS).</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+<dt>public static ModelLoader forDirectory(</dt><dd><blockquote>
+<div><p>final AbstractFile directory,
+CompositeFeatureContext featureContext,
+String counterPrefix,
+SearchStatsReceiver statsReceiver) {</p>
+</div></blockquote>
+<p>Supplier&lt;AbstractFile&gt; directorySupplier = Suppliers.ofInstance(directory);
+return new ModelLoader(featureContext, directorySupplier, counterPrefix, statsReceiver);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Creates an instance that loads models from HDFS.</p></li>
+</ul>
+<p><a href="#id9"><span class="problematic" id="id10">*</span></a>/</p>
+</dd>
+<dt>public static ModelLoader forHdfsDirectory(</dt><dd><blockquote>
+<div><p>final String nameNode,
+final String directory,
+CompositeFeatureContext featureContext,
+String counterPrefix,
+SearchStatsReceiver statsReceiver) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>Supplier&lt;AbstractFile&gt; directorySupplier =</dt><dd><p>() -&gt; FileUtils.getHdfsFileHandle(directory, nameNode);</p>
+</dd>
+</dl>
+<p>return new ModelLoader(featureContext, directorySupplier, counterPrefix, statsReceiver);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private static final AbstractFile.Filter IS_MODEL_DIR = file -&gt; {</dt><dd><dl>
+<dt>try {</dt><dd><dl class="simple">
+<dt>if (file.isDirectory()) {</dt><dd><p>AbstractFile modelFile = file.getChild(MODEL_FILE_NAME);
+return (modelFile != null) &amp;&amp; modelFile.canRead();</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>} catch (IOException e) {</dt><dd><p>LOG.error(“Error reading file: “ + file, e);</p>
+</dd>
+</dl>
+<p>}
+return false;</p>
+</dd>
+</dl>
+<p>};</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/src/java/com/twitter/search/common/util/ml/prediction_engine/ModelLoader.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

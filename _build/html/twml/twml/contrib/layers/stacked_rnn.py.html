@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../" id="documentation_options" src="../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>from twitter.deepbird.compat.v1.rnn import stack_bidirectional_dynamic_rnn</p>
+<p>import tensorflow.compat.v1 as tf
+import tensorflow
+import twml</p>
+<dl>
+<dt>def _get_rnn_cell_creator(cell_type):</dt><dd><dl class="simple">
+<dt>if cell_type == “LSTM”:</dt><dd><p>Cell = tf.nn.rnn_cell.LSTMCell</p>
+</dd>
+<dt>elif cell_type == “GRU”:</dt><dd><p>Cell = tf.nn.rnn_cell.GRUCell</p>
+</dd>
+<dt>else:</dt><dd><dl class="simple">
+<dt>raise ValueError(“cell_type: %s is not supported.”</dt><dd><p>“It should be one of ‘LSTM’ or ‘GRU’.” % cell_type)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>return Cell</p>
+</dd>
+<dt>def _apply_dropout_wrapper(rnn_cells, dropout):</dt><dd><p>“”” Apply dropout wrapper around each cell if necessary “””
+if rnn_cells is None:</p>
+<blockquote>
+<div><p>return None</p>
+</div></blockquote>
+<p>cells = []
+for i, dropout_rate in enumerate(dropout):</p>
+<blockquote>
+<div><p>cell = rnn_cells[i]
+if dropout_rate &gt; 0:</p>
+<blockquote>
+<div><p>cell = tf.nn.rnn_cell.DropoutWrapper(cell, input_keep_prob=(1.0 - dropout_rate))</p>
+</div></blockquote>
+<p>cells.append(cell)</p>
+</div></blockquote>
+<p>return cells</p>
+</dd>
+<dt>def _create_bidirectional_rnn_cell(num_units, dropout, cell_type):</dt><dd><p>scope_name = “lstm” if cell_type else “gru”
+with tf.variable_scope(scope_name):</p>
+<blockquote>
+<div><p>Cell = _get_rnn_cell_creator(cell_type)
+cells_forward = [Cell(output_size) for output_size in num_units]
+cells_backward = [Cell(output_size) for output_size in num_units]
+cells_forward = _apply_dropout_wrapper(cells_forward, dropout)
+cells_backward = _apply_dropout_wrapper(cells_backward, dropout)</p>
+</div></blockquote>
+<dl>
+<dt>def stacked_rnn_cell(inputs, sequence_lengths):</dt><dd><dl>
+<dt>with tf.variable_scope(scope_name):</dt><dd><dl class="simple">
+<dt>outputs, final_states, _ = stack_bidirectional_dynamic_rnn(</dt><dd><p>cells_fw=cells_forward, cells_bw=cells_backward, inputs=inputs,
+sequence_length=sequence_lengths, dtype=inputs.dtype)</p>
+</dd>
+</dl>
+<p>return final_states[-1][-1]</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>return stacked_rnn_cell</p>
+</dd>
+<dt>def _create_unidirectional_rnn_cell(num_units, dropout, cell_type):</dt><dd><p>scope_name = “lstm” if cell_type else “gru”
+with tf.variable_scope(scope_name):</p>
+<blockquote>
+<div><p>Cell = _get_rnn_cell_creator(cell_type)
+cells = [Cell(output_size) for output_size in num_units]
+cells = _apply_dropout_wrapper(cells, dropout)
+multi_cell = tf.nn.rnn_cell.MultiRNNCell(cells)</p>
+</div></blockquote>
+<dl>
+<dt>def stacked_rnn_cell(inputs, sequence_lengths):</dt><dd><dl>
+<dt>with tf.variable_scope(scope_name):</dt><dd><dl class="simple">
+<dt>outputs, final_states = tf.nn.static_rnn(</dt><dd><p>multi_cell,
+tf.unstack(inputs, axis=1),
+dtype=inputs.dtype,
+sequence_length=sequence_lengths)</p>
+</dd>
+</dl>
+<p>return final_states[-1].h</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>return stacked_rnn_cell</p>
+</dd>
+<dt>def _create_regular_rnn_cell(num_units, dropout, cell_type, is_bidirectional):</dt><dd><dl class="simple">
+<dt>if is_bidirectional:</dt><dd><p>return _create_bidirectional_rnn_cell(num_units, dropout, cell_type)</p>
+</dd>
+<dt>else:</dt><dd><p>return _create_unidirectional_rnn_cell(num_units, dropout, cell_type)</p>
+</dd>
+</dl>
+</dd>
+<dt>class StackedRNN(twml.layers.Layer):</dt><dd><p>“””
+Layer for stacking RNN modules.
+This layer provides a unified interface for RNN modules that perform well on CPUs and GPUs.</p>
+<dl class="simple">
+<dt>Arguments:</dt><dd><dl class="simple">
+<dt>num_units:</dt><dd><p>A list specifying the number of units per layer.</p>
+</dd>
+<dt>dropout:</dt><dd><p>Dropout applied to the input of each cell.
+If list, has to dropout used for each layer.
+If number, the same amount of dropout is used everywhere.
+Defaults to 0.</p>
+</dd>
+<dt>is_training:</dt><dd><p>Flag to specify if the layer is used in training mode or not.</p>
+</dd>
+<dt>cell_type:</dt><dd><p>Sepcifies the type of RNN. Can be “LSTM”. “GRU” is not yet implemented.</p>
+</dd>
+<dt>is_bidirectional:</dt><dd><p>Specifies if the stacked RNN layer is bidirectional.
+This is for forward compatibility, this is not yet implemented.
+Defaults to False.</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>“””</p>
+<dl>
+<dt>def __init__(self,</dt><dd><blockquote>
+<div><p>num_units,
+dropout=0,
+is_training=True,
+cell_type=”LSTM”,
+is_bidirectional=False,
+name=”stacked_rnn”):</p>
+</div></blockquote>
+<p>super(StackedRNN, self).__init__(name=name)</p>
+<dl class="simple">
+<dt>if (is_bidirectional):</dt><dd><p>raise NotImplementedError(“Bidirectional RNN is not yet implemented”)</p>
+</dd>
+<dt>if (cell_type != “LSTM”):</dt><dd><p>raise NotImplementedError(“Only LSTMs are supported”)</p>
+</dd>
+<dt>if not isinstance(num_units, (list, tuple)):</dt><dd><p>num_units = [num_units]</p>
+</dd>
+<dt>else:</dt><dd><p>num_units = num_units</p>
+</dd>
+</dl>
+<p>self.num_layers = len(num_units)
+if not isinstance(dropout, (tuple, list)):</p>
+<blockquote>
+<div><p>dropout = [dropout] * self.num_layers</p>
+</div></blockquote>
+<dl class="simple">
+<dt>else:</dt><dd><p>dropout = dropout</p>
+</dd>
+</dl>
+<p>self.is_training = is_training</p>
+<p>is_gpu_available = twml.contrib.utils.is_gpu_available()
+same_unit_size = all(size == num_units[0] for size in num_units)
+same_dropout_rate = any(val == dropout[0] for val in dropout)</p>
+<p>self.stacked_rnn_cell = None
+self.num_units = num_units
+self.dropout = dropout
+self.cell_type = cell_type
+self.is_bidirectional = is_bidirectional</p>
+</dd>
+<dt>def build(self, input_shape):</dt><dd><dl class="simple">
+<dt>self.stacked_rnn_cell = _create_regular_rnn_cell(self.num_units,</dt><dd><p>self.dropout,
+self.cell_type,
+self.is_bidirectional)</p>
+</dd>
+</dl>
+</dd>
+<dt>def call(self, inputs, sequence_lengths):</dt><dd><p>“””
+Arguments:</p>
+<blockquote>
+<div><dl class="simple">
+<dt>inputs:</dt><dd><p>A tensor of size [batch_size, max_sequence_length, embedding_size].</p>
+</dd>
+<dt>sequence_lengths:</dt><dd><p>The length of each input sequence in the batch. Should be of size [batch_size].</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl class="simple">
+<dt>Returns:</dt><dd><dl class="simple">
+<dt>final_output</dt><dd><p>The output of at the end of sequence_length.</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>“””
+return self.stacked_rnn_cell(inputs, sequence_lengths)</p>
+</dd>
+</dl>
+</dd>
+<dt>def stacked_rnn(inputs, sequence_lengths, num_units,</dt><dd><blockquote>
+<div><p>dropout=0, is_training=True,
+cell_type=”LSTM”, is_bidirectional=False, name=”stacked_rnn”):</p>
+</div></blockquote>
+<p>“””Functional interface for StackedRNN
+Arguments:</p>
+<blockquote>
+<div><dl class="simple">
+<dt>inputs:</dt><dd><p>A tensor of size [batch_size, max_sequence_length, embedding_size].</p>
+</dd>
+<dt>sequence_lengths:</dt><dd><p>The length of each input sequence in the batch. Should be of size [batch_size].</p>
+</dd>
+<dt>num_units:</dt><dd><p>A list specifying the number of units per layer.</p>
+</dd>
+<dt>dropout:</dt><dd><p>Dropout applied to the input of each cell.
+If list, has to dropout used for each layer.
+If number, the same amount of dropout is used everywhere.
+Defaults to 0.</p>
+</dd>
+<dt>is_training:</dt><dd><p>Flag to specify if the layer is used in training mode or not.</p>
+</dd>
+<dt>cell_type:</dt><dd><p>Sepcifies the type of RNN. Can be “LSTM” or “GRU”.</p>
+</dd>
+<dt>is_bidirectional:</dt><dd><p>Specifies if the stacked RNN layer is bidirectional.
+Defaults to False.</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl class="simple">
+<dt>Returns</dt><dd><p>outputs, state.</p>
+</dd>
+</dl>
+<p>“””
+rnn = StackedRNN(num_units, dropout, is_training, cell_type, is_bidirectional, name)
+return rnn(inputs, sequence_lengths)</p>
+</dd>
+</dl>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../_sources/twml/twml/contrib/layers/stacked_rnn.py.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

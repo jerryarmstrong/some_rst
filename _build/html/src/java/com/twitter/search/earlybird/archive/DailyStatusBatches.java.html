@@ -1,0 +1,1024 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../" id="documentation_options" src="../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.earlybird.archive;</p>
+<p>import java.io.File;
+import java.io.FileNotFoundException;
+import java.io.FileWriter;
+import java.io.IOException;
+import java.util.Calendar;
+import java.util.Collection;
+import java.util.Date;
+import java.util.NavigableMap;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;</p>
+<p>import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Preconditions;
+import com.google.common.base.Stopwatch;
+import com.google.common.collect.Maps;</p>
+<p>import org.apache.commons.io.IOUtils;
+import org.apache.commons.lang3.time.FastDateFormat;
+import org.apache.hadoop.fs.FileStatus;
+import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.Path;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;</p>
+<p>import com.twitter.common.quantity.Amount;
+import com.twitter.common.quantity.Time;
+import com.twitter.search.common.database.DatabaseConfig;
+import com.twitter.search.common.util.date.DateUtil;
+import com.twitter.search.common.util.io.LineRecordFileReader;
+import com.twitter.search.common.util.zktrylock.TryLock;
+import com.twitter.search.common.util.zktrylock.ZooKeeperTryLockFactory;
+import com.twitter.search.earlybird.common.config.EarlybirdConfig;
+import com.twitter.search.earlybird.common.config.EarlybirdProperty;
+import com.twitter.search.earlybird.partition.HdfsUtil;
+import com.twitter.search.earlybird.partition.StatusBatchFlushVersion;</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Provides access to preprocessed statuses (tweets) to be indexed by archive search earlybirds.</p></li>
+<li></li>
+<li><p>These tweets can be coming from a scrub gen or from the output of the daily jobs.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>public class DailyStatusBatches {</dt><dd><p>private static final Logger LOG = LoggerFactory.getLogger(DailyStatusBatches.class);</p>
+<p>// Maximum time to spend on obtaining daily status batches by computing or loading from HDFS
+private static final Amount&lt;Long, Time&gt; MAX_TIME_ALLOWED_DAILY_STATUS_BATCHES_MINUTES =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>Amount.of(EarlybirdConfig.getLong(“daily_status_batches_max_initial_load_time_minutes”),</dt><dd><p>Time.MINUTES);</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>// Time to wait before trying again when obtaining daily status batches fails
+private static final Amount&lt;Long, Time&gt; DAILY_STATUS_BATCHES_WAITING_TIME_MINUTES =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>Amount.of(EarlybirdConfig.getLong(“daily_status_batches_waiting_time_minutes”),</dt><dd><p>Time.MINUTES);</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl class="simple">
+<dt>private static final String DAILY_STATUS_BATCHES_SYNC_PATH =</dt><dd><p>EarlybirdProperty.ZK_APP_ROOT.get() + “/daily_batches_sync”;</p>
+</dd>
+</dl>
+<p>private static final String DAILY_BATCHES_ZK_LOCK = “daily_batches_zk_lock”;
+private static final Amount&lt;Long, Time&gt; DAILY_STATUS_BATCHES_ZK_LOCK_EXPIRATION_MINUTES =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>Amount.of(EarlybirdConfig.getLong(“daily_status_batches_zk_lock_expiration_minutes”),</dt><dd><p>Time.MINUTES);</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>static final FastDateFormat DATE_FORMAT = FastDateFormat.getInstance(“yyyyMMdd”);</p>
+<p>// before this date, there was no twitter
+private static final Date FIRST_TWITTER_DAY = DateUtil.toDate(2006, 2, 1);</p>
+<p>private static final String STATUS_BATCHES_PREFIX = “status_batches”;</p>
+<dl class="simple">
+<dt>private final String rootDir =</dt><dd><p>EarlybirdConfig.getString(“hdfs_offline_segment_sync_dir”, “top_archive_statuses”);</p>
+</dd>
+<dt>private final String buildGen =</dt><dd><p>EarlybirdConfig.getString(“offline_segment_build_gen”, “bg_1”);</p>
+</dd>
+</dl>
+<p>public static final String STATUS_SUBDIR_NAME = “statuses”;
+public static final String LAYOUT_SUBDIR_NAME = “layouts”;
+public static final String SCRUB_GEN_SUFFIX_PATTERN = “scrubbed/%s”;</p>
+<p>private static final String INTERMEDIATE_COUNTS_SUBDIR_NAME = “counts”;
+private static final String SUCCESS_FILE_NAME = “_SUCCESS”;
+private static final Pattern HASH_PARTITION_PATTERN = Pattern.compile(“p_(\d+)_of_(\d+)”);
+private static final Date FIRST_TWEET_DAY = DateUtil.toDate(2006, 3, 21);</p>
+<p>private final Path rootPath = new Path(rootDir);
+private final Path buildGenPath = new Path(rootPath, buildGen);
+private final Path statusPath = new Path(buildGenPath, STATUS_SUBDIR_NAME);</p>
+<p>private final NavigableMap&lt;Date, DailyStatusBatch&gt; statusBatches = Maps.newTreeMap();</p>
+<p>private Date firstValidDay = null;
+private Date lastValidDay = null;</p>
+<p>private final ZooKeeperTryLockFactory zkTryLockFactory;
+private final Date scrubGenDay;
+private long numberOfDaysWithValidScrubGenData;</p>
+<dl>
+<dt>public DailyStatusBatches(</dt><dd><blockquote>
+<div><p>ZooKeeperTryLockFactory zooKeeperTryLockFactory, Date scrubGenDay) throws IOException {</p>
+</div></blockquote>
+<p>this.zkTryLockFactory = zooKeeperTryLockFactory;
+this.scrubGenDay = scrubGenDay;</p>
+<p>FileSystem hdfs = null;
+try {</p>
+<blockquote>
+<div><p>hdfs = HdfsUtil.getHdfsFileSystem();
+verifyDirectory(hdfs);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} finally {</dt><dd><p>IOUtils.closeQuietly(hdfs);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;VisibleForTesting
+public Date getScrubGenDay() {</p>
+<blockquote>
+<div><p>return scrubGenDay;</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>public Collection&lt;DailyStatusBatch&gt; getStatusBatches() {</dt><dd><p>return statusBatches.values();</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Reset the states of the directory</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>private void resetDirectory() {</dt><dd><p>statusBatches.clear();
+firstValidDay = null;
+lastValidDay = null;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Indicate whether the directory has been initialized</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>private boolean isInitialized() {</dt><dd><p>return lastValidDay != null;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Load the daily status batches from HDFS; return true if one or more batches could be loaded.</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">**</span></a>/</p>
+</dd>
+<dt>private boolean refreshByLoadingHDFSStatusBatches(final FileSystem fs) throws IOException {</dt><dd><p>// first find the latest valid end date of statuses
+final Date lastValidStatusDay = getLastValidInputDateFromNow(fs);
+if (lastValidStatusDay != null) {</p>
+<blockquote>
+<div><dl>
+<dt>if (hasStatusBatchesOnHdfs(fs, lastValidStatusDay)) {</dt><dd><dl class="simple">
+<dt>if (loadStatusBatchesFromHdfs(fs, lastValidStatusDay)) {</dt><dd><p>return true;</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>resetDirectory();
+return false;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Checks the directory for new data and returns true, if one or more new batches could be loaded.</p></li>
+</ul>
+<p><a href="#id9"><span class="problematic" id="id10">*</span></a>/</p>
+</dd>
+<dt>public void refresh() throws IOException {</dt><dd><p>final FileSystem hdfs = HdfsUtil.getHdfsFileSystem();</p>
+<p>final Stopwatch stopwatch = Stopwatch.createStarted();
+try {</p>
+<blockquote>
+<div><dl>
+<dt>if (!isInitialized()) {</dt><dd><dl>
+<dt>if (initializeDailyStatusBatches(hdfs, stopwatch)) {</dt><dd><p>LOG.info(“Successfully obtained daily status batches after {}”, stopwatch);</p>
+</dd>
+<dt>} else {</dt><dd><dl class="simple">
+<dt>String errMsg = “Failed to load or compute daily status batches after “</dt><dd><ul class="simple">
+<li><p>stopwatch.toString();</p></li>
+</ul>
+</dd>
+</dl>
+<p>LOG.error(errMsg);
+throw new IOException(errMsg);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>} else {</dt><dd><p>loadNewDailyBatches(hdfs);</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} finally {</dt><dd><p>IOUtils.closeQuietly(hdfs);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private boolean initializeDailyStatusBatches(final FileSystem hdfs,</dt><dd><blockquote>
+<div><p>final Stopwatch stopwatch) throws IOException {</p>
+</div></blockquote>
+<p>long timeSpentOnDailyBatches = 0L;
+long maxAllowedTimeMs = MAX_TIME_ALLOWED_DAILY_STATUS_BATCHES_MINUTES.as(Time.MILLISECONDS);
+long waitingTimeMs = DAILY_STATUS_BATCHES_WAITING_TIME_MINUTES.as(Time.MILLISECONDS);
+boolean firstLoop = true;
+LOG.info(“Starting to load or compute daily status batches for the first time.”);
+while (timeSpentOnDailyBatches &lt;= maxAllowedTimeMs &amp;&amp; !Thread.currentThread().isInterrupted()) {</p>
+<blockquote>
+<div><dl>
+<dt>if (!firstLoop) {</dt><dd><dl>
+<dt>try {</dt><dd><dl class="simple">
+<dt>LOG.info(“Sleeping “ + waitingTimeMs</dt><dd><ul class="simple">
+<li><p>“ millis before trying to obtain daily batches again”);</p></li>
+</ul>
+</dd>
+</dl>
+<p>Thread.sleep(waitingTimeMs);</p>
+</dd>
+<dt>} catch (InterruptedException e) {</dt><dd><p>LOG.warn(“Interrupted while waiting to load daily batches”, e);
+Thread.currentThread().interrupt();
+break;</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>if (isStatusBatchLoadingEnabled() &amp;&amp; refreshByLoadingHDFSStatusBatches(hdfs)) {</dt><dd><p>LOG.info(“Successfully loaded daily status batches after {}”, stopwatch);
+return true;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>final AtomicBoolean successRef = new AtomicBoolean(false);
+if (computeDailyBatchesWithZKLock(hdfs, successRef, stopwatch)) {</p>
+<blockquote>
+<div><p>return successRef.get();</p>
+</div></blockquote>
+<p>}</p>
+<p>timeSpentOnDailyBatches = stopwatch.elapsed(TimeUnit.MILLISECONDS);
+firstLoop = false;</p>
+</div></blockquote>
+<p>}</p>
+<p>return false;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private boolean computeDailyBatchesWithZKLock(final FileSystem hdfs,</dt><dd><blockquote>
+<div><p>final AtomicBoolean successRef,
+final Stopwatch stopwatch) throws IOException {</p>
+</div></blockquote>
+<p>// Using a global lock to coordinate among earlybirds and segment builders so that only
+// one instance would hit the HDFS name node to query the daily status directories
+TryLock lock = zkTryLockFactory.createTryLock(</p>
+<blockquote>
+<div><p>DatabaseConfig.getLocalHostname(),
+DAILY_STATUS_BATCHES_SYNC_PATH,
+DAILY_BATCHES_ZK_LOCK,
+DAILY_STATUS_BATCHES_ZK_LOCK_EXPIRATION_MINUTES);</p>
+</div></blockquote>
+<dl>
+<dt>return lock.tryWithLock(() -&gt; {</dt><dd><p>LOG.info(“Obtained ZK lock to compute daily status batches after {}”, stopwatch);
+successRef.set(initialLoadDailyBatchInfos(hdfs));
+if (successRef.get()) {</p>
+<blockquote>
+<div><p>LOG.info(“Successfully computed daily status batches after {}”, stopwatch);
+if (isStatusBatchFlushingEnabled()) {</p>
+<blockquote>
+<div><p>LOG.info(“Starting to store daily status batches to HDFS”);
+if (storeStatusBatchesToHdfs(hdfs, lastValidDay)) {</p>
+<blockquote>
+<div><p>LOG.info(“Successfully stored daily status batches to HDFS”);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>LOG.warn(“Failed storing daily status batches to HDFS”);</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>LOG.info(“Failed loading daily status info”);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>});</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private void verifyDirectory(FileSystem hdfs) throws IOException {</dt><dd><dl class="simple">
+<dt>if (!hdfs.exists(rootPath)) {</dt><dd><p>throw new IOException(“Root dir ‘” + rootPath + “’ does not exist.”);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>if (!hdfs.exists(buildGenPath)) {</dt><dd><p>throw new IOException(“Build gen dir ‘” + buildGenPath + “’ does not exist.”);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>if (!hdfs.exists(statusPath)) {</dt><dd><p>throw new IOException(“Status dir ‘” + statusPath + “’ does not exist.”);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private void loadNewDailyBatches(FileSystem hdfs) throws IOException {</dt><dd><p>Preconditions.checkNotNull(lastValidDay);</p>
+<p>Calendar day = Calendar.getInstance();
+day.setTime(lastValidDay);
+day.add(Calendar.DATE, 1);</p>
+<dl class="simple">
+<dt>while (loadDay(hdfs, day.getTime()) != null) {</dt><dd><p>lastValidDay = day.getTime();
+day.add(Calendar.DATE, 1);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private boolean initialLoadDailyBatchInfos(FileSystem hdfs) throws IOException {</dt><dd><p>LOG.info(“Starting to build timeslice map from scratch.”);</p>
+<p>final Date lastValidStatusDay = getLastValidInputDateFromNow(hdfs);</p>
+<dl class="simple">
+<dt>if (lastValidStatusDay == null) {</dt><dd><p>LOG.warn(“No data found in “ + statusPath + “ and scrubbed path”);
+return false;</p>
+</dd>
+</dl>
+<p>}
+int mostRecentYear = DateUtil.getCalendar(lastValidStatusDay).get(Calendar.YEAR);
+for (int year = 2006; year &lt;= mostRecentYear; ++year) {</p>
+<blockquote>
+<div><p>// construct path to avoid hdfs.listStatus() calls
+Calendar day = Calendar.getInstance();
+day.set(year, Calendar.JANUARY, 1, 0, 0, 0);
+day.set(Calendar.MILLISECOND, 0);</p>
+<p>Calendar yearEnd = Calendar.getInstance();
+yearEnd.set(year, Calendar.DECEMBER, 31, 0, 0, 0);
+yearEnd.set(Calendar.MILLISECOND, 0);</p>
+<dl>
+<dt>if (lastValidDay != null) {</dt><dd><p>// We’re updating.
+if (lastValidDay.after(yearEnd.getTime())) {</p>
+<blockquote>
+<div><p>// This year was already loaded.
+continue;</p>
+</div></blockquote>
+<p>}
+if (lastValidDay.after(day.getTime())) {</p>
+<blockquote>
+<div><p>// Start one day after last valid date.
+day.setTime(lastValidDay);
+day.add(Calendar.DATE, 1);</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>for (; !day.after(yearEnd); day.add(Calendar.DATE, 1)) {</dt><dd><p>loadDay(hdfs, day.getTime());</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>boolean updated = false;
+numberOfDaysWithValidScrubGenData = 0;</p>
+<p>// Iterate batches in sorted order.
+for (DailyStatusBatch batch : statusBatches.values()) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (!batch.isValid()) {</dt><dd><p>break;</p>
+</dd>
+</dl>
+<p>}
+if (batch.getDate().before(scrubGenDay)) {</p>
+<blockquote>
+<div><p>numberOfDaysWithValidScrubGenData++;</p>
+</div></blockquote>
+<p>}
+if (firstValidDay == null) {</p>
+<blockquote>
+<div><p>firstValidDay = batch.getDate();</p>
+</div></blockquote>
+<p>}
+if (lastValidDay == null || lastValidDay.before(batch.getDate())) {</p>
+<blockquote>
+<div><p>lastValidDay = batch.getDate();
+updated = true;</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>LOG.info(“Number of statusBatches: {}”, statusBatches.size());
+return updated;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private static String filesToString(FileStatus[] files) {</dt><dd><dl class="simple">
+<dt>if (files == null) {</dt><dd><p>return “null”;</p>
+</dd>
+</dl>
+<p>}
+StringBuilder b = new StringBuilder();
+for (FileStatus s : files) {</p>
+<blockquote>
+<div><p>b.append(s.getPath().toString()).append(”, “);</p>
+</div></blockquote>
+<p>}
+return b.toString();</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;VisibleForTesting
+protected DailyStatusBatch loadDay(FileSystem hdfs, Date day) throws IOException {</p>
+<blockquote>
+<div><p>Path dayPath = new Path(getStatusPathToUseForDay(day), ArchiveHDFSUtils.dateToPath(day, “/”));
+LOG.debug(“Looking for batch in “ + dayPath.toString());
+DailyStatusBatch result = this.statusBatches.get(day);
+if (result != null) {</p>
+<blockquote>
+<div><p>return result;</p>
+</div></blockquote>
+<p>}</p>
+<p>final FileStatus[] files;
+try {</p>
+<blockquote>
+<div><p>files = hdfs.listStatus(dayPath);
+LOG.debug(“Files found:  “ + filesToString(files));</p>
+</div></blockquote>
+<dl>
+<dt>} catch (FileNotFoundException e) {</dt><dd><dl class="simple">
+<dt>LOG.debug(“loadDay() called, but directory does not exist for day: “ + day</dt><dd><ul class="simple">
+<li><p>“ in: “ + dayPath);</p></li>
+</ul>
+</dd>
+</dl>
+<p>return null;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>if (files != null &amp;&amp; files.length &gt; 0) {</dt><dd><dl>
+<dt>for (FileStatus file<span class="classifier">files) {</span></dt><dd><p>Matcher matcher = HASH_PARTITION_PATTERN.matcher(file.getPath().getName());
+if (matcher.matches()) {</p>
+<blockquote>
+<div><p>int numHashPartitions = Integer.parseInt(matcher.group(2));
+result = new DailyStatusBatch(</p>
+<blockquote>
+<div><p>day, numHashPartitions, getStatusPathToUseForDay(day), hdfs);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>for (int partitionID = 0; partitionID &lt; numHashPartitions; partitionID++) {</dt><dd><p>result.addPartition(hdfs, dayPath, partitionID);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>if (result.isValid()) {</dt><dd><p>statusBatches.put(day, result);
+return result;</p>
+</dd>
+<dt>} else {</dt><dd><p>LOG.info(“Invalid batch found for day: “ + day + “, batch: “ + result);</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<dl>
+<dt>} else {</dt><dd><p>// skip logging the intermediate count subdirectories or _SUCCESS files.
+if (!INTERMEDIATE_COUNTS_SUBDIR_NAME.equals(file.getPath().getName())</p>
+<blockquote>
+<div><blockquote>
+<div><p>&amp;&amp; !SUCCESS_FILE_NAME.equals(file.getPath().getName())) {</p>
+</div></blockquote>
+<p>LOG.warn(“Path does not match hash partition pattern: “ + file.getPath());</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>} else {</dt><dd><dl class="simple">
+<dt>LOG.warn(“No data found for day: “ + day + “ in: “ + dayPath</dt><dd><ul class="simple">
+<li><p>“ files null: “ + (files == null));</p></li>
+</ul>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>return null;</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Determines if this directory has a valid batch for the given day.</p></li>
+</ul>
+<p><a href="#id11"><span class="problematic" id="id12">*</span></a>/</p>
+</dd>
+<dt>public boolean hasValidBatchForDay(Date day) throws IOException {</dt><dd><p>FileSystem hdfs = null;
+try {</p>
+<blockquote>
+<div><p>hdfs = HdfsUtil.getHdfsFileSystem();
+return hasValidBatchForDay(hdfs, day);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} finally {</dt><dd><p>IOUtils.closeQuietly(hdfs);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private boolean hasValidBatchForDay(FileSystem fs, Date day) throws IOException {</dt><dd><p>DailyStatusBatch batch = loadDay(fs, day);</p>
+<p>return batch != null &amp;&amp; batch.isValid();</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;VisibleForTesting
+Date getFirstValidDay() {</p>
+<blockquote>
+<div><p>return firstValidDay;</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;VisibleForTesting
+Date getLastValidDay() {</p>
+<blockquote>
+<div><p>return lastValidDay;</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>private Date getLastValidInputDateFromNow(FileSystem hdfs) throws IOException {</dt><dd><p>Calendar cal = Calendar.getInstance();
+cal.setTime(new Date()); // current date
+return getLastValidInputDate(hdfs, cal);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Starting from current date, probe backward till we find a valid input Date</p></li>
+</ul>
+<p><a href="#id13"><span class="problematic" id="id14">*</span></a>/</p>
+</dd>
+</dl>
+<p>&#64;VisibleForTesting
+Date getLastValidInputDate(FileSystem hdfs, Calendar cal) throws IOException {</p>
+<blockquote>
+<div><p>cal.set(Calendar.MILLISECOND, 0);
+cal.set(Calendar.HOUR_OF_DAY, 0);
+cal.set(Calendar.MINUTE, 0);
+cal.set(Calendar.SECOND, 0);
+cal.set(Calendar.MILLISECOND, 0);
+Date lastValidInputDate = cal.getTime();
+LOG.info(“Probing backwards for last valid data date from “ + lastValidInputDate);
+while (lastValidInputDate.after(FIRST_TWITTER_DAY)) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (hasValidBatchForDay(hdfs, lastValidInputDate)) {</dt><dd><p>LOG.info(“Found latest valid data on date “ + lastValidInputDate);
+LOG.info(”  Used path: {}”, getStatusPathToUseForDay(lastValidInputDate));
+return lastValidInputDate;</p>
+</dd>
+</dl>
+<p>}
+cal.add(Calendar.DATE, -1);
+lastValidInputDate = cal.getTime();</p>
+</div></blockquote>
+<p>}</p>
+<p>return null;</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Check if the daily status batches are already on HDFS</p></li>
+</ul>
+<p><a href="#id15"><span class="problematic" id="id16">*</span></a>/</p>
+</dd>
+</dl>
+<p>&#64;VisibleForTesting
+boolean hasStatusBatchesOnHdfs(FileSystem fs, Date lastDataDay) {</p>
+<blockquote>
+<div><p>String hdfsFileName = getHdfsStatusBatchSyncFileName(lastDataDay);
+try {</p>
+<blockquote>
+<div><p>return fs.exists(new Path(hdfsFileName));</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} catch (IOException ex) {</dt><dd><p>LOG.error(“Failed checking status batch file on HDFS: “ + hdfsFileName, ex);
+return false;</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Load the daily status batches from HDFS by first copying the file from HDFS to local disk</p></li>
+<li><p>and then reading from the local disk.</p></li>
+<li></li>
+<li><p>&#64;param day the latest day of valid statuses.</p></li>
+<li><p>&#64;return true if the loading is successful.</p></li>
+</ul>
+<p><a href="#id17"><span class="problematic" id="id18">*</span></a>/</p>
+</dd>
+</dl>
+<p>&#64;VisibleForTesting
+boolean loadStatusBatchesFromHdfs(FileSystem fs, Date day) {</p>
+<blockquote>
+<div><p>// set the directory state to initial state
+resetDirectory();</p>
+<p>String fileHdfsPath = getHdfsStatusBatchSyncFileName(day);
+String fileLocalPath = getLocalStatusBatchSyncFileName(day);</p>
+<p>LOG.info(“Using “ + fileHdfsPath + “ as the HDFS batch summary load path.”);
+LOG.info(“Using “ + fileLocalPath + “ as the local batch summary sync path.”);</p>
+<p>LineRecordFileReader lineReader = null;
+try {</p>
+<blockquote>
+<div><p>fs.copyToLocalFile(new Path(fileHdfsPath), new Path(fileLocalPath));</p>
+<p>lineReader = new LineRecordFileReader(fileLocalPath);
+String batchLine;
+while ((batchLine = lineReader.readNext()) != null) {</p>
+<blockquote>
+<div><p>DailyStatusBatch batch = DailyStatusBatch.deserializeFromJson(batchLine);
+if (batch == null) {</p>
+<blockquote>
+<div><p>LOG.error(“Invalid daily status batch constructed from line: “ + batchLine);
+resetDirectory();
+return false;</p>
+</div></blockquote>
+<p>}
+Date date = batch.getDate();
+if (firstValidDay == null || firstValidDay.after(date)) {</p>
+<blockquote>
+<div><p>firstValidDay = date;</p>
+</div></blockquote>
+<p>}
+if (lastValidDay == null || lastValidDay.before(date)) {</p>
+<blockquote>
+<div><p>lastValidDay = date;</p>
+</div></blockquote>
+<p>}
+statusBatches.put(date, batch);</p>
+</div></blockquote>
+<p>}
+LOG.info(“Loaded {} status batches from HDFS: {}”,</p>
+<blockquote>
+<div><p>statusBatches.size(), fileHdfsPath);</p>
+</div></blockquote>
+<p>LOG.info(“First entry: {}”, statusBatches.firstEntry().getValue().toString());
+LOG.info(“Last entry: {}”, statusBatches.lastEntry().getValue().toString());</p>
+<p>return true;</p>
+</div></blockquote>
+<dl>
+<dt>} catch (IOException ex) {</dt><dd><p>LOG.error(“Failed loading time slices from HDFS: “ + fileHdfsPath, ex);
+resetDirectory();
+return false;</p>
+</dd>
+<dt>} finally {</dt><dd><dl class="simple">
+<dt>if (lineReader != null) {</dt><dd><p>lineReader.stop();</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Flush the daily status batches to local disk and then upload to HDFS.</p></li>
+</ul>
+<p><a href="#id19"><span class="problematic" id="id20">*</span></a>/</p>
+</dd>
+<dt>private boolean storeStatusBatchesToHdfs(FileSystem fs, Date day) {</dt><dd><p>Preconditions.checkNotNull(lastValidDay);</p>
+<dl class="simple">
+<dt>if (!StatusBatchFlushVersion.CURRENT_FLUSH_VERSION.isOfficial()) {</dt><dd><p>LOG.info(“Status batch flush version is not official, no batches will be flushed to HDFS”);
+return true;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>String fileLocalPath = getLocalStatusBatchSyncFileName(day);</p>
+<p>// Flush to local disk
+File outputFile = null;
+FileWriter fileWriter = null;
+try {</p>
+<blockquote>
+<div><p>LOG.info(“Flushing daily status batches into: “ + fileLocalPath);
+outputFile = new File(fileLocalPath);
+outputFile.getParentFile().mkdirs();
+if (!outputFile.getParentFile().exists()) {</p>
+<blockquote>
+<div><p>LOG.error(“Cannot create directory: “ + outputFile.getParentFile().toString());
+return false;</p>
+</div></blockquote>
+<p>}
+fileWriter = new FileWriter(outputFile, false);
+for (Date date : statusBatches.keySet()) {</p>
+<blockquote>
+<div><p>fileWriter.write(statusBatches.get(date).serializeToJson());
+fileWriter.write(”n”);</p>
+</div></blockquote>
+<p>}
+fileWriter.flush();</p>
+<p>// Upload the file to HDFS
+return uploadStatusBatchesToHdfs(fs, day);</p>
+</div></blockquote>
+<dl>
+<dt>} catch (IOException e) {</dt><dd><p>String fileHdfsPath = getHdfsStatusBatchSyncFileName(day);
+LOG.error(“Failed storing status batches to HDFS: “ + fileHdfsPath, e);
+return false;</p>
+</dd>
+<dt>} finally {</dt><dd><dl>
+<dt>try {</dt><dd><dl class="simple">
+<dt>if (fileWriter != null) {</dt><dd><p>fileWriter.close();</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>} catch (IOException e) {</dt><dd><p>LOG.error(“Error to close fileWrite.”, e);</p>
+</dd>
+</dl>
+<p>}
+if (outputFile != null) {</p>
+<blockquote>
+<div><p>// Delete the local file
+outputFile.delete();</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Upload the status batches to HDFS.</p></li>
+</ul>
+<p><a href="#id21"><span class="problematic" id="id22">*</span></a>/</p>
+</dd>
+</dl>
+<p>&#64;VisibleForTesting
+boolean uploadStatusBatchesToHdfs(FileSystem fs, Date day) {</p>
+<blockquote>
+<div><p>String localFileName = getLocalStatusBatchSyncFileName(day);
+String hdfsFileName = getHdfsStatusBatchSyncFileName(day);</p>
+<p>LOG.info(“Using “ + hdfsFileName + “ as the HDFS batch summary upload path.”);
+LOG.info(“Using “ + localFileName + “ as the local batch summary sync path.”);</p>
+<dl>
+<dt>try {</dt><dd><p>Path hdfsFilePath = new Path(hdfsFileName);
+if (fs.exists(hdfsFilePath)) {</p>
+<blockquote>
+<div><p>LOG.warn(“Found status batch file on HDFS: “ + hdfsFileName);
+return true;</p>
+</div></blockquote>
+<p>}</p>
+<p>String hdfsTempName = getHdfsStatusBatchTempSyncFileName(day);
+Path hdfsTempPath = new Path(hdfsTempName);
+if (fs.exists(hdfsTempPath)) {</p>
+<blockquote>
+<div><p>LOG.info(“Found existing temporary status batch file on HDFS, removing: “ + hdfsTempName);
+if (!fs.delete(hdfsTempPath, false)) {</p>
+<blockquote>
+<div><p>LOG.error(“Failed to delete temporary file: “ + hdfsTempName);
+return false;</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}
+fs.copyFromLocalFile(new Path(localFileName), hdfsTempPath);</p>
+<dl class="simple">
+<dt>if (fs.rename(hdfsTempPath, hdfsFilePath)) {</dt><dd><p>LOG.debug(“Renamed “ + hdfsTempName + “ on HDFS to: “ + hdfsFileName);
+return true;</p>
+</dd>
+<dt>} else {</dt><dd><p>LOG.error(“Failed to rename “ + hdfsTempName + “ on HDFS to: “ + hdfsFileName);
+return false;</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>} catch (IOException ex) {</dt><dd><p>LOG.error(“Failed uploading status batch file to HDFS: “ + hdfsFileName, ex);
+return false;</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>private static boolean isStatusBatchFlushingEnabled() {</dt><dd><p>return EarlybirdProperty.ARCHIVE_DAILY_STATUS_BATCH_FLUSHING_ENABLED.get(false);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private static boolean isStatusBatchLoadingEnabled() {</dt><dd><p>return EarlybirdConfig.getBool(“archive_daily_status_batch_loading_enabled”, false);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private static String getVersionFileExtension() {</dt><dd><p>return StatusBatchFlushVersion.CURRENT_FLUSH_VERSION.getVersionFileExtension();</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>String getStatusBatchSyncRootDir() {</dt><dd><dl class="simple">
+<dt>return EarlybirdConfig.getString(“archive_daily_status_batch_sync_dir”,</dt><dd><p>“daily_status_batches”) + “/” + scrubGenSuffix();</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;VisibleForTesting
+String getLocalStatusBatchSyncFileName(Date day) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>return  getStatusBatchSyncRootDir() + “/” + STATUS_BATCHES_PREFIX + “_”</dt><dd><ul class="simple">
+<li><p>DATE_FORMAT.format(day) + getVersionFileExtension();</p></li>
+</ul>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>String getHdfsStatusBatchSyncRootDir() {</dt><dd><dl class="simple">
+<dt>return EarlybirdConfig.getString(“hdfs_archive_daily_status_batch_sync_dir”,</dt><dd><p>“daily_status_batches”) + “/” + scrubGenSuffix();</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;VisibleForTesting
+String getHdfsStatusBatchSyncFileName(Date day) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>return getHdfsStatusBatchSyncRootDir() + “/” + STATUS_BATCHES_PREFIX + “_”</dt><dd><ul class="simple">
+<li><p>DATE_FORMAT.format(day) + getVersionFileExtension();</p></li>
+</ul>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>private String getHdfsStatusBatchTempSyncFileName(Date day) {</dt><dd><dl class="simple">
+<dt>return getHdfsStatusBatchSyncRootDir() + “/” + DatabaseConfig.getLocalHostname() + “_”</dt><dd><ul class="simple">
+<li><p>STATUS_BATCHES_PREFIX + “_” + DATE_FORMAT.format(day) + getVersionFileExtension();</p></li>
+</ul>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private String scrubGenSuffix() {</dt><dd><p>return String.format(SCRUB_GEN_SUFFIX_PATTERN, DATE_FORMAT.format(scrubGenDay));</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Returns the path to the directory that stores the statuses for the given day.</p></li>
+</ul>
+<p><a href="#id23"><span class="problematic" id="id24">*</span></a>/</p>
+</dd>
+<dt>public Path getStatusPathToUseForDay(Date day) {</dt><dd><dl class="simple">
+<dt>if (!day.before(scrubGenDay)) {</dt><dd><p>return statusPath;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>String suffix = scrubGenSuffix();
+Preconditions.checkArgument(!suffix.isEmpty());
+Path scrubPath = new Path(buildGenPath, suffix);
+return new Path(scrubPath, STATUS_SUBDIR_NAME);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Determines if the data for the specified scrub gen was fully built, by checking the number of</p></li>
+<li><p>days for which data was built against the expected number of days extracted from the specified</p></li>
+<li><p>scrub gen date.</p></li>
+</ul>
+<p><a href="#id25"><span class="problematic" id="id26">*</span></a>/</p>
+</dd>
+<dt>public boolean isScrubGenDataFullyBuilt(FileSystem hdfs) throws IOException {</dt><dd><p>initialLoadDailyBatchInfos(hdfs);
+if (numberOfDaysWithValidScrubGenData == 0) {</p>
+<blockquote>
+<div><p>LOG.warn(“numberOfDaysWithValidScrubGenData is 0”);</p>
+</div></blockquote>
+<p>}
+long expectedDays = getDiffBetweenDays(scrubGenDay);
+return expectedDays == numberOfDaysWithValidScrubGenData;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;VisibleForTesting
+long getDiffBetweenDays(Date day) {</p>
+<blockquote>
+<div><p>long diff = day.getTime() - FIRST_TWEET_DAY.getTime();
+return TimeUnit.DAYS.convert(diff, TimeUnit.MILLISECONDS);</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../_sources/src/java/com/twitter/search/earlybird/archive/DailyStatusBatches.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

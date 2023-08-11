@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../../../" id="documentation_options" src="../../../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.product_mixer.core.service.candidate_feature_transformer_executor</p>
+<p>import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.product_mixer.core.feature.featuremap.FeatureMap
+import com.twitter.product_mixer.core.functional_component.transformer.CandidateFeatureTransformer
+import com.twitter.product_mixer.core.model.common.identifier.TransformerIdentifier
+import com.twitter.product_mixer.core.service.Executor
+import com.twitter.product_mixer.core.service.Executor._
+import com.twitter.stitch.Arrow
+import javax.inject.Inject
+import javax.inject.Singleton</p>
+<p>&#64;Singleton
+class CandidateFeatureTransformerExecutor &#64;Inject() (override val statsReceiver: StatsReceiver)</p>
+<blockquote>
+<div><blockquote>
+<div><p>extends Executor {</p>
+</div></blockquote>
+<dl>
+<dt>def arrow[Result](</dt><dd><p>transformers: Seq[CandidateFeatureTransformer[Result]],
+context: Executor.Context</p>
+</dd>
+<dt>): Arrow[Seq[Result], CandidateFeatureTransformerExecutorResult] = {</dt><dd><dl>
+<dt>if (transformers.isEmpty) {</dt><dd><p>// must always return a Seq of FeatureMaps, even if there are no Transformers
+Arrow.map[Seq[Result], CandidateFeatureTransformerExecutorResult] { candidates =&gt;</p>
+<blockquote>
+<div><p>CandidateFeatureTransformerExecutorResult(candidates.map(_ =&gt; FeatureMap.empty), Seq.empty)</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+<dt>} else {</dt><dd><dl>
+<dt>val transformerArrows: Seq[Arrow[Seq[Result], Seq[(TransformerIdentifier, FeatureMap)]]] =</dt><dd><dl>
+<dt>transformers.map { transformer =&gt;</dt><dd><p>val transformerContext = context.pushToComponentStack(transformer.identifier)</p>
+<dl>
+<dt>val liftNonValidationFailuresToFailedFeatures =</dt><dd><dl class="simple">
+<dt>Arrow.handle[FeatureMap, FeatureMap] {</dt><dd><dl class="simple">
+<dt>case NotAMisconfiguredFeatureMapFailure(e) =&gt;</dt><dd><p>featureMapWithFailuresForFeatures(transformer.features, e, transformerContext)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>val underlyingArrow = Arrow</dt><dd><p>.map(transformer.transform)
+.map(validateFeatureMap(transformer.features, _, transformerContext))</p>
+</dd>
+<dt>val observedArrowWithoutTracing =</dt><dd><dl class="simple">
+<dt>wrapPerCandidateComponentWithExecutorBookkeepingWithoutTracing(</dt><dd><p>context,
+transformer.identifier)(underlyingArrow)</p>
+</dd>
+</dl>
+</dd>
+<dt>val seqArrow =</dt><dd><dl class="simple">
+<dt>Arrow.sequence(</dt><dd><dl class="simple">
+<dt>observedArrowWithoutTracing</dt><dd><p>.andThen(liftNonValidationFailuresToFailedFeatures)
+.map(transformer.identifier -&gt; _)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>wrapComponentsWithTracingOnly(context, transformer.identifier)(seqArrow)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>Arrow.collect(transformerArrows).map { results =&gt;</dt><dd><dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Inner Seqs are a given Transformer applied to all the candidates</p></li>
+<li></li>
+<li><p>We want to merge the FeatureMaps for each candidate</p></li>
+<li><p>from all the Transformers. We do this by merging all the FeatureMaps at</p></li>
+<li><p>each index <cite>i</cite> of each Seq in <cite>results</cite> by <cite>transpose</cite>-ing the <cite>results</cite></p></li>
+<li><p>so the inner Seq becomes all the FeatureMaps for Candidate</p></li>
+<li><p>at index <cite>i</cite> in the input Seq.</p></li>
+<li></li>
+<li><p>{{{</p></li>
+<li><p>Seq(</p></li>
+<li><p>Seq(transformer1FeatureMapCandidate1, …, transformer1FeatureMapCandidateN),</p></li>
+<li><p>…,</p></li>
+<li><p>Seq(transformerMFeatureMapCandidate1, …, transformerMFeatureMapCandidateN)</p></li>
+<li><p>).transpose == Seq(</p></li>
+<li><p>Seq(transformer1FeatureMapCandidate1, …, transformerMFeatureMapCandidate1),</p></li>
+<li><p>…,</p></li>
+<li><p>Seq(transformer1FeatureMapCandidateN, …, transformerMFeatureMapCandidateN)</p></li>
+<li><p>)</p></li>
+<li><p>}}}</p></li>
+<li></li>
+<li><p>we could avoid the transpose if we ran each candidate through all the transformers</p></li>
+<li><p>one-after-the-other, but then we couldn’t have a single tracing span for all applications</p></li>
+<li><p>of a Transformer, so instead we apply each transformer to all candidates together, then</p></li>
+<li><p>move onto the next transformer.</p></li>
+<li></li>
+<li><p>It’s worth noting that the outer Seq is bounded by the number of Transformers that are</p></li>
+<li><p>applied which will typically be small.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+</dl>
+<p>val transposed = results.transpose
+val combinedMaps = transposed.map(featureMapsForSingleCandidate =&gt;</p>
+<blockquote>
+<div><p>FeatureMap.merge(featureMapsForSingleCandidate.map { case (_, maps) =&gt; maps }))</p>
+</div></blockquote>
+<p>CandidateFeatureTransformerExecutorResult(combinedMaps, transposed.map(_.toMap))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../../../_sources/product-mixer/core/src/main/scala/com/twitter/product_mixer/core/service/candidate_feature_transformer_executor/CandidateFeatureTransformerExecutor.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

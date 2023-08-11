@@ -1,0 +1,579 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.ann.service.loadtest</p>
+<p>import com.twitter.ann.annoy.AnnoyCommon
+import com.twitter.ann.annoy.AnnoyRuntimeParams
+import com.twitter.ann.annoy.TypedAnnoyIndex
+import com.twitter.ann.common._
+import com.twitter.ann.common.thriftscala.{Distance =&gt; ServiceDistance}
+import com.twitter.ann.common.thriftscala.{RuntimeParams =&gt; ServiceRuntimeParams}
+import com.twitter.ann.faiss.FaissCommon
+import com.twitter.ann.faiss.FaissParams
+import com.twitter.ann.hnsw.HnswCommon
+import com.twitter.ann.hnsw.HnswParams
+import com.twitter.ann.hnsw.TypedHnswIndex
+import com.twitter.bijection.Injection
+import com.twitter.cortex.ml.embeddings.common.EntityKind
+import com.twitter.finagle.mtls.authentication.ServiceIdentifier
+import com.twitter.finagle.util.DefaultTimer
+import com.twitter.finatra.mtls.modules.ServiceIdentifierModule
+import com.twitter.inject.server.TwitterServer
+import com.twitter.util._
+import java.util.concurrent.TimeUnit</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>To build and upload:</p></li>
+<li><p>$ ./bazel bundle ann/src/main/scala/com/twitter/ann/service/loadtest:bin –bundle-jvm-archive=zip</p></li>
+<li><p>$ packer add_version –cluster=smf1 $USER ann-loadtest dist/ann-loadtest.zip</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>object AnnLoadTestMain extends TwitterServer {</dt><dd><dl class="simple">
+<dt>private[this] val algo =</dt><dd><p>flag[String](“algo”, “load test server types: [annoy/hnsw]”)</p>
+</dd>
+<dt>private[this] val targetQPS =</dt><dd><p>flag[Int](“qps”, “target QPS for load test”)</p>
+</dd>
+<dt>private[this] val queryIdType =</dt><dd><dl class="simple">
+<dt>flag[String](</dt><dd><p>“query_id_type”,
+“query id type for load test: [long/string/int/user/tweet/word/url/tfwId]”)</p>
+</dd>
+</dl>
+</dd>
+<dt>private[this] val indexIdType =</dt><dd><dl class="simple">
+<dt>flag[String](</dt><dd><p>“index_id_type”,
+“index id type for load test: [long/string/int/user/tweet/word/url/tfwId]”)</p>
+</dd>
+</dl>
+</dd>
+<dt>private[this] val metric =</dt><dd><p>flag[String](“metric”, “metric type for load test: [Cosine/L2/InnerProduct]”)</p>
+</dd>
+<dt>private[this] val durationSec =</dt><dd><p>flag[Int](“duration_sec”, “duration for the load test in sec”)</p>
+</dd>
+<dt>private[this] val numberOfNeighbors =</dt><dd><p>flag[Seq[Int]](“number_of_neighbors”, Seq(), “number of neighbors”)</p>
+</dd>
+</dl>
+<p>private[this] val dimension = flag[Int](“embedding_dimension”, “dimension of embeddings”)
+private[this] val querySetDir =</p>
+<blockquote>
+<div><p>flag[String](“query_set_dir”, “”, “Directory containing the queries”)</p>
+</div></blockquote>
+<dl>
+<dt>private[this] val indexSetDir =</dt><dd><dl class="simple">
+<dt>flag[String](</dt><dd><p>“index_set_dir”,
+“”,
+“Directory containing the embeddings to be indexed”</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>private[this] val truthSetDir =</dt><dd><p>flag[String](“truth_set_dir”, “”, “Directory containing the truth data”)</p>
+</dd>
+<dt>private[this] val loadTestType =</dt><dd><p>flag[String](“loadtest_type”, “Load test type [server/local]”)</p>
+</dd>
+<dt>private[this] val serviceDestination =</dt><dd><p>flag[String](“service_destination”, “wily address of remote query service”)</p>
+</dd>
+<dt>private[this] val concurrencyLevel =</dt><dd><p>flag[Int](“concurrency_level”, 8, “number of concurrent operations on the index”)</p>
+</dd>
+</dl>
+<p>// Queries with random embeddings
+private[this] val withRandomQueries =</p>
+<blockquote>
+<div><p>flag[Boolean](“with_random_queries”, false, “query with random embeddings”)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>private[this] val randomQueriesCount =</dt><dd><p>flag[Int](“random_queries_count”, 50000, “total random queries”)</p>
+</dd>
+<dt>private[this] val randomEmbeddingMinValue =</dt><dd><p>flag[Float](“random_embedding_min_value”, -1.0f, “Min value of random embeddings”)</p>
+</dd>
+<dt>private[this] val randomEmbeddingMaxValue =</dt><dd><p>flag[Float](“random_embedding_max_value”, 1.0f, “Max value of random embeddings”)</p>
+</dd>
+</dl>
+<p>// parameters for annoy
+private[this] val numOfNodesToExplore =</p>
+<blockquote>
+<div><p>flag[Seq[Int]](“annoy_num_of_nodes_to_explore”, Seq(), “number of nodes to explore”)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>private[this] val numOfTrees =</dt><dd><p>flag[Int](“annoy_num_trees”, 0, “number of trees to build”)</p>
+</dd>
+</dl>
+<p>// parameters for HNSW
+private[this] val efConstruction = flag[Int](“hnsw_ef_construction”, “ef for Hnsw construction”)
+private[this] val ef = flag[Seq[Int]](“hnsw_ef”, Seq(), “ef for Hnsw query”)
+private[this] val maxM = flag[Int](“hnsw_max_m”, “maxM for Hnsw”)</p>
+<p>// FAISS
+private[this] val nprobe = flag[Seq[Int]](“faiss_nprobe”, Seq(), “nprobe for faiss query”)
+private[this] val quantizerEf =</p>
+<blockquote>
+<div><p>flag[Seq[Int]](“faiss_quantizerEf”, Seq(0), “quantizerEf for faiss query”)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>private[this] val quantizerKfactorRF =</dt><dd><p>flag[Seq[Int]](“faiss_quantizerKfactorRF”, Seq(0), “quantizerEf for faiss query”)</p>
+</dd>
+<dt>private[this] val quantizerNprobe =</dt><dd><p>flag[Seq[Int]](“faiss_quantizerNprobe”, Seq(0), “quantizerNprobe for faiss query”)</p>
+</dd>
+<dt>private[this] val ht =</dt><dd><p>flag[Seq[Int]](“faiss_ht”, Seq(0), “ht for faiss query”)</p>
+</dd>
+</dl>
+<p>implicit val timer: Timer = DefaultTimer</p>
+<dl>
+<dt>override def start(): Unit = {</dt><dd><p>logger.info(“Starting load test..”)
+logger.info(flag.getAll().mkString(”t”))</p>
+<p>assert(numberOfNeighbors().nonEmpty, “number_of_neighbors not defined”)
+assert(dimension() &gt; 0, s”Invalid dimension ${dimension()}”)</p>
+<p>val inMemoryBuildRecorder = new InMemoryLoadTestBuildRecorder</p>
+<p>val queryableFuture = buildQueryable(inMemoryBuildRecorder)
+val queryConfig = getQueryRuntimeConfig
+val result = queryableFuture.flatMap { queryable =&gt;</p>
+<blockquote>
+<div><p>performQueries(queryable, queryConfig, getQueries)</p>
+</div></blockquote>
+<p>}</p>
+<p>Await.result(result)
+System.out.println(s”Target QPS: ${targetQPS()}”)
+System.out.println(s”Duration per test: ${durationSec()}”)
+System.out.println(s”Concurrency Level: ${concurrencyLevel()}”)</p>
+<dl class="simple">
+<dt>LoadTestUtils</dt><dd><p>.printResults(inMemoryBuildRecorder, queryConfig)
+.foreach(System.out.println)</p>
+</dd>
+</dl>
+<p>Await.result(close())
+System.exit(0)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private[this] def getQueries[Q, I]: Seq[Query[I]] = {</dt><dd><dl>
+<dt>if (withRandomQueries()) {</dt><dd><dl class="simple">
+<dt>assert(</dt><dd><p>truthSetDir().isEmpty,
+“Cannot use truth set when query with random embeddings enabled”</p>
+</dd>
+</dl>
+<p>)
+val queries = LoadTestUtils.getRandomQuerySet(</p>
+<blockquote>
+<div><p>dimension(),
+randomQueriesCount(),
+randomEmbeddingMinValue(),
+randomEmbeddingMaxValue()</p>
+</div></blockquote>
+<p>)</p>
+<p>queries.map(Query[I](_))</p>
+</dd>
+<dt>} else {</dt><dd><p>assert(querySetDir().nonEmpty, “Query set path is empty”)
+assert(queryIdType().nonEmpty, “Query id type is empty”)
+val queries = LoadTestUtils.getEmbeddingsSet[Q](querySetDir(), queryIdType())</p>
+<dl>
+<dt>if (truthSetDir().nonEmpty) {</dt><dd><p>// Join the queries with truth set data.
+assert(indexIdType().nonEmpty, “Index id type is empty”)
+val truthSetMap =</p>
+<blockquote>
+<div><p>LoadTestUtils.getTruthSetMap[Q, I](truthSetDir(), queryIdType(), indexIdType())</p>
+</div></blockquote>
+<p>queries.map(entity =&gt; Query[I](entity.embedding, truthSetMap(entity.id)))</p>
+</dd>
+<dt>} else {</dt><dd><p>queries.map(entity =&gt; Query[I](entity.embedding))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private[this] def getQueryRuntimeConfig[</dt><dd><p>T,
+P &lt;: RuntimeParams</p>
+</dd>
+<dt>]: Seq[QueryTimeConfiguration[T, P]] = {</dt><dd><dl>
+<dt>val queryTimeConfig = algo() match {</dt><dd><dl>
+<dt>case “annoy” =&gt;</dt><dd><p>assert(numOfNodesToExplore().nonEmpty, “Must specify the num_of_nodes_to_explore”)
+logger.info(s”Querying annoy index with num_of_nodes_to_explore ${numOfNodesToExplore()}”)
+for {</p>
+<blockquote>
+<div><p>numNodes &lt;- numOfNodesToExplore()
+numOfNeighbors &lt;- numberOfNeighbors()</p>
+</div></blockquote>
+<dl>
+<dt>} yield {</dt><dd><dl>
+<dt>buildQueryTimeConfig[T, AnnoyRuntimeParams](</dt><dd><p>numOfNeighbors,
+AnnoyRuntimeParams(Some(numNodes)),
+Map(</p>
+<blockquote>
+<div><p>“numNodes” -&gt; numNodes.toString,
+“numberOfNeighbors” -&gt; numOfNeighbors.toString</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>).asInstanceOf[QueryTimeConfiguration[T, P]]</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>case “hnsw” =&gt;</dt><dd><p>assert(ef().nonEmpty, “Must specify ef”)
+logger.info(s”Querying hnsw index with ef ${ef()}”)
+for {</p>
+<blockquote>
+<div><p>ef &lt;- ef()
+numOfNeighbors &lt;- numberOfNeighbors()</p>
+</div></blockquote>
+<dl>
+<dt>} yield {</dt><dd><dl>
+<dt>buildQueryTimeConfig[T, HnswParams](</dt><dd><p>numOfNeighbors,
+HnswParams(ef),
+Map(</p>
+<blockquote>
+<div><p>“efConstruction” -&gt; ef.toString,
+“numberOfNeighbors” -&gt; numOfNeighbors.toString</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>).asInstanceOf[QueryTimeConfiguration[T, P]]</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>case “faiss” =&gt;</dt><dd><p>assert(nprobe().nonEmpty, “Must specify nprobe”)
+def toNonZeroOptional(x: Int): Option[Int] = if (x != 0) Some(x) else None
+for {</p>
+<blockquote>
+<div><p>numOfNeighbors &lt;- numberOfNeighbors()
+runNProbe &lt;- nprobe()
+runQEF &lt;- quantizerEf()
+runKFactorEF &lt;- quantizerKfactorRF()
+runQNProbe &lt;- quantizerNprobe()
+runHT &lt;- ht()</p>
+</div></blockquote>
+<dl>
+<dt>} yield {</dt><dd><dl>
+<dt>val params = FaissParams(</dt><dd><p>Some(runNProbe),
+toNonZeroOptional(runQEF),
+toNonZeroOptional(runKFactorEF),
+toNonZeroOptional(runQNProbe),
+toNonZeroOptional(runHT))</p>
+</dd>
+<dt>buildQueryTimeConfig[T, FaissParams](</dt><dd><p>numOfNeighbors,
+params,
+Map(</p>
+<blockquote>
+<div><p>“nprobe” -&gt; params.nprobe.toString,
+“quantizer_efSearch” -&gt; params.quantizerEf.toString,
+“quantizer_k_factor_rf” -&gt; params.quantizerKFactorRF.toString,
+“quantizer_nprobe” -&gt; params.quantizerNprobe.toString,
+“ht” -&gt; params.ht.toString,
+“numberOfNeighbors” -&gt; numOfNeighbors.toString,</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>).asInstanceOf[QueryTimeConfiguration[T, P]]</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>case _ =&gt; throw new IllegalArgumentException(s”server type: $algo is not supported yet”)</p>
+</dd>
+</dl>
+<p>}</p>
+<p>queryTimeConfig</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def buildQueryable[T, P &lt;: RuntimeParams, D &lt;: Distance[D]](</dt><dd><p>inMemoryBuildRecorder: InMemoryLoadTestBuildRecorder</p>
+</dd>
+<dt>): Future[Queryable[T, P, D]] = {</dt><dd><dl>
+<dt>val queryable = loadTestType() match {</dt><dd><dl>
+<dt>case “remote” =&gt; {</dt><dd><p>assert(serviceDestination().nonEmpty, “Service destination not defined”)
+logger.info(s”Running load test with remote service ${serviceDestination()}”)
+LoadTestUtils.buildRemoteServiceQueryClient[T, P, D](</p>
+<blockquote>
+<div><p>serviceDestination(),
+“ann-load-test”,
+statsReceiver,
+injector.instance[ServiceIdentifier],
+getRuntimeParamInjection[P],
+getDistanceInjection[D],
+getIndexIdInjection[T]</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>}
+case “local” =&gt; {</p>
+<blockquote>
+<div><p>logger.info(“Running load test locally..”)
+assert(indexSetDir().nonEmpty, “Index set path is empty”)
+val statsLoadTestBuildRecorder = new StatsLoadTestBuildRecorder(statsReceiver)
+val buildRecorder =</p>
+<blockquote>
+<div><p>new ComposedLoadTestBuildRecorder(Seq(inMemoryBuildRecorder, statsLoadTestBuildRecorder))</p>
+</div></blockquote>
+<dl class="simple">
+<dt>indexEmbeddingsAndGetQueryable[T, P, D](</dt><dd><p>buildRecorder,
+LoadTestUtils.getEmbeddingsSet(indexSetDir(), indexIdType())</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}
+queryable</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def indexEmbeddingsAndGetQueryable[T, P &lt;: RuntimeParams, D &lt;: Distance[D]](</dt><dd><p>buildRecorder: LoadTestBuildRecorder,
+indexSet: Seq[EntityEmbedding[T]]</p>
+</dd>
+<dt>): Future[Queryable[T, P, D]] = {</dt><dd><p>logger.info(s”Indexing entity embeddings in index set with size ${indexSet.size}”)
+val metric = getDistanceMetric[D]
+val indexIdInjection = getIndexIdInjection[T]
+val indexBuilder = new AnnIndexBuildLoadTest(buildRecorder)
+val appendable = algo() match {</p>
+<blockquote>
+<div><dl>
+<dt>case “annoy” =&gt;</dt><dd><p>assert(numOfTrees() &gt; 0, “Must specify the number of trees for annoy”)
+logger.info(</p>
+<blockquote>
+<div><p>s”Creating annoy index locally with num_of_trees: ${numOfTrees()}”</p>
+</div></blockquote>
+<p>)
+TypedAnnoyIndex</p>
+<blockquote>
+<div><dl class="simple">
+<dt>.indexBuilder(</dt><dd><p>dimension(),
+numOfTrees(),
+metric,
+indexIdInjection,
+FuturePool.interruptibleUnboundedPool</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+</dd>
+<dt>case “hnsw” =&gt;</dt><dd><p>assert(efConstruction() &gt; 0 &amp;&amp; maxM() &gt; 0, “Must specify ef_construction and max_m”)
+logger.info(</p>
+<blockquote>
+<div><p>s”Creating hnsw index locally with max_m: ${maxM()} and ef_construction: ${efConstruction()}”</p>
+</div></blockquote>
+<p>)
+TypedHnswIndex</p>
+<blockquote>
+<div><dl class="simple">
+<dt>.index[T, D](</dt><dd><p>dimension(),
+metric,
+efConstruction(),
+maxM(),
+indexSet.size,
+ReadWriteFuturePool(FuturePool.interruptibleUnboundedPool)</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>indexBuilder</dt><dd><p>.indexEmbeddings(appendable, indexSet, concurrencyLevel())
+.asInstanceOf[Future[Queryable[T, P, D]]]</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private[this] def performQueries[T, P &lt;: RuntimeParams, D &lt;: Distance[D]](</dt><dd><p>queryable: Queryable[T, P, D],
+queryTimeConfig: Seq[QueryTimeConfiguration[T, P]],
+queries: Seq[Query[T]]</p>
+</dd>
+<dt>): Future[Unit] = {</dt><dd><p>val indexQuery = new AnnIndexQueryLoadTest()
+val duration = Duration(durationSec().toLong, TimeUnit.SECONDS)
+indexQuery.performQueries(</p>
+<blockquote>
+<div><p>queryable,
+targetQPS(),
+duration,
+queries,
+concurrencyLevel(),
+queryTimeConfig</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// provide index id injection based on argument
+private[this] def getIndexIdInjection[T]: Injection[T, Array[Byte]] = {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>val injection = indexIdType() match {</dt><dd><p>case “long” =&gt; AnnInjections.LongInjection
+case “string” =&gt; AnnInjections.StringInjection
+case “int” =&gt; AnnInjections.IntInjection
+case entityKind =&gt; EntityKind.getEntityKind(entityKind).byteInjection</p>
+</dd>
+</dl>
+<p>}
+injection.asInstanceOf[Injection[T, Array[Byte]]]</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>private[this] def getRuntimeParamInjection[</dt><dd><p>P &lt;: RuntimeParams</p>
+</dd>
+<dt>]: Injection[P, ServiceRuntimeParams] = {</dt><dd><dl class="simple">
+<dt>val injection = algo() match {</dt><dd><p>case “annoy” =&gt; AnnoyCommon.RuntimeParamsInjection
+case “hnsw” =&gt; HnswCommon.RuntimeParamsInjection
+case “faiss” =&gt; FaissCommon.RuntimeParamsInjection</p>
+</dd>
+</dl>
+<p>}</p>
+<p>injection.asInstanceOf[Injection[P, ServiceRuntimeParams]]</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// provide distance injection based on argument
+private[this] def getDistanceInjection[D &lt;: Distance[D]]: Injection[D, ServiceDistance] = {</p>
+<blockquote>
+<div><p>Metric.fromString(metric()).asInstanceOf[Injection[D, ServiceDistance]]</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>private[this] def getDistanceMetric[D &lt;: Distance[D]]: Metric[D] = {</dt><dd><p>Metric.fromString(metric()).asInstanceOf[Metric[D]]</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private[this] def buildQueryTimeConfig[T, P &lt;: RuntimeParams](</dt><dd><p>numOfNeighbors: Int,
+params: P,
+config: Map[String, String]</p>
+</dd>
+<dt>): QueryTimeConfiguration[T, P] = {</dt><dd><p>val printableQueryRecorder = new InMemoryLoadTestQueryRecorder[T]()
+val scope = config.flatMap { case (key, value) =&gt; Seq(key, value.toString) }.toSeq
+val statsLoadTestQueryRecorder = new StatsLoadTestQueryRecorder[T](</p>
+<blockquote>
+<div><p>// Put the run time params in the stats receiver names so that we can tell the difference when
+// we look at them later.
+statsReceiver.scope(algo()).scope(scope: _*)</p>
+</div></blockquote>
+<p>)
+val queryRecorder = new ComposedLoadTestQueryRecorder(</p>
+<blockquote>
+<div><p>Seq(printableQueryRecorder, statsLoadTestQueryRecorder)</p>
+</div></blockquote>
+<p>)
+QueryTimeConfiguration(</p>
+<blockquote>
+<div><p>queryRecorder,
+params,
+numOfNeighbors,
+printableQueryRecorder</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<p>override protected def modules: Seq[com.google.inject.Module] = Seq(ServiceIdentifierModule)</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/ann/src/main/scala/com/twitter/ann/service/loadtest/AnnLoadTestMain.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

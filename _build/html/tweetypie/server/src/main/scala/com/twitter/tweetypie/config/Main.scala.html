@@ -1,0 +1,459 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.tweetypie
+package config</p>
+<p>import com.twitter.app.Flag
+import com.twitter.app.Flaggable
+import com.twitter.app.Flags
+import com.twitter.finagle.http.HttpMuxer
+import com.twitter.finagle.mtls.authentication.ServiceIdentifier
+import com.twitter.finagle.mtls.authorization.server.MtlsServerSessionTrackerFilter
+import com.twitter.finagle.mtls.server.MtlsStackServer._
+import com.twitter.finagle.param.Reporter
+import com.twitter.finagle.ssl.OpportunisticTls
+import com.twitter.finagle.util.NullReporterFactory
+import com.twitter.finagle.Thrift
+import com.twitter.finagle.ThriftMux
+import com.twitter.flockdb.client.thriftscala.Priority
+import com.twitter.inject.Injector
+import com.twitter.inject.annotations.{Flags =&gt; InjectFlags}
+import com.twitter.scrooge.ThriftEnum
+import com.twitter.scrooge.ThriftEnumObject
+import com.twitter.server.handler.IndexHandler
+import com.twitter.strato.catalog.Catalog
+import com.twitter.strato.fed.StratoFed
+import com.twitter.strato.fed.server.StratoFedServer
+import com.twitter.strato.util.Ref
+import com.twitter.strato.warmup.Warmer
+import com.twitter.tweetypie.federated.StratoCatalogBuilder
+import com.twitter.tweetypie.federated.warmups.StratoCatalogWarmups
+import com.twitter.tweetypie.serverutil.ActivityService
+import java.net.InetSocketAddress
+import scala.reflect.ClassTag</p>
+<dl class="simple">
+<dt>object Env extends Enumeration {</dt><dd><p>val dev: Env.Value = Value
+val staging: Env.Value = Value
+val prod: Env.Value = Value</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>class TweetServiceFlags(flag: Flags, injector: =&gt; Injector) {</dt><dd><dl>
+<dt>implicit object EnvFlaggable extends Flaggable[Env.Value] {</dt><dd><dl>
+<dt>def parse(s: String): Env.Value =</dt><dd><dl class="simple">
+<dt>s match {</dt><dd><p>// Handle Aurora env names that are different from tweetypie’s names
+case “devel” =&gt; Env.dev
+case “test” =&gt; Env.staging
+// Handle Tweetypie env names
+case other =&gt; Env.withName(other)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>val zone: Flag[String] =</dt><dd><p>flag(“zone”, “localhost”, “One of: atla, pdxa, localhost, etc.”)</p>
+</dd>
+<dt>val env: Flag[Env.Value] =</dt><dd><p>flag(“env”, Env.dev, “One of: testbox, dev, staging, prod”)</p>
+</dd>
+<dt>val twemcacheDest: Flag[String] =</dt><dd><dl class="simple">
+<dt>flag(</dt><dd><p>“twemcacheDest”,
+“/s/cache/tweetypie:twemcaches”,
+“The Name for the tweetypie cache cluster.”</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>val deciderOverrides: Flag[Map[String, Boolean]] =</dt><dd><dl class="simple">
+<dt>flag(</dt><dd><p>“deciderOverrides”,
+Map.empty[String, Boolean],
+“Set deciders to constant values, overriding decider configuration files.”</p>
+</dd>
+<dt>)(</dt><dd><p>// Unfortunately, the implicit Flaggable[Boolean] has a default
+// value and Flaggable.ofMap[K, V] requires that the implicit
+// Flaggable[V] not have a default. Even less fortunately, it
+// doesn’t say why. We’re stuck with this.
+Flaggable.ofMap(implicitly, Flaggable.mandatory(_.toBoolean))</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>// “/decider.yml” comes from the resources included at
+// “tweetypie/server/config”, so you should not normally need to
+// override this value. This flag is defined as a step toward making
+// our command-line usage more similar to the standard
+// twitter-server-internal flags.
+def deciderBase(): String =</p>
+<blockquote>
+<div><p>injector.instance[String](InjectFlags.named(“decider.base”))</p>
+</div></blockquote>
+<p>// Omitting a value for decider overlay flag causes the server to use
+// only the static decider.
+def deciderOverlay(): String =</p>
+<blockquote>
+<div><p>injector.instance[String](InjectFlags.named(“decider.overlay”))</p>
+</div></blockquote>
+<p>// Omitting a value for the VF decider overlay flag causes the server
+// to use only the static decider.
+val vfDeciderOverlay: Flag[String] =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>flag(</dt><dd><p>“vf.decider.overlay”,
+“The location of the overlay decider configuration for Visibility Filtering”)</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Warmup Requests happen as part of the initialization process, before any real requests are</p></li>
+<li><p>processed. This prevents real requests from ever being served from a competely cold state</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>val enableWarmupRequests: Flag[Boolean] =</dt><dd><dl>
+<dt>flag(</dt><dd><p>“enableWarmupRequests”,
+true,
+“””| warms up Tweetypie service by generating random requests</p>
+<blockquote>
+<div><div class="line-block">
+<div class="line">to Tweetypie that are processed prior to the actual client requests “””.stripMargin</div>
+</div>
+</div></blockquote>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>val grayListRateLimit: Flag[Double] =</dt><dd><p>flag(“graylistRateLimit”, 5.0, “rate-limit for non-allowlisted clients”)</p>
+</dd>
+<dt>val servicePort: Flag[InetSocketAddress] =</dt><dd><p>flag(“service.port”, “port for tweet-service thrift interface”)</p>
+</dd>
+<dt>val clientId: Flag[String] =</dt><dd><p>flag(“clientId”, “tweetypie.staging”, “clientId to send in requests”)</p>
+</dd>
+<dt>val allowlist: Flag[Boolean] =</dt><dd><p>flag(“allowlist”, true, “enforce client allowlist”)</p>
+</dd>
+<dt>val clientHostStats: Flag[Boolean] =</dt><dd><p>flag(“clientHostStats”, false, “enable per client host stats”)</p>
+</dd>
+<dt>val withCache: Flag[Boolean] =</dt><dd><p>flag(“withCache”, true, “if set to false, Tweetypie will launch without memcache”)</p>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Make any [[ThriftEnum]] value parseable as a [[Flag]] value. This</p></li>
+<li><p>will parse case-insensitive values that match the unqualified</p></li>
+<li><p>names of the values of the enumeration, in the manner of</p></li>
+<li><p>[[ThriftEnum]]’s <cite>valueOf</cite> method.</p></li>
+<li></li>
+<li><p>Consider a [[ThriftEnum]] generated from the following Thrift IDL snippet:</p></li>
+<li></li>
+<li><p>{{{</p></li>
+<li><p>enum Priority {</p></li>
+<li><p>Low = 1</p></li>
+<li><p>Throttled = 2</p></li>
+<li><p>High = 3</p></li>
+<li><p>}</p></li>
+<li><p>}}}</p></li>
+<li></li>
+<li><p>To enable defining flags that specify one of these enum values:</p></li>
+<li></li>
+<li><p>{{{</p></li>
+<li><p>implicit val flaggablePriority: Flaggable[Priority] = flaggableThriftEnum(Priority)</p></li>
+<li><p>}}}</p></li>
+<li></li>
+<li><p>In this example, the enumeration value <cite>Priority.Low</cite> can be</p></li>
+<li><p>represented as the string “Low”, “low”, or “LOW”.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>def flaggableThriftEnum[T &lt;: ThriftEnum: ClassTag](enum: ThriftEnumObject[T]): Flaggable[T] =</dt><dd><dl>
+<dt>Flaggable.mandatory[T] { stringValue: String =&gt;</dt><dd><dl>
+<dt>enum</dt><dd><p>.valueOf(stringValue)
+.getOrElse {</p>
+<blockquote>
+<div><p>val validValues = enum.list.map(_.name).mkString(”, “)
+throw new IllegalArgumentException(</p>
+<blockquote>
+<div><p>s”Invalid value ${stringValue}. Valid values include: ${validValues}”</p>
+</div></blockquote>
+<p>)</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>implicit val flaggablePriority: Flaggable[Priority] = flaggableThriftEnum(Priority)</p>
+<dl>
+<dt>val backgroundIndexingPriority: Flag[Priority] =</dt><dd><dl>
+<dt>flag(</dt><dd><p>“backgroundIndexingPriority”,
+Priority.Low,
+“specifies the queue to use for &quot;background&quot; tflock operations, such as removing edges “ +</p>
+<blockquote>
+<div><p>“for deleted Tweets. This exists for testing scenarios, when it is useful to see the “ +
+“effects of background indexing operations sooner. In production, this should always be “ +
+“set to &quot;low&quot; (the default).”</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>val tflockPageSize: Flag[Int] =</dt><dd><p>flag(“tflockPageSize”, 1000, “Number of items to return in each page when querying tflock”)</p>
+</dd>
+<dt>val enableInProcessCache: Flag[Boolean] =</dt><dd><dl class="simple">
+<dt>flag(</dt><dd><p>“enableInProcessCache”,
+true,
+“if set to false, Tweetypie will not use the in-process cache”</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>val inProcessCacheSize: Flag[Int] =</dt><dd><p>flag(“inProcessCacheSize”, 1700, “maximum items in in-process cache”)</p>
+</dd>
+<dt>val inProcessCacheTtlMs: Flag[Int] =</dt><dd><p>flag(“inProcessCacheTtlMs”, 10000, “milliseconds that hot keys are stored in memory”)</p>
+</dd>
+<dt>val memcachePendingRequestLimit: Flag[Int] =</dt><dd><dl class="simple">
+<dt>flag(</dt><dd><p>“memcachePendingRequestLimit”,
+100,
+“Number of requests that can be queued on a single memcache connection (4 per cache server)”</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>val instanceId: Flag[Int] =</dt><dd><dl class="simple">
+<dt>flag(</dt><dd><p>“configbus.instanceId”,
+-1,
+“InstanceId of the tweetypie service instance for staged configuration distribution”</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>val instanceCount: Flag[Int] =</dt><dd><dl class="simple">
+<dt>flag(</dt><dd><p>“configbus.instanceCount”,
+-1,
+“Total number of tweetypie service instances for staged configuration distribution”</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>def serviceIdentifier(): ServiceIdentifier =</dt><dd><p>injector.instance[ServiceIdentifier]</p>
+</dd>
+<dt>val enableReplication: Flag[Boolean] =</dt><dd><dl class="simple">
+<dt>flag(</dt><dd><p>“enableReplication”,
+true,
+“Enable replication of reads (configurable via tweetypie_replicate_reads decider) and writes (100%) via DRPC”</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>val simulateDeferredrpcCallbacks: Flag[Boolean] =</dt><dd><dl>
+<dt>flag(</dt><dd><p>“simulateDeferredrpcCallbacks”,
+false,
+“””<a href="#id5"><span class="problematic" id="id6">|</span></a>For async write path, call back into current instance instead of via DRPC.</p>
+<blockquote>
+<div><p><a href="#id7"><span class="problematic" id="id8">|</span></a>This is used for test and devel instances so we can ensure the test traffic
+<a href="#id9"><span class="problematic" id="id10">|</span></a>is going to the test instance.”””.stripMargin</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>val shortCircuitLikelyPartialTweetReadsMs: Flag[Int] =</dt><dd><dl>
+<dt>flag(</dt><dd><p>“shortCircuitLikelyPartialTweetReadsMs”,
+1500,
+“””<a href="#id11"><span class="problematic" id="id12">|</span></a>Specifies a number of milliseconds before which we will short-circuit likely</p>
+<blockquote>
+<div><p><a href="#id13"><span class="problematic" id="id14">|</span></a>partial reads from MH and return a NotFound tweet response state. After
+<a href="#id15"><span class="problematic" id="id16">|</span></a>experimenting we went with 1500 ms.”””.stripMargin</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>val stringCenterProjects: Flag[Seq[String]] =</dt><dd><dl class="simple">
+<dt>flag(</dt><dd><p>“stringcenter.projects”,
+Seq.empty[String],
+“String Center project names, comma separated”)(Flaggable.ofSeq(Flaggable.ofString))</p>
+</dd>
+</dl>
+</dd>
+<dt>val languagesConfig: Flag[String] =</dt><dd><p>flag(“international.languages”, “Supported languages config file”)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>class TweetypieMain extends StratoFedServer {</dt><dd><p>override def dest: String = “/s/tweetypie/tweetypie:federated”</p>
+<p>val tweetServiceFlags: TweetServiceFlags = new TweetServiceFlags(flag, injector)</p>
+<p>// display all the registered HttpMuxer handlers
+HttpMuxer.addHandler(“”, new IndexHandler)</p>
+<dl>
+<dt>private[this] lazy val serverBuilder = {</dt><dd><p>val settings = new TweetServiceSettings(tweetServiceFlags)
+val serverBuilder = new TweetServerBuilder(settings)</p>
+<dl class="simple">
+<dt>val mtlsSessionTrackerFilter =</dt><dd><p>new MtlsServerSessionTrackerFilter[Array[Byte], Array[Byte]](statsReceiver)</p>
+</dd>
+</dl>
+<p>val mtlsTrackedService = mtlsSessionTrackerFilter.andThen(ActivityService(serverBuilder.build))</p>
+<p>val thriftMuxServer = ThriftMux.server
+// by default, finagle logs exceptions to chickadee, which is deprecated and
+// basically unused.  to avoid wasted overhead, we explicitly disable the reporter.</p>
+<blockquote>
+<div><p>.configured(Reporter(NullReporterFactory))
+.withLabel(“tweetypie”)
+.withMutualTls(tweetServiceFlags.serviceIdentifier())
+.withOpportunisticTls(OpportunisticTls.Required)
+.configured(Thrift.param.ServiceClass(Some(classOf[ThriftTweetService])))
+.serve(tweetServiceFlags.servicePort(), mtlsTrackedService)</p>
+</div></blockquote>
+<p>closeOnExit(thriftMuxServer)
+await(thriftMuxServer)</p>
+<p>serverBuilder</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>override def configureRefCatalog(</dt><dd><p>catalog: Ref[Catalog[StratoFed.Column]]</p>
+</dd>
+<dt>): Ref[Catalog[StratoFed.Column]] =</dt><dd><dl>
+<dt>catalog</dt><dd><dl>
+<dt>.join {</dt><dd><dl>
+<dt>Ref(</dt><dd><dl>
+<dt>serverBuilder.stratoTweetService.flatMap { tweetService =&gt;</dt><dd><dl class="simple">
+<dt>StratoCatalogBuilder.catalog(</dt><dd><p>tweetService,
+serverBuilder.backendClients.stratoserverClient,
+serverBuilder.backendClients.gizmoduck.getById,
+serverBuilder.backendClients.callbackPromotedContentLogger,
+statsReceiver,
+serverBuilder.deciderGates.enableCommunityTweetCreates,</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}
+.map { case (l, r) =&gt; l ++ r }</p>
+</dd>
+</dl>
+</dd>
+<dt>override def configureWarmer(warmer: Warmer): Unit = {</dt><dd><dl>
+<dt>new TweetServiceSettings(tweetServiceFlags).warmupRequestsSettings.foreach { warmupSettings =&gt;</dt><dd><dl class="simple">
+<dt>warmer.add(</dt><dd><p>“tweetypie strato catalog”,
+() =&gt; StratoCatalogWarmups.warmup(warmupSettings, composedOps)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>object Main extends TweetypieMain</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/tweetypie/server/src/main/scala/com/twitter/tweetypie/config/Main.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

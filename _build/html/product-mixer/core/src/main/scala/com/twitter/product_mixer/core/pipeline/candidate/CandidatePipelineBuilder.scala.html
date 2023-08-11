@@ -1,0 +1,1061 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../../../" id="documentation_options" src="../../../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.product_mixer.core.pipeline.candidate</p>
+<p>import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.product_mixer.core.feature.featuremap.FeatureMap
+import com.twitter.product_mixer.core.feature.featuremap.asyncfeaturemap.AsyncFeatureMap
+import com.twitter.product_mixer.core.functional_component.common.alert.Alert
+import com.twitter.product_mixer.core.functional_component.decorator.CandidateDecorator
+import com.twitter.product_mixer.core.functional_component.feature_hydrator.BaseQueryFeatureHydrator
+import com.twitter.product_mixer.core.functional_component.transformer.BaseCandidatePipelineQueryTransformer
+import com.twitter.product_mixer.core.functional_component.transformer.CandidatePipelineResultsTransformer
+import com.twitter.product_mixer.core.gate.ParamGate
+import com.twitter.product_mixer.core.gate.ParamGate.EnabledGateSuffix
+import com.twitter.product_mixer.core.gate.ParamGate.SupportedClientGateSuffix
+import com.twitter.product_mixer.core.model.common.CandidateWithFeatures
+import com.twitter.product_mixer.core.model.common.Component
+import com.twitter.product_mixer.core.model.common.UniversalNoun
+import com.twitter.product_mixer.core.model.common.identifier.CandidatePipelineIdentifier
+import com.twitter.product_mixer.core.model.common.identifier.ComponentIdentifierStack
+import com.twitter.product_mixer.core.model.common.identifier.PipelineStepIdentifier
+import com.twitter.product_mixer.core.model.common.presentation.CandidateWithDetails
+import com.twitter.product_mixer.core.pipeline.InvalidStepStateException
+import com.twitter.product_mixer.core.pipeline.PipelineBuilder
+import com.twitter.product_mixer.core.pipeline.PipelineQuery
+import com.twitter.product_mixer.core.pipeline.pipeline_failure.ClosedGate
+import com.twitter.product_mixer.core.pipeline.pipeline_failure.PipelineFailureClassifier
+import com.twitter.product_mixer.core.service.Executor
+import com.twitter.product_mixer.core.service.async_feature_map_executor.AsyncFeatureMapExecutor
+import com.twitter.product_mixer.core.service.async_feature_map_executor.AsyncFeatureMapExecutorResults
+import com.twitter.product_mixer.core.service.candidate_decorator_executor.CandidateDecoratorExecutor
+import com.twitter.product_mixer.core.service.candidate_decorator_executor.CandidateDecoratorExecutorResult
+import com.twitter.product_mixer.core.service.candidate_feature_hydrator_executor.CandidateFeatureHydratorExecutor
+import com.twitter.product_mixer.core.service.candidate_feature_hydrator_executor.CandidateFeatureHydratorExecutorResult
+import com.twitter.product_mixer.core.service.candidate_source_executor.CandidateSourceExecutor
+import com.twitter.product_mixer.core.service.candidate_source_executor.CandidateSourceExecutorResult
+import com.twitter.product_mixer.core.service.candidate_source_executor.FetchedCandidateWithFeatures
+import com.twitter.product_mixer.core.service.filter_executor.FilterExecutor
+import com.twitter.product_mixer.core.service.filter_executor.FilterExecutorResult
+import com.twitter.product_mixer.core.service.gate_executor.GateExecutor
+import com.twitter.product_mixer.core.service.gate_executor.GateExecutorResult
+import com.twitter.product_mixer.core.service.gate_executor.StoppedGateException
+import com.twitter.product_mixer.core.service.group_results_executor.GroupResultsExecutor
+import com.twitter.product_mixer.core.service.group_results_executor.GroupResultsExecutorInput
+import com.twitter.product_mixer.core.service.group_results_executor.GroupResultsExecutorResult
+import com.twitter.product_mixer.core.service.query_feature_hydrator_executor.QueryFeatureHydratorExecutor
+import com.twitter.stitch.Arrow
+import com.twitter.util.logging.Logging
+import javax.inject.Inject</p>
+<dl>
+<dt>class CandidatePipelineBuilder[</dt><dd><p>Query &lt;: PipelineQuery,
+CandidateSourceQuery,
+CandidateSourceResult,
+Result &lt;: UniversalNoun[Any]] &#64;Inject() (
+queryFeatureHydratorExecutor: QueryFeatureHydratorExecutor,
+asyncFeatureMapExecutor: AsyncFeatureMapExecutor,
+candidateDecoratorExecutor: CandidateDecoratorExecutor,
+candidateFeatureHydratorExecutor: CandidateFeatureHydratorExecutor,
+candidateSourceExecutor: CandidateSourceExecutor,
+groupResultsExecutor: GroupResultsExecutor,
+filterExecutor: FilterExecutor,
+gateExecutor: GateExecutor,
+override val statsReceiver: StatsReceiver)</p>
+<blockquote>
+<div><p>extends PipelineBuilder[CandidatePipeline.Inputs[Query]]
+with Logging {</p>
+</div></blockquote>
+<p>override type UnderlyingResultType = Seq[CandidateWithDetails]
+override type PipelineResultType = IntermediateCandidatePipelineResult[Result]</p>
+<dl>
+<dt>def build(</dt><dd><p>parentComponentIdentifierStack: ComponentIdentifierStack,
+config: BaseCandidatePipelineConfig[</p>
+<blockquote>
+<div><p>Query,
+CandidateSourceQuery,
+CandidateSourceResult,
+Result</p>
+</div></blockquote>
+<p>]</p>
+</dd>
+</dl>
+<p>): CandidatePipeline[Query] = {</p>
+<blockquote>
+<div><p>val pipelineIdentifier = config.identifier
+val candidateSourceIdentifier = config.candidateSource.identifier</p>
+<dl>
+<dt>val context = Executor.Context(</dt><dd><dl class="simple">
+<dt>PipelineFailureClassifier(</dt><dd><p>config.failureClassifier.orElse(StoppedGateException.classifier(ClosedGate))),</p>
+</dd>
+</dl>
+<p>parentComponentIdentifierStack.push(pipelineIdentifier)</p>
+</dd>
+</dl>
+<p>)</p>
+<dl class="simple">
+<dt>val enabledGateOpt = config.enabledDeciderParam.map { deciderParam =&gt;</dt><dd><p>ParamGate(pipelineIdentifier + EnabledGateSuffix, deciderParam)</p>
+</dd>
+</dl>
+<p>}
+val supportedClientGateOpt = config.supportedClientParam.map { param =&gt;</p>
+<blockquote>
+<div><p>ParamGate(pipelineIdentifier + SupportedClientGateSuffix, param)</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Evaluate enabled decider gate first since if it’s off, there is no reason to proceed</p></li>
+<li><p>Next evaluate supported client feature switch gate, followed by customer configured gates</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+</dl>
+<p>val allGates = enabledGateOpt.toSeq ++ supportedClientGateOpt.toSeq ++ config.gates</p>
+<p>// Dynamically replace the identifier of both transformers if config used the inline constructor
+// which sets a default identifier. We need to do this to ensure uniqueness of identifiers.
+val queryTransformer = BaseCandidatePipelineQueryTransformer.copyWithUpdatedIdentifier(</p>
+<blockquote>
+<div><p>config.queryTransformer,
+pipelineIdentifier)</p>
+</div></blockquote>
+<dl>
+<dt>val resultsTransformer = CandidatePipelineResultsTransformer.copyWithUpdatedIdentifier(</dt><dd><p>config.resultTransformer,
+pipelineIdentifier)</p>
+</dd>
+<dt>val decorator = config.decorator.map(decorator =&gt;</dt><dd><p>CandidateDecorator.copyWithUpdatedIdentifier(decorator, pipelineIdentifier))</p>
+</dd>
+<dt>val GatesStep = new Step[Query, GateExecutorResult] {</dt><dd><p>override def identifier: PipelineStepIdentifier = CandidatePipelineConfig.gatesStep</p>
+<dl class="simple">
+<dt>override def executorArrow: Arrow[Query, GateExecutorResult] = {</dt><dd><p>gateExecutor.arrow(allGates, context)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>override def inputAdaptor(</dt><dd><p>query: CandidatePipeline.Inputs[Query],
+previousResult: IntermediateCandidatePipelineResult[Result]</p>
+</dd>
+<dt>): Query =</dt><dd><p>query.query</p>
+</dd>
+<dt>override def resultUpdater(</dt><dd><p>previousPipelineResult: IntermediateCandidatePipelineResult[Result],
+executorResult: GateExecutorResult</p>
+</dd>
+<dt>): IntermediateCandidatePipelineResult[Result] =</dt><dd><dl class="simple">
+<dt>previousPipelineResult.copy(underlyingResult =</dt><dd><p>previousPipelineResult.underlyingResult.copy(gateResult = Some(executorResult)))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def queryFeatureHydrationStep(</dt><dd><p>queryFeatureHydrators: Seq[BaseQueryFeatureHydrator[Query, _]],
+stepIdentifier: PipelineStepIdentifier,
+updater: ResultUpdater[CandidatePipelineResult, QueryFeatureHydratorExecutor.Result]</p>
+</dd>
+<dt>): Step[Query, QueryFeatureHydratorExecutor.Result] =</dt><dd><dl>
+<dt>new Step[Query, QueryFeatureHydratorExecutor.Result] {</dt><dd><p>override def identifier: PipelineStepIdentifier = stepIdentifier</p>
+<dl class="simple">
+<dt>override def executorArrow: Arrow[Query, QueryFeatureHydratorExecutor.Result] =</dt><dd><dl class="simple">
+<dt>queryFeatureHydratorExecutor.arrow(</dt><dd><p>queryFeatureHydrators,
+CandidatePipelineConfig.stepsAsyncFeatureHydrationCanBeCompletedBy,
+context)</p>
+</dd>
+</dl>
+</dd>
+<dt>override def inputAdaptor(</dt><dd><p>query: CandidatePipeline.Inputs[Query],
+previousResult: IntermediateCandidatePipelineResult[Result]</p>
+</dd>
+</dl>
+<p>): Query = query.query</p>
+<dl>
+<dt>override def resultUpdater(</dt><dd><p>previousPipelineResult: IntermediateCandidatePipelineResult[Result],
+executorResult: QueryFeatureHydratorExecutor.Result</p>
+</dd>
+<dt>): IntermediateCandidatePipelineResult[Result] =</dt><dd><dl class="simple">
+<dt>previousPipelineResult.copy(</dt><dd><p>underlyingResult = updater(previousPipelineResult.underlyingResult, executorResult))</p>
+</dd>
+</dl>
+</dd>
+<dt>override def queryUpdater(</dt><dd><p>query: CandidatePipeline.Inputs[Query],
+executorResult: QueryFeatureHydratorExecutor.Result</p>
+</dd>
+<dt>): CandidatePipeline.Inputs[Query] =</dt><dd><dl>
+<dt>CandidatePipeline.Inputs(</dt><dd><dl class="simple">
+<dt>query.query</dt><dd><dl class="simple">
+<dt>.withFeatureMap(</dt><dd><dl class="simple">
+<dt>query.query.features.getOrElse(</dt><dd><p>FeatureMap.empty) ++ executorResult.featureMap).asInstanceOf[Query],</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>query.existingCandidates)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>def asyncFeaturesStep(</dt><dd><p>stepToHydrateFor: PipelineStepIdentifier,
+context: Executor.Context</p>
+</dd>
+<dt>): Step[AsyncFeatureMap, AsyncFeatureMapExecutorResults] =</dt><dd><dl>
+<dt>new Step[AsyncFeatureMap, AsyncFeatureMapExecutorResults] {</dt><dd><dl>
+<dt>override def identifier: PipelineStepIdentifier =</dt><dd><p>CandidatePipelineConfig.asyncFeaturesStep(stepToHydrateFor)</p>
+</dd>
+<dt>override def executorArrow: Arrow[AsyncFeatureMap, AsyncFeatureMapExecutorResults] =</dt><dd><p>asyncFeatureMapExecutor.arrow(stepToHydrateFor, identifier, context)</p>
+</dd>
+<dt>override def inputAdaptor(</dt><dd><p>query: CandidatePipeline.Inputs[Query],
+previousResult: IntermediateCandidatePipelineResult[Result]</p>
+</dd>
+<dt>): AsyncFeatureMap =</dt><dd><dl>
+<dt>previousResult.underlyingResult.mergedAsyncQueryFeatures</dt><dd><dl class="simple">
+<dt>.getOrElse(</dt><dd><p>throw InvalidStepStateException(identifier, “MergedAsyncQueryFeatures”)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+<dt>override def resultUpdater(</dt><dd><p>previousPipelineResult: IntermediateCandidatePipelineResult[Result],
+executorResult: AsyncFeatureMapExecutorResults</p>
+</dd>
+<dt>): IntermediateCandidatePipelineResult[Result] =</dt><dd><dl>
+<dt>previousPipelineResult.copy(</dt><dd><dl>
+<dt>underlyingResult =</dt><dd><dl>
+<dt>previousPipelineResult.underlyingResult.copy(asyncFeatureHydrationResults =</dt><dd><dl class="simple">
+<dt>previousPipelineResult.underlyingResult.asyncFeatureHydrationResults match {</dt><dd><p>case Some(existingResults) =&gt; Some(existingResults ++ executorResult)
+case None =&gt; Some(executorResult)</p>
+</dd>
+</dl>
+<p>}))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+<dt>override def queryUpdater(</dt><dd><p>query: CandidatePipeline.Inputs[Query],
+executorResult: AsyncFeatureMapExecutorResults</p>
+</dd>
+<dt>): CandidatePipeline.Inputs[Query] =</dt><dd><dl>
+<dt>if (executorResult.featureMapsByStep</dt><dd><blockquote>
+<div><p>.getOrElse(stepToHydrateFor, FeatureMap.empty).isEmpty) {</p>
+</div></blockquote>
+<p>query</p>
+</dd>
+<dt>} else {</dt><dd><dl class="simple">
+<dt>val updatedQuery = query.query</dt><dd><dl class="simple">
+<dt>.withFeatureMap(</dt><dd><dl class="simple">
+<dt>query.query.features</dt><dd><p>.getOrElse(FeatureMap.empty) ++ executorResult.featureMapsByStep(
+stepToHydrateFor)).asInstanceOf[Query]</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>CandidatePipeline.Inputs(updatedQuery, query.existingCandidates)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>val CandidateSourceStep =</dt><dd><dl>
+<dt>new Step[Query, CandidateSourceExecutorResult[Result]] {</dt><dd><dl>
+<dt>override def identifier: PipelineStepIdentifier =</dt><dd><p>CandidatePipelineConfig.candidateSourceStep</p>
+</dd>
+<dt>override def executorArrow: Arrow[</dt><dd><p>Query,
+CandidateSourceExecutorResult[Result]</p>
+</dd>
+<dt>] =</dt><dd><dl>
+<dt>candidateSourceExecutor</dt><dd><dl class="simple">
+<dt>.arrow(</dt><dd><p>config.candidateSource,
+queryTransformer,
+resultsTransformer,
+config.featuresFromCandidateSourceTransformers,
+context</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+<dt>override def inputAdaptor(</dt><dd><p>query: CandidatePipeline.Inputs[Query],
+previousResult: IntermediateCandidatePipelineResult[Result]</p>
+</dd>
+<dt>): Query =</dt><dd><p>query.query</p>
+</dd>
+<dt>override def resultUpdater(</dt><dd><p>previousPipelineResult: IntermediateCandidatePipelineResult[Result],
+executorResult: CandidateSourceExecutorResult[Result]</p>
+</dd>
+<dt>): IntermediateCandidatePipelineResult[Result] =</dt><dd><dl>
+<dt>previousPipelineResult.copy(underlyingResult =</dt><dd><dl class="simple">
+<dt>previousPipelineResult.underlyingResult.copy(</dt><dd><dl class="simple">
+<dt>candidateSourceResult =</dt><dd><p>Some(executorResult.asInstanceOf[CandidateSourceExecutorResult[UniversalNoun[Any]]])</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>))</p>
+</dd>
+</dl>
+</dd>
+<dt>override def queryUpdater(</dt><dd><p>query: CandidatePipeline.Inputs[Query],
+executorResult: CandidateSourceExecutorResult[Result]</p>
+</dd>
+<dt>): CandidatePipeline.Inputs[Query] = {</dt><dd><dl class="simple">
+<dt>val updatedFeatureMap =</dt><dd><dl class="simple">
+<dt>query.query.features</dt><dd><p>.getOrElse(FeatureMap.empty) ++ executorResult.candidateSourceFeatureMap</p>
+</dd>
+</dl>
+</dd>
+<dt>val updatedQuery = query.query</dt><dd><p>.withFeatureMap(updatedFeatureMap).asInstanceOf[Query]</p>
+</dd>
+</dl>
+<p>CandidatePipeline.Inputs(updatedQuery, query.existingCandidates)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>val PreFilterFeatureHydrationPhase1Step =</dt><dd><dl>
+<dt>new Step[</dt><dd><p>CandidateFeatureHydratorExecutor.Inputs[Query, Result],
+CandidateFeatureHydratorExecutorResult[Result]</p>
+</dd>
+<dt>] {</dt><dd><dl>
+<dt>override def identifier: PipelineStepIdentifier =</dt><dd><p>CandidatePipelineConfig.preFilterFeatureHydrationPhase1Step</p>
+</dd>
+<dt>override def executorArrow: Arrow[</dt><dd><p>CandidateFeatureHydratorExecutor.Inputs[Query, Result],
+CandidateFeatureHydratorExecutorResult[Result]</p>
+</dd>
+<dt>] =</dt><dd><p>candidateFeatureHydratorExecutor.arrow(config.preFilterFeatureHydrationPhase1, context)</p>
+</dd>
+<dt>override def inputAdaptor(</dt><dd><p>query: CandidatePipeline.Inputs[Query],
+previousResult: IntermediateCandidatePipelineResult[Result]</p>
+</dd>
+<dt>): CandidateFeatureHydratorExecutor.Inputs[Query, Result] = {</dt><dd><dl>
+<dt>val candidateSourceExecutorResult =</dt><dd><dl class="simple">
+<dt>previousResult.underlyingResult.candidateSourceResult.getOrElse {</dt><dd><p>throw InvalidStepStateException(identifier, “CandidateSourceResult”)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>CandidateFeatureHydratorExecutor.Inputs(</dt><dd><p>query.query,
+candidateSourceExecutorResult.candidates</p>
+<blockquote>
+<div><p>.asInstanceOf[Seq[CandidateWithFeatures[Result]]])</p>
+</div></blockquote>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>override def resultUpdater(</dt><dd><p>previousPipelineResult: IntermediateCandidatePipelineResult[Result],
+executorResult: CandidateFeatureHydratorExecutorResult[Result]</p>
+</dd>
+<dt>): IntermediateCandidatePipelineResult[Result] = {</dt><dd><dl>
+<dt>val candidateSourceExecutorResult =</dt><dd><dl class="simple">
+<dt>previousPipelineResult.underlyingResult.candidateSourceResult.getOrElse {</dt><dd><p>throw InvalidStepStateException(identifier, “CandidateSourceResult”)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>val featureMapsFromPreFilter = executorResult.results.map { result =&gt;</dt><dd><p>result.candidate -&gt; result.features</p>
+</dd>
+</dl>
+<p>}.toMap</p>
+<dl>
+<dt>val mergedFeatureMaps = candidateSourceExecutorResult.candidates.map { candidate =&gt;</dt><dd><p>val candidateFeatureMap = candidate.features
+val preFilterFeatureMap =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>featureMapsFromPreFilter.getOrElse(</dt><dd><p>candidate.candidate.asInstanceOf[Result],
+FeatureMap.empty)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>candidate.candidate.asInstanceOf[Result] -&gt; (candidateFeatureMap ++ preFilterFeatureMap)</p>
+</dd>
+</dl>
+<p>}.toMap</p>
+<dl>
+<dt>previousPipelineResult.copy(</dt><dd><dl class="simple">
+<dt>underlyingResult = previousPipelineResult.underlyingResult.copy(</dt><dd><dl class="simple">
+<dt>preFilterHydrationResult = Some(</dt><dd><dl class="simple">
+<dt>executorResult</dt><dd><p>.asInstanceOf[CandidateFeatureHydratorExecutorResult[UniversalNoun[Any]]])</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>),
+featureMaps = Some(mergedFeatureMaps)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>val PreFilterFeatureHydrationPhase2Step =</dt><dd><dl>
+<dt>new Step[</dt><dd><p>CandidateFeatureHydratorExecutor.Inputs[Query, Result],
+CandidateFeatureHydratorExecutorResult[Result]</p>
+</dd>
+<dt>] {</dt><dd><dl>
+<dt>override def identifier: PipelineStepIdentifier =</dt><dd><p>CandidatePipelineConfig.preFilterFeatureHydrationPhase2Step</p>
+</dd>
+<dt>override def executorArrow: Arrow[</dt><dd><p>CandidateFeatureHydratorExecutor.Inputs[Query, Result],
+CandidateFeatureHydratorExecutorResult[Result]</p>
+</dd>
+<dt>] =</dt><dd><p>candidateFeatureHydratorExecutor.arrow(config.preFilterFeatureHydrationPhase2, context)</p>
+</dd>
+<dt>override def inputAdaptor(</dt><dd><p>query: CandidatePipeline.Inputs[Query],
+previousResult: IntermediateCandidatePipelineResult[Result]</p>
+</dd>
+<dt>): CandidateFeatureHydratorExecutor.Inputs[Query, Result] = {</dt><dd><dl class="simple">
+<dt>val candidates = previousResult.underlyingResult.preFilterHydrationResult.getOrElse {</dt><dd><p>throw InvalidStepStateException(identifier, “PreFilterHydrationResult”)</p>
+</dd>
+</dl>
+<p>}.results
+CandidateFeatureHydratorExecutor.Inputs(</p>
+<blockquote>
+<div><p>query.query,
+candidates.asInstanceOf[Seq[CandidateWithFeatures[Result]]]</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>override def resultUpdater(</dt><dd><p>previousPipelineResult: IntermediateCandidatePipelineResult[Result],
+executorResult: CandidateFeatureHydratorExecutorResult[Result]</p>
+</dd>
+</dl>
+<p>): IntermediateCandidatePipelineResult[Result] = {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>val featureMapsFromPreFilterPhase2 = executorResult.results.map { result =&gt;</dt><dd><p>result.candidate -&gt; result.features</p>
+</dd>
+</dl>
+<p>}.toMap</p>
+<dl>
+<dt>val mergedFeatureMaps = previousPipelineResult.featureMaps</dt><dd><p>.getOrElse(throw InvalidStepStateException(identifier, “FeatureMaps”))
+.map {</p>
+<blockquote>
+<div><dl>
+<dt>case (candidate, featureMap) =&gt;</dt><dd><dl class="simple">
+<dt>val preFilterPhase2FeatureMap =</dt><dd><p>featureMapsFromPreFilterPhase2.getOrElse(candidate, FeatureMap.empty)</p>
+</dd>
+</dl>
+<p>candidate -&gt; (featureMap ++ preFilterPhase2FeatureMap)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+<dt>previousPipelineResult.copy(</dt><dd><dl class="simple">
+<dt>underlyingResult = previousPipelineResult.underlyingResult.copy(</dt><dd><dl class="simple">
+<dt>preFilterHydrationResultPhase2 = Some(</dt><dd><dl class="simple">
+<dt>executorResult</dt><dd><p>.asInstanceOf[CandidateFeatureHydratorExecutorResult[UniversalNoun[Any]]])</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>),
+featureMaps = Some(mergedFeatureMaps)</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>val FiltersStep =</dt><dd><dl>
+<dt>new Step[(Query, Seq[CandidateWithFeatures[Result]]), FilterExecutorResult[Result]] {</dt><dd><p>override def identifier: PipelineStepIdentifier = CandidatePipelineConfig.filtersStep</p>
+<dl>
+<dt>override def executorArrow: Arrow[</dt><dd><p>(Query, Seq[CandidateWithFeatures[Result]]),
+FilterExecutorResult[</p>
+<blockquote>
+<div><p>Result</p>
+</div></blockquote>
+<p>]</p>
+</dd>
+<dt>] =</dt><dd><p>filterExecutor.arrow(config.filters, context)</p>
+</dd>
+<dt>override def inputAdaptor(</dt><dd><p>query: CandidatePipeline.Inputs[Query],
+previousResult: IntermediateCandidatePipelineResult[Result]</p>
+</dd>
+<dt>): (Query, Seq[CandidateWithFeatures[Result]]) = {</dt><dd><dl>
+<dt>val candidates =</dt><dd><dl>
+<dt>previousResult.underlyingResult.candidateSourceResult</dt><dd><dl class="simple">
+<dt>.getOrElse {</dt><dd><p>throw InvalidStepStateException(identifier, “CandidateSourceResult”)</p>
+</dd>
+</dl>
+<p>}.candidates.map(_.candidate).asInstanceOf[Seq[Result]]</p>
+</dd>
+</dl>
+</dd>
+<dt>val featureMaps = previousResult.featureMaps</dt><dd><p>.getOrElse(throw InvalidStepStateException(identifier, “FeatureMaps”))</p>
+</dd>
+</dl>
+<dl>
+<dt>(</dt><dd><p>query.query,
+candidates.map(candidate =&gt;</p>
+<blockquote>
+<div><dl class="simple">
+<dt>CandidateWithFeaturesImpl(</dt><dd><p>candidate,
+featureMaps.getOrElse(candidate, FeatureMap.empty))))</p>
+</dd>
+</dl>
+</div></blockquote>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>override def resultUpdater(</dt><dd><p>previousPipelineResult: IntermediateCandidatePipelineResult[Result],
+executorResult: FilterExecutorResult[Result]</p>
+</dd>
+<dt>): IntermediateCandidatePipelineResult[Result] =</dt><dd><dl>
+<dt>previousPipelineResult.copy(underlyingResult =</dt><dd><dl class="simple">
+<dt>previousPipelineResult.underlyingResult.copy(</dt><dd><dl class="simple">
+<dt>filterResult =</dt><dd><p>Some(executorResult.asInstanceOf[FilterExecutorResult[UniversalNoun[Any]]])</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>val PostFilterFeatureHydrationStep =</dt><dd><dl>
+<dt>new Step[</dt><dd><p>CandidateFeatureHydratorExecutor.Inputs[Query, Result],
+CandidateFeatureHydratorExecutorResult[Result]</p>
+</dd>
+<dt>] {</dt><dd><dl>
+<dt>override def identifier: PipelineStepIdentifier =</dt><dd><p>CandidatePipelineConfig.postFilterFeatureHydrationStep</p>
+</dd>
+<dt>override def executorArrow: Arrow[</dt><dd><p>CandidateFeatureHydratorExecutor.Inputs[Query, Result],
+CandidateFeatureHydratorExecutorResult[Result]</p>
+</dd>
+<dt>] =</dt><dd><p>candidateFeatureHydratorExecutor.arrow(config.postFilterFeatureHydration, context)</p>
+</dd>
+<dt>override def inputAdaptor(</dt><dd><p>query: CandidatePipeline.Inputs[Query],
+previousResult: IntermediateCandidatePipelineResult[Result]</p>
+</dd>
+<dt>): CandidateFeatureHydratorExecutor.Inputs[Query, Result] = {</dt><dd><dl>
+<dt>val filterResult = previousResult.underlyingResult.filterResult</dt><dd><dl class="simple">
+<dt>.getOrElse(</dt><dd><p>throw InvalidStepStateException(identifier, “FilterResult”)</p>
+</dd>
+</dl>
+<p>).result.asInstanceOf[Seq[Result]]</p>
+</dd>
+<dt>val featureMaps = previousResult.featureMaps.getOrElse(</dt><dd><p>throw InvalidStepStateException(identifier, “FeatureMaps”)</p>
+</dd>
+</dl>
+<p>)</p>
+<dl class="simple">
+<dt>val filteredCandidates = filterResult.map { candidate =&gt;</dt><dd><p>CandidateWithFeaturesImpl(candidate, featureMaps.getOrElse(candidate, FeatureMap.empty))</p>
+</dd>
+</dl>
+<p>}
+CandidateFeatureHydratorExecutor.Inputs(query.query, filteredCandidates)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>override def resultUpdater(</dt><dd><p>previousPipelineResult: IntermediateCandidatePipelineResult[Result],
+executorResult: CandidateFeatureHydratorExecutorResult[Result]</p>
+</dd>
+<dt>): IntermediateCandidatePipelineResult[Result] = {</dt><dd><dl>
+<dt>val filterResult = previousPipelineResult.underlyingResult.filterResult</dt><dd><dl class="simple">
+<dt>.getOrElse(</dt><dd><p>throw InvalidStepStateException(identifier, “FilterResult”)</p>
+</dd>
+</dl>
+<p>).result.asInstanceOf[Seq[Result]]</p>
+</dd>
+<dt>val featureMaps = previousPipelineResult.featureMaps.getOrElse(</dt><dd><p>throw InvalidStepStateException(identifier, “FeatureMaps”)</p>
+</dd>
+</dl>
+<p>)</p>
+<dl class="simple">
+<dt>val postFilterFeatureMaps = executorResult.results.map { result =&gt;</dt><dd><p>result.candidate -&gt; result.features</p>
+</dd>
+</dl>
+<p>}.toMap</p>
+<dl class="simple">
+<dt>val mergedFeatureMaps = filterResult.map { candidate =&gt;</dt><dd><dl class="simple">
+<dt>candidate -&gt;</dt><dd><dl class="simple">
+<dt>(featureMaps</dt><dd><p>.getOrElse(candidate, FeatureMap.empty) ++ postFilterFeatureMaps.getOrElse(
+candidate,
+FeatureMap.empty))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}.toMap</p>
+<dl>
+<dt>previousPipelineResult.copy(</dt><dd><dl class="simple">
+<dt>underlyingResult = previousPipelineResult.underlyingResult.copy(</dt><dd><dl class="simple">
+<dt>postFilterHydrationResult = Some(</dt><dd><dl class="simple">
+<dt>executorResult</dt><dd><p>.asInstanceOf[CandidateFeatureHydratorExecutorResult[UniversalNoun[Any]]])</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>),
+featureMaps = Some(mergedFeatureMaps)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>val ScorersStep =</dt><dd><dl>
+<dt>new Step[</dt><dd><p>CandidateFeatureHydratorExecutor.Inputs[Query, Result],
+CandidateFeatureHydratorExecutorResult[Result]</p>
+</dd>
+<dt>] {</dt><dd><p>override def identifier: PipelineStepIdentifier = CandidatePipelineConfig.scorersStep</p>
+<dl>
+<dt>override def executorArrow: Arrow[</dt><dd><p>CandidateFeatureHydratorExecutor.Inputs[Query, Result],
+CandidateFeatureHydratorExecutorResult[Result]</p>
+</dd>
+<dt>] =</dt><dd><p>candidateFeatureHydratorExecutor.arrow(config.scorers, context)</p>
+</dd>
+<dt>override def inputAdaptor(</dt><dd><p>query: CandidatePipeline.Inputs[Query],
+previousResult: IntermediateCandidatePipelineResult[Result]</p>
+</dd>
+<dt>): CandidateFeatureHydratorExecutor.Inputs[Query, Result] = {</dt><dd><dl>
+<dt>val filterResult = previousResult.underlyingResult.filterResult</dt><dd><dl class="simple">
+<dt>.getOrElse(</dt><dd><p>throw InvalidStepStateException(identifier, “FilterResult”)</p>
+</dd>
+</dl>
+<p>).result.asInstanceOf[Seq[Result]]</p>
+</dd>
+<dt>val featureMaps = previousResult.featureMaps.getOrElse(</dt><dd><p>throw InvalidStepStateException(identifier, “FeatureMaps”)</p>
+</dd>
+</dl>
+<p>)</p>
+<dl class="simple">
+<dt>val filteredCandidates = filterResult.map { candidate =&gt;</dt><dd><p>CandidateWithFeaturesImpl(candidate, featureMaps.getOrElse(candidate, FeatureMap.empty))</p>
+</dd>
+</dl>
+<p>}
+CandidateFeatureHydratorExecutor.Inputs(query.query, filteredCandidates)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>override def resultUpdater(</dt><dd><p>previousPipelineResult: IntermediateCandidatePipelineResult[Result],
+executorResult: CandidateFeatureHydratorExecutorResult[Result]</p>
+</dd>
+<dt>): IntermediateCandidatePipelineResult[Result] = {</dt><dd><dl>
+<dt>val filterResult = previousPipelineResult.underlyingResult.filterResult</dt><dd><dl class="simple">
+<dt>.getOrElse(</dt><dd><p>throw InvalidStepStateException(identifier, “FilterResult”)</p>
+</dd>
+</dl>
+<p>).result.asInstanceOf[Seq[Result]]</p>
+</dd>
+<dt>val featureMaps = previousPipelineResult.featureMaps.getOrElse(</dt><dd><p>throw InvalidStepStateException(identifier, “FeatureMaps”)</p>
+</dd>
+</dl>
+<p>)</p>
+<dl class="simple">
+<dt>val scoringFeatureMaps = executorResult.results.map { result =&gt;</dt><dd><p>result.candidate -&gt; result.features</p>
+</dd>
+</dl>
+<p>}.toMap</p>
+<dl class="simple">
+<dt>val mergedFeatureMaps = filterResult.map { candidate =&gt;</dt><dd><dl class="simple">
+<dt>candidate -&gt;</dt><dd><dl class="simple">
+<dt>(featureMaps</dt><dd><p>.getOrElse(candidate, FeatureMap.empty) ++ scoringFeatureMaps.getOrElse(
+candidate,
+FeatureMap.empty))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}.toMap</p>
+<dl>
+<dt>previousPipelineResult.copy(</dt><dd><dl class="simple">
+<dt>underlyingResult = previousPipelineResult.underlyingResult.copy(</dt><dd><dl class="simple">
+<dt>scorersResult = Some(</dt><dd><dl class="simple">
+<dt>executorResult</dt><dd><p>.asInstanceOf[CandidateFeatureHydratorExecutorResult[UniversalNoun[Any]]])</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>),
+featureMaps = Some(mergedFeatureMaps)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>val DecorationStep =</dt><dd><dl>
+<dt>new Step[(Query, Seq[CandidateWithFeatures[Result]]), CandidateDecoratorExecutorResult] {</dt><dd><p>override def identifier: PipelineStepIdentifier = CandidatePipelineConfig.decoratorStep</p>
+<dl>
+<dt>override def executorArrow: Arrow[</dt><dd><p>(Query, Seq[CandidateWithFeatures[Result]]),
+CandidateDecoratorExecutorResult</p>
+</dd>
+<dt>] =</dt><dd><p>candidateDecoratorExecutor.arrow(decorator, context)</p>
+</dd>
+<dt>override def inputAdaptor(</dt><dd><p>query: CandidatePipeline.Inputs[Query],
+previousResult: IntermediateCandidatePipelineResult[Result]</p>
+</dd>
+<dt>): (Query, Seq[CandidateWithFeatures[Result]]) = {</dt><dd><dl>
+<dt>val keptCandidates = previousResult.underlyingResult.filterResult</dt><dd><dl class="simple">
+<dt>.getOrElse {</dt><dd><p>throw InvalidStepStateException(identifier, “FilterResult”)</p>
+</dd>
+</dl>
+<p>}.result.asInstanceOf[Seq[Result]]</p>
+</dd>
+<dt>val featureMaps = previousResult.featureMaps.getOrElse {</dt><dd><p>throw InvalidStepStateException(identifier, “FeatureMaps”)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>(</dt><dd><p>query.query,
+keptCandidates.map(candidate =&gt;</p>
+<blockquote>
+<div><dl class="simple">
+<dt>CandidateWithFeaturesImpl(</dt><dd><p>candidate,
+featureMaps.getOrElse(candidate, FeatureMap.empty))))</p>
+</dd>
+</dl>
+</div></blockquote>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>override def resultUpdater(</dt><dd><p>previousPipelineResult: IntermediateCandidatePipelineResult[Result],
+executorResult: CandidateDecoratorExecutorResult</p>
+</dd>
+<dt>): IntermediateCandidatePipelineResult[Result] =</dt><dd><dl>
+<dt>previousPipelineResult.copy(underlyingResult =</dt><dd><dl class="simple">
+<dt>previousPipelineResult.underlyingResult.copy(</dt><dd><p>candidateDecoratorResult = Some(executorResult)</p>
+</dd>
+</dl>
+<p>))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>ResultStep is a synchronous step that basically takes the outputs from the other steps, groups modules,</p></li>
+<li><p>and puts things into the final result object</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>val ResultStep = new Step[GroupResultsExecutorInput[Result], GroupResultsExecutorResult] {</dt><dd><p>override def identifier: PipelineStepIdentifier = CandidatePipelineConfig.resultStep</p>
+<dl class="simple">
+<dt>override def executorArrow: Arrow[</dt><dd><p>GroupResultsExecutorInput[Result],
+GroupResultsExecutorResult</p>
+</dd>
+</dl>
+<p>] = groupResultsExecutor.arrow(pipelineIdentifier, candidateSourceIdentifier, context)</p>
+<dl class="simple">
+<dt>override def inputAdaptor(</dt><dd><p>query: CandidatePipeline.Inputs[Query],
+previousResult: IntermediateCandidatePipelineResult[Result]</p>
+</dd>
+</dl>
+<p>): GroupResultsExecutorInput[Result] = {</p>
+<blockquote>
+<div><p>val underlying = previousResult.underlyingResult</p>
+<dl>
+<dt>val keptCandidates = underlying.filterResult</dt><dd><dl class="simple">
+<dt>.getOrElse(</dt><dd><p>throw InvalidStepStateException(identifier, “FilterResult”)</p>
+</dd>
+</dl>
+<p>).result.asInstanceOf[Seq[Result]]</p>
+</dd>
+<dt>val decorations = underlying.candidateDecoratorResult</dt><dd><dl class="simple">
+<dt>.getOrElse(</dt><dd><p>throw InvalidStepStateException(identifier, “DecorationResult”)</p>
+</dd>
+</dl>
+<p>).result.map(decoration =&gt; decoration.candidate -&gt; decoration.presentation).toMap</p>
+</dd>
+<dt>val combinedFeatureMaps: Map[Result, FeatureMap] = previousResult.featureMaps.getOrElse(</dt><dd><p>throw InvalidStepStateException(identifier, “FeatureMaps”))</p>
+</dd>
+<dt>val filteredCandidates = keptCandidates.map { candidate =&gt;</dt><dd><dl class="simple">
+<dt>val updatedMap = combinedFeatureMaps</dt><dd><p>.get(candidate).getOrElse(FeatureMap.empty)</p>
+</dd>
+</dl>
+<p>FetchedCandidateWithFeatures(candidate, updatedMap)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>GroupResultsExecutorInput(</dt><dd><p>candidates = filteredCandidates,
+decorations = decorations</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>override def resultUpdater(</dt><dd><p>previousPipelineResult: IntermediateCandidatePipelineResult[Result],
+executorResult: GroupResultsExecutorResult</p>
+</dd>
+<dt>): IntermediateCandidatePipelineResult[Result] =</dt><dd><dl class="simple">
+<dt>previousPipelineResult.copy(underlyingResult = previousPipelineResult.underlyingResult</dt><dd><p>.copy(result = Some(executorResult.candidatesWithDetails)))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>val builtSteps = Seq(</dt><dd><p>GatesStep,
+queryFeatureHydrationStep(</p>
+<blockquote>
+<div><p>config.queryFeatureHydration,
+CandidatePipelineConfig.fetchQueryFeaturesStep,
+(pipelineResult, executorResult) =&gt;</p>
+<blockquote>
+<div><p>pipelineResult.copy(queryFeatures = Some(executorResult))</p>
+</div></blockquote>
+</div></blockquote>
+<p>),
+queryFeatureHydrationStep(</p>
+<blockquote>
+<div><p>config.queryFeatureHydrationPhase2,
+CandidatePipelineConfig.fetchQueryFeaturesPhase2Step,
+(pipelineResult, executorResult) =&gt;</p>
+<blockquote>
+<div><dl>
+<dt>pipelineResult.copy(</dt><dd><p>queryFeaturesPhase2 = Some(executorResult),
+mergedAsyncQueryFeatures = Some(</p>
+<blockquote>
+<div><dl>
+<dt>pipelineResult.queryFeatures</dt><dd><dl class="simple">
+<dt>.getOrElse(</dt><dd><dl class="simple">
+<dt>throw InvalidStepStateException(</dt><dd><p>CandidatePipelineConfig.fetchQueryFeaturesPhase2Step,
+“QueryFeatures”)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>).asyncFeatureMap ++ executorResult.asyncFeatureMap)</p>
+</dd>
+</dl>
+</div></blockquote>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+</div></blockquote>
+<p>),
+asyncFeaturesStep(CandidatePipelineConfig.candidateSourceStep, context),
+CandidateSourceStep,
+asyncFeaturesStep(CandidatePipelineConfig.preFilterFeatureHydrationPhase1Step, context),
+PreFilterFeatureHydrationPhase1Step,
+asyncFeaturesStep(CandidatePipelineConfig.preFilterFeatureHydrationPhase2Step, context),
+PreFilterFeatureHydrationPhase2Step,
+asyncFeaturesStep(CandidatePipelineConfig.filtersStep, context),
+FiltersStep,
+asyncFeaturesStep(CandidatePipelineConfig.postFilterFeatureHydrationStep, context),
+PostFilterFeatureHydrationStep,
+asyncFeaturesStep(CandidatePipelineConfig.scorersStep, context),
+ScorersStep,
+asyncFeaturesStep(CandidatePipelineConfig.decoratorStep, context),
+DecorationStep,
+ResultStep</p>
+</dd>
+</dl>
+<p>)</p>
+<p>/** The main execution logic for this Candidate Pipeline. <a href="#id5"><span class="problematic" id="id6">*</span></a>/
+val finalArrow: Arrow[CandidatePipeline.Inputs[Query], CandidatePipelineResult] =</p>
+<blockquote>
+<div><dl>
+<dt>buildCombinedArrowFromSteps(</dt><dd><p>steps = builtSteps,
+context = context,
+initialEmptyResult =</p>
+<blockquote>
+<div><p>IntermediateCandidatePipelineResult.empty[Result](config.candidateSource.identifier),</p>
+</div></blockquote>
+<p>stepsInOrderFromConfig = CandidatePipelineConfig.stepsInOrder</p>
+</dd>
+</dl>
+<p>).map(_.underlyingResult)</p>
+</div></blockquote>
+<p>val configFromBuilder = config
+new CandidatePipeline[Query] {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>override private[core] val config: BaseCandidatePipelineConfig[Query, _, _, _] =</dt><dd><p>configFromBuilder</p>
+</dd>
+<dt>override val arrow: Arrow[CandidatePipeline.Inputs[Query], CandidatePipelineResult] =</dt><dd><p>finalArrow</p>
+</dd>
+</dl>
+<p>override val identifier: CandidatePipelineIdentifier = pipelineIdentifier
+override val alerts: Seq[Alert] = config.alerts
+override val children: Seq[Component] =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>allGates ++</dt><dd><p>config.queryFeatureHydration ++
+Seq(queryTransformer, config.candidateSource, resultsTransformer) ++
+config.featuresFromCandidateSourceTransformers ++
+decorator.toSeq ++
+config.preFilterFeatureHydrationPhase1 ++
+config.filters ++
+config.postFilterFeatureHydration ++
+config.scorers</p>
+</dd>
+</dl>
+</div></blockquote>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>private case class CandidateWithFeaturesImpl(candidate: Result, features: FeatureMap)</dt><dd><p>extends CandidateWithFeatures[Result]</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../../../_sources/product-mixer/core/src/main/scala/com/twitter/product_mixer/core/pipeline/candidate/CandidatePipelineBuilder.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

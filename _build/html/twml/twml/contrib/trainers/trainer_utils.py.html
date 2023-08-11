@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../" id="documentation_options" src="../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>“””
+This is a temporary close gap solution that allows TensorFlow users to do exploration and
+experimentation using Keras models, and production training using twml Trainer.</p>
+<p>As of now (Q4 2019), Keras model training using <cite>model.fit()</cite> has various issues, making it unfit
+for production training:</p>
+<blockquote>
+<div><ol class="arabic simple">
+<li><p><cite>model.fit()</cite> is slow in TF 1.14. This will be fixed with future TensorFlow updates.</p></li>
+<li><p><cite>model.fit()</cite> crashes during model saving or in eager mode when the input has SparseTensor.</p></li>
+<li><p>Models saved using TF 2.0 API cannot be served by TensorFlow’s Java API.</p></li>
+</ol>
+</div></blockquote>
+<dl class="simple">
+<dt>Until MLCE team resolves the above issues, MLCE team recommends the following:</dt><dd><ul class="simple">
+<li><p>Please feel free to use Keras models for experimentation and exploration.</p></li>
+<li><p>Please stick to twml Trainer for production training &amp; exporting,
+especially if you want to serve your model using Twitter’s prediction servers.</p></li>
+</ul>
+</dd>
+</dl>
+<p>This module provide tooling for easily training keras models using twml Trainer.</p>
+<p>This module takes a Keras model that performs binary classification, and returns a
+<cite>twml.trainers.Trainer</cite> object performing the same task.
+The common way to use the returned Trainer object is to call its
+<cite>train</cite>, <cite>evaluate</cite>, <cite>learn</cite>, or <cite>train_and_evaluate</cite> method with an input function.
+This input function can be created from the tf.data.Dataset you used with your Keras model.</p>
+<p>“””
+from twitter.deepbird.hparam import HParams</p>
+<p>import tensorflow  # noqa: F401
+import tensorflow.compat.v2 as tf</p>
+<p>import twml</p>
+<dl>
+<dt>def build_keras_trainer(</dt><dd><p>name,
+model_factory,
+save_dir,
+loss_fn=None,
+metrics_fn=None,
+<a href="#id1"><span class="problematic" id="id2">**</span></a>kwargs):
+“””
+Compile the given model_factory into a twml Trainer.</p>
+<dl>
+<dt>Args:</dt><dd><p>name: a string name for the returned twml Trainer.</p>
+<dl class="simple">
+<dt>model_factory: a callable that returns a keras model when called.</dt><dd><p>This keras model is expected to solve a binary classification problem.
+This keras model takes a dict of tensors as input, and outputs a logit or probability.</p>
+</dd>
+</dl>
+<p>save_dir: a directory where the trainer saves data. Can be an HDFS path.</p>
+<p>loss_fn: the loss function to use. Defaults to tf.keras.losses.BinaryCrossentropy.</p>
+<p>metrics_fn: metrics function used by TensorFlow estimators.
+Defaults to twml.metrics.get_binary_class_metric_fn().</p>
+<dl class="simple">
+<dt><a href="#id3"><span class="problematic" id="id4">**</span></a>kwargs: for people familiar with twml Trainer’s options, they can be passed in here</dt><dd><p>as kwargs, and they will be forwarded to Trainer as opts.
+See <a class="reference external" href="https://cgit.twitter.biz/source/tree/twml/twml/argument_parser.py#n43">https://cgit.twitter.biz/source/tree/twml/twml/argument_parser.py#n43</a> for available args.</p>
+</dd>
+</dl>
+</dd>
+<dt>Returns:</dt><dd><p>a twml.trainers.Trainer object which can be used for training and exporting models.</p>
+</dd>
+</dl>
+<p>“””
+build_graph = create_build_graph_fn(model_factory, loss_fn)</p>
+<dl class="simple">
+<dt>if metrics_fn is None:</dt><dd><p>metrics_fn = twml.metrics.get_binary_class_metric_fn()</p>
+</dd>
+</dl>
+<p>opts = HParams(<a href="#id5"><span class="problematic" id="id6">**</span></a>kwargs)
+opts.add_hparam(‘save_dir’, save_dir)</p>
+<dl class="simple">
+<dt>return twml.trainers.Trainer(</dt><dd><p>name,
+opts,
+build_graph_fn=build_graph,
+save_dir=save_dir,
+metric_fn=metrics_fn)</p>
+</dd>
+</dl>
+</dd>
+<dt>def create_build_graph_fn(model_factory, loss_fn=None):</dt><dd><p>“””Create a build graph function from the given keras model.”””</p>
+<dl>
+<dt>def build_graph(features, label, mode, params, config=None):</dt><dd><p># create model from model factory.
+model = model_factory()</p>
+<p># create loss function if the user didn’t specify one.
+if loss_fn is None:</p>
+<blockquote>
+<div><p>build_graph_loss_fn = tf.keras.losses.BinaryCrossentropy(from_logits=False)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>else:</dt><dd><p>build_graph_loss_fn = loss_fn</p>
+</dd>
+</dl>
+<p>output = model(features)
+if mode == ‘infer’:</p>
+<blockquote>
+<div><p>loss = None</p>
+</div></blockquote>
+<dl class="simple">
+<dt>else:</dt><dd><p>weights = features.get(‘weights’, None)
+loss = build_graph_loss_fn(y_true=label, y_pred=output, sample_weight=weights)</p>
+</dd>
+<dt>if isinstance(output, dict):</dt><dd><dl class="simple">
+<dt>if loss is None:</dt><dd><p>return output</p>
+</dd>
+<dt>else:</dt><dd><p>output[‘loss’] = loss
+return output</p>
+</dd>
+</dl>
+</dd>
+<dt>else:</dt><dd><p>return {‘output’: output, ‘loss’: loss}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>return build_graph</p>
+</dd>
+</dl>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../_sources/twml/twml/contrib/trainers/trainer_utils.py.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

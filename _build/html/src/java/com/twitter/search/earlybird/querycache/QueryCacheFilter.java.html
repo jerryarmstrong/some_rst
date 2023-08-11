@@ -1,0 +1,481 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../" id="documentation_options" src="../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.earlybird.querycache;</p>
+<p>import java.util.List;
+import java.util.TreeMap;</p>
+<p>import com.google.common.base.Preconditions;</p>
+<p>import org.apache.lucene.search.Query;</p>
+<p>import com.twitter.common.collections.Pair;
+import com.twitter.common.quantity.Amount;
+import com.twitter.common.quantity.Time;
+import com.twitter.common.util.Clock;
+import com.twitter.search.common.metrics.SearchCounter;
+import com.twitter.search.common.metrics.SearchStatsReceiver;
+import com.twitter.search.common.query.thriftjava.CollectorParams;
+import com.twitter.search.common.query.thriftjava.CollectorTerminationParams;
+import com.twitter.search.common.schema.earlybird.EarlybirdCluster;
+import com.twitter.search.common.search.TerminationTracker;
+import com.twitter.search.common.util.text.regex.Regex;
+import com.twitter.search.earlybird.common.config.EarlybirdConfig;
+import com.twitter.search.earlybird.common.userupdates.UserTable;
+import com.twitter.search.earlybird.queryparser.EarlybirdLuceneQueryVisitor;
+import com.twitter.search.earlybird.search.SearchRequestInfo;
+import com.twitter.search.earlybird.thrift.ThriftSearchQuery;
+import com.twitter.search.queryparser.parser.SerializedQueryParser;
+import com.twitter.search.queryparser.query.QueryParserException;</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>The definition of a QueryCache filter/entry, like the name of the filter, the query used</p></li>
+<li><p>to populate the cache, update schedule, etc..</p></li>
+<li></li>
+<li><p>Instances of this class are created by the YAML loader when loading the config file. Most</p></li>
+<li><p>members are populated by YAML using setters through reflection.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>public class QueryCacheFilter {</dt><dd><p>// Data structure type supported as cache result holder
+public enum ResultSetType {</p>
+<blockquote>
+<div><p>FixedBitSet,
+SparseFixedBitSet</p>
+</div></blockquote>
+<p>}</p>
+<p>// Fields set directly from YML config file.
+private String filterName;           // unique name for cached filter
+private String query;                // serialized query string
+private ResultSetType resultType;
+private boolean cacheModeOnly;
+private List&lt;UpdateInterval&gt; schedule;
+private SearchCounter queries;</p>
+<p>// Fields generated based on config (but not directly).
+private volatile Pair&lt;ThriftSearchQuery, Query&gt; queryPair;
+private TreeMap&lt;Integer, UpdateInterval&gt; scheduleMap;  // tree map from index to interval</p>
+<dl>
+<dt>public class InvalidEntryException extends Exception {</dt><dd><dl class="simple">
+<dt>public InvalidEntryException(String message) {</dt><dd><p>super(“Filter [” + filterName + “]: “ + message);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>public static class UpdateInterval {</dt><dd><p>// Overrides <em>all</em> query cache update frequencies to be this value, in seconds.
+private final int overrideSecondsForTests = EarlybirdConfig.getInt(</p>
+<blockquote>
+<div><p>“override_query_cache_update_frequency”, -1);</p>
+</div></blockquote>
+<p>// Fields set directly from YML config file.
+private int segment;
+private long seconds;</p>
+<dl class="simple">
+<dt>public void setSegment(int segment) {</dt><dd><p>this.segment = segment;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Sets the update period in seconds. If the override_query_cache_update_frequency parameter is</p></li>
+<li><p>specified in the earlybird configuration, its value is used instead (the value passed to this</p></li>
+<li><p>method is ignored).</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>public void setSeconds(long seconds) {</dt><dd><dl class="simple">
+<dt>if (overrideSecondsForTests != -1) {</dt><dd><p>this.seconds = overrideSecondsForTests;</p>
+</dd>
+<dt>} else {</dt><dd><p>this.seconds = seconds;</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public int getSegment() {</dt><dd><p>return segment;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public long getSeconds() {</dt><dd><p>return seconds;</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public void setFilterName(String filterName) throws InvalidEntryException {</dt><dd><p>sanityCheckFilterName(filterName);
+this.filterName = filterName;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Sets the driving query for this query cache filter.</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>public void setQuery(String query) throws InvalidEntryException {</dt><dd><dl class="simple">
+<dt>if (query == null || query.isEmpty()) {</dt><dd><p>throw new InvalidEntryException(“Empty query string”);</p>
+</dd>
+</dl>
+<p>}</p>
+<p>this.query = query;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Sets the type of the results that will be generated by this query cache filter.</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+<dt>public void setResultType(String resultType) throws InvalidEntryException {</dt><dd><dl class="simple">
+<dt>if (ResultSetType.FixedBitSet.toString().equalsIgnoreCase(resultType)) {</dt><dd><p>this.resultType = ResultSetType.FixedBitSet;</p>
+</dd>
+<dt>} else if (ResultSetType.SparseFixedBitSet.toString().equalsIgnoreCase(resultType)) {</dt><dd><p>this.resultType = ResultSetType.SparseFixedBitSet;</p>
+</dd>
+<dt>} else {</dt><dd><p>throw new InvalidEntryException(“Unregconized result type [” + resultType + “]”);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public void setCacheModeOnly(boolean cacheModeOnly) {</dt><dd><p>this.cacheModeOnly = cacheModeOnly;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>public void setSchedule(List&lt;UpdateInterval&gt; schedule)</dt><dd><blockquote>
+<div><p>throws QueryCacheFilter.InvalidEntryException {</p>
+</div></blockquote>
+<p>sanityCheckSchedule(schedule);
+this.schedule = schedule;
+this.scheduleMap = createScheduleMap(schedule);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public void createQueryCounter(SearchStatsReceiver statsReceiver) {</dt><dd><p>queries = statsReceiver.getCounter(”<a href="#id11"><span class="problematic" id="id12">cached_filter_</span></a>” + filterName + “_queries”);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public void incrementUsageStat() {</dt><dd><p>queries.increment();</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public String getFilterName() {</dt><dd><p>return filterName;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public String getQueryString() {</dt><dd><p>return query;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// snakeyaml does not like a getter named getResultType() that does not return a string
+public ResultSetType getResultSetType() {</p>
+<blockquote>
+<div><p>return resultType;</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>public boolean getCacheModeOnly() {</dt><dd><p>return cacheModeOnly;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public Query getLuceneQuery() {</dt><dd><p>return queryPair.getSecond();</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public ThriftSearchQuery getSearchQuery() {</dt><dd><p>return queryPair.getFirst();</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Create a new <a class="reference external" href="mailto:{&#37;&#52;&#48;link">{<span>&#64;</span>link</a> SearchRequestInfo} using <a class="reference external" href="mailto:{&#37;&#52;&#48;link">{<span>&#64;</span>link</a> #queryPair}.</p></li>
+<li></li>
+<li><p>&#64;return a new <a class="reference external" href="mailto:{&#37;&#52;&#48;link">{<span>&#64;</span>link</a> SearchRequestInfo}</p></li>
+</ul>
+<p><a href="#id9"><span class="problematic" id="id10">*</span></a>/</p>
+</dd>
+<dt>public SearchRequestInfo createSearchRequestInfo() {</dt><dd><p>ThriftSearchQuery searchQuery = Preconditions.checkNotNull(queryPair.getFirst());
+Query luceneQuery = Preconditions.checkNotNull(queryPair.getSecond());</p>
+<dl class="simple">
+<dt>return new SearchRequestInfo(</dt><dd><p>searchQuery, luceneQuery, new TerminationTracker(Clock.SYSTEM_CLOCK));</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>public void setup(</dt><dd><blockquote>
+<div><p>QueryCacheManager queryCacheManager,
+UserTable userTable,
+EarlybirdCluster earlybirdCluster) throws QueryParserException {</p>
+</div></blockquote>
+<p>createQuery(queryCacheManager, userTable, earlybirdCluster);</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// index corresponds to ‘segment’ from the config file.  this is the index of the
+// segment, starting with the current segment (0) and counting backwards in time.
+public Amount&lt;Long, Time&gt; getUpdateInterval(int index) {</p>
+<blockquote>
+<div><p>long seconds = scheduleMap.floorEntry(index).getValue().getSeconds();
+return Amount.of(seconds, Time.SECONDS);</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>private TreeMap&lt;Integer, UpdateInterval&gt; createScheduleMap(List&lt;UpdateInterval&gt; scheduleToUse) {</dt><dd><p>TreeMap&lt;Integer, UpdateInterval&gt; map = new TreeMap&lt;&gt;();
+for (UpdateInterval interval : scheduleToUse) {</p>
+<blockquote>
+<div><p>map.put(interval.segment, interval);</p>
+</div></blockquote>
+<p>}
+return map;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private void createQuery(</dt><dd><blockquote>
+<div><p>QueryCacheManager queryCacheManager,
+UserTable userTable,
+EarlybirdCluster earlybirdCluster) throws QueryParserException {</p>
+</div></blockquote>
+<p>int maxSegmentSize = EarlybirdConfig.getMaxSegmentSize();
+CollectorParams collectionParams = new CollectorParams();
+collectionParams.setNumResultsToReturn(maxSegmentSize);
+CollectorTerminationParams terminationParams = new CollectorTerminationParams();
+terminationParams.setMaxHitsToProcess(maxSegmentSize);
+collectionParams.setTerminationParams(terminationParams);</p>
+<p>ThriftSearchQuery searchQuery = new ThriftSearchQuery();
+searchQuery.setMaxHitsPerUser(maxSegmentSize);
+searchQuery.setCollectorParams(collectionParams);
+searchQuery.setSerializedQuery(query);</p>
+<dl class="simple">
+<dt>final SerializedQueryParser parser = new SerializedQueryParser(</dt><dd><p>EarlybirdConfig.getPenguinVersion());</p>
+</dd>
+<dt>Query luceneQuery = parser.parse(query).simplify().accept(</dt><dd><dl class="simple">
+<dt>new EarlybirdLuceneQueryVisitor(</dt><dd><p>queryCacheManager.getIndexConfig().getSchema().getSchemaSnapshot(),
+queryCacheManager,
+userTable,
+queryCacheManager.getUserScrubGeoMap(),
+earlybirdCluster,
+queryCacheManager.getDecider()));</p>
+</dd>
+</dl>
+</dd>
+<dt>if (luceneQuery == null) {</dt><dd><p>throw new QueryParserException(“Unable to create lucene query from “ + query);</p>
+</dd>
+</dl>
+<p>}</p>
+<p>queryPair = new Pair&lt;&gt;(searchQuery, luceneQuery);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private void sanityCheckFilterName(String filter) throws InvalidEntryException {</dt><dd><dl class="simple">
+<dt>if (filter == null || filter.isEmpty()) {</dt><dd><p>throw new InvalidEntryException(“Missing filter name”);</p>
+</dd>
+</dl>
+<p>}
+if (Regex.FILTER_NAME_CHECK.matcher(filter).find()) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>throw new InvalidEntryException(</dt><dd><p>“Invalid character in filter name. Chars allowed [a-zA-Z_0-9]”);</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private void sanityCheckSchedule(List&lt;UpdateInterval&gt; intervals)</dt><dd><blockquote>
+<div><p>throws InvalidEntryException {</p>
+</div></blockquote>
+<p>// Make sure there’s at least 1 interval defined
+if (intervals == null || intervals.isEmpty()) {</p>
+<blockquote>
+<div><p>throw new InvalidEntryException(“No schedule defined”);</p>
+</div></blockquote>
+<p>}</p>
+<p>// Make sure the first interval starts with segment 0
+if (intervals.get(0).getSegment() != 0) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>throw new InvalidEntryException(</dt><dd><p>“The first interval in the schedule must start from segment 0”);</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<p>// Make sure segments are defined in order, and no segment is defined more than twice
+int prevSegment = intervals.get(0).getSegment();
+for (int i = 1; i &lt; intervals.size(); ++i) {</p>
+<blockquote>
+<div><p>int currentSegment = intervals.get(i).getSegment();
+if (prevSegment &gt; currentSegment) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>throw new InvalidEntryException(“Segment intervals out of order. Segment “ + prevSegment</dt><dd><ul class="simple">
+<li><p>“ is defined before segment “ + currentSegment);</p></li>
+</ul>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>if (prevSegment == intervals.get(i).getSegment()) {</dt><dd><p>throw new InvalidEntryException(“Segment “ + prevSegment + “ is defined twice”);</p>
+</dd>
+</dl>
+<p>}</p>
+<p>prevSegment = currentSegment;</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>protected void sanityCheck() throws InvalidEntryException {</dt><dd><p>sanityCheckFilterName(filterName);
+if (query == null || query.isEmpty()) {</p>
+<blockquote>
+<div><p>throw new InvalidEntryException(“Missing query”);</p>
+</div></blockquote>
+<p>}
+if (resultType == null) {</p>
+<blockquote>
+<div><p>throw new InvalidEntryException(“Missing result type”);</p>
+</div></blockquote>
+<p>}
+if (schedule == null || schedule.size() == 0) {</p>
+<blockquote>
+<div><p>throw new InvalidEntryException(“Missing update schedule”);</p>
+</div></blockquote>
+<p>}
+if (scheduleMap == null || scheduleMap.size() == 0) {</p>
+<blockquote>
+<div><p>throw new InvalidEntryException(“Missing update schedule map”);</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;Override
+public String toString() {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>return “filterName: [” + getFilterName()</dt><dd><ul class="simple">
+<li><p>“] query: [” + getQueryString()</p></li>
+<li><p>“] result type [” + getResultSetType()</p></li>
+<li><p>“] schedule: “ + schedule;</p></li>
+</ul>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../_sources/src/java/com/twitter/search/earlybird/querycache/QueryCacheFilter.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

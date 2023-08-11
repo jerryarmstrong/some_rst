@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.recosinjector.uua_processors</p>
+<p>import org.apache.kafka.clients.consumer.ConsumerRecord
+import com.twitter.finatra.kafka.serde.UnKeyed
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.recos.util.Action
+import com.twitter.recos.util.Action.Action
+import com.twitter.recosinjector.clients.Gizmoduck
+import com.twitter.recosinjector.clients.Tweetypie
+import com.twitter.recosinjector.edges.UnifiedUserActionToUserVideoGraphBuilder
+import com.twitter.recosinjector.edges.UnifiedUserActionToUserAdGraphBuilder
+import com.twitter.recosinjector.edges.UnifiedUserActionToUserTweetGraphPlusBuilder
+import com.twitter.unified_user_actions.thriftscala.UnifiedUserAction
+import com.twitter.unified_user_actions.thriftscala.ActionType
+import com.twitter.unified_user_actions.thriftscala.Item
+import com.twitter.recosinjector.filters.UserFilter
+import com.twitter.recosinjector.publishers.KafkaEventPublisher
+import com.twitter.recosinjector.util.TweetDetails
+import com.twitter.recosinjector.util.UserTweetEngagement
+import com.twitter.recosinjector.util.UuaEngagementEventDetails
+import com.twitter.unified_user_actions.thriftscala.NotificationContent
+import com.twitter.unified_user_actions.thriftscala.NotificationInfo
+import com.twitter.util.Future</p>
+<dl>
+<dt>class UnifiedUserActionProcessor(</dt><dd><p>gizmoduck: Gizmoduck,
+tweetypie: Tweetypie,
+kafkaEventPublisher: KafkaEventPublisher,
+userVideoGraphTopic: String,
+userVideoGraphBuilder: UnifiedUserActionToUserVideoGraphBuilder,
+userAdGraphTopic: String,
+userAdGraphBuilder: UnifiedUserActionToUserAdGraphBuilder,
+userTweetGraphPlusTopic: String,
+userTweetGraphPlusBuilder: UnifiedUserActionToUserTweetGraphPlusBuilder</p>
+</dd>
+<dt>)(</dt><dd><p>implicit statsReceiver: StatsReceiver) {</p>
+<p>val messagesProcessedCount = statsReceiver.counter(“messages_processed”)</p>
+<p>val eventsByTypeCounts = statsReceiver.scope(“events_by_type”)
+private val numSelfEngageCounter = statsReceiver.counter(“num_self_engage_event”)
+private val numTweetFailSafetyLevelCounter = statsReceiver.counter(“num_fail_tweetypie_safety”)
+private val numNullCastTweetCounter = statsReceiver.counter(“num_null_cast_tweet”)
+private val numEngageUserUnsafeCounter = statsReceiver.counter(“num_engage_user_unsafe”)
+private val engageUserFilter = new UserFilter(gizmoduck)(statsReceiver.scope(“engage_user”))
+private val numNoProcessTweetCounter = statsReceiver.counter(“num_no_process_tweet”)
+private val numProcessTweetCounter = statsReceiver.counter(“num_process_tweet”)</p>
+<dl>
+<dt>private def getUuaEngagementEventDetails(</dt><dd><p>unifiedUserAction: UnifiedUserAction</p>
+</dd>
+<dt>): Option[Future[UuaEngagementEventDetails]] = {</dt><dd><p>val userIdOpt = unifiedUserAction.userIdentifier.userId
+val tweetIdOpt = unifiedUserAction.item match {</p>
+<blockquote>
+<div><p>case Item.TweetInfo(tweetInfo) =&gt; Some(tweetInfo.actionTweetId)
+case Item.NotificationInfo(</p>
+<blockquote>
+<div><blockquote>
+<div><p>NotificationInfo(_, NotificationContent.TweetNotification(notification))) =&gt;</p>
+</div></blockquote>
+<p>Some(notification.tweetId)</p>
+</div></blockquote>
+<p>case _ =&gt; None</p>
+</div></blockquote>
+<p>}
+val timestamp = unifiedUserAction.eventMetadata.sourceTimestampMs
+val action = getTweetAction(unifiedUserAction.actionType)</p>
+<dl>
+<dt>tweetIdOpt</dt><dd><dl>
+<dt>.flatMap { tweetId =&gt;</dt><dd><dl>
+<dt>userIdOpt.map { engageUserId =&gt;</dt><dd><p>val tweetFut = tweetypie.getTweet(tweetId)
+tweetFut.map { tweetOpt =&gt;</p>
+<blockquote>
+<div><p>val tweetDetailsOpt = tweetOpt.map(TweetDetails)
+val engagement = UserTweetEngagement(</p>
+<blockquote>
+<div><p>engageUserId = engageUserId,
+action = action,
+engagementTimeMillis = Some(timestamp),
+tweetId = tweetId,
+engageUser = None,
+tweetDetails = tweetDetailsOpt</p>
+</div></blockquote>
+<p>)
+UuaEngagementEventDetails(engagement)</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def getTweetAction(action: ActionType): Action = {</dt><dd><dl class="simple">
+<dt>action match {</dt><dd><p>case ActionType.ClientTweetVideoPlayback50 =&gt; Action.VideoPlayback50
+case ActionType.ClientTweetClick =&gt; Action.Click
+case ActionType.ClientTweetVideoPlayback75 =&gt; Action.VideoPlayback75
+case ActionType.ClientTweetVideoQualityView =&gt; Action.VideoQualityView
+case ActionType.ServerTweetFav =&gt; Action.Favorite
+case ActionType.ServerTweetReply =&gt; Action.Reply
+case ActionType.ServerTweetRetweet =&gt; Action.Retweet
+case ActionType.ClientTweetQuote =&gt; Action.Quote
+case ActionType.ClientNotificationOpen =&gt; Action.NotificationOpen
+case ActionType.ClientTweetEmailClick =&gt; Action.EmailClick
+case ActionType.ClientTweetShareViaBookmark =&gt; Action.Share
+case ActionType.ClientTweetShareViaCopyLink =&gt; Action.Share
+case ActionType.ClientTweetSeeFewer =&gt; Action.TweetSeeFewer
+case ActionType.ClientTweetNotRelevant =&gt; Action.TweetNotRelevant
+case ActionType.ClientTweetNotInterestedIn =&gt; Action.TweetNotInterestedIn
+case ActionType.ServerTweetReport =&gt; Action.TweetReport
+case ActionType.ClientTweetMuteAuthor =&gt; Action.TweetMuteAuthor
+case ActionType.ClientTweetBlockAuthor =&gt; Action.TweetBlockAuthor
+case _ =&gt; Action.UnDefined</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}
+private def shouldProcessTweetEngagement(</p>
+<blockquote>
+<div><p>event: UuaEngagementEventDetails,
+isAdsUseCase: Boolean = false</p>
+</div></blockquote>
+<dl>
+<dt>): Future[Boolean] = {</dt><dd><p>val engagement = event.userTweetEngagement
+val engageUserId = engagement.engageUserId
+val authorIdOpt = engagement.tweetDetails.flatMap(_.authorId)</p>
+<p>val isSelfEngage = authorIdOpt.contains(engageUserId)
+val isNullCastTweet = engagement.tweetDetails.forall(_.isNullCastTweet)
+val isEngageUserSafeFut = engageUserFilter.filterByUserId(engageUserId)
+val isTweetPassSafety =</p>
+<blockquote>
+<div><p>engagement.tweetDetails.isDefined // Tweetypie can fetch a tweet object successfully</p>
+</div></blockquote>
+<dl>
+<dt>isEngageUserSafeFut.map { isEngageUserSafe =&gt;</dt><dd><p>if (isSelfEngage) numSelfEngageCounter.incr()
+if (isNullCastTweet) numNullCastTweetCounter.incr()
+if (!isEngageUserSafe) numEngageUserUnsafeCounter.incr()
+if (!isTweetPassSafety) numTweetFailSafetyLevelCounter.incr()</p>
+<p>!isSelfEngage &amp;&amp; (!isNullCastTweet &amp;&amp; !isAdsUseCase || isNullCastTweet &amp;&amp; isAdsUseCase) &amp;&amp; isEngageUserSafe &amp;&amp; isTweetPassSafety</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>def apply(record: ConsumerRecord[UnKeyed, UnifiedUserAction]): Future[Unit] = {</p>
+<blockquote>
+<div><p>messagesProcessedCount.incr()
+val unifiedUserAction = record.value
+eventsByTypeCounts.counter(unifiedUserAction.actionType.toString).incr()</p>
+<dl>
+<dt>getTweetAction(unifiedUserAction.actionType) match {</dt><dd><dl>
+<dt>case Action.UnDefined =&gt;</dt><dd><p>numNoProcessTweetCounter.incr()
+Future.Unit</p>
+</dd>
+<dt>case action =&gt;</dt><dd><dl>
+<dt>getUuaEngagementEventDetails(unifiedUserAction)</dt><dd><dl>
+<dt>.map {</dt><dd><dl>
+<dt>_.flatMap { detail =&gt;</dt><dd><p>// The following cases are set up specifically for an ads relevance demo.
+val actionForAds = Set(Action.Click, Action.Favorite, Action.VideoPlayback75)
+if (actionForAds.contains(action))</p>
+<blockquote>
+<div><dl>
+<dt>shouldProcessTweetEngagement(detail, isAdsUseCase = true).map {</dt><dd><dl>
+<dt>case true =&gt;</dt><dd><dl>
+<dt>userAdGraphBuilder.processEvent(detail).map { edges =&gt;</dt><dd><dl class="simple">
+<dt>edges.foreach { edge =&gt;</dt><dd><dl class="simple">
+<dt>kafkaEventPublisher</dt><dd><p>.publish(edge.convertToRecosHoseMessage, userAdGraphTopic)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}
+numProcessTweetCounter.incr()</p>
+</dd>
+</dl>
+<p>case _ =&gt;</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<dl>
+<dt>shouldProcessTweetEngagement(detail).map {</dt><dd><dl>
+<dt>case true =&gt;</dt><dd><dl>
+<dt>userVideoGraphBuilder.processEvent(detail).map { edges =&gt;</dt><dd><dl class="simple">
+<dt>edges.foreach { edge =&gt;</dt><dd><dl class="simple">
+<dt>kafkaEventPublisher</dt><dd><p>.publish(edge.convertToRecosHoseMessage, userVideoGraphTopic)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>userTweetGraphPlusBuilder.processEvent(detail).map { edges =&gt;</dt><dd><dl class="simple">
+<dt>edges.foreach { edge =&gt;</dt><dd><dl class="simple">
+<dt>kafkaEventPublisher</dt><dd><p>.publish(edge.convertToRecosHoseMessage, userTweetGraphPlusTopic)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}
+numProcessTweetCounter.incr()</p>
+</dd>
+</dl>
+<p>case _ =&gt;</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}.getOrElse(Future.Unit)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/recos-injector/server/src/main/scala/com/twitter/recosinjector/uua_processors/UnifiedUserActionProcessor.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

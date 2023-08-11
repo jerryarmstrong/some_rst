@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../../../" id="documentation_options" src="../../../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.follow_recommendations.common.rankers.fatigue_ranker</p>
+<p>import com.twitter.finagle.stats.Counter
+import com.twitter.finagle.stats.Stat
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.follow_recommendations.common.base.Ranker
+import com.twitter.follow_recommendations.common.base.StatsUtil
+import com.twitter.follow_recommendations.common.models.CandidateUser
+import com.twitter.follow_recommendations.common.models.HasDisplayLocation
+import com.twitter.follow_recommendations.common.models.HasWtfImpressions
+import com.twitter.follow_recommendations.common.models.WtfImpression
+import com.twitter.follow_recommendations.common.rankers.common.RankerId.RankerId
+import com.twitter.follow_recommendations.common.rankers.utils.Utils
+import com.twitter.product_mixer.core.model.marshalling.request.HasClientContext
+import com.twitter.servo.util.MemoizingStatsReceiver
+import com.twitter.stitch.Stitch
+import com.twitter.timelines.configapi.HasParams
+import com.twitter.util.Time</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Ranks candidates based on the given weights for each algorithm while preserving the ranks inside each algorithm.</p></li>
+<li><p>Reorders the ranked list based on recent impressions from recentImpressionRepo</p></li>
+<li></li>
+<li><p>Note that the penalty is added to the rank of each candidate. To make producer-side experiments</p></li>
+<li><p>with multiple rankers possible, we modify the scores for each candidate and ranker as:</p></li>
+<li><p>NewScore(C, R) = -(Rank(C, R) + Impression(C, U) x FatigueFactor),</p></li>
+<li><p>where C is a candidate, R a ranker and U the target user.</p></li>
+<li><p>Note also that fatigue penalty is independent of any of the rankers.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>class ImpressionBasedFatigueRanker[</dt><dd><p>Target &lt;: HasClientContext with HasDisplayLocation with HasParams with HasWtfImpressions</p>
+</dd>
+<dt>](</dt><dd><p>fatigueFactor: Int,
+statsReceiver: StatsReceiver)</p>
+<blockquote>
+<div><p>extends Ranker[Target, CandidateUser] {</p>
+</div></blockquote>
+<p>val name: String = this.getClass.getSimpleName
+val stats = statsReceiver.scope(“impression_based_fatigue_ranker”)
+val droppedStats: MemoizingStatsReceiver = new MemoizingStatsReceiver(stats.scope(“hard_drops”))
+val impressionStats: StatsReceiver = stats.scope(“wtf_impressions”)
+val noImpressionCounter: Counter = impressionStats.counter(“no_impressions”)
+val oldestImpressionStat: Stat = impressionStats.stat(“oldest_sec”)</p>
+<dl>
+<dt>override def rank(target: Target, candidates: Seq[CandidateUser]): Stitch[Seq[CandidateUser]] = {</dt><dd><dl class="simple">
+<dt>StatsUtil.profileStitch(</dt><dd><p>Stitch.value(rankCandidates(target, candidates)),
+stats.scope(“rank”)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private def trackTimeSinceOldestImpression(impressions: Seq[WtfImpression]): Unit = {</dt><dd><p>val timeSinceOldest = Time.now - impressions.map(_.latestTime).min
+oldestImpressionStat.add(timeSinceOldest.inSeconds)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def rankCandidates(</dt><dd><p>target: Target,
+candidates: Seq[CandidateUser]</p>
+</dd>
+<dt>): Seq[CandidateUser] = {</dt><dd><dl>
+<dt>target.wtfImpressions</dt><dd><dl>
+<dt>.map { wtfImpressions =&gt;</dt><dd><dl>
+<dt>if (wtfImpressions.isEmpty) {</dt><dd><p>noImpressionCounter.incr()
+candidates</p>
+</dd>
+<dt>} else {</dt><dd><dl>
+<dt>val rankerIds =</dt><dd><p>candidates.flatMap(_.scores.map(_.scores.flatMap(_.rankerId))).flatten.sorted.distinct</p>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>In below we create a Map from each CandidateUser’s ID to a Map from each Ranker that</p></li>
+<li><p>the user has a score for, and candidate’s corresponding rank when candidates are sorted</p></li>
+<li><p>by that Ranker (Only candidates who have this Ranker are considered for ranking).</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>val candidateRanks: Map[Long, Map[RankerId, Int]] = rankerIds</dt><dd><dl>
+<dt>.flatMap { rankerId =&gt;</dt><dd><p>// Candidates with no scores from this Ranker is first removed to calculate ranks.
+val relatedCandidates =</p>
+<blockquote>
+<div><p>candidates.filter(_.scores.exists(_.scores.exists(_.rankerId.contains(rankerId))))</p>
+</div></blockquote>
+<dl>
+<dt>relatedCandidates</dt><dd><dl>
+<dt>.sortBy(-_.scores</dt><dd><dl class="simple">
+<dt>.flatMap(_.scores.find(_.rankerId.contains(rankerId)).map(_.value)).getOrElse(</dt><dd><p>0.0)).zipWithIndex.map {</p>
+</dd>
+</dl>
+<p>case (candidate, rank) =&gt; (candidate.id, rankerId, rank)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+<dt>}.groupBy(_._1).map {</dt><dd><dl class="simple">
+<dt>case (candidate, ranksForAllRankers) =&gt;</dt><dd><dl class="simple">
+<dt>(</dt><dd><p>candidate,
+ranksForAllRankers.map { case (_, rankerId, rank) =&gt; (rankerId, rank) }.toMap)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>val idFatigueCountMap =</dt><dd><p>wtfImpressions.groupBy(_.candidateId).mapValues(_.map(_.counts).sum)</p>
+</dd>
+</dl>
+<p>trackTimeSinceOldestImpression(wtfImpressions)
+val rankedCandidates: Seq[CandidateUser] = candidates</p>
+<blockquote>
+<div><dl>
+<dt>.map { candidate =&gt;</dt><dd><p>val candidateImpressions = idFatigueCountMap.getOrElse(candidate.id, 0)
+val fatiguedScores = candidate.scores.map { ss =&gt;</p>
+<blockquote>
+<div><dl>
+<dt>ss.copy(scores = ss.scores.map { s =&gt;</dt><dd><dl>
+<dt>s.rankerId match {</dt><dd><p>// We set the new score as -rank after fatigue penalty is applied.
+case Some(rankerId) =&gt;</p>
+<blockquote>
+<div><p>// If the candidate’s ID is not in the candidate-&gt;ranks map, or there is no
+// rank for this specific ranker and this candidate, we use maximum possible
+// rank instead. Note that this indicates that there is a problem.
+s.copy(value = -(candidateRanks</p>
+<blockquote>
+<div><p>.getOrElse(candidate.id, Map()).getOrElse(rankerId, candidates.length) +
+candidateImpressions * fatigueFactor))</p>
+</div></blockquote>
+</div></blockquote>
+<p>// In case a score exists without a RankerId, we pass on the score as is.
+case None =&gt; s</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>})</p>
+</div></blockquote>
+<p>}
+candidate.copy(scores = fatiguedScores)</p>
+</dd>
+<dt>}.zipWithIndex.map {</dt><dd><p>// We re-rank candidates with their input ordering (which is done by the request-level
+// ranker) and fatigue penalty.
+case (candidate, inputRank) =&gt;</p>
+<blockquote>
+<div><p>val candidateImpressions = idFatigueCountMap.getOrElse(candidate.id, 0)
+(candidate, inputRank + candidateImpressions * fatigueFactor)</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}.sortBy(_._2).map(_._1)</p>
+</div></blockquote>
+<p>// Only populate ranking info when WTF impression info present
+val scribeRankingInfo: Boolean =</p>
+<blockquote>
+<div><p>target.params(ImpressionBasedFatigueRankerParams.ScribeRankingInfoInFatigueRanker)</p>
+</div></blockquote>
+<p>if (scribeRankingInfo) Utils.addRankingInfo(rankedCandidates, name) else rankedCandidates</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}.getOrElse(candidates) // no reranking/filtering when wtf impressions not present</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>object ImpressionBasedFatigueRanker {</dt><dd><p>val DefaultFatigueFactor = 5</p>
+<dl class="simple">
+<dt>def build[</dt><dd><p>Target &lt;: HasClientContext with HasDisplayLocation with HasParams with HasWtfImpressions</p>
+</dd>
+<dt>](</dt><dd><p>baseStatsReceiver: StatsReceiver,
+fatigueFactor: Int = DefaultFatigueFactor</p>
+</dd>
+<dt>): ImpressionBasedFatigueRanker[Target] =</dt><dd><p>new ImpressionBasedFatigueRanker(fatigueFactor, baseStatsReceiver)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../../../_sources/follow-recommendations-service/common/src/main/scala/com/twitter/follow_recommendations/common/rankers/fatigue_ranker/ImpressionBasedFatigueRanker.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

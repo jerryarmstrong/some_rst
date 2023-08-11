@@ -1,0 +1,526 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../../../" id="documentation_options" src="../../../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.follow_recommendations.common.candidate_sources.base</p>
+<p>import com.twitter.follow_recommendations.common.candidate_sources.base.SimilarUserExpanderParams.DefaultEnableImplicitEngagedExpansion
+import com.twitter.follow_recommendations.common.candidate_sources.base.SimilarUserExpanderParams.DefaultExpansionInputCount
+import com.twitter.follow_recommendations.common.candidate_sources.base.SimilarUserExpanderParams.DefaultFinalCandidatesReturnedCount
+import com.twitter.follow_recommendations.common.candidate_sources.base.SimilarUserExpanderParams.EnableNonDirectFollowExpansion
+import com.twitter.follow_recommendations.common.candidate_sources.base.SimilarUserExpanderParams.EnableSimsExpandSeedAccountsSort
+import com.twitter.follow_recommendations.common.candidate_sources.base.SimilarUserExpanderRepository.DefaultCandidateBuilder
+import com.twitter.follow_recommendations.common.candidate_sources.base.SimilarUserExpanderRepository.DefaultScore
+import com.twitter.follow_recommendations.common.models.AccountProof
+import com.twitter.follow_recommendations.common.models.CandidateUser
+import com.twitter.follow_recommendations.common.models.EngagementType
+import com.twitter.follow_recommendations.common.models.FollowProof
+import com.twitter.follow_recommendations.common.models.Reason
+import com.twitter.follow_recommendations.common.models.SimilarToProof
+import com.twitter.follow_recommendations.common.models.UserCandidateSourceDetails
+import com.twitter.hermit.candidate.thriftscala.Candidates
+import com.twitter.product_mixer.core.functional_component.candidate_source.CandidateSource
+import com.twitter.product_mixer.core.model.common.identifier.CandidateSourceIdentifier
+import com.twitter.stitch.Stitch
+import com.twitter.strato.client.Fetcher
+import com.twitter.timelines.configapi.FSBoundedParam
+import com.twitter.timelines.configapi.FSParam
+import com.twitter.timelines.configapi.HasParams
+import com.twitter.timelines.configapi.Params</p>
+<p>case class SecondDegreeCandidate(userId: Long, score: Double, socialProof: Option[Seq[Long]])</p>
+<dl>
+<dt>abstract class SimilarUserExpanderRepository[-Request &lt;: HasParams](</dt><dd><p>override val identifier: CandidateSourceIdentifier,
+similarToCandidatesFetcher: Fetcher[</p>
+<blockquote>
+<div><p>Long,
+Unit,
+Candidates</p>
+</div></blockquote>
+<p>],
+expansionInputSizeParam: FSBoundedParam[Int] = DefaultExpansionInputCount,
+candidatesReturnedSizeParam: FSBoundedParam[Int] = DefaultFinalCandidatesReturnedCount,
+enableImplicitEngagedExpansion: FSParam[Boolean] = DefaultEnableImplicitEngagedExpansion,
+thresholdToAvoidExpansion: Int = 30,
+maxExpansionPerCandidate: Option[Int] = None,
+includingOriginalCandidates: Boolean = false,
+scorer: (Double, Double) =&gt; Double = SimilarUserExpanderRepository.DefaultScorer,
+aggregator: (Seq[Double]) =&gt; Double = ScoreAggregator.Max,
+candidateBuilder: (Long, CandidateSourceIdentifier, Double, CandidateUser) =&gt; CandidateUser =</p>
+<blockquote>
+<div><p>DefaultCandidateBuilder)
+extends TwoHopExpansionCandidateSource[</p>
+<blockquote>
+<div><p>Request,
+CandidateUser,
+SecondDegreeCandidate,
+CandidateUser</p>
+</div></blockquote>
+<p>] {</p>
+</div></blockquote>
+<p>val originalCandidateSource: CandidateSource[Request, CandidateUser]
+val backupOriginalCandidateSource: Option[CandidateSource[Request, CandidateUser]] = None</p>
+<p>override def firstDegreeNodes(request: Request): Stitch[Seq[CandidateUser]] = {</p>
+<blockquote>
+<div><dl>
+<dt>val originalCandidatesStitch: Stitch[Seq[CandidateUser]] =</dt><dd><p>originalCandidateSource(request)</p>
+</dd>
+<dt>val backupCandidatesStitch: Stitch[Seq[CandidateUser]] =</dt><dd><dl class="simple">
+<dt>if (request.params(EnableNonDirectFollowExpansion)) {</dt><dd><p>backupOriginalCandidateSource.map(_.apply(request)).getOrElse(Stitch.Nil)</p>
+</dd>
+<dt>} else {</dt><dd><p>Stitch.Nil</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>val firstDegreeCandidatesCombinedStitch: Stitch[Seq[CandidateUser]] =</dt><dd><dl>
+<dt>Stitch</dt><dd><dl>
+<dt>.join(originalCandidatesStitch, backupCandidatesStitch).map {</dt><dd><dl>
+<dt>case (firstDegreeOrigCandidates, backupFirstDegreeCandidates) =&gt;</dt><dd><dl>
+<dt>if (request.params(EnableSimsExpandSeedAccountsSort)) {</dt><dd><dl class="simple">
+<dt>firstDegreeOrigCandidates ++ backupFirstDegreeCandidates sortBy {</dt><dd><p>-_.score.getOrElse(DefaultScore)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>} else {</dt><dd><p>firstDegreeOrigCandidates ++ backupFirstDegreeCandidates</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+<dt>val candidatesAfterImplicitEngagementsRemovalStitch: Stitch[Seq[CandidateUser]] =</dt><dd><dl class="simple">
+<dt>getCandidatesAfterImplicitEngagementFiltering(</dt><dd><p>request.params,
+firstDegreeCandidatesCombinedStitch)</p>
+</dd>
+</dl>
+</dd>
+<dt>val firstDegreeCandidatesCombinedTrimmed = candidatesAfterImplicitEngagementsRemovalStitch.map {</dt><dd><dl class="simple">
+<dt>candidates: Seq[CandidateUser] =&gt;</dt><dd><p>candidates.take(request.params(expansionInputSizeParam))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>firstDegreeCandidatesCombinedTrimmed.map { firstDegreeResults: Seq[CandidateUser] =&gt;</dt><dd><dl>
+<dt>if (firstDegreeResults.nonEmpty &amp;&amp; firstDegreeResults.size &lt; thresholdToAvoidExpansion) {</dt><dd><dl>
+<dt>firstDegreeResults</dt><dd><dl class="simple">
+<dt>.groupBy(_.id).mapValues(</dt><dd><p>_.maxBy(_.score)</p>
+</dd>
+</dl>
+<p>).values.toSeq</p>
+</dd>
+</dl>
+</dd>
+<dt>} else {</dt><dd><p>Nil</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>override def secondaryDegreeNodes(</dt><dd><p>request: Request,
+firstDegreeCandidate: CandidateUser</p>
+</dd>
+<dt>): Stitch[Seq[SecondDegreeCandidate]] = {</dt><dd><dl>
+<dt>similarToCandidatesFetcher.fetch(firstDegreeCandidate.id).map(_.v).map { candidateListOption =&gt;</dt><dd><dl>
+<dt>candidateListOption</dt><dd><dl class="simple">
+<dt>.map { candidatesList =&gt;</dt><dd><dl class="simple">
+<dt>candidatesList.candidates.map(candidate =&gt;</dt><dd><p>SecondDegreeCandidate(candidate.userId, candidate.score, candidate.socialProof))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}.getOrElse(Nil)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>override def aggregateAndScore(</dt><dd><p>req: Request,
+firstDegreeToSecondDegreeNodesMap: Map[CandidateUser, Seq[SecondDegreeCandidate]]</p>
+</dd>
+</dl>
+<p>): Stitch[Seq[CandidateUser]] = {</p>
+<blockquote>
+<div><dl>
+<dt>val similarExpanderResults = firstDegreeToSecondDegreeNodesMap.flatMap {</dt><dd><dl>
+<dt>case (firstDegreeCandidate, seqOfSecondDegreeCandidates) =&gt;</dt><dd><p>val sourceScore = firstDegreeCandidate.score.getOrElse(DefaultScore)
+val results: Seq[CandidateUser] = seqOfSecondDegreeCandidates.map { secondDegreeCandidate =&gt;</p>
+<blockquote>
+<div><p>val score = scorer(sourceScore, secondDegreeCandidate.score)
+candidateBuilder(secondDegreeCandidate.userId, identifier, score, firstDegreeCandidate)</p>
+</div></blockquote>
+<p>}
+maxExpansionPerCandidate match {</p>
+<blockquote>
+<div><p>case None =&gt; results
+case Some(limit) =&gt; results.sortBy(-_.score.getOrElse(DefaultScore)).take(limit)</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}.toSeq</p>
+<dl class="simple">
+<dt>val allCandidates = {</dt><dd><dl class="simple">
+<dt>if (includingOriginalCandidates)</dt><dd><p>firstDegreeToSecondDegreeNodesMap.keySet.toSeq</p>
+</dd>
+<dt>else</dt><dd><p>Nil</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>} ++ similarExpanderResults</p>
+<dl>
+<dt>val groupedCandidates: Seq[CandidateUser] = allCandidates</dt><dd><p>.groupBy(_.id)
+.flatMap {</p>
+<blockquote>
+<div><dl>
+<dt>case (_, candidates) =&gt;</dt><dd><p>val finalScore = aggregator(candidates.map(_.score.getOrElse(DefaultScore)))
+val candidateSourceDetailsCombined = aggregateCandidateSourceDetails(candidates)
+val accountSocialProofcombined = aggregateAccountSocialProof(candidates)</p>
+<dl class="simple">
+<dt>candidates.headOption.map(</dt><dd><dl class="simple">
+<dt>_.copy(</dt><dd><p>score = Some(finalScore),
+reason = accountSocialProofcombined,
+userCandidateSourceDetails = candidateSourceDetailsCombined)
+.withCandidateSource(identifier))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+.toSeq</p>
+</dd>
+<dt>Stitch.value(</dt><dd><dl class="simple">
+<dt>groupedCandidates</dt><dd><p>.sortBy { -_.score.getOrElse(DefaultScore) }.take(req.params(candidatesReturnedSizeParam))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>def aggregateCandidateSourceDetails(</dt><dd><p>candidates: Seq[CandidateUser]</p>
+</dd>
+<dt>): Option[UserCandidateSourceDetails] = {</dt><dd><dl>
+<dt>candidates</dt><dd><dl class="simple">
+<dt>.map { candidate =&gt;</dt><dd><p>candidate.userCandidateSourceDetails.map(_.candidateSourceScores).getOrElse(Map.empty)</p>
+</dd>
+<dt>}.reduceLeftOption { (scoreMap1, scoreMap2) =&gt;</dt><dd><p>scoreMap1 ++ scoreMap2</p>
+</dd>
+<dt>}.map {</dt><dd><p>UserCandidateSourceDetails(primaryCandidateSource = None, _)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def aggregateAccountSocialProof(candidates: Seq[CandidateUser]): Option[Reason] = {</dt><dd><dl>
+<dt>candidates</dt><dd><dl>
+<dt>.map { candidate =&gt;</dt><dd><dl class="simple">
+<dt>(</dt><dd><dl class="simple">
+<dt>candidate.reason</dt><dd><p>.flatMap(_.accountProof.flatMap(_.similarToProof.map(_.similarTo))).getOrElse(Nil),</p>
+</dd>
+<dt>candidate.reason</dt><dd><p>.flatMap(_.accountProof.flatMap(_.followProof.map(_.followedBy))).getOrElse(Nil),</p>
+</dd>
+<dt>candidate.reason</dt><dd><p>.flatMap(_.accountProof.flatMap(_.followProof.map(_.numIds))).getOrElse(0)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>}.reduceLeftOption { (accountProofOne, accountProofTwo) =&gt;</dt><dd><dl class="simple">
+<dt>(</dt><dd><p>// merge similarToIds
+accountProofOne._1 ++ accountProofTwo._1,
+// merge followedByIds
+accountProofOne._2 ++ accountProofTwo._2,
+// add numIds
+accountProofOne._3 + accountProofTwo._3)</p>
+</dd>
+</dl>
+</dd>
+<dt>}.map { proofs =&gt;</dt><dd><dl>
+<dt>Reason(accountProof = Some(</dt><dd><dl class="simple">
+<dt>AccountProof(</dt><dd><p>similarToProof = Some(SimilarToProof(proofs._1)),
+followProof = if (proofs._2.nonEmpty) Some(FollowProof(proofs._2, proofs._3)) else None</p>
+</dd>
+</dl>
+<p>)))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>def getCandidatesAfterImplicitEngagementFiltering(</dt><dd><p>params: Params,
+firstDegreeCandidatesStitch: Stitch[Seq[CandidateUser]]</p>
+</dd>
+</dl>
+<p>): Stitch[Seq[CandidateUser]] = {</p>
+<blockquote>
+<div><p>if (!params(enableImplicitEngagedExpansion)) {</p>
+<blockquote>
+<div><dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Remove candidates whose engagement types only contain implicit engagements</p></li>
+<li><p>(e.g. Profile View, Tweet Click) and only expand those candidates who contain explicit</p></li>
+<li><p>engagements.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>firstDegreeCandidatesStitch.map { candidates =&gt;</dt><dd><dl class="simple">
+<dt>candidates.filter { cand =&gt;</dt><dd><dl class="simple">
+<dt>cand.engagements.exists(engage =&gt;</dt><dd><p>engage == EngagementType.Like || engage == EngagementType.Retweet || engage == EngagementType.Mention)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>firstDegreeCandidatesStitch</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>object SimilarUserExpanderRepository {</dt><dd><dl class="simple">
+<dt>val DefaultScorer: (Double, Double) =&gt; Double = (sourceScore: Double, similarScore: Double) =&gt;</dt><dd><p>similarScore</p>
+</dd>
+<dt>val MultiplyScorer: (Double, Double) =&gt; Double = (sourceScore: Double, similarScore: Double) =&gt;</dt><dd><p>sourceScore * similarScore</p>
+</dd>
+<dt>val SourceScorer: (Double, Double) =&gt; Double = (sourceScore: Double, similarScore: Double) =&gt;</dt><dd><p>sourceScore</p>
+</dd>
+</dl>
+<p>val DefaultScore = 0.0d</p>
+<dl>
+<dt>val DefaultCandidateBuilder: (</dt><dd><p>Long,
+CandidateSourceIdentifier,
+Double,
+CandidateUser</p>
+</dd>
+<dt>) =&gt; CandidateUser =</dt><dd><dl>
+<dt>(</dt><dd><p>userId: Long,
+_: CandidateSourceIdentifier,
+score: Double,
+candidate: CandidateUser</p>
+</dd>
+<dt>) =&gt; {</dt><dd><dl>
+<dt>val originalCandidateSourceDetails =</dt><dd><dl>
+<dt>candidate.userCandidateSourceDetails.flatMap { candSourceDetails =&gt;</dt><dd><dl class="simple">
+<dt>candSourceDetails.primaryCandidateSource.map { primaryCandidateSource =&gt;</dt><dd><dl class="simple">
+<dt>UserCandidateSourceDetails(</dt><dd><p>primaryCandidateSource = None,
+candidateSourceScores = Map(primaryCandidateSource -&gt; candidate.score))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>CandidateUser(</dt><dd><p>id = userId,
+score = Some(score),
+userCandidateSourceDetails = originalCandidateSourceDetails,
+reason =</p>
+<blockquote>
+<div><p>Some(Reason(Some(AccountProof(similarToProof = Some(SimilarToProof(Seq(candidate.id)))))))</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>val FollowClusterCandidateBuilder: (</dt><dd><p>Long,
+CandidateSourceIdentifier,
+Double,
+CandidateUser</p>
+</dd>
+<dt>) =&gt; CandidateUser =</dt><dd><dl>
+<dt>(userId: Long, _: CandidateSourceIdentifier, score: Double, candidate: CandidateUser) =&gt; {</dt><dd><dl>
+<dt>val originalCandidateSourceDetails =</dt><dd><dl>
+<dt>candidate.userCandidateSourceDetails.flatMap { candSourceDetails =&gt;</dt><dd><dl class="simple">
+<dt>candSourceDetails.primaryCandidateSource.map { primaryCandidateSource =&gt;</dt><dd><dl class="simple">
+<dt>UserCandidateSourceDetails(</dt><dd><p>primaryCandidateSource = None,
+candidateSourceScores = Map(primaryCandidateSource -&gt; candidate.score))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>val originalFollowCluster = candidate.reason</dt><dd><p>.flatMap(_.accountProof.flatMap(_.followProof.map(_.followedBy)))</p>
+</dd>
+<dt>CandidateUser(</dt><dd><p>id = userId,
+score = Some(score),
+userCandidateSourceDetails = originalCandidateSourceDetails,
+reason = Some(</p>
+<blockquote>
+<div><dl>
+<dt>Reason(</dt><dd><dl>
+<dt>Some(</dt><dd><dl>
+<dt>AccountProof(</dt><dd><p>similarToProof = Some(SimilarToProof(Seq(candidate.id))),
+followProof = originalFollowCluster.map(follows =&gt;</p>
+<blockquote>
+<div><p>FollowProof(follows, follows.size)))))</p>
+</div></blockquote>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>object ScoreAggregator {</dt><dd><p>// aggregate the same candidates with same id by taking the one with largest score
+val Max: Seq[Double] =&gt; Double = (candidateScores: Seq[Double]) =&gt; { candidateScores.max }</p>
+<p>// aggregate the same candidates with same id by taking the sum of the scores
+val Sum: Seq[Double] =&gt; Double = (candidateScores: Seq[Double]) =&gt; { candidateScores.sum }</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../../../_sources/follow-recommendations-service/common/src/main/scala/com/twitter/follow_recommendations/common/candidate_sources/base/SimilarUserExpanderRepository.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

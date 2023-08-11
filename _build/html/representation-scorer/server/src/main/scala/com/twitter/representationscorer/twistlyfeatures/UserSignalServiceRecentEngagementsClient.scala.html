@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.representationscorer.twistlyfeatures</p>
+<p>import com.twitter.decider.SimpleRecipient
+import com.twitter.finagle.stats.Stat
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.representationscorer.common._
+import com.twitter.representationscorer.twistlyfeatures.Engagements._
+import com.twitter.simclusters_v2.common.SimClustersEmbeddingId.LongInternalId
+import com.twitter.stitch.Stitch
+import com.twitter.strato.generated.client.recommendations.user_signal_service.SignalsClientColumn
+import com.twitter.strato.generated.client.recommendations.user_signal_service.SignalsClientColumn.Value
+import com.twitter.usersignalservice.thriftscala.BatchSignalRequest
+import com.twitter.usersignalservice.thriftscala.SignalRequest
+import com.twitter.usersignalservice.thriftscala.SignalType
+import com.twitter.util.Time
+import scala.collection.mutable.ArrayBuffer
+import com.twitter.usersignalservice.thriftscala.ClientIdentifier</p>
+<dl>
+<dt>class UserSignalServiceRecentEngagementsClient(</dt><dd><p>stratoClient: SignalsClientColumn,
+decider: RepresentationScorerDecider,
+stats: StatsReceiver) {</p>
+<p>import UserSignalServiceRecentEngagementsClient._</p>
+<p>private val signalStats = stats.scope(“user-signal-service”, “signal”)
+private val signalTypeStats: Map[SignalType, Stat] =</p>
+<blockquote>
+<div><p>SignalType.list.map(s =&gt; (s, signalStats.scope(s.name).stat(“size”))).toMap</p>
+</div></blockquote>
+<dl>
+<dt>def get(userId: UserId): Stitch[Engagements] = {</dt><dd><p>val request = buildRequest(userId)
+stratoClient.fetcher.fetch(request).map(_.v).lowerFromOption().map { response =&gt;</p>
+<blockquote>
+<div><p>val now = Time.now
+val sevenDaysAgo = now - SevenDaysSpan
+val thirtyDaysAgo = now - ThirtyDaysSpan</p>
+<dl>
+<dt>Engagements(</dt><dd><p>favs7d = getUserSignals(response, SignalType.TweetFavorite, sevenDaysAgo),
+retweets7d = getUserSignals(response, SignalType.Retweet, sevenDaysAgo),
+follows30d = getUserSignals(response, SignalType.AccountFollowWithDelay, thirtyDaysAgo),
+shares7d = getUserSignals(response, SignalType.TweetShareV1, sevenDaysAgo),
+replies7d = getUserSignals(response, SignalType.Reply, sevenDaysAgo),
+originalTweets7d = getUserSignals(response, SignalType.OriginalTweet, sevenDaysAgo),
+videoPlaybacks7d =</p>
+<blockquote>
+<div><p>getUserSignals(response, SignalType.VideoView90dPlayback50V1, sevenDaysAgo),</p>
+</div></blockquote>
+<p>block30d = getUserSignals(response, SignalType.AccountBlock, thirtyDaysAgo),
+mute30d = getUserSignals(response, SignalType.AccountMute, thirtyDaysAgo),
+report30d = getUserSignals(response, SignalType.TweetReport, thirtyDaysAgo),
+dontlike30d = getUserSignals(response, SignalType.TweetDontLike, thirtyDaysAgo),
+seeFewer30d = getUserSignals(response, SignalType.TweetSeeFewer, thirtyDaysAgo),</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def getUserSignals(</dt><dd><p>response: Value,
+signalType: SignalType,
+earliestValidTimestamp: Time</p>
+</dd>
+<dt>): Seq[UserSignal] = {</dt><dd><dl class="simple">
+<dt>val signals = response.signalResponse</dt><dd><p>.getOrElse(signalType, Seq.empty)
+.view
+.filter(_.timestamp &gt; earliestValidTimestamp.inMillis)
+.map(s =&gt; s.targetInternalId.collect { case LongInternalId(id) =&gt; (id, s.timestamp) })
+.collect { case Some((id, engagedAt)) =&gt; UserSignal(id, engagedAt) }
+.take(EngagementsToScore)
+.force</p>
+</dd>
+</dl>
+<p>signalTypeStats(signalType).add(signals.size)
+signals</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def buildRequest(userId: Long) = {</dt><dd><p>val recipient = Some(SimpleRecipient(userId))</p>
+<p>// Signals RSX always fetches
+val requestSignals = ArrayBuffer(</p>
+<blockquote>
+<div><p>SignalRequestFav,
+SignalRequestRetweet,
+SignalRequestFollow</p>
+</div></blockquote>
+<p>)</p>
+<p>// Signals under experimentation. We use individual deciders to disable them if necessary.
+// If experiments are successful, they will become permanent.
+if (decider.isAvailable(FetchSignalShareDeciderKey, recipient))</p>
+<blockquote>
+<div><p>requestSignals.append(SignalRequestShare)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>if (decider.isAvailable(FetchSignalReplyDeciderKey, recipient))</dt><dd><p>requestSignals.append(SignalRequestReply)</p>
+</dd>
+<dt>if (decider.isAvailable(FetchSignalOriginalTweetDeciderKey, recipient))</dt><dd><p>requestSignals.append(SignalRequestOriginalTweet)</p>
+</dd>
+<dt>if (decider.isAvailable(FetchSignalVideoPlaybackDeciderKey, recipient))</dt><dd><p>requestSignals.append(SignalRequestVideoPlayback)</p>
+</dd>
+<dt>if (decider.isAvailable(FetchSignalBlockDeciderKey, recipient))</dt><dd><p>requestSignals.append(SignalRequestBlock)</p>
+</dd>
+<dt>if (decider.isAvailable(FetchSignalMuteDeciderKey, recipient))</dt><dd><p>requestSignals.append(SignalRequestMute)</p>
+</dd>
+<dt>if (decider.isAvailable(FetchSignalReportDeciderKey, recipient))</dt><dd><p>requestSignals.append(SignalRequestReport)</p>
+</dd>
+<dt>if (decider.isAvailable(FetchSignalDontlikeDeciderKey, recipient))</dt><dd><p>requestSignals.append(SignalRequestDontlike)</p>
+</dd>
+<dt>if (decider.isAvailable(FetchSignalSeeFewerDeciderKey, recipient))</dt><dd><p>requestSignals.append(SignalRequestSeeFewer)</p>
+</dd>
+</dl>
+<p>BatchSignalRequest(userId, requestSignals, Some(ClientIdentifier.RepresentationScorerHome))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>object UserSignalServiceRecentEngagementsClient {</dt><dd><p>val FetchSignalShareDeciderKey = “representation_scorer_fetch_signal_share”
+val FetchSignalReplyDeciderKey = “representation_scorer_fetch_signal_reply”
+val FetchSignalOriginalTweetDeciderKey = “representation_scorer_fetch_signal_original_tweet”
+val FetchSignalVideoPlaybackDeciderKey = “representation_scorer_fetch_signal_video_playback”
+val FetchSignalBlockDeciderKey = “representation_scorer_fetch_signal_block”
+val FetchSignalMuteDeciderKey = “representation_scorer_fetch_signal_mute”
+val FetchSignalReportDeciderKey = “representation_scorer_fetch_signal_report”
+val FetchSignalDontlikeDeciderKey = “representation_scorer_fetch_signal_dont_like”
+val FetchSignalSeeFewerDeciderKey = “representation_scorer_fetch_signal_see_fewer”</p>
+<p>val EngagementsToScore = 10
+private val engagementsToScoreOpt: Option[Long] = Some(EngagementsToScore)</p>
+<dl class="simple">
+<dt>val SignalRequestFav: SignalRequest =</dt><dd><p>SignalRequest(engagementsToScoreOpt, SignalType.TweetFavorite)</p>
+</dd>
+</dl>
+<p>val SignalRequestRetweet: SignalRequest = SignalRequest(engagementsToScoreOpt, SignalType.Retweet)
+val SignalRequestFollow: SignalRequest =</p>
+<blockquote>
+<div><p>SignalRequest(engagementsToScoreOpt, SignalType.AccountFollowWithDelay)</p>
+</div></blockquote>
+<p>// New experimental signals
+val SignalRequestShare: SignalRequest =</p>
+<blockquote>
+<div><p>SignalRequest(engagementsToScoreOpt, SignalType.TweetShareV1)</p>
+</div></blockquote>
+<p>val SignalRequestReply: SignalRequest = SignalRequest(engagementsToScoreOpt, SignalType.Reply)
+val SignalRequestOriginalTweet: SignalRequest =</p>
+<blockquote>
+<div><p>SignalRequest(engagementsToScoreOpt, SignalType.OriginalTweet)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>val SignalRequestVideoPlayback: SignalRequest =</dt><dd><p>SignalRequest(engagementsToScoreOpt, SignalType.VideoView90dPlayback50V1)</p>
+</dd>
+</dl>
+<p>// Negative signals
+val SignalRequestBlock: SignalRequest =</p>
+<blockquote>
+<div><p>SignalRequest(engagementsToScoreOpt, SignalType.AccountBlock)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>val SignalRequestMute: SignalRequest =</dt><dd><p>SignalRequest(engagementsToScoreOpt, SignalType.AccountMute)</p>
+</dd>
+<dt>val SignalRequestReport: SignalRequest =</dt><dd><p>SignalRequest(engagementsToScoreOpt, SignalType.TweetReport)</p>
+</dd>
+<dt>val SignalRequestDontlike: SignalRequest =</dt><dd><p>SignalRequest(engagementsToScoreOpt, SignalType.TweetDontLike)</p>
+</dd>
+<dt>val SignalRequestSeeFewer: SignalRequest =</dt><dd><p>SignalRequest(engagementsToScoreOpt, SignalType.TweetSeeFewer)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/representation-scorer/server/src/main/scala/com/twitter/representationscorer/twistlyfeatures/UserSignalServiceRecentEngagementsClient.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

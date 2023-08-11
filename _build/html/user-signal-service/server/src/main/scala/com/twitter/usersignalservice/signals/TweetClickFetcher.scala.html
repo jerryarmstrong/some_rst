@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.usersignalservice.signals</p>
+<p>import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.simclusters_v2.common.UserId
+import com.twitter.simclusters_v2.thriftscala.InternalId
+import com.twitter.strato.client.Client
+import com.twitter.strato.data.Conv
+import com.twitter.strato.thrift.ScroogeConv
+import com.twitter.twistly.thriftscala.RecentTweetClickImpressEvents
+import com.twitter.twistly.thriftscala.TweetClickImpressEvent
+import com.twitter.usersignalservice.base.Query
+import com.twitter.usersignalservice.base.StratoSignalFetcher
+import com.twitter.usersignalservice.thriftscala.Signal
+import com.twitter.usersignalservice.thriftscala.SignalType
+import com.twitter.util.Future
+import com.twitter.util.Timer
+import javax.inject.Inject
+import javax.inject.Singleton</p>
+<p>&#64;Singleton
+case class TweetClickFetcher &#64;Inject() (</p>
+<blockquote>
+<div><p>stratoClient: Client,
+timer: Timer,
+stats: StatsReceiver)</p>
+<blockquote>
+<div><p>extends StratoSignalFetcher[(UserId, Long), Unit, RecentTweetClickImpressEvents] {</p>
+</div></blockquote>
+<p>import TweetClickFetcher._</p>
+<p>override type RawSignalType = TweetClickImpressEvent
+override val name: String = this.getClass.getCanonicalName
+override val statsReceiver: StatsReceiver = stats.scope(name)</p>
+<p>override val stratoColumnPath: String = stratoPath
+override val stratoView: Unit = None</p>
+<p>override protected val keyConv: Conv[(UserId, Long)] = Conv.ofType
+override protected val viewConv: Conv[Unit] = Conv.ofType
+override protected val valueConv: Conv[RecentTweetClickImpressEvents] =</p>
+<blockquote>
+<div><p>ScroogeConv.fromStruct[RecentTweetClickImpressEvents]</p>
+</div></blockquote>
+<p>override protected def toStratoKey(userId: UserId): (UserId, Long) = (userId, defaultVersion)</p>
+<dl class="simple">
+<dt>override protected def toRawSignals(</dt><dd><p>stratoValue: RecentTweetClickImpressEvents</p>
+</dd>
+<dt>): Seq[TweetClickImpressEvent] = {</dt><dd><p>stratoValue.events</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>override def process(</dt><dd><p>query: Query,
+rawSignals: Future[Option[Seq[TweetClickImpressEvent]]]</p>
+</dd>
+<dt>): Future[Option[Seq[Signal]]] =</dt><dd><dl>
+<dt>rawSignals.map { events =&gt;</dt><dd><dl class="simple">
+<dt>events.map { clicks =&gt;</dt><dd><dl class="simple">
+<dt>clicks</dt><dd><p>.filter(dwelltimeFilter(_, query.signalType))
+.map(signalFromTweetClick(_, query.signalType))
+.sortBy(-_.timestamp)
+.take(query.maxResults.getOrElse(Int.MaxValue))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<p>object TweetClickFetcher {</p>
+<blockquote>
+<div><p>val stratoPath = “recommendations/twistly/userRecentTweetClickImpress”
+private val defaultVersion = 0L</p>
+<dl class="simple">
+<dt>private val minDwellTimeMap: Map[SignalType, Long] = Map(</dt><dd><p>SignalType.GoodTweetClick -&gt; 2 * 1000L,
+SignalType.GoodTweetClick5s -&gt; 5 * 1000L,
+SignalType.GoodTweetClick10s -&gt; 10 * 1000L,
+SignalType.GoodTweetClick30s -&gt; 30 * 1000L,</p>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>def signalFromTweetClick(</dt><dd><p>tweetClickImpressEvent: TweetClickImpressEvent,
+signalType: SignalType</p>
+</dd>
+<dt>): Signal = {</dt><dd><dl class="simple">
+<dt>Signal(</dt><dd><p>signalType,
+tweetClickImpressEvent.engagedAt,
+Some(InternalId.TweetId(tweetClickImpressEvent.entityId))</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>def dwelltimeFilter(</dt><dd><p>tweetClickImpressEvent: TweetClickImpressEvent,
+signalType: SignalType</p>
+</dd>
+<dt>): Boolean = {</dt><dd><p>val goodClickDwellTime = minDwellTimeMap(signalType)
+tweetClickImpressEvent.clickImpressEventMetadata.totalDwellTime &gt;= goodClickDwellTime</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/user-signal-service/server/src/main/scala/com/twitter/usersignalservice/signals/TweetClickFetcher.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

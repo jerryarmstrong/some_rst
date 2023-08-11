@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.core.earlybird.index.column;</p>
+<p>import java.io.IOException;
+import java.util.Iterator;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;</p>
+<p>import com.google.common.base.Preconditions;
+import com.google.common.collect.Maps;
+import com.google.common.collect.Sets;</p>
+<p>import com.twitter.search.common.schema.base.EarlybirdFieldType;
+import com.twitter.search.common.schema.base.Schema;
+import com.twitter.search.common.util.io.flushable.DataDeserializer;
+import com.twitter.search.common.util.io.flushable.DataSerializer;
+import com.twitter.search.common.util.io.flushable.FlushInfo;
+import com.twitter.search.common.util.io.flushable.Flushable;
+import com.twitter.search.core.earlybird.index.DocIDToTweetIDMapper;</p>
+<dl>
+<dt>public abstract class DocValuesManager implements Flushable {</dt><dd><p>protected final Schema schema;
+protected final int segmentSize;
+protected final ConcurrentHashMap&lt;String, ColumnStrideFieldIndex&gt; columnStrideFields;</p>
+<dl class="simple">
+<dt>public DocValuesManager(Schema schema, int segmentSize) {</dt><dd><p>this(schema, segmentSize, new ConcurrentHashMap&lt;&gt;());</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>protected DocValuesManager(Schema schema,</dt><dd><blockquote>
+<div><p>int segmentSize,
+ConcurrentHashMap&lt;String, ColumnStrideFieldIndex&gt; columnStrideFields) {</p>
+</div></blockquote>
+<p>this.schema = Preconditions.checkNotNull(schema);
+this.segmentSize = segmentSize;
+this.columnStrideFields = columnStrideFields;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>protected abstract ColumnStrideFieldIndex newByteCSF(String field);
+protected abstract ColumnStrideFieldIndex newIntCSF(String field);
+protected abstract ColumnStrideFieldIndex newLongCSF(String field);
+protected abstract ColumnStrideFieldIndex newMultiIntCSF(String field, int numIntsPerField);</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Optimize this doc values manager, and return a doc values manager a more compact and fast</p></li>
+<li><p>encoding for doc values (but that we can’t add new doc IDs to).</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>public abstract DocValuesManager optimize(</dt><dd><p>DocIDToTweetIDMapper originalTweetIdMapper,
+DocIDToTweetIDMapper optimizedTweetIdMapper) throws IOException;</p>
+</dd>
+<dt>public Set&lt;String&gt; getDocValueNames() {</dt><dd><p>return columnStrideFields.keySet();</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Creates a new <a class="reference external" href="mailto:{&#37;&#52;&#48;link">{<span>&#64;</span>link</a> ColumnStrideFieldIndex} for the given field and returns it.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>public ColumnStrideFieldIndex addColumnStrideField(String field, EarlybirdFieldType fieldType) {</dt><dd><p>// For CSF view fields, we will perform the same check on the base field when we try to create
+// a ColumnStrideFieldIndex for them in newIntViewCSF().
+if (!fieldType.isCsfViewField()) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>Preconditions.checkState(</dt><dd><p>fieldType.isCsfLoadIntoRam(), “Field %s is not loaded in RAM”, field);</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>if (columnStrideFields.containsKey(field)) {</dt><dd><p>return columnStrideFields.get(field);</p>
+</dd>
+</dl>
+<p>}</p>
+<p>final ColumnStrideFieldIndex index;
+switch (fieldType.getCsfType()) {</p>
+<blockquote>
+<div><dl>
+<dt>case BYTE:</dt><dd><p>index = newByteCSF(field);
+break;</p>
+</dd>
+<dt>case INT:</dt><dd><dl class="simple">
+<dt>if (fieldType.getCsfFixedLengthNumValuesPerDoc() &gt; 1) {</dt><dd><p>index = newMultiIntCSF(field, fieldType.getCsfFixedLengthNumValuesPerDoc());</p>
+</dd>
+<dt>} else if (fieldType.isCsfViewField()) {</dt><dd><p>index = newIntViewCSF(field);</p>
+</dd>
+<dt>} else {</dt><dd><p>index = newIntCSF(field);</p>
+</dd>
+</dl>
+<p>}
+break;</p>
+</dd>
+<dt>case LONG:</dt><dd><p>index = newLongCSF(field);
+break;</p>
+</dd>
+<dt>default:</dt><dd><p>throw new RuntimeException(“Invalid CsfType.”);</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<p>columnStrideFields.put(field, index);
+return index;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>protected ColumnStrideFieldIndex newIntViewCSF(String field) {</dt><dd><p>Schema.FieldInfo info = Preconditions.checkNotNull(schema.getFieldInfo(field));
+Schema.FieldInfo baseFieldInfo = Preconditions.checkNotNull(</p>
+<blockquote>
+<div><p>schema.getFieldInfo(info.getFieldType().getCsfViewBaseFieldId()));</p>
+</div></blockquote>
+<dl class="simple">
+<dt>Preconditions.checkState(</dt><dd><p>baseFieldInfo.getFieldType().isCsfLoadIntoRam(),
+“Field %s has a base field (%s) that is not loaded in RAM”,
+field, baseFieldInfo.getName());</p>
+</dd>
+</dl>
+<p>// We might not have a CSF for the base field yet.
+ColumnStrideFieldIndex baseFieldIndex =</p>
+<blockquote>
+<div><p>addColumnStrideField(baseFieldInfo.getName(), baseFieldInfo.getFieldType());</p>
+</div></blockquote>
+<p>Preconditions.checkNotNull(baseFieldIndex);
+Preconditions.checkState(baseFieldIndex instanceof AbstractColumnStrideMultiIntIndex);
+return new ColumnStrideIntViewIndex(info, (AbstractColumnStrideMultiIntIndex) baseFieldIndex);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Returns the ColumnStrideFieldIndex instance for the given field.</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>public ColumnStrideFieldIndex getColumnStrideFieldIndex(String field) {</dt><dd><p>ColumnStrideFieldIndex docValues = columnStrideFields.get(field);
+if (docValues == null) {</p>
+<blockquote>
+<div><p>Schema.FieldInfo info = schema.getFieldInfo(field);
+if (info != null &amp;&amp; info.getFieldType().isCsfDefaultValueSet()) {</p>
+<blockquote>
+<div><p>return new ConstantColumnStrideFieldIndex(field, info.getFieldType().getCsfDefaultValue());</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>return docValues;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>private static final String CSF_INDEX_CLASS_NAME_PROP_NAME = “csfIndexClassName”;
+private static final String CSF_PROP_NAME = “column_stride_fields”;
+protected static final String MAX_SEGMENT_SIZE_PROP_NAME = “maxSegmentSize”;</p>
+<dl>
+<dt>private static Map&lt;String, Set&lt;Schema.FieldInfo&gt;&gt; getIntViewFields(Schema schema) {</dt><dd><p>Map&lt;String, Set&lt;Schema.FieldInfo&gt;&gt; intViewFields = Maps.newHashMap();
+for (Schema.FieldInfo fieldInfo : schema.getFieldInfos()) {</p>
+<blockquote>
+<div><dl>
+<dt>if (fieldInfo.getFieldType().isCsfViewField()) {</dt><dd><dl class="simple">
+<dt>Schema.FieldInfo baseFieldInfo = Preconditions.checkNotNull(</dt><dd><p>schema.getFieldInfo(fieldInfo.getFieldType().getCsfViewBaseFieldId()));</p>
+</dd>
+</dl>
+<p>String baseFieldName = baseFieldInfo.getName();
+Set&lt;Schema.FieldInfo&gt; intViewFieldsForBaseField =</p>
+<blockquote>
+<div><p>intViewFields.computeIfAbsent(baseFieldName, k -&gt; Sets.newHashSet());</p>
+</div></blockquote>
+<p>intViewFieldsForBaseField.add(fieldInfo);</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}
+return intViewFields;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>public abstract static class FlushHandler extends Handler&lt;DocValuesManager&gt; {</dt><dd><p>private final Schema schema;</p>
+<dl class="simple">
+<dt>public FlushHandler(Schema schema) {</dt><dd><p>this.schema = schema;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public FlushHandler(DocValuesManager docValuesManager) {</dt><dd><p>super(docValuesManager);
+this.schema = docValuesManager.schema;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;Override
+public void doFlush(FlushInfo flushInfo, DataSerializer out) throws IOException {</p>
+<blockquote>
+<div><p>long startTime = getClock().nowMillis();</p>
+<p>DocValuesManager docValuesManager = getObjectToFlush();
+flushInfo.addIntProperty(MAX_SEGMENT_SIZE_PROP_NAME, docValuesManager.segmentSize);
+long sizeBeforeFlush = out.length();
+FlushInfo csfProps = flushInfo.newSubProperties(CSF_PROP_NAME);
+for (ColumnStrideFieldIndex csf : docValuesManager.columnStrideFields.values()) {
+if (!(csf instanceof ColumnStrideIntViewIndex)) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>Preconditions.checkState(</dt><dd><p>csf instanceof Flushable,
+“Cannot flush column stride field {} of type {}”,
+csf.getName(), csf.getClass().getCanonicalName());</p>
+</dd>
+</dl>
+<p>FlushInfo info = csfProps.newSubProperties(csf.getName());
+info.addStringProperty(CSF_INDEX_CLASS_NAME_PROP_NAME, csf.getClass().getCanonicalName());
+((Flushable) csf).getFlushHandler().flush(info, out);</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<dl class="simple">
+<dt>}</dt><dd><p>csfProps.setSizeInBytes(out.length() - sizeBeforeFlush);
+getFlushTimerStats().timerIncrement(getClock().nowMillis() - startTime);</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;Override
+public DocValuesManager doLoad(FlushInfo flushInfo, DataDeserializer in)</p>
+<blockquote>
+<div><blockquote>
+<div><p>throws IOException {</p>
+</div></blockquote>
+<p>long startTime = getClock().nowMillis();
+Map&lt;String, Set&lt;Schema.FieldInfo&gt;&gt; intViewFields = getIntViewFields(schema);</p>
+<p>FlushInfo csfProps = flushInfo.getSubProperties(CSF_PROP_NAME);
+ConcurrentHashMap&lt;String, ColumnStrideFieldIndex&gt; columnStrideFields =</p>
+<blockquote>
+<div><p>new ConcurrentHashMap&lt;&gt;();</p>
+</div></blockquote>
+<p>Iterator&lt;String&gt; csfPropIter = csfProps.getKeyIterator();
+while (csfPropIter.hasNext()) {</p>
+<blockquote>
+<div><p>String fieldName = csfPropIter.next();
+try {</p>
+<blockquote>
+<div><p>FlushInfo info = csfProps.getSubProperties(fieldName);
+String className = info.getStringProperty(CSF_INDEX_CLASS_NAME_PROP_NAME);
+Class&lt;? extends ColumnStrideFieldIndex&gt; fieldIndexType =</p>
+<blockquote>
+<div><p>(Class&lt;? extends ColumnStrideFieldIndex&gt;) Class.forName(className);</p>
+</div></blockquote>
+<dl>
+<dt>Preconditions.checkNotNull(</dt><dd><p>fieldIndexType,
+“Invalid field configuration: field “ + fieldName + “ not found in config.”);</p>
+</dd>
+<dt>for (Class&lt;?&gt; c<span class="classifier">fieldIndexType.getDeclaredClasses()) {</span></dt><dd><dl>
+<dt>if (Handler.class.isAssignableFrom(c)) {</dt><dd><p>&#64;SuppressWarnings(“rawtypes”)
+Handler handler = (Handler) c.newInstance();
+ColumnStrideFieldIndex index = (ColumnStrideFieldIndex) handler.load(</p>
+<blockquote>
+<div><p>csfProps.getSubProperties(fieldName), in);</p>
+</div></blockquote>
+<p>columnStrideFields.put(fieldName, index);</p>
+<p>// If this is a base field, create ColumnStrideIntViewIndex instances for all the
+// view fields based on it.
+if (index instanceof AbstractColumnStrideMultiIntIndex) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>AbstractColumnStrideMultiIntIndex multiIntIndex =</dt><dd><p>(AbstractColumnStrideMultiIntIndex) index;</p>
+</dd>
+</dl>
+<p>// We should have AbstractColumnStrideMultiIntIndex instances only for base fields
+// and all our base fields have views defined on top of them.
+for (Schema.FieldInfo intViewFieldInfo : intViewFields.get(fieldName)) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>columnStrideFields.put(</dt><dd><p>intViewFieldInfo.getName(),
+new ColumnStrideIntViewIndex(intViewFieldInfo, multiIntIndex));</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>break;</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} catch (ClassNotFoundException | IllegalAccessException | InstantiationException e) {</dt><dd><dl class="simple">
+<dt>throw new IOException(</dt><dd><p>“Invalid field configuration for column stride field: “ + fieldName, e);</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}
+getLoadTimerStats().timerIncrement(getClock().nowMillis() - startTime);</p>
+<dl class="simple">
+<dt>return createDocValuesManager(</dt><dd><p>schema,
+flushInfo.getIntProperty(MAX_SEGMENT_SIZE_PROP_NAME),
+columnStrideFields);</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>protected abstract DocValuesManager createDocValuesManager(</dt><dd><p>Schema docValuesSchema,
+int maxSegmentSize,
+ConcurrentHashMap&lt;String, ColumnStrideFieldIndex&gt; columnStrideFields);</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/src/java/com/twitter/search/core/earlybird/index/column/DocValuesManager.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

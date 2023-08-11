@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../../../" id="documentation_options" src="../../../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.product_mixer.core.service.selector_executor</p>
+<p>import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.product_mixer.core.functional_component.selector.Selector
+import com.twitter.product_mixer.core.functional_component.selector.SelectorResult
+import com.twitter.product_mixer.core.model.common.identifier.SelectorIdentifier
+import com.twitter.product_mixer.core.model.common.presentation.CandidateWithDetails
+import com.twitter.product_mixer.core.pipeline.PipelineQuery
+import com.twitter.product_mixer.core.pipeline.pipeline_failure.IllegalStateFailure
+import com.twitter.product_mixer.core.pipeline.pipeline_failure.PipelineFailure
+import com.twitter.product_mixer.core.service.Executor
+import com.twitter.stitch.Arrow</p>
+<p>import javax.inject.Inject
+import javax.inject.Singleton</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Applies a <cite>Seq[Selector]</cite> in sequential order.</p></li>
+<li><p>Returns the results, and also a detailed list each selector’s results (for debugging / understandability).</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+</dl>
+<p>&#64;Singleton
+class SelectorExecutor &#64;Inject() (override val statsReceiver: StatsReceiver) extends Executor {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>def arrow[Query &lt;: PipelineQuery](</dt><dd><p>selectors: Seq[Selector[Query]],
+context: Executor.Context</p>
+</dd>
+</dl>
+<p>): Arrow[SelectorExecutor.Inputs[Query], SelectorExecutorResult] = {</p>
+<blockquote>
+<div><dl>
+<dt>if (selectors.isEmpty) {</dt><dd><dl class="simple">
+<dt>throw PipelineFailure(</dt><dd><p>IllegalStateFailure,
+“Must provide a non-empty Seq of Selectors. Check the config indicated by the componentStack and ensure that a non-empty Selector Seq is provided.”,
+componentStack = Some(context.componentStack)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>val selectorArrows =</dt><dd><dl class="simple">
+<dt>selectors.zipWithIndex.foldLeft(Arrow.identity[(Query, IndexedSeq[SelectorResult])]) {</dt><dd><dl class="simple">
+<dt>case (previousSelectorArrows, (selector, index)) =&gt;</dt><dd><p>val selectorResult = getIndividualSelectorIsoArrow(selector, index, context)
+previousSelectorArrows.andThen(selectorResult)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>Arrow</dt><dd><dl>
+<dt>.zipWithArg(</dt><dd><dl>
+<dt>Arrow</dt><dd><dl class="simple">
+<dt>.map[SelectorExecutor.Inputs[Query], (Query, IndexedSeq[SelectorResult])] {</dt><dd><dl class="simple">
+<dt>case SelectorExecutor.Inputs(query, candidates) =&gt;</dt><dd><p>(query, IndexedSeq(SelectorResult(candidates, Seq.empty)))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}.andThen(selectorArrows)).map {</p>
+</dd>
+<dt>case (inputs, (_, selectorResults)) =&gt;</dt><dd><p>// the last results, safe because it’s always non-empty since it starts with 1 element in it
+val SelectorResult(remainingCandidates, result) = selectorResults.last</p>
+<dl class="simple">
+<dt>val resultsAndRemainingCandidates =</dt><dd><p>(result.iterator ++ remainingCandidates.iterator).toSet</p>
+</dd>
+</dl>
+<p>// the droppedCandidates are all the candidates which are in neither the result or remainingCandidates
+val droppedCandidates = inputs.candidatesWithDetails.iterator</p>
+<blockquote>
+<div><p>.filterNot(resultsAndRemainingCandidates.contains)
+.toIndexedSeq</p>
+</div></blockquote>
+<dl>
+<dt>SelectorExecutorResult(</dt><dd><p>selectedCandidates = result,
+remainingCandidates = remainingCandidates,
+droppedCandidates = droppedCandidates,
+individualSelectorResults =</p>
+<blockquote>
+<div><p>selectorResults.tail // <cite>.tail</cite> to remove the initial state we had</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>private def getIndividualSelectorIsoArrow[Query &lt;: PipelineQuery](</dt><dd><p>selector: Selector[Query],
+index: Int,
+context: Executor.Context</p>
+</dd>
+<dt>): Arrow.Iso[(Query, IndexedSeq[SelectorResult])] = {</dt><dd><p>val identifier = SelectorIdentifier(selector.getClass.getSimpleName, index)</p>
+<dl>
+<dt>val arrow = Arrow</dt><dd><p>.identity[(Query, IndexedSeq[SelectorResult])]
+.map {</p>
+<blockquote>
+<div><dl>
+<dt>case (query, previousResults) =&gt;</dt><dd><p>// last is safe here because we pass in a non-empty IndexedSeq
+val previousResult = previousResults.last
+val currentResult = selector.apply(</p>
+<blockquote>
+<div><p>query,
+previousResult.remainingCandidates,
+previousResult.result</p>
+</div></blockquote>
+<p>)
+(query, previousResults :+ currentResult)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+<dt>wrapComponentsWithTracingOnly(context, identifier)(</dt><dd><dl class="simple">
+<dt>wrapWithErrorHandling(context, identifier)(</dt><dd><p>arrow</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>object SelectorExecutor {</dt><dd><dl class="simple">
+<dt>case class Inputs[Query &lt;: PipelineQuery](</dt><dd><p>query: Query,
+candidatesWithDetails: Seq[CandidateWithDetails])</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../../../_sources/product-mixer/core/src/main/scala/com/twitter/product_mixer/core/service/selector_executor/SelectorExecutor.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

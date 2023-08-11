@@ -1,0 +1,454 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../" id="documentation_options" src="../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.earlybird;</p>
+<p>import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.util.concurrent.atomic.AtomicLong;</p>
+<p>import javax.annotation.concurrent.GuardedBy;</p>
+<p>import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Preconditions;
+import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.Maps;</p>
+<p>import org.apache.zookeeper.KeeperException;
+import org.apache.zookeeper.Watcher;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;</p>
+<p>import com.twitter.common.zookeeper.ServerSet;
+import com.twitter.common.zookeeper.ZooKeeperClient;
+import com.twitter.common_internal.zookeeper.TwitterServerSet;
+import com.twitter.search.common.config.Config;
+import com.twitter.search.common.database.DatabaseConfig;
+import com.twitter.search.common.metrics.SearchCounter;
+import com.twitter.search.common.metrics.SearchLongGauge;
+import com.twitter.search.common.metrics.SearchStatsReceiver;
+import com.twitter.search.common.util.zookeeper.ZooKeeperProxy;
+import com.twitter.search.earlybird.common.config.EarlybirdConfig;
+import com.twitter.search.earlybird.common.config.EarlybirdProperty;
+import com.twitter.search.earlybird.config.TierConfig;
+import com.twitter.search.earlybird.exception.AlreadyInServerSetUpdateException;
+import com.twitter.search.earlybird.exception.NotInServerSetUpdateException;
+import com.twitter.search.earlybird.partition.PartitionConfig;</p>
+<dl>
+<dt>public class EarlybirdServerSetManager implements ServerSetMember {</dt><dd><p>private static final Logger LOG = LoggerFactory.getLogger(EarlybirdServerSetManager.class);</p>
+<p>// How many times this earlybird joined/left its partition’s server set
+&#64;VisibleForTesting
+protected final SearchCounter leaveServerSetCounter;
+&#64;VisibleForTesting
+protected final SearchCounter joinServerSetCounter;
+private final ZooKeeperProxy discoveryZKClient;
+private final SearchLongGauge inServerSetGauge;
+private final PartitionConfig partitionConfig;
+private final int port;
+private final String serverSetNamePrefix;</p>
+<p>&#64;VisibleForTesting
+protected final SearchLongGauge connectedToZooKeeper;</p>
+<p>private final Object endpointStatusLock = new Object();
+&#64;GuardedBy(“endpointStatusLock”)
+private ServerSet.EndpointStatus endpointStatus = null;</p>
+<p>private boolean inServerSetForServiceProxy = false;</p>
+<dl>
+<dt>public EarlybirdServerSetManager(</dt><dd><blockquote>
+<div><p>SearchStatsReceiver searchStatsReceiver,
+ZooKeeperProxy discoveryZKClient,
+final PartitionConfig partitionConfig,
+int port,
+String serverSetNamePrefix) {</p>
+</div></blockquote>
+<p>this.discoveryZKClient = discoveryZKClient;
+this.partitionConfig = partitionConfig;
+this.port = port;
+this.serverSetNamePrefix = serverSetNamePrefix;</p>
+<p>// Export serverset related stats
+Preconditions.checkNotNull(searchStatsReceiver);
+this.joinServerSetCounter = searchStatsReceiver.getCounter(</p>
+<blockquote>
+<div><p>serverSetNamePrefix + “join_server_set_count”);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>this.leaveServerSetCounter = searchStatsReceiver.getCounter(</dt><dd><p>serverSetNamePrefix + “leave_server_set_count”);</p>
+</dd>
+</dl>
+<p>// Create a new stat based on the partition number for hosts-in-partition aggregation.
+// The value of the stat is dependent on whether the server is in the serverset so that the
+// aggregate stat reflects the number serving traffic instead of the live process count.
+AtomicLong sharedInServerSetStatus = new AtomicLong();
+this.inServerSetGauge = searchStatsReceiver.getLongGauge(</p>
+<blockquote>
+<div><p>serverSetNamePrefix + “is_in_server_set”, sharedInServerSetStatus);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>this.connectedToZooKeeper = searchStatsReceiver.getLongGauge(</dt><dd><p>serverSetNamePrefix + “connected_to_zookeeper”);</p>
+</dd>
+<dt>searchStatsReceiver.getLongGauge(</dt><dd><p>serverSetNamePrefix + “<a href="#id11"><span class="problematic" id="id12">member_of_partition_</span></a>” + partitionConfig.getIndexingHashPartitionID(),
+sharedInServerSetStatus);</p>
+</dd>
+</dl>
+<p>this.discoveryZKClient.registerExpirationHandler(() -&gt; connectedToZooKeeper.set(0));</p>
+<dl>
+<dt>this.discoveryZKClient.register(event -&gt; {</dt><dd><dl>
+<dt>if (event.getType() == Watcher.Event.EventType.None</dt><dd><blockquote>
+<div><p>&amp;&amp; event.getState() == Watcher.Event.KeeperState.SyncConnected) {</p>
+</div></blockquote>
+<p>connectedToZooKeeper.set(1);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>});</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Join ServerSet and update endpointStatus.</p></li>
+<li><p>This will allow Earlybird consumers, e.g. Blender, to detect when an</p></li>
+<li><p>Earlybird goes online and offline.</p></li>
+<li><p>&#64;param username</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+</dl>
+<p>&#64;Override
+public void joinServerSet(String username) throws ServerSet.UpdateException {</p>
+<blockquote>
+<div><p>joinServerSetCounter.increment();</p>
+<dl>
+<dt>synchronized (endpointStatusLock) {</dt><dd><p>LOG.info(“Joining {} ServerSet (instructed by: {}) …”, serverSetNamePrefix, username);
+if (endpointStatus != null) {</p>
+<blockquote>
+<div><p>LOG.warn(“Already in ServerSet. Nothing done.”);
+throw new AlreadyInServerSetUpdateException(“Already in ServerSet. Nothing done.”);</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>try {</dt><dd><p>TwitterServerSet.Service service = getServerSetService();</p>
+<p>ServerSet serverSet = discoveryZKClient.createServerSet(service);
+endpointStatus = serverSet.join(</p>
+<blockquote>
+<div><p>new InetSocketAddress(InetAddress.getLocalHost().getHostName(), port),
+Maps.newHashMap(),
+partitionConfig.getHostPositionWithinHashPartition());</p>
+</div></blockquote>
+<p>inServerSetGauge.set(1);</p>
+<p>String path = service.getPath();
+EarlybirdStatus.recordEarlybirdEvent(“Joined “ + serverSetNamePrefix + “ ServerSet “ + path</p>
+<blockquote>
+<div><ul class="simple">
+<li><p>“ (instructed by: “ + username + “)”);</p></li>
+</ul>
+</div></blockquote>
+<dl class="simple">
+<dt>LOG.info(“Successfully joined {} ServerSet {} (instructed by: {})”,</dt><dd><p>serverSetNamePrefix, path, username);</p>
+</dd>
+</dl>
+</dd>
+<dt>} catch (Exception e) {</dt><dd><p>endpointStatus = null;
+String message = “Failed to join “ + serverSetNamePrefix + “ ServerSet of partition “</p>
+<blockquote>
+<div><ul class="simple">
+<li><p>partitionConfig.getIndexingHashPartitionID();</p></li>
+</ul>
+</div></blockquote>
+<p>LOG.error(message, e);
+throw new ServerSet.UpdateException(message, e);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Takes this Earlybird out of its registered ServerSet.</p></li>
+<li></li>
+<li><p>&#64;throws ServerSet.UpdateException if there was a problem leaving the ServerSet,</p></li>
+<li><p>or if this Earlybird is already not in a ServerSet.</p></li>
+<li><p>&#64;param username</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+</dl>
+<p>&#64;Override
+public void leaveServerSet(String username) throws ServerSet.UpdateException {</p>
+<blockquote>
+<div><p>leaveServerSetCounter.increment();
+synchronized (endpointStatusLock) {</p>
+<blockquote>
+<div><p>LOG.info(“Leaving {} ServerSet (instructed by: {}) …”, serverSetNamePrefix, username);
+if (endpointStatus == null) {</p>
+<blockquote>
+<div><p>String message = “Not in a ServerSet. Nothing done.”;
+LOG.warn(message);
+throw new NotInServerSetUpdateException(message);</p>
+</div></blockquote>
+<p>}</p>
+<p>endpointStatus.leave();
+endpointStatus = null;
+inServerSetGauge.set(0);
+EarlybirdStatus.recordEarlybirdEvent(“Left “ + serverSetNamePrefix</p>
+<blockquote>
+<div><ul class="simple">
+<li><p>“ ServerSet (instructed by: “ + username + “)”);</p></li>
+</ul>
+</div></blockquote>
+<dl class="simple">
+<dt>LOG.info(“Successfully left {} ServerSet. (instructed by: {})”,</dt><dd><p>serverSetNamePrefix, username);</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public int getNumberOfServerSetMembers()</p>
+<blockquote>
+<div><blockquote>
+<div><p>throws InterruptedException, ZooKeeperClient.ZooKeeperConnectionException, KeeperException {</p>
+</div></blockquote>
+<p>String path = getServerSetService().getPath();
+return discoveryZKClient.getNumberOfServerSetMembers(path);</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Determines if this earlybird is in the server set.</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+</dl>
+<p>&#64;Override
+public boolean isInServerSet() {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>synchronized (endpointStatusLock) {</dt><dd><p>return endpointStatus != null;</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Returns the server set that this earlybird should join.</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+<dt>public String getServerSetIdentifier() {</dt><dd><p>TwitterServerSet.Service service = getServerSetService();
+return String.format(“/cluster/local/%s/%s/%s”,</p>
+<blockquote>
+<div><p>service.getRole(),
+service.getEnv(),
+service.getName());</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private TwitterServerSet.Service getServerSetService() {</dt><dd><p>// If the tier name is ‘all’ then it treat it as an untiered EB cluster
+// and do not add the tier component into the ZK path it registers under.
+String tierZKPathComponent = “”;
+if (!TierConfig.DEFAULT_TIER_NAME.equalsIgnoreCase(partitionConfig.getTierName())) {</p>
+<blockquote>
+<div><p>tierZKPathComponent = “/” + partitionConfig.getTierName();</p>
+</div></blockquote>
+<p>}
+if (EarlybirdConfig.isAurora()) {</p>
+<blockquote>
+<div><p>// ROLE, EARYLBIRD_NAME, and ENV properties are required on Aurora, thus will be set here
+return new TwitterServerSet.Service(</p>
+<blockquote>
+<div><p>EarlybirdProperty.ROLE.get(),
+EarlybirdProperty.ENV.get(),
+getServerSetPath(EarlybirdProperty.EARLYBIRD_NAME.get() + tierZKPathComponent));</p>
+</div></blockquote>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><dl class="simple">
+<dt>return new TwitterServerSet.Service(</dt><dd><p>DatabaseConfig.getZooKeeperRole(),
+Config.getEnvironment(),
+getServerSetPath(“earlybird” + tierZKPathComponent));</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private String getServerSetPath(String earlybirdName) {</dt><dd><dl class="simple">
+<dt>return String.format(“%s%s/hash_partition_%d”, serverSetNamePrefix, earlybirdName,</dt><dd><p>partitionConfig.getIndexingHashPartitionID());</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Join ServerSet for ServiceProxy with a named admin port and with a zookeeper path that Service</p></li>
+<li><p>Proxy can translate to a domain name label that is less than 64 characters (due to the size</p></li>
+<li><p>limit for domain name labels described here: <a class="reference external" href="https://tools.ietf.org/html/rfc1035">https://tools.ietf.org/html/rfc1035</a>)</p></li>
+<li><p>This will allow us to access Earlybirds that are not on mesos via ServiceProxy.</p></li>
+</ul>
+<p><a href="#id9"><span class="problematic" id="id10">*</span></a>/</p>
+</dd>
+</dl>
+<p>&#64;Override
+public void joinServerSetForServiceProxy() {</p>
+<blockquote>
+<div><p>// This additional Zookeeper server set is only necessary for Archive Earlybirds which are
+// running on bare metal hardware, so ensure that this method is never called for services
+// on Aurora.
+Preconditions.checkArgument(!EarlybirdConfig.isAurora(),</p>
+<blockquote>
+<div><p>“Attempting to join server set for ServiceProxy on Earlybird running on Aurora”);</p>
+</div></blockquote>
+<p>LOG.info(“Attempting to join ServerSet for ServiceProxy”);
+try {</p>
+<blockquote>
+<div><p>TwitterServerSet.Service service = getServerSetForServiceProxyOnArchive();</p>
+<p>ServerSet serverSet = discoveryZKClient.createServerSet(service);
+String hostName = InetAddress.getLocalHost().getHostName();
+int adminPort = EarlybirdConfig.getAdminPort();
+serverSet.join(</p>
+<blockquote>
+<div><p>new InetSocketAddress(hostName, port),
+ImmutableMap.of(“admin”, new InetSocketAddress(hostName, adminPort)),
+partitionConfig.getHostPositionWithinHashPartition());</p>
+</div></blockquote>
+<p>String path = service.getPath();
+LOG.info(“Successfully joined ServerSet for ServiceProxy {}”, path);
+inServerSetForServiceProxy = true;</p>
+</div></blockquote>
+<dl>
+<dt>} catch (Exception e) {</dt><dd><dl class="simple">
+<dt>String message = “Failed to join ServerSet for ServiceProxy of partition “</dt><dd><ul class="simple">
+<li><p>partitionConfig.getIndexingHashPartitionID();</p></li>
+</ul>
+</dd>
+</dl>
+<p>LOG.warn(message, e);</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;VisibleForTesting
+protected TwitterServerSet.Service getServerSetForServiceProxyOnArchive() {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>String serverSetPath = String.format(“proxy/%s/p_%d”,</dt><dd><p>partitionConfig.getTierName(),
+partitionConfig.getIndexingHashPartitionID());</p>
+</dd>
+<dt>return new TwitterServerSet.Service(</dt><dd><p>DatabaseConfig.getZooKeeperRole(),
+Config.getEnvironment(),
+serverSetPath);</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<p>&#64;VisibleForTesting
+protected boolean isInServerSetForServiceProxy() {</p>
+<blockquote>
+<div><p>return inServerSetForServiceProxy;</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../_sources/src/java/com/twitter/search/earlybird/EarlybirdServerSetManager.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

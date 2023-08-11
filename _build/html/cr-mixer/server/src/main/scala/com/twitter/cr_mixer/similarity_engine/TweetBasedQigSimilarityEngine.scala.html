@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.cr_mixer.similarity_engine</p>
+<p>import com.twitter.cr_mixer.model.SimilarityEngineInfo
+import com.twitter.cr_mixer.model.TweetWithScore
+import com.twitter.cr_mixer.thriftscala.SimilarityEngineType
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.frigate.common.base.Stats
+import com.twitter.product_mixer.core.thriftscala.ClientContext
+import com.twitter.qig_ranker.thriftscala.Product
+import com.twitter.qig_ranker.thriftscala.ProductContext
+import com.twitter.qig_ranker.thriftscala.QigRanker
+import com.twitter.qig_ranker.thriftscala.QigRankerProductResponse
+import com.twitter.qig_ranker.thriftscala.QigRankerRequest
+import com.twitter.qig_ranker.thriftscala.QigRankerResponse
+import com.twitter.qig_ranker.thriftscala.TwistlySimilarTweetsProductContext
+import com.twitter.simclusters_v2.thriftscala.InternalId
+import com.twitter.storehaus.ReadableStore
+import com.twitter.timelines.configapi
+import com.twitter.util.Future
+import javax.inject.Singleton</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>This store looks for similar tweets from QueryInteractionGraph (QIG) for a source tweet id.</p></li>
+<li><p>For a given query tweet, QIG returns us the similar tweets that have an overlap of engagements</p></li>
+<li><p>(with the query tweet) on different search queries</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+</dl>
+<p>&#64;Singleton
+case class TweetBasedQigSimilarityEngine(</p>
+<blockquote>
+<div><p>qigRanker: QigRanker.MethodPerEndpoint,
+statsReceiver: StatsReceiver)</p>
+<blockquote>
+<div><dl class="simple">
+<dt>extends ReadableStore[</dt><dd><p>TweetBasedQigSimilarityEngine.Query,
+Seq[TweetWithScore]</p>
+</dd>
+</dl>
+<p>] {</p>
+</div></blockquote>
+<p>private val stats = statsReceiver.scope(this.getClass.getSimpleName)
+private val fetchCandidatesStat = stats.scope(“fetchCandidates”)</p>
+<dl>
+<dt>override def get(</dt><dd><p>query: TweetBasedQigSimilarityEngine.Query</p>
+</dd>
+<dt>): Future[Option[Seq[TweetWithScore]]] = {</dt><dd><dl>
+<dt>query.sourceId match {</dt><dd><dl>
+<dt>case InternalId.TweetId(tweetId) =&gt;</dt><dd><p>val qigSimilarTweetsRequest = getQigSimilarTweetsRequest(tweetId)</p>
+<dl>
+<dt>Stats.trackOption(fetchCandidatesStat) {</dt><dd><dl>
+<dt>qigRanker</dt><dd><p>.getSimilarCandidates(qigSimilarTweetsRequest)
+.map { qigSimilarTweetsResponse =&gt;</p>
+<blockquote>
+<div><p>getCandidatesFromQigResponse(qigSimilarTweetsResponse)</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>case _ =&gt;</dt><dd><p>Future.value(None)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def getQigSimilarTweetsRequest(</dt><dd><p>tweetId: Long</p>
+</dd>
+<dt>): QigRankerRequest = {</dt><dd><p>// Note: QigRanker needs a non-empty userId to be passed to return results.
+// We are passing in a dummy userId until we fix this on QigRanker side
+val clientContext = ClientContext(userId = Some(0L))
+val productContext = ProductContext.TwistlySimilarTweetsProductContext(</p>
+<blockquote>
+<div><p>TwistlySimilarTweetsProductContext(tweetId = tweetId))</p>
+</div></blockquote>
+<dl class="simple">
+<dt>QigRankerRequest(</dt><dd><p>clientContext = clientContext,
+product = Product.TwistlySimilarTweets,
+productContext = Some(productContext),</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def getCandidatesFromQigResponse(</dt><dd><p>qigSimilarTweetsResponse: QigRankerResponse</p>
+</dd>
+<dt>): Option[Seq[TweetWithScore]] = {</dt><dd><dl>
+<dt>qigSimilarTweetsResponse.productResponse match {</dt><dd><dl>
+<dt>case QigRankerProductResponse</dt><dd><blockquote>
+<div><p>.TwistlySimilarTweetCandidatesResponse(response) =&gt;</p>
+</div></blockquote>
+<dl>
+<dt>val tweetsWithScore = response.similarTweets</dt><dd><dl class="simple">
+<dt>.map { similarTweetResult =&gt;</dt><dd><dl class="simple">
+<dt>TweetWithScore(</dt><dd><p>similarTweetResult.tweetResult.tweetId,
+similarTweetResult.tweetResult.score.getOrElse(0L))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>Some(tweetsWithScore)</p>
+</dd>
+</dl>
+<p>case _ =&gt; None</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>object TweetBasedQigSimilarityEngine {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>def toSimilarityEngineInfo(score: Double): SimilarityEngineInfo = {</dt><dd><dl class="simple">
+<dt>SimilarityEngineInfo(</dt><dd><p>similarityEngineType = SimilarityEngineType.Qig,
+modelId = None,
+score = Some(score))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>case class Query(sourceId: InternalId)</p>
+<dl>
+<dt>def fromParams(</dt><dd><p>sourceId: InternalId,
+params: configapi.Params,</p>
+</dd>
+<dt>): EngineQuery[Query] = {</dt><dd><dl class="simple">
+<dt>EngineQuery(</dt><dd><p>Query(sourceId = sourceId),
+params</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/cr-mixer/server/src/main/scala/com/twitter/cr_mixer/similarity_engine/TweetBasedQigSimilarityEngine.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

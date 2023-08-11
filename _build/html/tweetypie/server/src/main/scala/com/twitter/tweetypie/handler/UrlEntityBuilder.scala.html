@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.tweetypie
+package handler</p>
+<p>import com.twitter.tco_util.TcoUrl
+import com.twitter.tweetypie.core._
+import com.twitter.tweetypie.thriftscala.entities.EntityExtractor
+import com.twitter.tweetypie.thriftscala._
+import com.twitter.tweetypie.tweettext.IndexConverter
+import com.twitter.tweetypie.tweettext.Offset
+import com.twitter.tweetypie.tweettext.Preprocessor._</p>
+<dl>
+<dt>object UrlEntityBuilder {</dt><dd><p>import UpstreamFailure.UrlShorteningFailure
+import UrlShortener.Context</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Extracts URLs from the given tweet text, shortens them, and returns an updated tweet</p></li>
+<li><p>text that contains the shortened URLs, along with the generated <a href="#id1"><span class="problematic" id="id2">`</span></a>UrlEntity`s.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+</dl>
+<p>type Type = FutureArrow[(String, Context), (String, Seq[UrlEntity])]</p>
+<dl>
+<dt>def fromShortener(shortener: UrlShortener.Type): Type =</dt><dd><dl class="simple">
+<dt>FutureArrow {</dt><dd><dl class="simple">
+<dt>case (text, ctx) =&gt;</dt><dd><dl class="simple">
+<dt>Future</dt><dd><p>.collect(EntityExtractor.extractAllUrls(text).map(shortenEntity(shortener, _, ctx)))
+.map(_.flatMap(_.toSeq))
+.map(updateTextAndUrls(text, _)(replaceInvisiblesWithWhitespace))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Update a url entity with tco-ed url</p></li>
+<li></li>
+<li><p>&#64;param urlEntity an url entity with long url in the <cite>url</cite> field</p></li>
+<li><p>&#64;param ctx additional data needed to build the shortener request</p></li>
+<li><p>&#64;return an updated url entity with tco-ed url in the <cite>url</cite> field,</p></li>
+<li><p>and long url in the <cite>expanded</cite> field</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>private def shortenEntity(</dt><dd><p>shortener: UrlShortener.Type,
+entity: UrlEntity,
+ctx: Context</p>
+</dd>
+<dt>): Future[Option[UrlEntity]] =</dt><dd><dl>
+<dt>shortener((TcoUrl.normalizeProtocol(entity.url), ctx))</dt><dd><dl>
+<dt>.map { urlData =&gt;</dt><dd><dl>
+<dt>Some(</dt><dd><dl class="simple">
+<dt>entity.copy(</dt><dd><p>url = urlData.shortUrl,
+expanded = Some(urlData.longUrl),
+display = Some(urlData.displayText)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}
+.rescue {</p>
+<blockquote>
+<div><p>// fail tweets with invalid urls
+case UrlShortener.InvalidUrlError =&gt;</p>
+<blockquote>
+<div><p>Future.exception(TweetCreateFailure.State(TweetCreateState.InvalidUrl))</p>
+</div></blockquote>
+<p>// fail tweets with malware urls
+case UrlShortener.MalwareUrlError =&gt;</p>
+<blockquote>
+<div><p>Future.exception(TweetCreateFailure.State(TweetCreateState.MalwareUrl))</p>
+</div></blockquote>
+<p>// propagate OverCapacity
+case e &#64; OverCapacity(_) =&gt; Future.exception(e)
+// convert any other failure into UrlShorteningFailure
+case e =&gt; Future.exception(UrlShorteningFailure(e))</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Applies a text-modification function to all parts of the text not found within a UrlEntity,</p></li>
+<li><p>and then updates all the UrlEntity indices as necessary.</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+<dt>def updateTextAndUrls(</dt><dd><p>text: String,
+urlEntities: Seq[UrlEntity]</p>
+</dd>
+<dt>)(</dt><dd><p>textMod: String =&gt; String</p>
+</dd>
+<dt>): (String, Seq[UrlEntity]) = {</dt><dd><p>var offsetInText = Offset.CodePoint(0)
+var offsetInNewText = Offset.CodePoint(0)
+val newText = new StringBuilder
+val newUrlEntities = Seq.newBuilder[UrlEntity]
+val indexConverter = new IndexConverter(text)</p>
+<dl>
+<dt>urlEntities.foreach { e =&gt;</dt><dd><p>val nonUrl = textMod(indexConverter.substringByCodePoints(offsetInText.toInt, e.fromIndex))
+newText.append(nonUrl)
+newText.append(e.url)
+offsetInText = Offset.CodePoint(e.toIndex.toInt)</p>
+<p>val urlFrom = offsetInNewText + Offset.CodePoint.length(nonUrl)
+val urlTo = urlFrom + Offset.CodePoint.length(e.url)
+val newEntity =</p>
+<blockquote>
+<div><p>e.copy(fromIndex = urlFrom.toShort, toIndex = urlTo.toShort)</p>
+</div></blockquote>
+<p>newUrlEntities += newEntity
+offsetInNewText = urlTo</p>
+</dd>
+</dl>
+<p>}</p>
+<p>newText.append(textMod(indexConverter.substringByCodePoints(offsetInText.toInt)))</p>
+<p>(newText.toString, newUrlEntities.result())</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/tweetypie/server/src/main/scala/com/twitter/tweetypie/handler/UrlEntityBuilder.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

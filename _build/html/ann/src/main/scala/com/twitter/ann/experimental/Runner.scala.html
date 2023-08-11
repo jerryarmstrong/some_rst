@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../" id="documentation_options" src="../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.ann.experimental</p>
+<p>import com.twitter.ann.annoy.{AnnoyRuntimeParams, TypedAnnoyIndex}
+import com.twitter.ann.brute_force.{BruteForceIndex, BruteForceRuntimeParams}
+import com.twitter.ann.common.{Cosine, CosineDistance, EntityEmbedding, ReadWriteFuturePool}
+import com.twitter.ann.hnsw.{HnswParams, TypedHnswIndex}
+import com.twitter.bijection.Injection
+import com.twitter.ml.api.embedding.Embedding
+import com.twitter.search.common.file.LocalFile
+import com.twitter.util.{Await, Future, FuturePool}
+import java.nio.file.Files
+import java.util
+import java.util.concurrent.Executors
+import java.util.{Collections, Random}
+import scala.collection.JavaConverters._
+import scala.collection.mutable</p>
+<dl>
+<dt>object Runner {</dt><dd><dl>
+<dt>def main(args: Array[String]): Unit = {</dt><dd><p>val rng = new Random()
+val dimen = 300
+val neighbours = 20
+val trainDataSetSize = 2000
+val testDataSetSize = 30</p>
+<p>// Hnsw (ef -&gt; (time, recall))
+val hnswEfConfig = new mutable.HashMap[Int, (Float, Float)]
+val efConstruction = 200
+val maxM = 16
+val threads = 24
+val efSearch =</p>
+<blockquote>
+<div><p>Seq(20, 30, 50, 70, 100, 120)</p>
+</div></blockquote>
+<p>efSearch.foreach(hnswEfConfig.put(_, (0.0f, 0.0f)))</p>
+<p>// Annoy (nodes to explore -&gt; (time, recall))
+val numOfTrees = 80
+val annoyConfig = new mutable.HashMap[Int, (Float, Float)]
+val nodesToExplore = Seq(0, 2000, 3000, 5000, 7000, 10000, 15000, 20000,</p>
+<blockquote>
+<div><p>30000, 35000, 40000, 50000)</p>
+</div></blockquote>
+<p>nodesToExplore.foreach(annoyConfig.put(_, (0.0f, 0.0f)))
+val injection = Injection.int2BigEndian
+val distance = Cosine
+val exec = Executors.newFixedThreadPool(threads)
+val pool = FuturePool.apply(exec)
+val hnswMultiThread =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>TypedHnswIndex.index[Int, CosineDistance](</dt><dd><p>dimen,
+distance,
+efConstruction = efConstruction,
+maxM = maxM,
+trainDataSetSize,
+ReadWriteFuturePool(pool)</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<p>val bruteforce = BruteForceIndex[Int, CosineDistance](distance, pool)
+val annoyBuilder =</p>
+<blockquote>
+<div><p>TypedAnnoyIndex.indexBuilder(dimen, numOfTrees, distance, injection, FuturePool.immediatePool)</p>
+</div></blockquote>
+<p>val temp = new LocalFile(Files.createTempDirectory(“test”).toFile)</p>
+<p>println(“Creating bruteforce………”)
+val data =</p>
+<blockquote>
+<div><p>Collections.synchronizedList(new util.ArrayList[EntityEmbedding[Int]]())</p>
+</div></blockquote>
+<dl class="simple">
+<dt>val bruteforceFutures = 1 to trainDataSetSize map { id =&gt;</dt><dd><p>val vec = Array.fill(dimen)(rng.nextFloat() * 50)
+val emb = EntityEmbedding[Int](id, Embedding(vec))
+data.add(emb)
+bruteforce.append(emb)</p>
+</dd>
+</dl>
+<p>}</p>
+<p>Await.result(Future.collect(bruteforceFutures))</p>
+<p>println(“Creating hnsw multithread test………”)
+val (_, multiThreadInsertion) = time {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>Await.result(Future.collect(data.asScala.toList.map { emb =&gt;</dt><dd><p>hnswMultiThread.append(emb)</p>
+</dd>
+</dl>
+<p>}))</p>
+</div></blockquote>
+<p>}</p>
+<p>println(“Creating annoy………”)
+val (_, annoyTime) = time {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>Await.result(Future.collect(data.asScala.toList.map(emb =&gt;</dt><dd><p>annoyBuilder.append(emb))))</p>
+</dd>
+</dl>
+<p>annoyBuilder.toDirectory(temp)</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>val annoyQuery = TypedAnnoyIndex.loadQueryableIndex(</dt><dd><p>dimen,
+Cosine,
+injection,
+FuturePool.immediatePool,
+temp</p>
+</dd>
+</dl>
+<p>)</p>
+<p>val hnswQueryable = hnswMultiThread.toQueryable</p>
+<p>println(s”Total train size : $trainDataSetSize”)
+println(s”Total querySize : $testDataSetSize”)
+println(s”Dimension : $dimen”)
+println(s”Distance type : $distance”)
+println(s”Annoy index creation time trees: $numOfTrees =&gt; $annoyTime ms”)
+println(</p>
+<blockquote>
+<div><p>s”Hnsw multi thread creation time : $multiThreadInsertion ms efCons: $efConstruction maxM $maxM thread : $threads”)</p>
+</div></blockquote>
+<p>println(“Querying………”)
+var bruteForceTime = 0.0f
+1 to testDataSetSize foreach { id =&gt;</p>
+<blockquote>
+<div><p>println(“Querying id “ + id)
+val embedding = Embedding(Array.fill(dimen)(rng.nextFloat()))</p>
+<dl>
+<dt>val (list, timeTakenB) =</dt><dd><dl>
+<dt>time(</dt><dd><dl>
+<dt>Await</dt><dd><dl class="simple">
+<dt>.result(</dt><dd><p>bruteforce.query(embedding, neighbours, BruteForceRuntimeParams))</p>
+</dd>
+</dl>
+<p>.toSet)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>bruteForceTime += timeTakenB</p>
+<p>val annoyConfigCopy = annoyConfig.toMap
+val hnswEfConfigCopy = hnswEfConfig.toMap</p>
+<dl>
+<dt>hnswEfConfigCopy.keys.foreach { ef =&gt;</dt><dd><dl class="simple">
+<dt>val (nn, timeTaken) =</dt><dd><dl class="simple">
+<dt>time(Await</dt><dd><p>.result(hnswQueryable.query(embedding, neighbours, HnswParams(ef)))
+.toSet)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>val recall = (list.intersect(nn).size) * 1.0f / neighbours
+val (oldTime, oldRecall) = hnswEfConfig(ef)
+hnswEfConfig.put(ef, (oldTime + timeTaken, oldRecall + recall))</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>annoyConfigCopy.keys.foreach { nodes =&gt;</dt><dd><dl>
+<dt>val (nn, timeTaken) =</dt><dd><dl>
+<dt>time(</dt><dd><dl>
+<dt>Await.result(</dt><dd><dl>
+<dt>annoyQuery</dt><dd><dl class="simple">
+<dt>.query(embedding,</dt><dd><p>neighbours,
+AnnoyRuntimeParams(nodesToExplore = Some(nodes)))</p>
+</dd>
+</dl>
+<p>.map(_.toSet)))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>val recall = (list.intersect(nn).size) * 1.0f / neighbours
+val (oldTime, oldRecall) = annoyConfig(nodes)
+annoyConfig.put(nodes, (oldTime + timeTaken, oldRecall + recall))</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>println(</dt><dd><p>s”Bruteforce avg query time : ${bruteForceTime / testDataSetSize} ms”)</p>
+</dd>
+<dt>efSearch.foreach { ef =&gt;</dt><dd><p>val data = hnswEfConfig(ef)
+println(</p>
+<blockquote>
+<div><p>s”Hnsw avg recall and time with query ef : $ef =&gt; ${data._2 / testDataSetSize} ${data._1 / testDataSetSize} ms”</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>nodesToExplore.foreach { n =&gt;</dt><dd><p>val data = annoyConfig(n)
+println(</p>
+<blockquote>
+<div><p>s”Annoy avg recall and time with nodes_to_explore :  $n =&gt; ${data._2 / testDataSetSize} ${data._1 / testDataSetSize} ms”</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<p>exec.shutdown()</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>def time[T](fn: =&gt; T): (T, Long) = {</dt><dd><p>val start = System.currentTimeMillis()
+val result = fn
+val end = System.currentTimeMillis()
+(result, (end - start))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../_sources/ann/src/main/scala/com/twitter/ann/experimental/Runner.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

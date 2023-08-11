@@ -1,0 +1,451 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../" id="documentation_options" src="../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.ingester.pipeline.twitter;</p>
+<p>import java.net.MalformedURLException;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import javax.naming.NamingException;</p>
+<p>import com.google.common.collect.Maps;</p>
+<p>import org.apache.commons.pipeline.StageException;
+import org.apache.commons.pipeline.stage.StageTimer;
+import org.apache.commons.pipeline.validation.ConsumedTypes;
+import org.apache.commons.pipeline.validation.ProducesConsumed;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;</p>
+<p>import com.twitter.common.text.language.LocaleUtil;
+import com.twitter.expandodo.thriftjava.Card2;
+import com.twitter.mediaservices.commons.tweetmedia.thrift_java.MediaInfo;
+import com.twitter.search.common.indexing.thriftjava.ThriftExpandedUrl;
+import com.twitter.search.common.metrics.SearchRateCounter;
+import com.twitter.search.ingester.model.IngesterTwitterMessage;
+import com.twitter.search.ingester.pipeline.util.BatchingClient;
+import com.twitter.search.ingester.pipeline.util.CardFieldUtil;
+import com.twitter.search.ingester.pipeline.util.IngesterStageTimer;
+import com.twitter.search.ingester.pipeline.util.ResponseNotReturnedException;
+import com.twitter.spiderduck.common.URLUtils;
+import com.twitter.tweetypie.thriftjava.GetTweetOptions;
+import com.twitter.tweetypie.thriftjava.GetTweetResult;
+import com.twitter.tweetypie.thriftjava.GetTweetsRequest;
+import com.twitter.tweetypie.thriftjava.MediaEntity;
+import com.twitter.tweetypie.thriftjava.StatusState;
+import com.twitter.tweetypie.thriftjava.Tweet;
+import com.twitter.tweetypie.thriftjava.TweetService;
+import com.twitter.util.Function;
+import com.twitter.util.Future;</p>
+<p>&#64;ConsumedTypes(IngesterTwitterMessage.class)
+&#64;ProducesConsumed
+public class RetrieveCardBatchedStage extends TwitterBaseStage</p>
+<blockquote>
+<div><blockquote>
+<div><p>&lt;IngesterTwitterMessage, IngesterTwitterMessage&gt; {</p>
+</div></blockquote>
+<p>private static final Logger LOG = LoggerFactory.getLogger(RetrieveCardBatchedStage.class);</p>
+<p>private static final String CARDS_PLATFORM_KEY = “iPhone-13”;
+private int batchSize = 10;</p>
+<p>private SearchRateCounter totalTweets;
+private SearchRateCounter tweetsWithCards;
+private SearchRateCounter tweetsWithoutCards;
+private SearchRateCounter tweetsWithAnimatedGifMediaInfo;
+private SearchRateCounter cardsWithName;
+private SearchRateCounter cardsWithDomain;
+private SearchRateCounter cardsWithTitles;
+private SearchRateCounter cardsWithDescriptions;
+private SearchRateCounter cardsWithUnknownLanguage;
+private SearchRateCounter tweetsNotFound;
+private SearchRateCounter malformedUrls;
+private SearchRateCounter urlMismatches;
+private SearchRateCounter cardExceptions;
+private SearchRateCounter cardExceptionTweets;
+private StageTimer retrieveCardsTimer;</p>
+<p>private String cardNamePrefix;
+// Since there is only one thread executing this stage (although that could potentially be
+// changed in the pipeline config), no need to be thread safe.
+private static final Map&lt;String, SearchRateCounter&gt; CARD_NAME_STATS = new HashMap&lt;&gt;();</p>
+<p>private static TweetService.ServiceToClient tweetyPieService;
+private BatchingClient&lt;Long, Card2&gt; cardsClient;</p>
+<p>private String tweetypieClientId = null;</p>
+<p>// Can be overridden in the corresponding pipeline-ingester.*.xml config.
+// By default protected tweets are filtered out.
+// Only in the protected ingester pipeline is this set to false.
+private boolean filterProtected = true;</p>
+<p>&#64;Override
+public void initStats() {</p>
+<blockquote>
+<div><p>super.initStats();
+cardNamePrefix = getStageNamePrefix() + “_card_name_”;
+totalTweets = SearchRateCounter.export(getStageNamePrefix() + “_total_tweets”);
+tweetsWithCards = SearchRateCounter.export(getStageNamePrefix() + “_tweets_with_cards”);
+tweetsWithoutCards = SearchRateCounter.export(getStageNamePrefix() + “_tweets_without_cards”);
+tweetsWithAnimatedGifMediaInfo =</p>
+<blockquote>
+<div><p>SearchRateCounter.export(getStageNamePrefix() + “_tweets_with_animated_gif_media_info”);</p>
+</div></blockquote>
+<p>cardsWithName = SearchRateCounter.export(getStageNamePrefix() + “_tweets_with_card_name”);
+cardsWithDomain = SearchRateCounter.export(getStageNamePrefix() + “_tweets_with_card_domain”);
+cardsWithTitles = SearchRateCounter.export(getStageNamePrefix() + “_tweets_with_card_titles”);
+cardsWithDescriptions =</p>
+<blockquote>
+<div><p>SearchRateCounter.export(getStageNamePrefix() + “_tweets_with_card_descriptions”);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>cardsWithUnknownLanguage =</dt><dd><p>SearchRateCounter.export(getStageNamePrefix() + “_tweets_with_unknown_card_lanuage”);</p>
+</dd>
+</dl>
+<p>tweetsNotFound = SearchRateCounter.export(getStageNamePrefix() + “_tweets_not_found”);
+malformedUrls = SearchRateCounter.export(getStageNamePrefix() + “_malformed_urls”);
+urlMismatches = SearchRateCounter.export(getStageNamePrefix() + “_url_mismatches”);
+cardExceptions = SearchRateCounter.export(getStageNamePrefix() + “_card_exceptions”);
+cardExceptionTweets =</p>
+<blockquote>
+<div><p>SearchRateCounter.export(getStageNamePrefix() + “_card_exception_tweets”);</p>
+</div></blockquote>
+<p>retrieveCardsTimer = new IngesterStageTimer(getStageNamePrefix() + “_request_timer”);</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+protected void doInnerPreprocess() throws StageException, NamingException {</p>
+<blockquote>
+<div><p>super.doInnerPreprocess();
+tweetyPieService = wireModule.getTweetyPieClient(tweetypieClientId);
+cardsClient = new BatchingClient&lt;&gt;(this::batchRetrieveURLs, batchSize);</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public void innerProcess(Object obj) throws StageException {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (!(obj instanceof IngesterTwitterMessage)) {</dt><dd><dl class="simple">
+<dt>throw new StageException(this,</dt><dd><p>“Received object of incorrect type: “ + obj.getClass().getName());</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>IngesterTwitterMessage message = (IngesterTwitterMessage) obj;</p>
+<dl>
+<dt>cardsClient.call(message.getTweetId())</dt><dd><dl class="simple">
+<dt>.onSuccess(Function.cons(card -&gt; {</dt><dd><p>updateMessage(message, card);
+emitAndCount(message);</p>
+</dd>
+</dl>
+<p>}))
+.onFailure(Function.cons(exception -&gt; {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (!(exception instanceof ResponseNotReturnedException)) {</dt><dd><p>cardExceptionTweets.increment();</p>
+</dd>
+</dl>
+<p>}</p>
+<p>emitAndCount(message);</p>
+</div></blockquote>
+<p>}));</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>private Future&lt;Map&lt;Long, Card2&gt;&gt; batchRetrieveURLs(Set&lt;Long&gt; keys) {</dt><dd><p>retrieveCardsTimer.start();
+totalTweets.increment(keys.size());</p>
+<dl>
+<dt>GetTweetOptions options = new GetTweetOptions()</dt><dd><p>.setInclude_cards(true)
+.setCards_platform_key(CARDS_PLATFORM_KEY)
+.setBypass_visibility_filtering(!filterProtected);</p>
+</dd>
+<dt>GetTweetsRequest request = new GetTweetsRequest()</dt><dd><p>.setOptions(options)
+.setTweet_ids(new ArrayList&lt;&gt;(keys));</p>
+</dd>
+<dt>return tweetyPieService.get_tweets(request)</dt><dd><dl>
+<dt>.onFailure(throwable -&gt; {</dt><dd><p>cardExceptions.increment();
+LOG.error(“TweetyPie server threw an exception while requesting tweetIds: “</p>
+<blockquote>
+<div><ul class="simple">
+<li><p>request.getTweet_ids(), throwable);</p></li>
+</ul>
+</div></blockquote>
+<p>return null;</p>
+</dd>
+</dl>
+<p>})
+.map(this::createIdToCardMap);</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private void updateMessage(IngesterTwitterMessage message, Card2 card) {</dt><dd><p>tweetsWithCards.increment();</p>
+<p>String cardName = card.getName().toLowerCase();
+addCardNameToStats(cardName);
+message.setCardName(cardName);
+cardsWithName.increment();
+message.setCardUrl(card.getUrl());</p>
+<p>String url = getLastHop(message, card.getUrl());
+if (url != null) {</p>
+<blockquote>
+<div><dl>
+<dt>try {</dt><dd><p>String domain = URLUtils.getDomainFromURL(url);
+message.setCardDomain(domain.toLowerCase());
+cardsWithDomain.increment();</p>
+</dd>
+<dt>} catch (MalformedURLException e) {</dt><dd><p>malformedUrls.increment();
+if (LOG.isDebugEnabled()) {</p>
+<blockquote>
+<div><p>LOG.debug(“Tweet ID {} has a malformed card last hop URL: {}”, message.getId(), url);</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>// This happens with retweet. Basically when retrieve card for a retweet, we
+// get a card associated with the original tweet, so the tco won’t match.
+// As of Sep 2014, this seems to be the intended behavior and has been running
+// like this for over a year.
+urlMismatches.increment();</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>message.setCardTitle(</dt><dd><p>CardFieldUtil.extractBindingValue(CardFieldUtil.TITLE_BINDING_KEY, card));</p>
+</dd>
+<dt>if (message.getCardTitle() != null) {</dt><dd><p>cardsWithTitles.increment();</p>
+</dd>
+</dl>
+<p>}
+message.setCardDescription(</p>
+<blockquote>
+<div><p>CardFieldUtil.extractBindingValue(CardFieldUtil.DESCRIPTION_BINDING_KEY, card));</p>
+</div></blockquote>
+<dl class="simple">
+<dt>if (message.getCardDescription() != null) {</dt><dd><p>cardsWithDescriptions.increment();</p>
+</dd>
+</dl>
+<p>}
+CardFieldUtil.deriveCardLang(message);
+if (LocaleUtil.UNKNOWN.getLanguage().equals(message.getCardLang())) {</p>
+<blockquote>
+<div><p>cardsWithUnknownLanguage.increment();</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private Map&lt;Long, Card2&gt; createIdToCardMap(List&lt;GetTweetResult&gt; listResult) {</dt><dd><p>Map&lt;Long, Card2&gt; responseMap = Maps.newHashMap();
+for (GetTweetResult entry : listResult) {</p>
+<blockquote>
+<div><dl>
+<dt>if (entry.isSetTweet()</dt><dd><blockquote>
+<div><p>&amp;&amp; entry.isSetTweet_state()
+&amp;&amp; (entry.getTweet_state() == StatusState.FOUND)) {</p>
+</div></blockquote>
+<p>long id = entry.getTweet_id();
+if (entry.getTweet().isSetCard2()) {</p>
+<blockquote>
+<div><p>responseMap.put(id, entry.getTweet().getCard2());</p>
+</div></blockquote>
+<dl>
+<dt>} else {</dt><dd><p>// Short-term fix for removal of animated GIF cards –
+// if the tweet contains an animated GIF, create a card based on media entity data
+Card2 card = createCardForAnimatedGif(entry.getTweet());
+if (card != null) {</p>
+<blockquote>
+<div><p>responseMap.put(id, card);
+tweetsWithAnimatedGifMediaInfo.increment();</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>tweetsWithoutCards.increment();</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>} else {</dt><dd><p>tweetsNotFound.increment();</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}
+return responseMap;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private Card2 createCardForAnimatedGif(Tweet tweet) {</dt><dd><dl>
+<dt>if (tweet.getMediaSize() &gt; 0) {</dt><dd><dl>
+<dt>for (MediaEntity mediaEntity<span class="classifier">tweet.getMedia()) {</span></dt><dd><p>MediaInfo mediaInfo = mediaEntity.getMedia_info();
+if (mediaInfo != null &amp;&amp; mediaInfo.getSetField() == MediaInfo._Fields.ANIMATED_GIF_INFO) {</p>
+<blockquote>
+<div><p>Card2 card = new Card2();
+card.setName(“animated_gif”);
+// Use the original compressed URL for the media entity to match existing card URLs
+card.setUrl(mediaEntity.getUrl());
+card.setBinding_values(Collections.emptyList());</p>
+<p>return card;</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}
+return null;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// Unfortunately the url returned in the card data is not the last hop
+private String getLastHop(IngesterTwitterMessage message, String url) {</p>
+<blockquote>
+<div><dl>
+<dt>if (message.getExpandedUrlMap() != null) {</dt><dd><p>ThriftExpandedUrl expanded = message.getExpandedUrlMap().get(url);
+if ((expanded != null) &amp;&amp; expanded.isSetCanonicalLastHopUrl()) {</p>
+<blockquote>
+<div><p>return expanded.getCanonicalLastHopUrl();</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}
+return null;</p>
+</div></blockquote>
+<p>}</p>
+<p>// Used by commons-pipeline and set via the xml config
+public void setFilterProtected(boolean filterProtected) {</p>
+<blockquote>
+<div><p>LOG.info(“Filtering protected tweets: {}”, filterProtected);
+this.filterProtected = filterProtected;</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>public void setTweetypieClientId(String tweetypieClientId) {</dt><dd><p>LOG.info(“Using tweetypieClientId: {}”, tweetypieClientId);
+this.tweetypieClientId = tweetypieClientId;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public void setInternalBatchSize(int internalBatchSize) {</dt><dd><p>this.batchSize = internalBatchSize;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>For each card name, we add a rate counter to observe what kinds of card we’re actually</p></li>
+<li><p>indexing, and with what rate.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>private void addCardNameToStats(String cardName) {</dt><dd><p>SearchRateCounter cardNameCounter = CARD_NAME_STATS.get(cardName);
+if (cardNameCounter == null) {</p>
+<blockquote>
+<div><p>cardNameCounter = SearchRateCounter.export(cardNamePrefix + cardName);
+CARD_NAME_STATS.put(cardName, cardNameCounter);</p>
+</div></blockquote>
+<p>}
+cardNameCounter.increment();</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../_sources/src/java/com/twitter/search/ingester/pipeline/twitter/RetrieveCardBatchedStage.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

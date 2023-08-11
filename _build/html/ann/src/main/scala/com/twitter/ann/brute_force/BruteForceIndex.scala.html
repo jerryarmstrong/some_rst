@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../" id="documentation_options" src="../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.ann.brute_force</p>
+<p>import com.twitter.ann.common.Appendable
+import com.twitter.ann.common.Distance
+import com.twitter.ann.common.EmbeddingType._
+import com.twitter.ann.common.EntityEmbedding
+import com.twitter.ann.common.IndexOutputFile
+import com.twitter.ann.common.Metric
+import com.twitter.ann.common.NeighborWithDistance
+import com.twitter.ann.common.Queryable
+import com.twitter.ann.common.RuntimeParams
+import com.twitter.ann.common.Serialization
+import com.twitter.ann.serialization.PersistedEmbeddingInjection
+import com.twitter.ann.serialization.ThriftIteratorIO
+import com.twitter.ann.serialization.thriftscala.PersistedEmbedding
+import com.twitter.search.common.file.AbstractFile
+import com.twitter.util.Future
+import com.twitter.util.FuturePool
+import java.util.concurrent.ConcurrentLinkedQueue
+import org.apache.beam.sdk.io.fs.ResourceId
+import scala.collection.JavaConverters._
+import scala.collection.mutable</p>
+<p>object BruteForceRuntimeParams extends RuntimeParams</p>
+<dl>
+<dt>object BruteForceIndex {</dt><dd><p>val DataFileName = “BruteForceFileData”</p>
+<dl class="simple">
+<dt>def apply[T, D &lt;: Distance[D]](</dt><dd><p>metric: Metric[D],
+futurePool: FuturePool,
+initialEmbeddings: Iterator[EntityEmbedding[T]] = Iterator()</p>
+</dd>
+<dt>): BruteForceIndex[T, D] = {</dt><dd><p>val linkedQueue = new ConcurrentLinkedQueue[EntityEmbedding[T]]
+initialEmbeddings.foreach(embedding =&gt; linkedQueue.add(embedding))
+new BruteForceIndex(metric, futurePool, linkedQueue)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>class BruteForceIndex[T, D &lt;: Distance[D]] private (</dt><dd><p>metric: Metric[D],
+futurePool: FuturePool,
+// visible for serialization
+private[brute_force] val linkedQueue: ConcurrentLinkedQueue[EntityEmbedding[T]])</p>
+<blockquote>
+<div><p>extends Appendable[T, BruteForceRuntimeParams.type, D]
+with Queryable[T, BruteForceRuntimeParams.type, D] {</p>
+</div></blockquote>
+<dl>
+<dt>override def append(embedding: EntityEmbedding[T]): Future[Unit] = {</dt><dd><dl class="simple">
+<dt>futurePool {</dt><dd><p>linkedQueue.add(embedding)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>override def toQueryable: Queryable[T, BruteForceRuntimeParams.type, D] = this</p>
+<dl>
+<dt>override def query(</dt><dd><p>embedding: EmbeddingVector,
+numOfNeighbours: Int,
+runtimeParams: BruteForceRuntimeParams.type</p>
+</dd>
+<dt>): Future[List[T]] = {</dt><dd><dl class="simple">
+<dt>queryWithDistance(embedding, numOfNeighbours, runtimeParams).map { neighborsWithDistance =&gt;</dt><dd><p>neighborsWithDistance.map(_.neighbor)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>override def queryWithDistance(</dt><dd><p>embedding: EmbeddingVector,
+numOfNeighbours: Int,
+runtimeParams: BruteForceRuntimeParams.type</p>
+</dd>
+<dt>): Future[List[NeighborWithDistance[T, D]]] = {</dt><dd><dl>
+<dt>futurePool {</dt><dd><p>// Use the reverse ordering so that we can call dequeue to remove the largest element.
+val ordering = Ordering.by[NeighborWithDistance[T, D], D](_.distance)
+val priorityQueue =</p>
+<blockquote>
+<div><p>new mutable.PriorityQueue[NeighborWithDistance[T, D]]()(ordering)</p>
+</div></blockquote>
+<dl>
+<dt>linkedQueue</dt><dd><p>.iterator()
+.asScala
+.foreach { entity =&gt;</p>
+<blockquote>
+<div><dl class="simple">
+<dt>val neighborWithDistance =</dt><dd><p>NeighborWithDistance(entity.id, metric.distance(entity.embedding, embedding))</p>
+</dd>
+</dl>
+<p>priorityQueue.+=(neighborWithDistance)
+if (priorityQueue.size &gt; numOfNeighbours) {</p>
+<blockquote>
+<div><p>priorityQueue.dequeue()</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+<dt>val reverseList: List[NeighborWithDistance[T, D]] =</dt><dd><p>priorityQueue.dequeueAll</p>
+</dd>
+</dl>
+<p>reverseList.reverse</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>object SerializableBruteForceIndex {</dt><dd><dl>
+<dt>def apply[T, D &lt;: Distance[D]](</dt><dd><p>metric: Metric[D],
+futurePool: FuturePool,
+embeddingInjection: PersistedEmbeddingInjection[T],
+thriftIteratorIO: ThriftIteratorIO[PersistedEmbedding]</p>
+</dd>
+<dt>): SerializableBruteForceIndex[T, D] = {</dt><dd><p>val bruteForceIndex = BruteForceIndex[T, D](metric, futurePool)</p>
+<p>new SerializableBruteForceIndex(bruteForceIndex, embeddingInjection, thriftIteratorIO)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>This is a class that wrapps a BruteForceIndex and provides a method for serialization.</p></li>
+<li><ul>
+<li><p>&#64;param bruteForceIndex all queries and updates are sent to this index.</p></li>
+</ul>
+</li>
+<li><p>&#64;param embeddingInjection injection that can convert embeddings to thrift embeddings.</p></li>
+<li><p>&#64;param thriftIteratorIO class that provides a way to write PersistedEmbeddings to disk</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>class SerializableBruteForceIndex[T, D &lt;: Distance[D]](</dt><dd><p>bruteForceIndex: BruteForceIndex[T, D],
+embeddingInjection: PersistedEmbeddingInjection[T],
+thriftIteratorIO: ThriftIteratorIO[PersistedEmbedding])</p>
+<blockquote>
+<div><p>extends Appendable[T, BruteForceRuntimeParams.type, D]
+with Queryable[T, BruteForceRuntimeParams.type, D]
+with Serialization {</p>
+</div></blockquote>
+<p>import BruteForceIndex._</p>
+<dl class="simple">
+<dt>override def append(entity: EntityEmbedding[T]): Future[Unit] =</dt><dd><p>bruteForceIndex.append(entity)</p>
+</dd>
+</dl>
+<p>override def toQueryable: Queryable[T, BruteForceRuntimeParams.type, D] = this</p>
+<dl class="simple">
+<dt>override def query(</dt><dd><p>embedding: EmbeddingVector,
+numOfNeighbours: Int,
+runtimeParams: BruteForceRuntimeParams.type</p>
+</dd>
+<dt>): Future[List[T]] =</dt><dd><p>bruteForceIndex.query(embedding, numOfNeighbours, runtimeParams)</p>
+</dd>
+<dt>override def queryWithDistance(</dt><dd><p>embedding: EmbeddingVector,
+numOfNeighbours: Int,
+runtimeParams: BruteForceRuntimeParams.type</p>
+</dd>
+<dt>): Future[List[NeighborWithDistance[T, D]]] =</dt><dd><p>bruteForceIndex.queryWithDistance(embedding, numOfNeighbours, runtimeParams)</p>
+</dd>
+<dt>override def toDirectory(serializationDirectory: ResourceId): Unit = {</dt><dd><p>toDirectory(new IndexOutputFile(serializationDirectory))</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>override def toDirectory(serializationDirectory: AbstractFile): Unit = {</dt><dd><p>toDirectory(new IndexOutputFile(serializationDirectory))</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def toDirectory(serializationDirectory: IndexOutputFile): Unit = {</dt><dd><p>val outputStream = serializationDirectory.createFile(DataFileName).getOutputStream()
+val thriftEmbeddings =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>bruteForceIndex.linkedQueue.iterator().asScala.map { embedding =&gt;</dt><dd><p>embeddingInjection(embedding)</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<dl class="simple">
+<dt>try {</dt><dd><p>thriftIteratorIO.toOutputStream(thriftEmbeddings, outputStream)</p>
+</dd>
+<dt>} finally {</dt><dd><p>outputStream.close()</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../_sources/ann/src/main/scala/com/twitter/ann/brute_force/BruteForceIndex.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

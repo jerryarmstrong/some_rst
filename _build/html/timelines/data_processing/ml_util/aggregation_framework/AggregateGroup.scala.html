@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../" id="documentation_options" src="../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.timelines.data_processing.ml_util.aggregation_framework</p>
+<p>import com.twitter.ml.api._
+import com.twitter.timelines.data_processing.ml_util.aggregation_framework.metrics.AggregationMetric
+import com.twitter.timelines.data_processing.ml_util.aggregation_framework.metrics.EasyMetric
+import com.twitter.timelines.data_processing.ml_util.aggregation_framework.metrics.MaxMetric
+import com.twitter.timelines.data_processing.ml_util.transforms.OneToSomeTransform
+import com.twitter.util.Duration
+import java.lang.{Boolean =&gt; JBoolean}
+import java.lang.{Long =&gt; JLong}
+import scala.language.existentials</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>A wrapper for [[com.twitter.timelines.data_processing.ml_util.aggregation_framework.TypedAggregateGroup]]</p></li>
+<li><p>(see TypedAggregateGroup.scala) with some convenient syntactic sugar that avoids</p></li>
+<li><p>the user having to specify different groups for different types of features.</p></li>
+<li><p>Gets translated into multiple strongly typed TypedAggregateGroup(s)</p></li>
+<li><p>by the buildTypedAggregateGroups() method defined below.</p></li>
+<li></li>
+<li><p>&#64;param inputSource Source to compute this aggregate over</p></li>
+<li><p>&#64;param preTransforms Sequence of [[ITransform]] that is applied to</p></li>
+<li><p>data records pre-aggregation (e.g. discretization, renaming)</p></li>
+<li><p>&#64;param samplingTransformOpt Optional [[OneToSomeTransform]] that samples data record</p></li>
+<li><p>&#64;param aggregatePrefix Prefix to use for naming resultant aggregate features</p></li>
+<li><p>&#64;param keys Features to group by when computing the aggregates</p></li>
+<li><p>(e.g. USER_ID, AUTHOR_ID). These must be either discrete, string or sparse binary.</p></li>
+<li><p>Grouping by a sparse binary feature is different than grouping by a discrete or string</p></li>
+<li><p>feature. For example, if you have a sparse binary feature WORDS_IN_TWEET which is</p></li>
+<li><p>a set of all words in a tweet, then grouping by this feature generates a</p></li>
+<li><p>separate aggregate mean/count/etc for each value of the feature (each word), and</p></li>
+<li><p>not just a single aggregate count for different “sets of words”</p></li>
+<li><p>&#64;param features Features to aggregate (e.g. blender_score or is_photo).</p></li>
+<li><p>&#64;param labels Labels to cross the features with to make pair features, if any.</p></li>
+<li><p>&#64;param metrics Aggregation metrics to compute (e.g. count, mean)</p></li>
+<li><p>&#64;param halfLives Half lives to use for the aggregations, to be crossed with the above.</p></li>
+<li><p>use Duration.Top for “forever” aggregations over an infinite time window (no decay).</p></li>
+<li><p>&#64;param outputStore Store to output this aggregate to</p></li>
+<li><p>&#64;param includeAnyFeature Aggregate label counts for any feature value</p></li>
+<li><p>&#64;param includeAnyLabel Aggregate feature counts for any label value (e.g. all impressions)</p></li>
+<li><p>&#64;param includeTimestampFeature compute max aggregate on timestamp feature</p></li>
+<li><p>&#64;param aggExclusionRegex Sequence of Regexes, which define features to</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>case class AggregateGroup(</dt><dd><p>inputSource: AggregateSource,
+aggregatePrefix: String,
+keys: Set[Feature[_]],
+features: Set[Feature[_]],
+labels: Set[_ &lt;: Feature[JBoolean]],
+metrics: Set[EasyMetric],
+halfLives: Set[Duration],
+outputStore: AggregateStore,
+preTransforms: Seq[OneToSomeTransform] = Seq.empty,
+includeAnyFeature: Boolean = true,
+includeAnyLabel: Boolean = true,
+includeTimestampFeature: Boolean = false,
+aggExclusionRegex: Seq[String] = Seq.empty) {</p>
+<dl>
+<dt>private def toStrongType[T](</dt><dd><p>metrics: Set[EasyMetric],
+features: Set[Feature[_]],
+featureType: FeatureType</p>
+</dd>
+<dt>): TypedAggregateGroup[_] = {</dt><dd><dl class="simple">
+<dt>val underlyingMetrics: Set[AggregationMetric[T, _]] =</dt><dd><p>metrics.flatMap(_.forFeatureType[T](featureType))</p>
+</dd>
+<dt>val underlyingFeatures: Set[Feature[T]] = features</dt><dd><p>.map(_.asInstanceOf[Feature[T]])</p>
+</dd>
+<dt>TypedAggregateGroup[T](</dt><dd><p>inputSource = inputSource,
+aggregatePrefix = aggregatePrefix,
+keysToAggregate = keys,
+featuresToAggregate = underlyingFeatures,
+labels = labels,
+metrics = underlyingMetrics,
+halfLives = halfLives,
+outputStore = outputStore,
+preTransforms = preTransforms,
+includeAnyFeature,
+includeAnyLabel,
+aggExclusionRegex</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def timestampTypedAggregateGroup: TypedAggregateGroup[_] = {</dt><dd><dl class="simple">
+<dt>val metrics: Set[AggregationMetric[JLong, _]] =</dt><dd><p>Set(MaxMetric.forFeatureType[JLong](TypedAggregateGroup.timestampFeature.getFeatureType).get)</p>
+</dd>
+<dt>TypedAggregateGroup[JLong](</dt><dd><p>inputSource = inputSource,
+aggregatePrefix = aggregatePrefix,
+keysToAggregate = keys,
+featuresToAggregate = Set(TypedAggregateGroup.timestampFeature),
+labels = Set.empty,
+metrics = metrics,
+halfLives = Set(Duration.Top),
+outputStore = outputStore,
+preTransforms = preTransforms,
+includeAnyFeature = false,
+includeAnyLabel = true,
+aggExclusionRegex = Seq.empty</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def buildTypedAggregateGroups(): List[TypedAggregateGroup[_]] = {</dt><dd><dl>
+<dt>val typedAggregateGroupsList = {</dt><dd><dl>
+<dt>if (features.isEmpty) {</dt><dd><p>List(toStrongType(metrics, features, FeatureType.BINARY))</p>
+</dd>
+<dt>} else {</dt><dd><dl>
+<dt>features</dt><dd><p>.groupBy(_.getFeatureType())
+.toList
+.map {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case (featureType, features) =&gt;</dt><dd><p>toStrongType(metrics, features, featureType)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>val optionalTimestampTypedAggregateGroup =</dt><dd><p>if (includeTimestampFeature) List(timestampTypedAggregateGroup) else List()</p>
+</dd>
+</dl>
+<p>typedAggregateGroupsList ++ optionalTimestampTypedAggregateGroup</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../_sources/timelines/data_processing/ml_util/aggregation_framework/AggregateGroup.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

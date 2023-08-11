@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../../../" id="documentation_options" src="../../../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.home_mixer.product.scored_tweets.feature_hydrator</p>
+<p>import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.home_mixer.param.HomeMixerInjectionNames.TwhinAuthorFollowFeatureRepository
+import com.twitter.home_mixer.product.scored_tweets.feature_hydrator.adapters.twhin_embeddings.TwhinAuthorFollowEmbeddingsAdapter
+import com.twitter.home_mixer.util.CandidatesUtil
+import com.twitter.home_mixer.util.ObservedKeyValueResultHandler
+import com.twitter.ml.api.DataRecord
+import com.twitter.ml.api.{thriftscala =&gt; ml}
+import com.twitter.product_mixer.component_library.model.candidate.TweetCandidate
+import com.twitter.product_mixer.core.feature.Feature
+import com.twitter.product_mixer.core.feature.FeatureWithDefaultOnFailure
+import com.twitter.product_mixer.core.feature.datarecord.DataRecordInAFeature
+import com.twitter.product_mixer.core.feature.featuremap.FeatureMap
+import com.twitter.product_mixer.core.feature.featuremap.FeatureMapBuilder
+import com.twitter.product_mixer.core.functional_component.feature_hydrator.BulkCandidateFeatureHydrator
+import com.twitter.product_mixer.core.model.common.CandidateWithFeatures
+import com.twitter.product_mixer.core.model.common.identifier.FeatureHydratorIdentifier
+import com.twitter.product_mixer.core.pipeline.PipelineQuery
+import com.twitter.product_mixer.core.util.OffloadFuturePools
+import com.twitter.servo.repository.KeyValueRepository
+import com.twitter.servo.repository.KeyValueResult
+import com.twitter.stitch.Stitch
+import com.twitter.util.Future
+import com.twitter.util.Try
+import javax.inject.Inject
+import javax.inject.Named
+import javax.inject.Singleton
+import scala.collection.JavaConverters._</p>
+<dl>
+<dt>object TwhinAuthorFollowFeature</dt><dd><blockquote>
+<div><p>extends DataRecordInAFeature[TweetCandidate]
+with FeatureWithDefaultOnFailure[TweetCandidate, DataRecord] {</p>
+</div></blockquote>
+<p>override def defaultValue: DataRecord = new DataRecord()</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;Singleton
+class TwhinAuthorFollowFeatureHydrator &#64;Inject() (</p>
+<blockquote>
+<div><p>&#64;Named(TwhinAuthorFollowFeatureRepository)
+client: KeyValueRepository[Seq[Long], Long, ml.FloatTensor],
+override val statsReceiver: StatsReceiver)</p>
+<blockquote>
+<div><p>extends BulkCandidateFeatureHydrator[PipelineQuery, TweetCandidate]
+with ObservedKeyValueResultHandler {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>override val identifier: FeatureHydratorIdentifier =</dt><dd><p>FeatureHydratorIdentifier(“TwhinAuthorFollow”)</p>
+</dd>
+</dl>
+<p>override val features: Set[Feature[_, _]] = Set(TwhinAuthorFollowFeature)</p>
+<p>override val statScope: String = identifier.toString</p>
+<dl>
+<dt>override def apply(</dt><dd><p>query: PipelineQuery,
+candidates: Seq[CandidateWithFeatures[TweetCandidate]]</p>
+</dd>
+<dt>): Stitch[Seq[FeatureMap]] = OffloadFuturePools.offloadFuture {</dt><dd><p>val possiblyAuthorIds = extractKeys(candidates)
+val authorIds = possiblyAuthorIds.flatten</p>
+<dl>
+<dt>val response: Future[KeyValueResult[Long, ml.FloatTensor]] =</dt><dd><p>if (authorIds.isEmpty) Future.value(KeyValueResult.empty) else client(authorIds)</p>
+</dd>
+<dt>response.map { result =&gt;</dt><dd><dl>
+<dt>possiblyAuthorIds.map { possiblyAuthorId =&gt;</dt><dd><p>val value = observedGet(key = possiblyAuthorId, keyValueResult = result)
+val transformedValue = postTransformer(value)</p>
+<p>FeatureMapBuilder().add(TwhinAuthorFollowFeature, transformedValue).build()</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def postTransformer(embedding: Try[Option[ml.FloatTensor]]): Try[DataRecord] = {</dt><dd><dl class="simple">
+<dt>embedding.map { floatTensor =&gt;</dt><dd><p>TwhinAuthorFollowEmbeddingsAdapter.adaptToDataRecords(floatTensor).asScala.head</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def extractKeys(</dt><dd><p>candidates: Seq[CandidateWithFeatures[TweetCandidate]]</p>
+</dd>
+<dt>): Seq[Option[Long]] = {</dt><dd><dl class="simple">
+<dt>candidates.map { candidate =&gt;</dt><dd><p>CandidatesUtil.getOriginalAuthorId(candidate.features)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../../../_sources/home-mixer/server/src/main/scala/com/twitter/home_mixer/product/scored_tweets/feature_hydrator/TwhinAuthorFollowFeatureHydrator.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

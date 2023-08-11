@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../" id="documentation_options" src="../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.earlybird_root.filters;</p>
+<p>import java.util.HashMap;
+import java.util.Map;
+import javax.annotation.Nullable;
+import javax.inject.Inject;</p>
+<p>import com.google.common.annotations.VisibleForTesting;</p>
+<p>import com.twitter.finagle.Service;
+import com.twitter.finagle.SimpleFilter;
+import com.twitter.search.common.constants.thriftjava.ThriftQuerySource;
+import com.twitter.search.common.decider.SearchDecider;
+import com.twitter.search.common.metrics.SearchRateCounter;
+import com.twitter.search.common.schema.earlybird.EarlybirdCluster;
+import com.twitter.search.earlybird.thrift.EarlybirdRequest;
+import com.twitter.search.earlybird.thrift.EarlybirdResponse;
+import com.twitter.search.earlybird.thrift.EarlybirdResponseCode;
+import com.twitter.search.earlybird.thrift.ThriftSearchResults;
+import com.twitter.util.Future;</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Rejects requests based on the query source of the request. Intended to be used at super-root</p></li>
+<li><p>or archive-root. If used to reject client request at super-root, the client will get a response</p></li>
+<li><p>with empty results and a REQUEST_BLOCKED_ERROR status code. If used at archive-root the client</p></li>
+<li><p>will get a response which might contain some results from realtime and protected and the status</p></li>
+<li><p>code of the response will depend on how super-root combines responses from the three downstream</p></li>
+<li><p>roots.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>public class RejectRequestsByQuerySourceFilter extends</dt><dd><blockquote>
+<div><p>SimpleFilter&lt;EarlybirdRequest, EarlybirdResponse&gt; {</p>
+</div></blockquote>
+<p>&#64;VisibleForTesting
+protected static final String NUM_REJECTED_REQUESTS_STAT_NAME_PATTERN =</p>
+<blockquote>
+<div><p>“num_root_%s_rejected_requests_with_query_source_%s”;</p>
+</div></blockquote>
+<p>&#64;VisibleForTesting
+protected static final String REJECT_REQUESTS_DECIDER_KEY_PATTERN =</p>
+<blockquote>
+<div><p>“root_%s_reject_requests_with_query_source_%s”;</p>
+</div></blockquote>
+<dl class="simple">
+<dt>private final Map&lt;ThriftQuerySource, SearchRateCounter&gt; rejectedRequestsCounterPerQuerySource =</dt><dd><p>new HashMap&lt;&gt;();</p>
+</dd>
+<dt>private final Map&lt;ThriftQuerySource, String&gt; rejectRequestsDeciderKeyPerQuerySource =</dt><dd><p>new HashMap&lt;&gt;();</p>
+</dd>
+</dl>
+<p>private final SearchDecider searchDecider;</p>
+<p>&#64;Inject
+public RejectRequestsByQuerySourceFilter(</p>
+<blockquote>
+<div><blockquote>
+<div><p>&#64;Nullable EarlybirdCluster cluster,
+SearchDecider searchDecider) {</p>
+</div></blockquote>
+<p>this.searchDecider = searchDecider;</p>
+<dl>
+<dt>String clusterName = cluster != null</dt><dd><p>? cluster.getNameForStats()
+: EarlybirdCluster.SUPERROOT.getNameForStats();</p>
+</dd>
+<dt>for (ThriftQuerySource querySource<span class="classifier">ThriftQuerySource.values()) {</span></dt><dd><p>String querySourceName = querySource.name().toLowerCase();</p>
+<dl class="simple">
+<dt>rejectedRequestsCounterPerQuerySource.put(querySource,</dt><dd><dl class="simple">
+<dt>SearchRateCounter.export(</dt><dd><dl class="simple">
+<dt>String.format(</dt><dd><p>NUM_REJECTED_REQUESTS_STAT_NAME_PATTERN, clusterName, querySourceName)));</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+<dt>rejectRequestsDeciderKeyPerQuerySource.put(querySource,</dt><dd><dl class="simple">
+<dt>String.format(</dt><dd><p>REJECT_REQUESTS_DECIDER_KEY_PATTERN, clusterName, querySourceName));</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public Future&lt;EarlybirdResponse&gt; apply(EarlybirdRequest request,</p>
+<blockquote>
+<div><blockquote>
+<div><p>Service&lt;EarlybirdRequest, EarlybirdResponse&gt; service) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>ThriftQuerySource querySource = request.isSetQuerySource()</dt><dd><p>? request.getQuerySource()
+: ThriftQuerySource.UNKNOWN;</p>
+</dd>
+</dl>
+<p>String deciderKey = rejectRequestsDeciderKeyPerQuerySource.get(querySource);
+if (searchDecider.isAvailable(deciderKey)) {</p>
+<blockquote>
+<div><p>rejectedRequestsCounterPerQuerySource.get(querySource).increment();
+return Future.value(getRejectedRequestResponse(querySource, deciderKey));</p>
+</div></blockquote>
+<p>}
+return service.apply(request);</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>private static EarlybirdResponse getRejectedRequestResponse(</dt><dd><blockquote>
+<div><p>ThriftQuerySource querySource, String deciderKey) {</p>
+</div></blockquote>
+<dl>
+<dt>return new EarlybirdResponse(EarlybirdResponseCode.REQUEST_BLOCKED_ERROR, 0)</dt><dd><p>.setSearchResults(new ThriftSearchResults())
+.setDebugString(String.format(</p>
+<blockquote>
+<div><p>“Request with query source %s is blocked by decider %s”, querySource, deciderKey));</p>
+</div></blockquote>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../_sources/src/java/com/twitter/search/earlybird_root/filters/RejectRequestsByQuerySourceFilter.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

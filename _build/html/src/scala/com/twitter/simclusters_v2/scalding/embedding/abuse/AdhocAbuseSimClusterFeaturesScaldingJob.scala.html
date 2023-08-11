@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../" id="documentation_options" src="../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.simclusters_v2.scalding.embedding.abuse</p>
+<p>import com.twitter.ml.api.Feature
+import com.twitter.ml.api.util.SRichDataRecord
+import com.twitter.scalding.Args
+import com.twitter.scalding.DateRange
+import com.twitter.scalding.Execution
+import com.twitter.scalding.UniqueID
+import com.twitter.scalding._
+import com.twitter.scalding_internal.dalv2.DAL
+import com.twitter.scalding_internal.dalv2.DALWrite.D
+import com.twitter.scalding_internal.dalv2.DALWrite._
+import com.twitter.scalding_internal.dalv2.dataset.DAL.DALSourceBuilderExtension
+import com.twitter.scalding_internal.dalv2.remote_access.AllowCrossDC
+import com.twitter.search.common.features.ExternalTweetFeature
+import com.twitter.search.common.features.SearchContextFeature
+import com.twitter.search.tweet_ranking.scalding.datasets.TweetEngagementRawTrainingDataDailyJavaDataset
+import com.twitter.simclusters_v2.common.ClusterId
+import com.twitter.simclusters_v2.hdfs_sources.AdhocAbuseSimclusterFeaturesScalaDataset
+import com.twitter.simclusters_v2.scalding.common.matrix.SparseMatrix
+import com.twitter.simclusters_v2.scalding.embedding.abuse.DataSources.NumBlocksP95
+import com.twitter.simclusters_v2.scalding.embedding.abuse.DataSources.getFlockBlocksSparseMatrix
+import com.twitter.simclusters_v2.scalding.embedding.abuse.DataSources.getUserInterestedInSparseMatrix
+import com.twitter.simclusters_v2.scalding.embedding.common.EmbeddingUtil.UserId
+import com.twitter.simclusters_v2.scalding.embedding.common.EmbeddingUtil
+import com.twitter.simclusters_v2.scalding.embedding.common.ExternalDataSources
+import com.twitter.simclusters_v2.thriftscala.ModelVersion
+import com.twitter.simclusters_v2.thriftscala.SimClustersEmbedding
+import com.twitter.wtf.scalding.jobs.common.AdhocExecutionApp
+import com.twitter.wtf.scalding.jobs.common.CassowaryJob
+import java.util.TimeZone</p>
+<dl class="simple">
+<dt>object AdhocAbuseSimClusterFeatureKeys {</dt><dd><p>val AbuseAuthorSearchKey = “abuseAuthorSearch”
+val AbuseUserSearchKey = “abuseUserSearch”
+val ImpressionUserSearchKey = “impressionUserSearch”
+val ImpressionAuthorSearchKey = “impressionAuthorSearch”
+val FlockBlocksAuthorKey = “blocksAuthorFlockDataset”
+val FlockBlocksUserKey = “blocksUserFlockDataset”
+val FavScoresAuthorKey = “favsAuthorFromFavGraph”
+val FavScoresUserKey = “favsUserFromFavGraph”</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul>
+<li><p>Adhoc job that is still in development. The job builds features that are meant to be useful for</p></li>
+<li><p>search.</p></li>
+<li></li>
+<li><p>Features are built from existing SimCluster representations and the interaction graphs.</p></li>
+<li></li>
+<li><p>Example command:</p></li>
+<li><p>scalding remote run </p></li>
+<li><p>–target src/scala/com/twitter/simclusters_v2/scalding/embedding/abuse:abuse-adhoc </p></li>
+<li><p>–main-class com.twitter.simclusters_v2.scalding.embedding.abuse.AdhocAbuseSimClusterFeaturesScaldingJob </p></li>
+<li><dl class="option-list">
+<dt><kbd><span class="option">--submitter</span></kbd></dt>
+<dd><p>hadoopnest1.atla.twitter.com –user cassowary </p>
+</dd>
+</dl>
+</li>
+<li><p>–hadoop-properties “mapreduce.job.user.classpath.first=true” – </p></li>
+<li><p>–hdfs –date 2020/11/24 2020/12/14 –partitionName second_run –dalEnvironment Prod</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>object AdhocAbuseSimClusterFeaturesScaldingJob extends AdhocExecutionApp with CassowaryJob {</dt><dd><p>override def jobName: String = “AdhocAbuseScaldingJob”</p>
+<p>import AdhocAbuseSimClusterFeatureKeys._</p>
+<p>val tweetAuthorFeature = new Feature.Discrete(ExternalTweetFeature.TWEET_AUTHOR_ID.getName)
+val searcherIdFeature = new Feature.Discrete(SearchContextFeature.SEARCHER_ID.getName)
+val isReportedFeature = new Feature.Binary(ExternalTweetFeature.IS_REPORTED.getName)
+val HalfLifeInDaysForFavScore = 100</p>
+<dl class="simple">
+<dt>private val outputPathThrift: String = EmbeddingUtil.getHdfsPath(</dt><dd><p>isAdhoc = false,
+isManhattanKeyVal = false,
+modelVersion = ModelVersion.Model20m145kUpdated,
+pathSuffix = “abuse_simcluster_features”</p>
+</dd>
+</dl>
+<p>)</p>
+<p>def searchDataRecords(
+)(</p>
+<blockquote>
+<div><p>implicit dateRange: DateRange,
+mode: Mode</p>
+</div></blockquote>
+<dl class="simple">
+<dt>) = {</dt><dd><dl class="simple">
+<dt>DAL</dt><dd><p>.read(TweetEngagementRawTrainingDataDailyJavaDataset)
+.withRemoteReadPolicy(AllowCrossDC)
+.toDataSetPipe
+.records</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>def abuseInteractionSearchGraph(
+)(</p>
+<blockquote>
+<div><p>implicit dateRange: DateRange,
+mode: Mode</p>
+</div></blockquote>
+<dl>
+<dt>): SparseMatrix[UserId, UserId, Double] = {</dt><dd><dl>
+<dt>val abuseMatrixEntries = searchDataRecords()</dt><dd><dl>
+<dt>.flatMap { dataRecord =&gt;</dt><dd><p>val sDataRecord = SRichDataRecord(dataRecord)
+val authorIdOption = sDataRecord.getFeatureValueOpt(tweetAuthorFeature)
+val userIdOption = sDataRecord.getFeatureValueOpt(searcherIdFeature)
+val isReportedOption = sDataRecord.getFeatureValueOpt(isReportedFeature)</p>
+<dl class="simple">
+<dt>for {</dt><dd><p>isReported &lt;- isReportedOption if isReported
+authorId &lt;- authorIdOption if authorId != 0
+userId &lt;- userIdOption if userId != 0</p>
+</dd>
+<dt>} yield {</dt><dd><p>(userId: UserId, authorId: UserId, 1.0)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>SparseMatrix.apply[UserId, UserId, Double](abuseMatrixEntries)</p>
+</dd>
+</dl>
+<p>}</p>
+<p>def impressionInteractionSearchGraph(
+)(</p>
+<blockquote>
+<div><p>implicit dateRange: DateRange,
+mode: Mode</p>
+</div></blockquote>
+<dl>
+<dt>): SparseMatrix[UserId, UserId, Double] = {</dt><dd><dl>
+<dt>val impressionMatrixEntries = searchDataRecords</dt><dd><dl>
+<dt>.flatMap { dataRecord =&gt;</dt><dd><p>val sDataRecord = SRichDataRecord(dataRecord)
+val authorIdOption = sDataRecord.getFeatureValueOpt(tweetAuthorFeature)
+val userIdOption = sDataRecord.getFeatureValueOpt(searcherIdFeature)</p>
+<dl class="simple">
+<dt>for {</dt><dd><p>authorId &lt;- authorIdOption if authorId != 0
+userId &lt;- userIdOption if userId != 0</p>
+</dd>
+<dt>} yield {</dt><dd><p>(userId: UserId, authorId: UserId, 1.0)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>SparseMatrix.apply[UserId, UserId, Double](impressionMatrixEntries)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>case class SingleSideScores(</dt><dd><p>unhealthyConsumerClusterScores: TypedPipe[(UserId, SimClustersEmbedding)],
+unhealthyAuthorClusterScores: TypedPipe[(UserId, SimClustersEmbedding)],
+healthyConsumerClusterScores: TypedPipe[(UserId, SimClustersEmbedding)],
+healthyAuthorClusterScores: TypedPipe[(UserId, SimClustersEmbedding)])</p>
+</dd>
+<dt>def buildSearchAbuseScores(</dt><dd><p>normalizedSimClusterMatrix: SparseMatrix[UserId, ClusterId, Double],
+unhealthyGraph: SparseMatrix[UserId, UserId, Double],
+healthyGraph: SparseMatrix[UserId, UserId, Double]</p>
+</dd>
+<dt>): SingleSideScores = {</dt><dd><dl class="simple">
+<dt>SingleSideScores(</dt><dd><dl class="simple">
+<dt>unhealthyConsumerClusterScores = SingleSideInteractionTransformation</dt><dd><p>.clusterScoresFromGraphs(normalizedSimClusterMatrix, unhealthyGraph),</p>
+</dd>
+<dt>unhealthyAuthorClusterScores = SingleSideInteractionTransformation</dt><dd><p>.clusterScoresFromGraphs(normalizedSimClusterMatrix, unhealthyGraph.transpose),</p>
+</dd>
+<dt>healthyConsumerClusterScores = SingleSideInteractionTransformation</dt><dd><p>.clusterScoresFromGraphs(normalizedSimClusterMatrix, healthyGraph),</p>
+</dd>
+<dt>healthyAuthorClusterScores = SingleSideInteractionTransformation</dt><dd><p>.clusterScoresFromGraphs(normalizedSimClusterMatrix, healthyGraph.transpose)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>override def runOnDateRange(</dt><dd><p>args: Args</p>
+</dd>
+<dt>)(</dt><dd><p>implicit dateRange: DateRange,
+timeZone: TimeZone,
+uniqueID: UniqueID</p>
+</dd>
+<dt>): Execution[Unit] = {</dt><dd><dl>
+<dt>Execution.getMode.flatMap { implicit mode =&gt;</dt><dd><p>val normalizedSimClusterMatrix = getUserInterestedInSparseMatrix.rowL2Normalize</p>
+<p>val abuseSearchGraph = abuseInteractionSearchGraph()
+val impressionSearchGraph = impressionInteractionSearchGraph()</p>
+<dl class="simple">
+<dt>val searchAbuseScores = buildSearchAbuseScores(</dt><dd><p>normalizedSimClusterMatrix,
+unhealthyGraph = abuseSearchGraph,
+healthyGraph = impressionSearchGraph)</p>
+</dd>
+</dl>
+<p>// Step 2a: Read FlockBlocks for unhealthy interactions and user-user-fav for healthy interactions
+val flockBlocksSparseGraph =</p>
+<blockquote>
+<div><p>getFlockBlocksSparseMatrix(NumBlocksP95, dateRange.prepend(Years(1)))</p>
+</div></blockquote>
+<dl class="simple">
+<dt>val favSparseGraph = SparseMatrix.apply[UserId, UserId, Double](</dt><dd><p>ExternalDataSources.getFavEdges(HalfLifeInDaysForFavScore))</p>
+</dd>
+<dt>val blocksAbuseScores = buildSearchAbuseScores(</dt><dd><p>normalizedSimClusterMatrix,
+unhealthyGraph = flockBlocksSparseGraph,
+healthyGraph = favSparseGraph</p>
+</dd>
+</dl>
+<p>)</p>
+<p>// Step 3. Combine all scores from different sources for users
+val pairedScores = SingleSideInteractionTransformation.pairScores(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>Map(</dt><dd><p>// User cluster scores built from the search abuse reports graph
+AbuseUserSearchKey -&gt; searchAbuseScores.unhealthyConsumerClusterScores,
+// Author cluster scores built from the search abuse reports graph
+AbuseAuthorSearchKey -&gt; searchAbuseScores.unhealthyAuthorClusterScores,
+// User cluster scores built from the search impression graph
+ImpressionUserSearchKey -&gt; searchAbuseScores.healthyConsumerClusterScores,
+// Author cluster scores built from the search impression graph
+ImpressionAuthorSearchKey -&gt; searchAbuseScores.healthyAuthorClusterScores,
+// User cluster scores built from flock blocks graph
+FlockBlocksUserKey -&gt; blocksAbuseScores.unhealthyConsumerClusterScores,
+// Author cluster scores built from the flock blocks graph
+FlockBlocksAuthorKey -&gt; blocksAbuseScores.unhealthyAuthorClusterScores,
+// User cluster scores built from the user-user fav graph
+FavScoresUserKey -&gt; blocksAbuseScores.healthyConsumerClusterScores,
+// Author cluster scores built from the user-user fav graph
+FavScoresAuthorKey -&gt; blocksAbuseScores.healthyAuthorClusterScores</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<p>)</p>
+<dl class="simple">
+<dt>pairedScores.writeDALSnapshotExecution(</dt><dd><p>AdhocAbuseSimclusterFeaturesScalaDataset,
+D.Daily,
+D.Suffix(outputPathThrift),
+D.Parquet,
+dateRange.`end`,
+partitions = Set(D.Partition(“partition”, args(“partitionName”), D.PartitionType.String))</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../_sources/src/scala/com/twitter/simclusters_v2/scalding/embedding/abuse/AdhocAbuseSimClusterFeaturesScaldingJob.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

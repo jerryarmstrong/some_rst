@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../../../" id="documentation_options" src="../../../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.follow_recommendations.common.candidate_sources.base</p>
+<p>import com.twitter.conversions.DurationOps._
+import com.twitter.finagle.stats.NullStatsReceiver
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.finagle.util.DefaultTimer
+import com.twitter.follow_recommendations.common.candidate_sources.base.RealGraphExpansionRepository.DefaultScore
+import com.twitter.follow_recommendations.common.candidate_sources.base.RealGraphExpansionRepository.MaxNumIntermediateNodesToKeep
+import com.twitter.follow_recommendations.common.candidate_sources.base.RealGraphExpansionRepository.FirstDegreeCandidatesTimeout
+import com.twitter.follow_recommendations.common.models.CandidateUser
+import com.twitter.follow_recommendations.common.models._
+import com.twitter.onboarding.relevance.features.ymbii.ExpansionCandidateScores
+import com.twitter.onboarding.relevance.features.ymbii.RawYMBIICandidateFeatures
+import com.twitter.onboarding.relevance.store.thriftscala.CandidatesFollowedV1
+import com.twitter.product_mixer.core.functional_component.candidate_source.CandidateSource
+import com.twitter.product_mixer.core.model.common.identifier.CandidateSourceIdentifier
+import com.twitter.stitch.Stitch
+import com.twitter.strato.client.Fetcher
+import com.twitter.util.Duration
+import scala.collection.immutable
+import scala.util.control.NonFatal</p>
+<dl>
+<dt>private final case class InterestExpansionCandidate(</dt><dd><p>userID: Long,
+score: Double,
+features: RawYMBIICandidateFeatures)</p>
+</dd>
+<dt>abstract class RealGraphExpansionRepository[Request](</dt><dd><dl class="simple">
+<dt>realgraphExpansionStore: Fetcher[</dt><dd><p>Long,
+Unit,
+CandidatesFollowedV1</p>
+</dd>
+</dl>
+<p>],
+override val identifier: CandidateSourceIdentifier,
+statsReceiver: StatsReceiver = NullStatsReceiver,
+maxUnderlyingCandidatesToQuery: Int = 50,
+maxCandidatesToReturn: Int = 40,
+overrideUnderlyingTimeout: Option[Duration] = None,
+appendSocialProof: Boolean = false)</p>
+<blockquote>
+<div><dl class="simple">
+<dt>extends CandidateSource[</dt><dd><p>Request,
+CandidateUser</p>
+</dd>
+</dl>
+<p>] {</p>
+</div></blockquote>
+<dl>
+<dt>val underlyingCandidateSource: Seq[</dt><dd><dl class="simple">
+<dt>CandidateSource[</dt><dd><p>Request,
+CandidateUser</p>
+</dd>
+</dl>
+<p>]</p>
+</dd>
+</dl>
+<p>]</p>
+<p>private val stats = statsReceiver.scope(this.getClass.getSimpleName).scope(identifier.name)
+private val underlyingCandidateSourceFailureStats =</p>
+<blockquote>
+<div><p>stats.scope(“underlying_candidate_source_failure”)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>def apply(</dt><dd><p>request: Request,</p>
+</dd>
+</dl>
+<p>): Stitch[Seq[CandidateUser]] = {</p>
+<blockquote>
+<div><dl>
+<dt>val candidatesFromUnderlyingSourcesStitch: Seq[Stitch[Seq[CandidateUser]]] =</dt><dd><dl>
+<dt>underlyingCandidateSource.map { candidateSource =&gt;</dt><dd><dl>
+<dt>candidateSource</dt><dd><p>.apply(request)
+.within(overrideUnderlyingTimeout.getOrElse(FirstDegreeCandidatesTimeout))(</p>
+<blockquote>
+<div><p>DefaultTimer</p>
+</div></blockquote>
+<p>)
+.handle {</p>
+<blockquote>
+<div><dl>
+<dt>case NonFatal(e) =&gt;</dt><dd><dl class="simple">
+<dt>underlyingCandidateSourceFailureStats</dt><dd><p>.counter(candidateSource.identifier.name, e.getClass.getSimpleName).incr()</p>
+</dd>
+</dl>
+<p>Seq.empty</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>for {</dt><dd><p>underlyingCandidatesFromEachAlgo &lt;- Stitch.collect(candidatesFromUnderlyingSourcesStitch)
+// The first algorithm in the list has the highest priority. Depending on if its not
+// populated, fall back to other algorithms. Once a particular algorithm is chosen, only
+// take the top few candidates from the underlying store for expansion.
+underlyingCandidatesTuple =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>underlyingCandidatesFromEachAlgo</dt><dd><p>.zip(underlyingCandidateSource)
+.find(_._1.nonEmpty)</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl class="simple">
+<dt>underlyingAlgorithmUsed: Option[CandidateSourceIdentifier] = underlyingCandidatesTuple.map {</dt><dd><p>case (_, candidateSource) =&gt; candidateSource.identifier</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// Take maxUnderlyingCandidatesToQuery to query realgraphExpansionStore
+underlyingCandidates =</p>
+<blockquote>
+<div><dl>
+<dt>underlyingCandidatesTuple</dt><dd><dl>
+<dt>.map {</dt><dd><dl>
+<dt>case (candidates, candidateSource) =&gt;</dt><dd><dl class="simple">
+<dt>stats</dt><dd><dl class="simple">
+<dt>.scope(“underlyingAlgorithmUsedScope”).counter(</dt><dd><p>candidateSource.identifier.name).incr()</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>candidates</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+.getOrElse(Seq.empty)
+.sortBy(_.score.getOrElse(DefaultScore))(Ordering.Double.reverse)
+.take(maxUnderlyingCandidatesToQuery)</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl class="simple">
+<dt>underlyingCandidateMap: Map[Long, Double] = underlyingCandidates.map { candidate =&gt;</dt><dd><p>(candidate.id, candidate.score.getOrElse(DefaultScore))</p>
+</dd>
+</dl>
+<p>}.toMap</p>
+<dl>
+<dt>expansionCandidates &lt;-</dt><dd><dl>
+<dt>Stitch</dt><dd><dl class="simple">
+<dt>.traverse(underlyingCandidateMap.keySet.toSeq) { candidateId =&gt;</dt><dd><dl class="simple">
+<dt>Stitch.join(</dt><dd><p>Stitch.value(candidateId),
+realgraphExpansionStore.fetch(candidateId).map(_.v))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}.map(_.toMap)</p>
+</dd>
+</dl>
+</dd>
+<dt>rerankedCandidates: Seq[InterestExpansionCandidate] =</dt><dd><p>rerankCandidateExpansions(underlyingCandidateMap, expansionCandidates)</p>
+</dd>
+</dl>
+<p>rerankedCandidatesFiltered = rerankedCandidates.take(maxCandidatesToReturn)</p>
+</dd>
+<dt>} yield {</dt><dd><dl>
+<dt>rerankedCandidatesFiltered.map { candidate =&gt;</dt><dd><dl class="simple">
+<dt>val socialProofReason = if (appendSocialProof) {</dt><dd><dl class="simple">
+<dt>val socialProofIds = candidate.features.expansionCandidateScores</dt><dd><p>.map(_.intermediateCandidateId)</p>
+</dd>
+<dt>Some(</dt><dd><dl class="simple">
+<dt>Reason(Some(</dt><dd><p>AccountProof(followProof = Some(FollowProof(socialProofIds, socialProofIds.size))))))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+<dt>} else {</dt><dd><p>None</p>
+</dd>
+</dl>
+<p>}
+CandidateUser(</p>
+<blockquote>
+<div><p>id = candidate.userID,
+score = Some(candidate.score),
+reason = socialProofReason,
+userCandidateSourceDetails = Some(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>UserCandidateSourceDetails(</dt><dd><p>primaryCandidateSource = Some(identifier),
+candidateSourceFeatures = Map(identifier -&gt; Seq(candidate.features))</p>
+</dd>
+</dl>
+<p>))</p>
+</div></blockquote>
+</div></blockquote>
+<p>).addAddressBookMetadataIfAvailable(underlyingAlgorithmUsed.toSeq)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Expands underlying candidates, returning them in sorted order.</p></li>
+<li></li>
+<li><p>&#64;param underlyingCandidatesMap A map from underlying candidate id to score</p></li>
+<li><p>&#64;param expansionCandidateMap A map from underlying candidate id to optional expansion candidates</p></li>
+<li><p>&#64;return A sorted sequence of expansion candidates and associated scores</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>private def rerankCandidateExpansions(</dt><dd><p>underlyingCandidatesMap: Map[Long, Double],
+expansionCandidateMap: Map[Long, Option[CandidatesFollowedV1]]</p>
+</dd>
+</dl>
+<p>): Seq[InterestExpansionCandidate] = {</p>
+<blockquote>
+<div><p>// extract features
+val candidates: Seq[(Long, ExpansionCandidateScores)] = for {</p>
+<blockquote>
+<div><p>(underlyingCandidateId, underlyingCandidateScore) &lt;- underlyingCandidatesMap.toSeq
+expansionCandidates =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>expansionCandidateMap</dt><dd><p>.get(underlyingCandidateId)
+.flatten
+.map(_.candidatesFollowed)
+.getOrElse(Seq.empty)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>expansionCandidate &lt;- expansionCandidates</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} yield expansionCandidate.candidateID -&gt; ExpansionCandidateScores(</dt><dd><p>underlyingCandidateId,
+Some(underlyingCandidateScore),
+Some(expansionCandidate.score)</p>
+</dd>
+</dl>
+<p>)</p>
+<p>// merge intermediate nodes for the same candidate
+val dedupedCandidates: Seq[(Long, Seq[ExpansionCandidateScores])] =</p>
+<blockquote>
+<div><p>candidates.groupBy(_._1).mapValues(_.map(_._2).sortBy(_.intermediateCandidateId)).toSeq</p>
+</div></blockquote>
+<p>// score the candidate
+val candidatesWithTotalScore: Seq[((Long, Seq[ExpansionCandidateScores]), Double)] =</p>
+<blockquote>
+<div><dl>
+<dt>dedupedCandidates.map { candidate: (Long, Seq[ExpansionCandidateScores]) =&gt;</dt><dd><dl>
+<dt>(</dt><dd><p>candidate,
+candidate._2.map { ieScore: ExpansionCandidateScores =&gt;</p>
+<blockquote>
+<div><dl class="simple">
+<dt>ieScore.scoreFromUserToIntermediateCandidate.getOrElse(DefaultScore) *</dt><dd><p>ieScore.scoreFromIntermediateToExpansionCandidate.getOrElse(DefaultScore)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}.sum)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>// sort candidate by score
+for {</p>
+<blockquote>
+<div><p>((candidate, edges), score) &lt;- candidatesWithTotalScore.sortBy(_._2)(Ordering[Double].reverse)</p>
+</div></blockquote>
+<dl>
+<dt>} yield InterestExpansionCandidate(</dt><dd><p>candidate,
+score,
+RawYMBIICandidateFeatures(</p>
+<blockquote>
+<div><p>edges.size,
+edges.take(MaxNumIntermediateNodesToKeep).to[immutable.Seq])</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>object RealGraphExpansionRepository {</dt><dd><p>private val FirstDegreeCandidatesTimeout: Duration = 250.milliseconds
+private val MaxNumIntermediateNodesToKeep = 20
+private val DefaultScore = 0.0d</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../../../_sources/follow-recommendations-service/common/src/main/scala/com/twitter/follow_recommendations/common/candidate_sources/base/RealGraphExpansionRepository.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

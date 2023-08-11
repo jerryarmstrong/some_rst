@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.timelines.prediction.common.aggregates.real_time</p>
+<p>import com.twitter.finagle.stats.Counter
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.ml.api.constant.SharedFeatures
+import com.twitter.ml.api.DataRecord
+import com.twitter.ml.api.DataRecordMerger
+import com.twitter.ml.api.Feature
+import com.twitter.ml.api.RichDataRecord
+import com.twitter.ml.featurestore.catalog.entities.core.Author
+import com.twitter.ml.featurestore.catalog.entities.core.Tweet
+import com.twitter.ml.featurestore.catalog.entities.core.User
+import com.twitter.ml.featurestore.lib.online.FeatureStoreClient
+import com.twitter.summingbird.Producer
+import com.twitter.summingbird.storm.Storm
+import com.twitter.timelines.data_processing.ml_util.aggregation_framework.heron.RealTimeAggregatesJobConfig
+import com.twitter.timelines.prediction.features.common.TimelinesSharedFeatures
+import java.lang.{Long =&gt; JLong}</p>
+<p>import com.twitter.unified_user_actions.thriftscala.ActionType
+import com.twitter.unified_user_actions.thriftscala.UnifiedUserAction</p>
+<dl>
+<dt>private[real_time] object StormAggregateSourceUtils {</dt><dd><p>type UserId = Long
+type AuthorId = Long
+type TweetId = Long</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Attaches a [[FeatureStoreClient]] to the underyling [[Producer]]. The FeatureStoreClient</p></li>
+<li><p>hydrates additional user features.</p></li>
+<li></li>
+<li><p>&#64;param underlyingProducer converts a stream of [[com.twitter.clientapp.thriftscala.LogEvent]]</p></li>
+<li><p>to a stream of [[DataRecord]].</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>def wrapByFeatureStoreClient(</dt><dd><p>underlyingProducer: Producer[Storm, Event[DataRecord]],
+jobConfig: RealTimeAggregatesJobConfig,
+scopedStatsReceiver: StatsReceiver</p>
+</dd>
+<dt>): Producer[Storm, Event[DataRecord]] = {</dt><dd><p>lazy val keyDataRecordCounter = scopedStatsReceiver.counter(“keyDataRecord”)
+lazy val keyFeatureCounter = scopedStatsReceiver.counter(“keyFeature”)
+lazy val leftDataRecordCounter = scopedStatsReceiver.counter(“leftDataRecord”)
+lazy val rightDataRecordCounter = scopedStatsReceiver.counter(“rightDataRecord”)
+lazy val mergeNumFeaturesCounter = scopedStatsReceiver.counter(“mergeNumFeatures”)
+lazy val authorKeyDataRecordCounter = scopedStatsReceiver.counter(“authorKeyDataRecord”)
+lazy val authorKeyFeatureCounter = scopedStatsReceiver.counter(“authorKeyFeature”)
+lazy val authorLeftDataRecordCounter = scopedStatsReceiver.counter(“authorLeftDataRecord”)
+lazy val authorRightDataRecordCounter = scopedStatsReceiver.counter(“authorRightDataRecord”)
+lazy val authorMergeNumFeaturesCounter = scopedStatsReceiver.counter(“authorMergeNumFeatures”)
+lazy val tweetKeyDataRecordCounter =</p>
+<blockquote>
+<div><p>scopedStatsReceiver.counter(“tweetKeyDataRecord”)</p>
+</div></blockquote>
+<p>lazy val tweetKeyFeatureCounter = scopedStatsReceiver.counter(“tweetKeyFeature”)
+lazy val tweetLeftDataRecordCounter =</p>
+<blockquote>
+<div><p>scopedStatsReceiver.counter(“tweetLeftDataRecord”)</p>
+</div></blockquote>
+<dl>
+<dt>lazy val tweetRightDataRecordCounter =</dt><dd><p>scopedStatsReceiver.counter(“tweetRightDataRecord”)</p>
+</dd>
+<dt>lazy val tweetMergeNumFeaturesCounter =</dt><dd><p>scopedStatsReceiver.counter(“tweetMergeNumFeatures”)</p>
+</dd>
+<dt>&#64;transient lazy val featureStoreClient: FeatureStoreClient =</dt><dd><dl class="simple">
+<dt>FeatureStoreUtils.mkFeatureStoreClient(</dt><dd><p>serviceIdentifier = jobConfig.serviceIdentifier,
+statsReceiver = scopedStatsReceiver</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>lazy val joinUserFeaturesDataRecordProducer =</dt><dd><dl>
+<dt>if (jobConfig.keyedByUserEnabled) {</dt><dd><dl>
+<dt>lazy val keyedByUserFeaturesStormService: Storm#Service[Set[UserId], DataRecord] =</dt><dd><dl>
+<dt>Storm.service(</dt><dd><dl class="simple">
+<dt>new UserFeaturesReadableStore(</dt><dd><p>featureStoreClient = featureStoreClient,
+userEntity = User,
+userFeaturesAdapter = UserFeaturesAdapter</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>leftJoinDataRecordProducer(</dt><dd><p>keyFeature = SharedFeatures.USER_ID,
+leftDataRecordProducer = underlyingProducer,
+rightStormService = keyedByUserFeaturesStormService,
+keyDataRecordCounter = keyDataRecordCounter,
+keyFeatureCounter = keyFeatureCounter,
+leftDataRecordCounter = leftDataRecordCounter,
+rightDataRecordCounter = rightDataRecordCounter,
+mergeNumFeaturesCounter = mergeNumFeaturesCounter</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>} else {</dt><dd><p>underlyingProducer</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>lazy val joinAuthorFeaturesDataRecordProducer =</dt><dd><dl>
+<dt>if (jobConfig.keyedByAuthorEnabled) {</dt><dd><dl>
+<dt>lazy val keyedByAuthorFeaturesStormService: Storm#Service[Set[AuthorId], DataRecord] =</dt><dd><dl>
+<dt>Storm.service(</dt><dd><dl class="simple">
+<dt>new UserFeaturesReadableStore(</dt><dd><p>featureStoreClient = featureStoreClient,
+userEntity = Author,
+userFeaturesAdapter = AuthorFeaturesAdapter</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>leftJoinDataRecordProducer(</dt><dd><p>keyFeature = TimelinesSharedFeatures.SOURCE_AUTHOR_ID,
+leftDataRecordProducer = joinUserFeaturesDataRecordProducer,
+rightStormService = keyedByAuthorFeaturesStormService,
+keyDataRecordCounter = authorKeyDataRecordCounter,
+keyFeatureCounter = authorKeyFeatureCounter,
+leftDataRecordCounter = authorLeftDataRecordCounter,
+rightDataRecordCounter = authorRightDataRecordCounter,
+mergeNumFeaturesCounter = authorMergeNumFeaturesCounter</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>} else {</dt><dd><p>joinUserFeaturesDataRecordProducer</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>lazy val joinTweetFeaturesDataRecordProducer = {</dt><dd><dl>
+<dt>if (jobConfig.keyedByTweetEnabled) {</dt><dd><dl>
+<dt>lazy val keyedByTweetFeaturesStormService: Storm#Service[Set[TweetId], DataRecord] =</dt><dd><dl>
+<dt>Storm.service(</dt><dd><dl class="simple">
+<dt>new TweetFeaturesReadableStore(</dt><dd><p>featureStoreClient = featureStoreClient,
+tweetEntity = Tweet,
+tweetFeaturesAdapter = TweetFeaturesAdapter</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>leftJoinDataRecordProducer(</dt><dd><p>keyFeature = TimelinesSharedFeatures.SOURCE_TWEET_ID,
+leftDataRecordProducer = joinAuthorFeaturesDataRecordProducer,
+rightStormService = keyedByTweetFeaturesStormService,
+keyDataRecordCounter = tweetKeyDataRecordCounter,
+keyFeatureCounter = tweetKeyFeatureCounter,
+leftDataRecordCounter = tweetLeftDataRecordCounter,
+rightDataRecordCounter = tweetRightDataRecordCounter,
+mergeNumFeaturesCounter = tweetMergeNumFeaturesCounter</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>} else {</dt><dd><p>joinAuthorFeaturesDataRecordProducer</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>joinTweetFeaturesDataRecordProducer</p>
+</dd>
+</dl>
+<p>}</p>
+<p>private[this] lazy val DataRecordMerger = new DataRecordMerger</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Make join key from the client event data record and return both.</p></li>
+<li><p>&#64;param keyFeature Feature to extract join key value: USER_ID, SOURCE_TWEET_ID, etc.</p></li>
+<li><p>&#64;param record DataRecord containing client engagement and basic tweet-side features</p></li>
+<li><p>&#64;return The return type is a tuple of this key and original data record which will be used</p></li>
+<li><p>in the subsequent leftJoin operation.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>private[this] def mkKey(</dt><dd><p>keyFeature: Feature[JLong],
+record: DataRecord,
+keyDataRecordCounter: Counter,
+keyFeatureCounter: Counter</p>
+</dd>
+<dt>): Set[Long] = {</dt><dd><p>keyDataRecordCounter.incr()
+val richRecord = new RichDataRecord(record)
+if (richRecord.hasFeature(keyFeature)) {</p>
+<blockquote>
+<div><p>keyFeatureCounter.incr()
+val key: Long = richRecord.getFeatureValue(keyFeature).toLong
+Set(key)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>Set.empty[Long]</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>After the leftJoin, merge the client event data record and the joined data record</p></li>
+<li><p>into a single data record used for further aggregation.</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>private[this] def mergeDataRecord(</dt><dd><p>leftRecord: Event[DataRecord],
+rightRecordOpt: Option[DataRecord],
+leftDataRecordCounter: Counter,
+rightDataRecordCounter: Counter,
+mergeNumFeaturesCounter: Counter</p>
+</dd>
+<dt>): Event[DataRecord] = {</dt><dd><p>leftDataRecordCounter.incr()
+rightRecordOpt.foreach { rightRecord =&gt;</p>
+<blockquote>
+<div><p>rightDataRecordCounter.incr()
+DataRecordMerger.merge(leftRecord.event, rightRecord)
+mergeNumFeaturesCounter.incr(new RichDataRecord(leftRecord.event).numFeatures())</p>
+</div></blockquote>
+<p>}
+leftRecord</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private[this] def leftJoinDataRecordProducer(</dt><dd><p>keyFeature: Feature[JLong],
+leftDataRecordProducer: Producer[Storm, Event[DataRecord]],
+rightStormService: Storm#Service[Set[Long], DataRecord],
+keyDataRecordCounter: =&gt; Counter,
+keyFeatureCounter: =&gt; Counter,
+leftDataRecordCounter: =&gt; Counter,
+rightDataRecordCounter: =&gt; Counter,
+mergeNumFeaturesCounter: =&gt; Counter</p>
+</dd>
+<dt>): Producer[Storm, Event[DataRecord]] = {</dt><dd><dl>
+<dt>val keyedLeftDataRecordProducer: Producer[Storm, (Set[Long], Event[DataRecord])] =</dt><dd><dl>
+<dt>leftDataRecordProducer.map {</dt><dd><dl>
+<dt>case dataRecord: HomeEvent[DataRecord] =&gt;</dt><dd><dl class="simple">
+<dt>val key = mkKey(</dt><dd><p>keyFeature = keyFeature,
+record = dataRecord.event,
+keyDataRecordCounter = keyDataRecordCounter,
+keyFeatureCounter = keyFeatureCounter</p>
+</dd>
+</dl>
+<p>)
+(key, dataRecord)</p>
+</dd>
+<dt>case dataRecord: ProfileEvent[DataRecord] =&gt;</dt><dd><p>val key = Set.empty[Long]
+(key, dataRecord)</p>
+</dd>
+<dt>case dataRecord: SearchEvent[DataRecord] =&gt;</dt><dd><p>val key = Set.empty[Long]
+(key, dataRecord)</p>
+</dd>
+<dt>case dataRecord: UuaEvent[DataRecord] =&gt;</dt><dd><p>val key = Set.empty[Long]
+(key, dataRecord)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>keyedLeftDataRecordProducer</dt><dd><p>.leftJoin(rightStormService)
+.map {</p>
+<blockquote>
+<div><dl>
+<dt>case (_, (leftRecord, rightRecordOpt)) =&gt;</dt><dd><dl class="simple">
+<dt>mergeDataRecord(</dt><dd><p>leftRecord = leftRecord,
+rightRecordOpt = rightRecordOpt,
+leftDataRecordCounter = leftDataRecordCounter,
+rightDataRecordCounter = rightDataRecordCounter,
+mergeNumFeaturesCounter = mergeNumFeaturesCounter</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Filter Unified User Actions events to include only actions that has home timeline visit prior to landing on the page</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+<dt>def isUuaBCEEventsFromHome(event: UnifiedUserAction): Boolean = {</dt><dd><dl>
+<dt>def breadcrumbViewsContain(view: String): Boolean =</dt><dd><p>event.eventMetadata.breadcrumbViews.map(_.contains(view)).getOrElse(false)</p>
+</dd>
+<dt>(event.actionType) match {</dt><dd><dl>
+<dt>case ActionType.ClientTweetV2Impression if breadcrumbViewsContain(“home”) =&gt;</dt><dd><p>true</p>
+</dd>
+<dt>case ActionType.ClientTweetVideoFullscreenV2Impression</dt><dd><blockquote>
+<div><p>if (breadcrumbViewsContain(“home”) &amp; breadcrumbViewsContain(“video”)) =&gt;</p>
+</div></blockquote>
+<p>true</p>
+</dd>
+<dt>case ActionType.ClientProfileV2Impression if breadcrumbViewsContain(“home”) =&gt;</dt><dd><p>true</p>
+</dd>
+</dl>
+<p>case _ =&gt; false</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/src/scala/com/twitter/timelines/prediction/common/aggregates/real_time/StormAggregateSourceUtils.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

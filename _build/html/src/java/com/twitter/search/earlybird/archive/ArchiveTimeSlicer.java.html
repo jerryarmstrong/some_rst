@@ -1,0 +1,490 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../" id="documentation_options" src="../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.earlybird.archive;</p>
+<p>import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Calendar;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.Date;
+import java.util.List;</p>
+<p>import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Preconditions;
+import com.google.common.base.Predicate;
+import com.google.common.collect.Lists;</p>
+<p>import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;</p>
+<p>import com.twitter.search.common.schema.thriftjava.ThriftIndexingEvent;
+import com.twitter.search.common.util.io.MergingSortedRecordReader;
+import com.twitter.search.common.util.io.recordreader.RecordReader;
+import com.twitter.search.earlybird.config.TierConfig;
+import com.twitter.search.earlybird.document.DocumentFactory;
+import com.twitter.search.earlybird.document.ThriftIndexingEventDocumentFactory;
+import com.twitter.search.earlybird.document.TweetDocument;</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Responsible for taking a number of daily status batches and partitioning them into time slices</p></li>
+<li><p>which will be used to build segments.</p></li>
+<li></li>
+<li><p>We try to put at most N number of tweets into a time slice.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>public class ArchiveTimeSlicer {</dt><dd><p>private static final Logger LOG = LoggerFactory.getLogger(ArchiveTimeSlicer.class);</p>
+<dl class="simple">
+<dt>private static final Comparator&lt;TweetDocument&gt; ASCENDING =</dt><dd><p>(o1, o2) -&gt; Long.compare(o1.getTweetID(), o2.getTweetID());</p>
+</dd>
+<dt>private static final Comparator&lt;TweetDocument&gt; DESCENDING =</dt><dd><p>(o1, o2) -&gt; Long.compare(o2.getTweetID(), o1.getTweetID());</p>
+</dd>
+</dl>
+<p>// Represents a number of daily batches which will go into a segment.
+public static final class ArchiveTimeSlice {</p>
+<blockquote>
+<div><p>private Date startDate;
+private Date endDate;
+private int statusCount;
+private final DailyStatusBatches directory;
+private final ArchiveEarlybirdIndexConfig earlybirdIndexConfig;</p>
+<p>// This list is always ordered from oldest day, to the newest day.
+// For the on-disk archive, we reverse the days in getTweetReaders().
+private final List&lt;DailyStatusBatch&gt; batches = Lists.newArrayList();</p>
+<dl>
+<dt>private ArchiveTimeSlice(DailyStatusBatches directory,</dt><dd><blockquote>
+<div><p>ArchiveEarlybirdIndexConfig earlybirdIndexConfig) {</p>
+</div></blockquote>
+<p>this.directory = directory;
+this.earlybirdIndexConfig = earlybirdIndexConfig;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public Date getEndDate() {</dt><dd><p>return endDate;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public int getStatusCount() {</dt><dd><p>return statusCount;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public int getNumHashPartitions() {</dt><dd><p>return batches.isEmpty() ? 0 : batches.get(0).getNumHashPartitions();</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Returns a reader for reading tweets from this timeslice.</p></li>
+<li></li>
+<li><p>&#64;param archiveSegment The segment to which the timeslice belongs.</p></li>
+<li><p>&#64;param documentFactory The ThriftIndexingEvent to TweetDocument converter.</p></li>
+<li><p>&#64;param filter A filter that determines what dates should be read.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>public RecordReader&lt;TweetDocument&gt; getStatusReader(</dt><dd><blockquote>
+<div><p>ArchiveSegment archiveSegment,
+DocumentFactory&lt;ThriftIndexingEvent&gt; documentFactory,
+Predicate&lt;Date&gt; filter) throws IOException {</p>
+</div></blockquote>
+<p>// We no longer support ThriftStatus based document factories.
+Preconditions.checkState(documentFactory instanceof ThriftIndexingEventDocumentFactory);</p>
+<p>final int hashPartitionID = archiveSegment.getHashPartitionID();
+List&lt;RecordReader&lt;TweetDocument&gt;&gt; readers = new ArrayList&lt;&gt;(batches.size());
+List&lt;DailyStatusBatch&gt; orderedForReading = orderBatchesForReading(batches);
+LOG.info(“Creating new status reader for hashPartition: “</p>
+<blockquote>
+<div><ul class="simple">
+<li><p>hashPartitionID + “ timeslice: “ + getDescription());</p></li>
+</ul>
+</div></blockquote>
+<dl>
+<dt>for (DailyStatusBatch batch<span class="classifier">orderedForReading) {</span></dt><dd><dl>
+<dt>if (filter.apply(batch.getDate())) {</dt><dd><p>LOG.info(“Adding reader for “ + batch.getDate() + “ “ + getDescription());
+PartitionedBatch partitionedBatch = batch.getPartition(hashPartitionID);
+// Don’t even try to create a reader if the partition is empty.
+// There does not seem to be any problem in production now, but HDFS FileSystem’s javadoc
+// does indicate that listStatus() is allowed to throw a FileNotFoundException if the
+// partition does not exist. This check makes the code more robust against future
+// HDFS FileSystem implementation changes.
+if (partitionedBatch.getStatusCount() &gt; 0) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>RecordReader&lt;TweetDocument&gt; tweetReaders = partitionedBatch.getTweetReaders(</dt><dd><p>archiveSegment,
+directory.getStatusPathToUseForDay(batch.getDate()),
+documentFactory);</p>
+</dd>
+</dl>
+<p>readers.add(tweetReaders);</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+<dt>} else {</dt><dd><p>LOG.info(“Filtered reader for “ + batch.getDate() + “ “ + getDescription());</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>LOG.info(“Creating reader for timeslice: “ + getDescription()</dt><dd><ul class="simple">
+<li><p>“ with “ + readers.size() + “ readers”);</p></li>
+</ul>
+</dd>
+</dl>
+<p>return new MergingSortedRecordReader&lt;TweetDocument&gt;(getMergingComparator(), readers);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private List&lt;DailyStatusBatch&gt; orderBatchesForReading(List&lt;DailyStatusBatch&gt; orderedBatches) {</dt><dd><p>// For the index formats using stock lucene, we want the most recent days to be indexed first.
+// In the twitter in-memory optimized indexes, older tweets will be added first, and
+// optimization will reverse the documents to make most recent tweets be first.
+return this.earlybirdIndexConfig.isUsingLIFODocumentOrdering()</p>
+<blockquote>
+<div><p>? orderedBatches : Lists.reverse(orderedBatches);</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private Comparator&lt;TweetDocument&gt; getMergingComparator() {</dt><dd><p>// We always want to retrieve larger tweet ids first.
+// LIFO means that the smaller ids get inserted first –&gt; ASCENDING order.
+// FIFO would mean that we want to first insert the larger ids –&gt; DESCENDING order.
+return this.earlybirdIndexConfig.isUsingLIFODocumentOrdering()</p>
+<blockquote>
+<div><p>? ASCENDING : DESCENDING;</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Returns the smallest indexed tweet ID in this timeslice for the given partition.</p></li>
+<li></li>
+<li><p>&#64;param hashPartitionID The partition.</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>public long getMinStatusID(int hashPartitionID) {</dt><dd><dl class="simple">
+<dt>if (batches.isEmpty()) {</dt><dd><p>return 0;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>for (int i = 0; i &lt; batches.size(); i++) {</dt><dd><p>long minStatusID = batches.get(i).getPartition(hashPartitionID).getMinStatusID();
+if (minStatusID != DailyStatusBatch.EMPTY_BATCH_STATUS_ID) {</p>
+<blockquote>
+<div><p>return minStatusID;</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>return 0;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Returns the highest indexed tweet ID in this timeslice for the given partition.</p></li>
+<li></li>
+<li><p>&#64;param hashPartitionID The partition.</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+<dt>public long getMaxStatusID(int hashPartitionID) {</dt><dd><dl class="simple">
+<dt>if (batches.isEmpty()) {</dt><dd><p>return Long.MAX_VALUE;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>for (int i = batches.size() - 1; i &gt;= 0; i–) {</dt><dd><p>long maxStatusID = batches.get(i).getPartition(hashPartitionID).getMaxStatusID();
+if (maxStatusID != DailyStatusBatch.EMPTY_BATCH_STATUS_ID) {</p>
+<blockquote>
+<div><p>return maxStatusID;</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>return Long.MAX_VALUE;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Returns a string with some information for this timeslice.</p></li>
+</ul>
+<p><a href="#id9"><span class="problematic" id="id10">*</span></a>/</p>
+</dd>
+<dt>public String getDescription() {</dt><dd><p>StringBuilder builder = new StringBuilder();
+builder.append(“TimeSlice[start date=”);
+builder.append(DailyStatusBatches.DATE_FORMAT.format(startDate));
+builder.append(”, end date=”);
+builder.append(DailyStatusBatches.DATE_FORMAT.format(endDate));
+builder.append(”, status count=”);
+builder.append(statusCount);
+builder.append(”, days count=”);
+builder.append(batches.size());
+builder.append(“]”);
+return builder.toString();</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>private final int maxSegmentSize;
+private final DailyStatusBatches dailyStatusBatches;
+private final Date tierStartDate;
+private final Date tierEndDate;
+private final ArchiveEarlybirdIndexConfig earlybirdIndexConfig;</p>
+<p>private List&lt;ArchiveTimeSlice&gt; lastCachedTimeslices = null;</p>
+<dl>
+<dt>public ArchiveTimeSlicer(int maxSegmentSize,</dt><dd><blockquote>
+<div><p>DailyStatusBatches dailyStatusBatches,
+ArchiveEarlybirdIndexConfig earlybirdIndexConfig) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>this(maxSegmentSize, dailyStatusBatches, TierConfig.DEFAULT_TIER_START_DATE,</dt><dd><p>TierConfig.DEFAULT_TIER_END_DATE, earlybirdIndexConfig);</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>public ArchiveTimeSlicer(int maxSegmentSize,</dt><dd><blockquote>
+<div><p>DailyStatusBatches dailyStatusBatches,
+Date tierStartDate,
+Date tierEndDate,
+ArchiveEarlybirdIndexConfig earlybirdIndexConfig) {</p>
+</div></blockquote>
+<p>this.maxSegmentSize = maxSegmentSize;
+this.dailyStatusBatches = dailyStatusBatches;
+this.tierStartDate = tierStartDate;
+this.tierEndDate = tierEndDate;
+this.earlybirdIndexConfig = earlybirdIndexConfig;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private boolean cacheIsValid() throws IOException {</dt><dd><dl class="simple">
+<dt>return lastCachedTimeslices != null</dt><dd><p>&amp;&amp; !lastCachedTimeslices.isEmpty()
+&amp;&amp; cacheIsValid(lastCachedTimeslices.get(lastCachedTimeslices.size() - 1).endDate);</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private boolean cacheIsValid(Date lastDate) throws IOException {</dt><dd><dl class="simple">
+<dt>if (lastCachedTimeslices == null || lastCachedTimeslices.isEmpty()) {</dt><dd><p>return false;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// Check if we have a daily batch newer than the last batch used for the newest timeslice.
+Calendar cal = Calendar.getInstance();
+cal.setTime(lastDate);
+cal.add(Calendar.DATE, 1);
+Date nextDate = cal.getTime();</p>
+<p>boolean foundBatch = dailyStatusBatches.hasValidBatchForDay(nextDate);</p>
+<dl class="simple">
+<dt>LOG.info(“Checking cache: Looked for valid batch for day {}. Found: {}”,</dt><dd><p>DailyStatusBatches.DATE_FORMAT.format(nextDate), foundBatch);</p>
+</dd>
+</dl>
+<p>return !foundBatch;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private boolean timesliceIsFull(ArchiveTimeSlice timeSlice, DailyStatusBatch batch) {</dt><dd><p>return timeSlice.statusCount + batch.getMaxPerPartitionStatusCount() &gt; maxSegmentSize;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private void doTimeSlicing() throws IOException {</dt><dd><p>dailyStatusBatches.refresh();</p>
+<p>lastCachedTimeslices = Lists.newArrayList();
+ArchiveTimeSlice currentTimeSlice = null;</p>
+<p>// Iterate over each day and add it to the current timeslice, until it gets full.
+for (DailyStatusBatch batch : dailyStatusBatches.getStatusBatches()) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (!batch.isValid()) {</dt><dd><p>LOG.warn(“Skipping hole: “ + batch.getDate());
+continue;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>if (currentTimeSlice == null || timesliceIsFull(currentTimeSlice, batch)) {</dt><dd><dl class="simple">
+<dt>if (currentTimeSlice != null) {</dt><dd><p>LOG.info(“Filled timeslice: “ + currentTimeSlice.getDescription());</p>
+</dd>
+</dl>
+<p>}
+currentTimeSlice = new ArchiveTimeSlice(dailyStatusBatches, earlybirdIndexConfig);
+currentTimeSlice.startDate = batch.getDate();
+lastCachedTimeslices.add(currentTimeSlice);</p>
+</dd>
+</dl>
+<p>}</p>
+<p>currentTimeSlice.endDate = batch.getDate();
+currentTimeSlice.statusCount += batch.getMaxPerPartitionStatusCount();
+currentTimeSlice.batches.add(batch);</p>
+</div></blockquote>
+<p>}
+LOG.info(“Last timeslice: {}”, currentTimeSlice.getDescription());</p>
+<dl class="simple">
+<dt>LOG.info(“Done with time slicing. Number of timeslices: {}”,</dt><dd><p>lastCachedTimeslices.size());</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Returns all timeslices for this earlybird.</p></li>
+</ul>
+<p><a href="#id11"><span class="problematic" id="id12">*</span></a>/</p>
+</dd>
+<dt>public List&lt;ArchiveTimeSlice&gt; getTimeSlices() throws IOException {</dt><dd><dl class="simple">
+<dt>if (cacheIsValid()) {</dt><dd><p>return lastCachedTimeslices;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>LOG.info(“Cache is outdated. Loading new daily batches now…”);</p>
+<p>doTimeSlicing();</p>
+<p>return lastCachedTimeslices != null ? Collections.unmodifiableList(lastCachedTimeslices) : null;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Return the timeslices that overlap the tier start/end date ranges if they are specified</p></li>
+</ul>
+<p><a href="#id13"><span class="problematic" id="id14">*</span></a>/</p>
+</dd>
+<dt>public List&lt;ArchiveTimeSlice&gt; getTimeSlicesInTierRange() throws IOException {</dt><dd><p>List&lt;ArchiveTimeSlice&gt; timeSlices = getTimeSlices();
+if (tierStartDate == TierConfig.DEFAULT_TIER_START_DATE</p>
+<blockquote>
+<div><blockquote>
+<div><p>&amp;&amp; tierEndDate == TierConfig.DEFAULT_TIER_END_DATE) {</p>
+</div></blockquote>
+<p>return timeSlices;</p>
+</div></blockquote>
+<p>}</p>
+<p>List&lt;ArchiveTimeSlice&gt; filteredTimeSlice = Lists.newArrayList();
+for (ArchiveTimeSlice timeSlice : timeSlices) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (timeSlice.startDate.before(tierEndDate) &amp;&amp; !timeSlice.endDate.before(tierStartDate)) {</dt><dd><p>filteredTimeSlice.add(timeSlice);</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>return filteredTimeSlice;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;VisibleForTesting
+protected DailyStatusBatches getDailyStatusBatches() {</p>
+<blockquote>
+<div><p>return dailyStatusBatches;</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../_sources/src/java/com/twitter/search/earlybird/archive/ArchiveTimeSlicer.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

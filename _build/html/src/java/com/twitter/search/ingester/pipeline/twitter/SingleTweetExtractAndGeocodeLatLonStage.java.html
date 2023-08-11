@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../" id="documentation_options" src="../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.ingester.pipeline.twitter;</p>
+<p>import org.apache.commons.pipeline.StageException;
+import org.apache.commons.pipeline.validation.ConsumedTypes;
+import org.apache.commons.pipeline.validation.ProducesConsumed;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;</p>
+<p>import com.twitter.search.common.indexing.thriftjava.ThriftGeoLocationSource;
+import com.twitter.search.common.metrics.SearchRateCounter;
+import com.twitter.search.common.relevance.entities.GeoObject;
+import com.twitter.search.common.relevance.entities.TwitterMessage;
+import com.twitter.search.common.relevance.text.LocationUtils;
+import com.twitter.search.ingester.model.IngesterTwitterMessage;
+import com.twitter.search.ingester.pipeline.util.PipelineStageRuntimeException;</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Read-only stage to extract lat/lon pairs from the tweet text and populate</p></li>
+<li><p>the geoLocation field.</p></li>
+<li><p>&lt;p&gt;</p></li>
+<li><p>If the tweet is geotagged by mobile devices, the geo coordinates extracted from the JSON</p></li>
+<li><p>is used.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+</dl>
+<p>&#64;ConsumedTypes(IngesterTwitterMessage.class)
+&#64;ProducesConsumed
+public class SingleTweetExtractAndGeocodeLatLonStage extends TwitterBaseStage</p>
+<blockquote>
+<div><blockquote>
+<div><p>&lt;TwitterMessage, IngesterTwitterMessage&gt; {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>private static final Logger LOG =</dt><dd><p>LoggerFactory.getLogger(SingleTweetExtractAndGeocodeLatLonStage.class);</p>
+</dd>
+</dl>
+<p>private SearchRateCounter extractedLatLons;
+private SearchRateCounter badLatLons;</p>
+<p>&#64;Override
+public void initStats() {</p>
+<blockquote>
+<div><p>super.initStats();
+innerSetupStats();</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+protected void innerSetupStats() {</p>
+<blockquote>
+<div><p>extractedLatLons = SearchRateCounter.export(getStageNamePrefix() + “_extracted_lat_lons”);
+badLatLons = SearchRateCounter.export(getStageNamePrefix() + “_invalid_lat_lons”);</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public void innerProcess(Object obj) throws StageException {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (!(obj instanceof IngesterTwitterMessage)) {</dt><dd><p>throw new StageException(this, “Object is not IngesterTwitterMessage object: “ + obj);</p>
+</dd>
+</dl>
+<p>}</p>
+<p>IngesterTwitterMessage message = IngesterTwitterMessage.class.cast(obj);
+tryToSetGeoLocation(message);
+emitAndCount(message);</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+protected IngesterTwitterMessage innerRunStageV2(TwitterMessage message) {</p>
+<blockquote>
+<div><p>// Previous stage takes in a TwitterMessage and returns a TwitterMessage. I think it was
+// done to simplify testing. From this stage onwards, we only count the message that are of type
+// IngesterTwitterMessage.
+if (!(message instanceof IngesterTwitterMessage)) {</p>
+<blockquote>
+<div><p>throw new PipelineStageRuntimeException(“Message needs to be of type IngesterTwitterMessage”);</p>
+</div></blockquote>
+<p>}</p>
+<p>IngesterTwitterMessage ingesterTwitterMessage = IngesterTwitterMessage.class.cast(message);
+tryToSetGeoLocation(ingesterTwitterMessage);
+return ingesterTwitterMessage;</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>private void tryToSetGeoLocation(IngesterTwitterMessage message) {</dt><dd><dl>
+<dt>if (message.getGeoTaggedLocation() != null) {</dt><dd><p>message.setGeoLocation(message.getGeoTaggedLocation());</p>
+</dd>
+<dt>} else if (message.hasGeoLocation()) {</dt><dd><p>LOG.warn(“Message {} already contains geoLocation”, message.getId());</p>
+</dd>
+<dt>} else {</dt><dd><dl>
+<dt>try {</dt><dd><p>GeoObject extracted = extractLatLon(message);
+if (extracted != null) {</p>
+<blockquote>
+<div><p>message.setGeoLocation(extracted);
+extractedLatLons.increment();</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+<dt>} catch (NumberFormatException e) {</dt><dd><p>LOG.debug(“Message contains bad latitude and longitude: “ + message.getOrigLocation(), e);
+badLatLons.increment();</p>
+</dd>
+<dt>} catch (Exception e) {</dt><dd><dl class="simple">
+<dt>LOG.error(“Failed to extract geo location from “ + message.getOrigLocation() + “ for tweet “</dt><dd><ul class="simple">
+<li><p>message.getId(), e);</p></li>
+</ul>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private GeoObject extractLatLon(IngesterTwitterMessage message) throws NumberFormatException {</dt><dd><p>double[] latlon = LocationUtils.extractLatLon(message);
+return latlon == null</p>
+<blockquote>
+<div><p>? null
+: new GeoObject(latlon[0], latlon[1], ThriftGeoLocationSource.TWEET_TEXT);</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../_sources/src/java/com/twitter/search/ingester/pipeline/twitter/SingleTweetExtractAndGeocodeLatLonStage.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

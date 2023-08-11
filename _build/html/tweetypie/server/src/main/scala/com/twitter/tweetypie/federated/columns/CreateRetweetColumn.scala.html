@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../../" id="documentation_options" src="../../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.tweetypie
+package federated.columns</p>
+<p>import com.twitter.accounts.util.SafetyMetadataUtils
+import com.twitter.ads.callback.thriftscala.EngagementRequest
+import com.twitter.bouncer.thriftscala.{Bounce =&gt; BouncerBounce}
+import com.twitter.stitch.Stitch
+import com.twitter.strato.catalog.OpMetadata
+import com.twitter.strato.config.AllOf
+import com.twitter.strato.config.BouncerAccess
+import com.twitter.strato.config.ContactInfo
+import com.twitter.strato.config.Policy
+import com.twitter.strato.data.Conv
+import com.twitter.strato.data.Description.PlainText
+import com.twitter.strato.data.Lifecycle.Production
+import com.twitter.strato.fed.StratoFed
+import com.twitter.strato.opcontext.OpContext
+import com.twitter.strato.response.Err
+import com.twitter.strato.thrift.ScroogeConv
+import com.twitter.tweetypie.federated.columns.ApiErrors._
+import com.twitter.tweetypie.federated.columns.CreateRetweetColumn.toCreateRetweetErr
+import com.twitter.tweetypie.federated.context.GetRequestContext
+import com.twitter.tweetypie.federated.prefetcheddata.PrefetchedDataRequest
+import com.twitter.tweetypie.federated.prefetcheddata.PrefetchedDataResponse
+import com.twitter.tweetypie.federated.promotedcontent.TweetPromotedContentLogger
+import com.twitter.tweetypie.federated.promotedcontent.TweetPromotedContentLogger.RetweetEngagement
+import com.twitter.tweetypie.thriftscala.TweetCreateState._
+import com.twitter.tweetypie.thriftscala.{graphql =&gt; gql}
+import com.twitter.tweetypie.{thriftscala =&gt; thrift}
+import com.twitter.weaverbird.common.{GetRequestContext =&gt; WGetRequestContext}</p>
+<dl>
+<dt>class CreateRetweetColumn(</dt><dd><p>retweet: thrift.RetweetRequest =&gt; Future[thrift.PostTweetResult],
+getRequestContext: GetRequestContext,
+prefetchedDataRepository: PrefetchedDataRequest =&gt; Stitch[PrefetchedDataResponse],
+logTweetPromotedContent: TweetPromotedContentLogger.Type,
+statsReceiver: StatsReceiver,</p>
+</dd>
+<dt>) extends StratoFed.Column(CreateRetweetColumn.Path)</dt><dd><blockquote>
+<div><p>with StratoFed.Execute.StitchWithContext
+with StratoFed.HandleDarkRequests {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>override val policy: Policy = AllOf(</dt><dd><p>Seq(AccessPolicy.TweetMutationCommonAccessPolicies, BouncerAccess()))</p>
+</dd>
+</dl>
+<p>// The underlying call to thriftTweetService.postRetweet is not idempotent
+override val isIdempotent: Boolean = false</p>
+<p>override type Arg = gql.CreateRetweetRequest
+override type Result = gql.CreateRetweetResponseWithSubqueryPrefetchItems</p>
+<p>override val argConv: Conv[Arg] = ScroogeConv.fromStruct
+override val resultConv: Conv[Result] = ScroogeConv.fromStruct</p>
+<p>override val contactInfo: ContactInfo = TweetypieContactInfo
+override val metadata: OpMetadata = OpMetadata(</p>
+<blockquote>
+<div><p>Some(Production),
+Some(PlainText(“Creates a retweet by the calling Twitter user of the given source tweet.”)))</p>
+</div></blockquote>
+<p>private val getWeaverbirdCtx = new WGetRequestContext()</p>
+<dl>
+<dt>override def execute(request: Arg, opContext: OpContext): Stitch[Result] = {</dt><dd><p>val ctx = getRequestContext(opContext)</p>
+<p>// First, do any request parameter validation that can result in an error
+// prior to calling into thriftTweetService.retweet.
+val safetyLevel = ctx.safetyLevel.getOrElse(throw SafetyLevelMissingErr)</p>
+<p>// Macaw-tweets returns ApiError.ClientNotPrivileged if the caller provides
+// an impression_id but lacks the PROMOTED_TWEETS_IN_TIMELINE privilege.
+val trackingId = request.engagementRequest match {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case Some(engagementRequest: EngagementRequest) if ctx.hasPrivilegePromotedTweetsInTimeline =&gt;</dt><dd><p>TrackingId.parse(engagementRequest.impressionId, statsReceiver)</p>
+</dd>
+<dt>case Some(e: EngagementRequest) =&gt;</dt><dd><p>throw ClientNotPrivilegedErr</p>
+</dd>
+<dt>case None =&gt;</dt><dd><p>None</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<p>// DeviceSource is an oauth string computed from the ClientApplicationId.
+// Macaw-tweets allows non-oauth callers, but GraphQL does not. An undefined
+// ClientApplicationId is similar to TweetCreateState.DeviceSourceNotFound,
+// which Macaw-tweets handles via a catch-all that returns
+// ApiError.GenericAccessDenied
+val deviceSource = ctx.deviceSource.getOrElse(throw GenericAccessDeniedErr)</p>
+<p>// Macaw-tweets doesn’t perform any parameter validation for the components
+// used as input to makeSafetyMetaData.
+val safetyMetadata = SafetyMetadataUtils.makeSafetyMetaData(</p>
+<blockquote>
+<div><p>sessionHash = ctx.sessionHash,
+knownDeviceToken = ctx.knownDeviceToken,
+contributorId = ctx.contributorId</p>
+</div></blockquote>
+<p>)</p>
+<dl class="simple">
+<dt>val thriftRetweetRequest = thrift.RetweetRequest(</dt><dd><p>sourceStatusId = request.tweetId,
+userId = ctx.twitterUserId,
+contributorUserId = None, // no longer supported, per tweet_service.thrift
+createdVia = deviceSource,
+nullcast = request.nullcast,
+trackingId = trackingId,
+dark = ctx.isDarkRequest,
+hydrationOptions = Some(HydrationOptions.writePathHydrationOptions(ctx.cardsPlatformKey)),
+safetyMetaData = Some(safetyMetadata),</p>
+</dd>
+</dl>
+<p>)</p>
+<p>val stitchRetweet = Stitch.callFuture(retweet(thriftRetweetRequest))</p>
+<dl class="simple">
+<dt>request.engagementRequest.foreach { engagement =&gt;</dt><dd><p>logTweetPromotedContent(engagement, RetweetEngagement, ctx.isDarkRequest)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>stitchRetweet.flatMap { result: thrift.PostTweetResult =&gt;</dt><dd><dl>
+<dt>result.state match {</dt><dd><dl>
+<dt>case thrift.TweetCreateState.Ok =&gt;</dt><dd><dl class="simple">
+<dt>val r = PrefetchedDataRequest(</dt><dd><p>tweet = result.tweet.get,
+sourceTweet = result.sourceTweet,
+quotedTweet = result.quotedTweet,
+safetyLevel = safetyLevel,
+requestContext = getWeaverbirdCtx()</p>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>prefetchedDataRepository(r)</dt><dd><p>.liftToOption()
+.map((prefetchedData: Option[PrefetchedDataResponse]) =&gt; {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>gql.CreateRetweetResponseWithSubqueryPrefetchItems(</dt><dd><p>data = Some(gql.CreateRetweetResponse(result.tweet.map(_.id))),
+subqueryPrefetchItems = prefetchedData.map(_.value)</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<p>})</p>
+</dd>
+</dl>
+</dd>
+<dt>case errState =&gt;</dt><dd><p>throw toCreateRetweetErr(errState, result.bounce, result.failureReason)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>object CreateRetweetColumn {</dt><dd><p>val Path = “tweetypie/createRetweet.Tweet”</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Ported from:</p></li>
+<li><p>StatusesRetweetController#retweetStatus rescue block</p></li>
+<li><p>TweetyPieStatusRepository.toRetweetException</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>def toCreateRetweetErr(</dt><dd><p>errState: thrift.TweetCreateState,
+bounce: Option[BouncerBounce],
+failureReason: Option[String]</p>
+</dd>
+<dt>): Err = errState match {</dt><dd><dl class="simple">
+<dt>case CannotRetweetBlockingUser =&gt;</dt><dd><p>BlockedUserErr</p>
+</dd>
+<dt>case AlreadyRetweeted =&gt;</dt><dd><p>AlreadyRetweetedErr</p>
+</dd>
+<dt>case Duplicate =&gt;</dt><dd><p>DuplicateStatusErr</p>
+</dd>
+<dt>case CannotRetweetOwnTweet | CannotRetweetProtectedTweet | CannotRetweetSuspendedUser =&gt;</dt><dd><p>InvalidRetweetForStatusErr</p>
+</dd>
+<dt>case UserNotFound | SourceTweetNotFound | SourceUserNotFound | CannotRetweetDeactivatedUser =&gt;</dt><dd><p>StatusNotFoundErr</p>
+</dd>
+<dt>case UserDeactivated | UserSuspended =&gt;</dt><dd><p>UserDeniedRetweetErr</p>
+</dd>
+<dt>case RateLimitExceeded =&gt;</dt><dd><p>RateLimitExceededErr</p>
+</dd>
+<dt>case UrlSpam =&gt;</dt><dd><p>TweetUrlSpamErr</p>
+</dd>
+<dt>case Spam | UserReadonly =&gt;</dt><dd><p>TweetSpammerErr</p>
+</dd>
+<dt>case SafetyRateLimitExceeded =&gt;</dt><dd><p>SafetyRateLimitExceededErr</p>
+</dd>
+<dt>case Bounce if bounce.isDefined =&gt;</dt><dd><p>accessDeniedByBouncerErr(bounce.get)</p>
+</dd>
+<dt>case DisabledByIpiPolicy =&gt;</dt><dd><dl class="simple">
+<dt>failureReason</dt><dd><p>.map(tweetEngagementLimitedErr)
+.getOrElse(GenericAccessDeniedErr)</p>
+</dd>
+</dl>
+</dd>
+<dt>case TrustedFriendsRetweetNotAllowed =&gt;</dt><dd><p>TrustedFriendsRetweetNotAllowedErr</p>
+</dd>
+<dt>case StaleTweetRetweetNotAllowed =&gt;</dt><dd><p>StaleTweetRetweetNotAllowedErr</p>
+</dd>
+<dt>case _ =&gt;</dt><dd><p>GenericAccessDeniedErr</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../../_sources/tweetypie/server/src/main/scala/com/twitter/tweetypie/federated/columns/CreateRetweetColumn.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

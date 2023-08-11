@@ -1,0 +1,571 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../../../" id="documentation_options" src="../../../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.product_mixer.core.pipeline.scoring</p>
+<p>import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.product_mixer.core.feature.featuremap.FeatureMap
+import com.twitter.product_mixer.core.functional_component.common.alert.Alert
+import com.twitter.product_mixer.core.functional_component.scorer.ScoredCandidateResult
+import com.twitter.product_mixer.core.gate.ParamGate
+import com.twitter.product_mixer.core.gate.ParamGate.EnabledGateSuffix
+import com.twitter.product_mixer.core.gate.ParamGate.SupportedClientGateSuffix
+import com.twitter.product_mixer.core.model.common.CandidateWithFeatures
+import com.twitter.product_mixer.core.model.common.Component
+import com.twitter.product_mixer.core.model.common.UniversalNoun
+import com.twitter.product_mixer.core.model.common.identifier.ComponentIdentifierStack
+import com.twitter.product_mixer.core.model.common.identifier.ScoringPipelineIdentifier
+import com.twitter.product_mixer.core.model.common.identifier.PipelineStepIdentifier
+import com.twitter.product_mixer.core.model.common.presentation.ItemCandidateWithDetails
+import com.twitter.product_mixer.core.pipeline.InvalidStepStateException
+import com.twitter.product_mixer.core.pipeline.PipelineBuilder
+import com.twitter.product_mixer.core.pipeline.PipelineQuery
+import com.twitter.product_mixer.core.pipeline.pipeline_failure.ClosedGate
+import com.twitter.product_mixer.core.pipeline.pipeline_failure.PipelineFailureClassifier
+import com.twitter.product_mixer.core.pipeline.scoring.ScoringPipeline.Inputs
+import com.twitter.product_mixer.core.service.Executor
+import com.twitter.product_mixer.core.service.candidate_feature_hydrator_executor.CandidateFeatureHydratorExecutor
+import com.twitter.product_mixer.core.service.candidate_feature_hydrator_executor.CandidateFeatureHydratorExecutorResult
+import com.twitter.product_mixer.core.service.gate_executor.GateExecutor
+import com.twitter.product_mixer.core.service.gate_executor.GateExecutorResult
+import com.twitter.product_mixer.core.service.gate_executor.StoppedGateException
+import com.twitter.product_mixer.core.service.selector_executor.SelectorExecutor
+import com.twitter.product_mixer.core.service.selector_executor.SelectorExecutorResult
+import com.twitter.stitch.Arrow
+import javax.inject.Inject</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>ScoringPipelineBuilder builds [[ScoringPipeline]]s from [[ScoringPipelineConfig]]s.</p></li>
+<li></li>
+<li><p>You should inject a [[ScoringPipelineBuilderFactory]] and call <cite>.get</cite> to build these.</p></li>
+<li></li>
+<li><p>&#64;see [[ScoringPipelineConfig]] for the description of the type parameters</p></li>
+<li><p>&#64;tparam Query the type of query these accept.</p></li>
+<li><p>&#64;tparam Candidate the domain model for the candidate being scored</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>class ScoringPipelineBuilder[Query &lt;: PipelineQuery, Candidate &lt;: UniversalNoun[Any]] &#64;Inject() (</dt><dd><p>gateExecutor: GateExecutor,
+selectorExecutor: SelectorExecutor,
+candidateFeatureHydratorExecutor: CandidateFeatureHydratorExecutor,
+override val statsReceiver: StatsReceiver)</p>
+<blockquote>
+<div><p>extends PipelineBuilder[Inputs[Query]] {</p>
+</div></blockquote>
+<p>override type UnderlyingResultType = Seq[ScoredCandidateResult[Candidate]]
+override type PipelineResultType = ScoringPipelineResult[Candidate]</p>
+<dl class="simple">
+<dt>def build(</dt><dd><p>parentComponentIdentifierStack: ComponentIdentifierStack,
+config: ScoringPipelineConfig[Query, Candidate]</p>
+</dd>
+</dl>
+<p>): ScoringPipeline[Query, Candidate] = {</p>
+<blockquote>
+<div><p>val pipelineIdentifier = config.identifier</p>
+<dl>
+<dt>val context = Executor.Context(</dt><dd><dl class="simple">
+<dt>PipelineFailureClassifier(</dt><dd><p>config.failureClassifier.orElse(StoppedGateException.classifier(ClosedGate))),</p>
+</dd>
+</dl>
+<p>parentComponentIdentifierStack.push(pipelineIdentifier)</p>
+</dd>
+</dl>
+<p>)</p>
+<dl class="simple">
+<dt>val enabledGateOpt = config.enabledDeciderParam.map { deciderParam =&gt;</dt><dd><p>ParamGate(pipelineIdentifier + EnabledGateSuffix, deciderParam)</p>
+</dd>
+</dl>
+<p>}
+val supportedClientGateOpt = config.supportedClientParam.map { param =&gt;</p>
+<blockquote>
+<div><p>ParamGate(pipelineIdentifier + SupportedClientGateSuffix, param)</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Evaluate enabled decider gate first since if it’s off, there is no reason to proceed</p></li>
+<li><p>Next evaluate supported client feature switch gate, followed by customer configured gates</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+</dl>
+<p>val allGates = enabledGateOpt.toSeq ++ supportedClientGateOpt.toSeq ++ config.gates</p>
+<dl>
+<dt>val GatesStep = new Step[Query, GateExecutorResult] {</dt><dd><p>override def identifier: PipelineStepIdentifier = ScoringPipelineConfig.gatesStep</p>
+<dl class="simple">
+<dt>override lazy val executorArrow: Arrow[Query, GateExecutorResult] =</dt><dd><p>gateExecutor.arrow(allGates, context)</p>
+</dd>
+<dt>override def inputAdaptor(</dt><dd><p>query: ScoringPipeline.Inputs[Query],
+previousResult: ScoringPipelineResult[Candidate]</p>
+</dd>
+<dt>): Query = {</dt><dd><p>query.query</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>override def resultUpdater(</dt><dd><p>previousPipelineResult: ScoringPipelineResult[Candidate],
+executorResult: GateExecutorResult</p>
+</dd>
+<dt>): ScoringPipelineResult[Candidate] =</dt><dd><p>previousPipelineResult.copy(gateResults = Some(executorResult))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>val SelectorsStep = new Step[SelectorExecutor.Inputs[Query], SelectorExecutorResult] {</dt><dd><p>override def identifier: PipelineStepIdentifier = ScoringPipelineConfig.selectorsStep</p>
+<dl class="simple">
+<dt>override def executorArrow: Arrow[SelectorExecutor.Inputs[Query], SelectorExecutorResult] =</dt><dd><p>selectorExecutor.arrow(config.selectors, context)</p>
+</dd>
+<dt>override def inputAdaptor(</dt><dd><p>query: ScoringPipeline.Inputs[Query],
+previousResult: ScoringPipelineResult[Candidate]</p>
+</dd>
+</dl>
+<p>): SelectorExecutor.Inputs[Query] = SelectorExecutor.Inputs(query.query, query.candidates)</p>
+<dl class="simple">
+<dt>override def resultUpdater(</dt><dd><p>previousPipelineResult: ScoringPipelineResult[Candidate],
+executorResult: SelectorExecutorResult</p>
+</dd>
+<dt>): ScoringPipelineResult[Candidate] =</dt><dd><p>previousPipelineResult.copy(selectorResults = Some(executorResult))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>val PreScoringFeatureHydrationPhase1Step =</dt><dd><dl>
+<dt>new Step[</dt><dd><p>CandidateFeatureHydratorExecutor.Inputs[Query, Candidate],
+CandidateFeatureHydratorExecutorResult[Candidate]</p>
+</dd>
+<dt>] {</dt><dd><dl>
+<dt>override def identifier: PipelineStepIdentifier =</dt><dd><p>ScoringPipelineConfig.preScoringFeatureHydrationPhase1Step</p>
+</dd>
+<dt>override def executorArrow: Arrow[</dt><dd><p>CandidateFeatureHydratorExecutor.Inputs[Query, Candidate],
+CandidateFeatureHydratorExecutorResult[Candidate]</p>
+</dd>
+<dt>] =</dt><dd><p>candidateFeatureHydratorExecutor.arrow(config.preScoringFeatureHydrationPhase1, context)</p>
+</dd>
+<dt>override def inputAdaptor(</dt><dd><p>query: ScoringPipeline.Inputs[Query],
+previousResult: ScoringPipelineResult[Candidate]</p>
+</dd>
+<dt>): CandidateFeatureHydratorExecutor.Inputs[Query, Candidate] = {</dt><dd><dl class="simple">
+<dt>val selectedCandidatesResult = previousResult.selectorResults.getOrElse {</dt><dd><p>throw InvalidStepStateException(identifier, “SelectorResults”)</p>
+</dd>
+</dl>
+<p>}.selectedCandidates</p>
+<dl class="simple">
+<dt>CandidateFeatureHydratorExecutor.Inputs(</dt><dd><p>query.query,
+selectedCandidatesResult.asInstanceOf[Seq[CandidateWithFeatures[Candidate]]])</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>override def resultUpdater(</dt><dd><p>previousPipelineResult: ScoringPipelineResult[Candidate],
+executorResult: CandidateFeatureHydratorExecutorResult[Candidate]</p>
+</dd>
+<dt>): ScoringPipelineResult[Candidate] = previousPipelineResult.copy(</dt><dd><p>preScoringHydrationPhase1Result = Some(executorResult)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>val PreScoringFeatureHydrationPhase2Step =</dt><dd><dl>
+<dt>new Step[</dt><dd><p>CandidateFeatureHydratorExecutor.Inputs[Query, Candidate],
+CandidateFeatureHydratorExecutorResult[Candidate]</p>
+</dd>
+<dt>] {</dt><dd><dl>
+<dt>override def identifier: PipelineStepIdentifier =</dt><dd><p>ScoringPipelineConfig.preScoringFeatureHydrationPhase2Step</p>
+</dd>
+<dt>override def executorArrow: Arrow[</dt><dd><p>CandidateFeatureHydratorExecutor.Inputs[Query, Candidate],
+CandidateFeatureHydratorExecutorResult[Candidate]</p>
+</dd>
+<dt>] =</dt><dd><p>candidateFeatureHydratorExecutor.arrow(config.preScoringFeatureHydrationPhase2, context)</p>
+</dd>
+<dt>override def inputAdaptor(</dt><dd><p>query: ScoringPipeline.Inputs[Query],
+previousResult: ScoringPipelineResult[Candidate]</p>
+</dd>
+<dt>): CandidateFeatureHydratorExecutor.Inputs[Query, Candidate] = {</dt><dd><dl>
+<dt>val preScoringHydrationPhase1FeatureMaps: Seq[FeatureMap] =</dt><dd><dl>
+<dt>previousResult.preScoringHydrationPhase1Result</dt><dd><dl class="simple">
+<dt>.getOrElse(</dt><dd><p>throw InvalidStepStateException(identifier, “PreScoringHydrationPhase1Result”))</p>
+</dd>
+</dl>
+<p>.results.map(_.features)</p>
+</dd>
+</dl>
+</dd>
+<dt>val itemCandidates = previousResult.selectorResults</dt><dd><p>.getOrElse(throw InvalidStepStateException(identifier, “SelectionResults”))
+.selectedCandidates.collect {</p>
+<blockquote>
+<div><p>case itemCandidate: ItemCandidateWithDetails =&gt; itemCandidate</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>// If there is no feature hydration (empty results), no need to attempt merging.
+val candidates = if (preScoringHydrationPhase1FeatureMaps.isEmpty) {</p>
+<blockquote>
+<div><p>itemCandidates</p>
+</div></blockquote>
+<dl>
+<dt>} else {</dt><dd><dl class="simple">
+<dt>itemCandidates.zip(preScoringHydrationPhase1FeatureMaps).map {</dt><dd><dl class="simple">
+<dt>case (itemCandidate, featureMap) =&gt;</dt><dd><p>itemCandidate.copy(features = itemCandidate.features ++ featureMap)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>CandidateFeatureHydratorExecutor.Inputs(</dt><dd><p>query.query,
+candidates.asInstanceOf[Seq[CandidateWithFeatures[Candidate]]])</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>override def resultUpdater(</dt><dd><p>previousPipelineResult: ScoringPipelineResult[Candidate],
+executorResult: CandidateFeatureHydratorExecutorResult[Candidate]</p>
+</dd>
+<dt>): ScoringPipelineResult[Candidate] = previousPipelineResult.copy(</dt><dd><p>preScoringHydrationPhase2Result = Some(executorResult)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>def getMergedPreScoringFeatureMap(</dt><dd><p>stepIdentifier: PipelineStepIdentifier,
+previousResult: ScoringPipelineResult[Candidate]</p>
+</dd>
+<dt>): Seq[FeatureMap] = {</dt><dd><dl>
+<dt>val preScoringHydrationPhase1FeatureMaps: Seq[FeatureMap] =</dt><dd><dl class="simple">
+<dt>previousResult.preScoringHydrationPhase1Result</dt><dd><dl class="simple">
+<dt>.getOrElse(</dt><dd><dl class="simple">
+<dt>throw InvalidStepStateException(</dt><dd><p>stepIdentifier,
+“PreScoringHydrationPhase1Result”)).results.map(_.features)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+<dt>val preScoringHydrationPhase2FeatureMaps: Seq[FeatureMap] =</dt><dd><dl class="simple">
+<dt>previousResult.preScoringHydrationPhase2Result</dt><dd><dl class="simple">
+<dt>.getOrElse(</dt><dd><dl class="simple">
+<dt>throw InvalidStepStateException(</dt><dd><p>stepIdentifier,
+“PreScoringHydrationPhase2Result”)).results.map(_.features)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+<dt>/*</dt><dd><ul class="simple">
+<li><p>If either pre-scoring hydration phase feature map is empty, no need to merge them,</p></li>
+<li><p>we can just take all non-empty ones.</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>if (preScoringHydrationPhase1FeatureMaps.isEmpty) {</dt><dd><p>preScoringHydrationPhase2FeatureMaps</p>
+</dd>
+<dt>} else if (preScoringHydrationPhase2FeatureMaps.isEmpty) {</dt><dd><p>preScoringHydrationPhase1FeatureMaps</p>
+</dd>
+<dt>} else {</dt><dd><p>// No need to check the size in both, since the inputs to both hydration phases are the
+// same and each phase ensures the number of candidates and ordering matches the input.
+preScoringHydrationPhase1FeatureMaps.zip(preScoringHydrationPhase2FeatureMaps).map {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case (preScoringHydrationPhase1FeatureMap, preScoringHydrationPhasesFeatureMap) =&gt;</dt><dd><p>preScoringHydrationPhase1FeatureMap ++ preScoringHydrationPhasesFeatureMap</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>val ScorersStep =</dt><dd><dl>
+<dt>new Step[</dt><dd><p>CandidateFeatureHydratorExecutor.Inputs[Query, Candidate],
+CandidateFeatureHydratorExecutorResult[Candidate]</p>
+</dd>
+<dt>] {</dt><dd><p>override def identifier: PipelineStepIdentifier = ScoringPipelineConfig.scorersStep</p>
+<dl class="simple">
+<dt>override def inputAdaptor(</dt><dd><p>query: ScoringPipeline.Inputs[Query],
+previousResult: ScoringPipelineResult[Candidate]</p>
+</dd>
+</dl>
+<p>): CandidateFeatureHydratorExecutor.Inputs[Query, Candidate] = {</p>
+<blockquote>
+<div><dl>
+<dt>val mergedPreScoringFeatureHydrationFeatures: Seq[FeatureMap] =</dt><dd><p>getMergedPreScoringFeatureMap(ScoringPipelineConfig.scorersStep, previousResult)</p>
+</dd>
+<dt>val itemCandidates = previousResult.selectorResults</dt><dd><p>.getOrElse(throw InvalidStepStateException(identifier, “SelectionResults”))
+.selectedCandidates.collect {</p>
+<blockquote>
+<div><p>case itemCandidate: ItemCandidateWithDetails =&gt; itemCandidate</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>// If there was no pre-scoring features hydration, no need to re-merge feature maps
+// and construct a new item candidate
+val updatedCandidates = if (mergedPreScoringFeatureHydrationFeatures.isEmpty) {</p>
+<blockquote>
+<div><p>itemCandidates</p>
+</div></blockquote>
+<dl>
+<dt>} else {</dt><dd><dl class="simple">
+<dt>itemCandidates.zip(mergedPreScoringFeatureHydrationFeatures).map {</dt><dd><dl class="simple">
+<dt>case (itemCandidate, preScoringFeatureMap) =&gt;</dt><dd><p>itemCandidate.copy(features = itemCandidate.features ++ preScoringFeatureMap)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}
+CandidateFeatureHydratorExecutor.Inputs(</p>
+<blockquote>
+<div><p>query.query,
+updatedCandidates.asInstanceOf[Seq[CandidateWithFeatures[Candidate]]])</p>
+</div></blockquote>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>override lazy val executorArrow: Arrow[</dt><dd><p>CandidateFeatureHydratorExecutor.Inputs[Query, Candidate],
+CandidateFeatureHydratorExecutorResult[</p>
+<blockquote>
+<div><p>Candidate</p>
+</div></blockquote>
+<p>]</p>
+</dd>
+</dl>
+<p>] = candidateFeatureHydratorExecutor.arrow(config.scorers.toSeq, context)</p>
+<dl class="simple">
+<dt>override def resultUpdater(</dt><dd><p>previousPipelineResult: ScoringPipelineResult[Candidate],
+executorResult: CandidateFeatureHydratorExecutorResult[Candidate]</p>
+</dd>
+<dt>): ScoringPipelineResult[Candidate] =</dt><dd><p>previousPipelineResult.copy(scorerResults = Some(executorResult))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>val ResultStep =</dt><dd><dl>
+<dt>new Step[Seq[CandidateWithFeatures[UniversalNoun[Any]]], Seq[</dt><dd><p>CandidateWithFeatures[UniversalNoun[Any]]</p>
+</dd>
+<dt>]] {</dt><dd><p>override def identifier: PipelineStepIdentifier = ScoringPipelineConfig.resultStep</p>
+<dl class="simple">
+<dt>override def executorArrow: Arrow[Seq[CandidateWithFeatures[UniversalNoun[Any]]], Seq[</dt><dd><p>CandidateWithFeatures[UniversalNoun[Any]]</p>
+</dd>
+</dl>
+<p>]] = Arrow.identity</p>
+<dl>
+<dt>override def inputAdaptor(</dt><dd><p>query: Inputs[Query],
+previousResult: ScoringPipelineResult[Candidate]</p>
+</dd>
+<dt>): Seq[CandidateWithFeatures[UniversalNoun[Any]]] = previousResult.selectorResults</dt><dd><p>.getOrElse(throw InvalidStepStateException(identifier, “SelectionResults”))
+.selectedCandidates.collect {</p>
+<blockquote>
+<div><p>case itemCandidate: ItemCandidateWithDetails =&gt; itemCandidate</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+<dt>override def resultUpdater(</dt><dd><p>previousPipelineResult: ScoringPipelineResult[Candidate],
+executorResult: Seq[CandidateWithFeatures[UniversalNoun[Any]]]</p>
+</dd>
+<dt>): ScoringPipelineResult[Candidate] = {</dt><dd><dl class="simple">
+<dt>val scorerResults: Seq[FeatureMap] = previousPipelineResult.scorerResults</dt><dd><dl class="simple">
+<dt>.getOrElse(throw InvalidStepStateException(identifier, “ScorerResult”)).results.map(</dt><dd><p>_.features)</p>
+</dd>
+</dl>
+</dd>
+<dt>val mergedPreScoringFeatureHydrationFeatureMaps: Seq[FeatureMap] =</dt><dd><p>getMergedPreScoringFeatureMap(ScoringPipelineConfig.resultStep, previousPipelineResult)</p>
+</dd>
+</dl>
+<p>val itemCandidates = executorResult.asInstanceOf[Seq[ItemCandidateWithDetails]]
+val finalFeatureMap = if (mergedPreScoringFeatureHydrationFeatureMaps.isEmpty) {</p>
+<blockquote>
+<div><p>scorerResults</p>
+</div></blockquote>
+<dl>
+<dt>} else {</dt><dd><dl>
+<dt>scorerResults</dt><dd><dl class="simple">
+<dt>.zip(mergedPreScoringFeatureHydrationFeatureMaps).map {</dt><dd><dl class="simple">
+<dt>case (preScoringFeatureMap, scoringFeatureMap) =&gt;</dt><dd><p>preScoringFeatureMap ++ scoringFeatureMap</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>val finalResults = itemCandidates.zip(finalFeatureMap).map {</dt><dd><dl class="simple">
+<dt>case (itemCandidate, featureMap) =&gt;</dt><dd><p>ScoredCandidateResult(itemCandidate.candidate.asInstanceOf[Candidate], featureMap)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+previousPipelineResult.withResult(finalResults)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>val builtSteps = Seq(</dt><dd><p>GatesStep,
+SelectorsStep,
+PreScoringFeatureHydrationPhase1Step,
+PreScoringFeatureHydrationPhase2Step,
+ScorersStep,
+ResultStep</p>
+</dd>
+</dl>
+<p>)</p>
+<p>/** The main execution logic for this Candidate Pipeline. <a href="#id7"><span class="problematic" id="id8">*</span></a>/
+val finalArrow: Arrow[ScoringPipeline.Inputs[Query], ScoringPipelineResult[Candidate]] =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>buildCombinedArrowFromSteps(</dt><dd><p>steps = builtSteps,
+context = context,
+initialEmptyResult = ScoringPipelineResult.empty,
+stepsInOrderFromConfig = ScoringPipelineConfig.stepsInOrder</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<p>val configFromBuilder = config
+new ScoringPipeline[Query, Candidate] {</p>
+<blockquote>
+<div><p>override private[core] val config: ScoringPipelineConfig[Query, Candidate] = configFromBuilder
+override val arrow: Arrow[ScoringPipeline.Inputs[Query], ScoringPipelineResult[Candidate]] =</p>
+<blockquote>
+<div><p>finalArrow</p>
+</div></blockquote>
+<p>override val identifier: ScoringPipelineIdentifier = pipelineIdentifier
+override val alerts: Seq[Alert] = config.alerts
+override val children: Seq[Component] =</p>
+<blockquote>
+<div><p>allGates ++ config.preScoringFeatureHydrationPhase1 ++ config.preScoringFeatureHydrationPhase2 ++ config.scorers</p>
+</div></blockquote>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../../../_sources/product-mixer/core/src/main/scala/com/twitter/product_mixer/core/pipeline/scoring/ScoringPipelineBuilder.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

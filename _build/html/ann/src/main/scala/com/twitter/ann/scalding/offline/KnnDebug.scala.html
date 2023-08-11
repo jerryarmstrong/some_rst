@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.ann.scalding.offline</p>
+<p>import com.twitter.core_workflows.user_model.thriftscala.CondensedUserState
+import com.twitter.cortex.ml.embeddings.common.{DataSourceManager, GraphEdge, Helpers, UserKind}
+import com.twitter.ml.featurestore.lib.UserId
+import com.twitter.entityembeddings.neighbors.thriftscala.{EntityKey, NearestNeighbors}
+import com.twitter.pluck.source.core_workflows.user_model.CondensedUserStateScalaDataset
+import com.twitter.scalding._
+import com.twitter.scalding.typed.TypedPipe
+import com.twitter.scalding_internal.dalv2.DAL
+import com.twitter.usersource.snapshot.flat.UsersourceFlatScalaDataset
+import com.twitter.usersource.snapshot.flat.thriftscala.FlatUser</p>
+<p>case class ConsumerAssoc(consumerId: UserId, assoc: List[String])</p>
+<p>object KnnDebug {</p>
+<blockquote>
+<div><dl>
+<dt>def getConsumerAssociations(</dt><dd><p>graph: TypedPipe[GraphEdge[UserId, UserId]],
+usernames: TypedPipe[(UserId, String)],
+reducers: Int</p>
+</dd>
+<dt>): TypedPipe[ConsumerAssoc] = {</dt><dd><dl>
+<dt>graph</dt><dd><p>.groupBy(_.itemId)
+.join(usernames).withReducers(reducers)
+.values
+.map {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case (edge: GraphEdge[UserId, UserId], producerScreenName: String) =&gt;</dt><dd><p>ConsumerAssoc(consumerId = edge.consumerId, assoc = List(producerScreenName))</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+.groupBy(_.consumerId).withReducers(reducers)
+.reduce[ConsumerAssoc] {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case (uFollow1: ConsumerAssoc, uFollow2: ConsumerAssoc) =&gt;</dt><dd><p>ConsumerAssoc(consumerId = uFollow1.consumerId, assoc = uFollow1.assoc ++ uFollow2.assoc)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+.values</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Write the neighbors and a set of follows to a tsv for easier analysis during debugging</p></li>
+<li><p>We take the set of users with between 25-50 follows and grab only those users</p></li>
+<li></li>
+<li><p>This returns 4 strings of the form:</p></li>
+<li><p>consumerId, state, followUserName&lt;f&gt;followUserName&lt;f&gt;followUserName, neighborName&lt;n&gt;neighborName&lt;n&gt;neighborName</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>def getDebugTable(</dt><dd><p>neighborsPipe: TypedPipe[(EntityKey, NearestNeighbors)],
+shards: Int,
+reducers: Int,
+limit: Int = 10000,
+userDataset: Option[TypedPipe[FlatUser]] = None,
+followDataset: Option[TypedPipe[GraphEdge[UserId, UserId]]] = None,
+consumerStatesDataset: Option[TypedPipe[CondensedUserState]] = None,
+minFollows: Int = 25,
+maxFollows: Int = 50</p>
+</dd>
+<dt>)(</dt><dd><p>implicit dateRange: DateRange</p>
+</dd>
+</dl>
+<p>): TypedPipe[(String, String, String, String)] = {</p>
+<blockquote>
+<div><dl>
+<dt>val usersourcePipe: TypedPipe[FlatUser] = userDataset</dt><dd><p>.getOrElse(DAL.readMostRecentSnapshot(UsersourceFlatScalaDataset, dateRange).toTypedPipe)</p>
+</dd>
+<dt>val followGraph: TypedPipe[GraphEdge[UserId, UserId]] = followDataset</dt><dd><p>.getOrElse(new DataSourceManager().getFollowGraph())</p>
+</dd>
+<dt>val consumerStates: TypedPipe[CondensedUserState] = consumerStatesDataset</dt><dd><p>.getOrElse(DAL.read(CondensedUserStateScalaDataset).toTypedPipe)</p>
+</dd>
+<dt>val usernames: TypedPipe[(UserId, String)] = usersourcePipe.flatMap { flatUser =&gt;</dt><dd><dl class="simple">
+<dt>(flatUser.screenName, flatUser.id) match {</dt><dd><p>case (Some(name: String), Some(userId: Long)) =&gt; Some((UserId(userId), name))
+case _ =&gt; None</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}.fork</p>
+<dl>
+<dt>val consumerFollows: TypedPipe[ConsumerAssoc] =</dt><dd><dl class="simple">
+<dt>getConsumerAssociations(followGraph, usernames, reducers)</dt><dd><p>.filter { uFollow =&gt; (uFollow.assoc.size &gt; minFollows &amp;&amp; uFollow.assoc.size &lt; maxFollows) }</p>
+</dd>
+</dl>
+</dd>
+<dt>val neighborGraph: TypedPipe[GraphEdge[UserId, UserId]] = neighborsPipe</dt><dd><p>.limit(limit)
+.flatMap {</p>
+<blockquote>
+<div><dl>
+<dt>case (entityKey: EntityKey, neighbors: NearestNeighbors) =&gt;</dt><dd><dl>
+<dt>Helpers.optionalToLong(entityKey.id) match {</dt><dd><dl>
+<dt>case Some(entityId: Long) =&gt;</dt><dd><dl>
+<dt>neighbors.neighbors.flatMap { neighbor =&gt;</dt><dd><dl>
+<dt>Helpers</dt><dd><p>.optionalToLong(neighbor.neighbor.id)
+.map { neighborId =&gt;</p>
+<blockquote>
+<div><dl class="simple">
+<dt>GraphEdge[UserId, UserId](</dt><dd><p>consumerId = UserId(entityId),
+itemId = UserId(neighborId),
+weight = 1.0F)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>case None =&gt; List()</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+<dt>val consumerNeighbors: TypedPipe[ConsumerAssoc] =</dt><dd><p>getConsumerAssociations(neighborGraph, usernames, reducers)</p>
+</dd>
+<dt>consumerFollows</dt><dd><p>.groupBy(_.consumerId)
+.join(consumerStates.groupBy { consumer =&gt; UserId(consumer.uid) }).withReducers(reducers)
+.join(consumerNeighbors.groupBy(_.consumerId)).withReducers(reducers)
+.values
+.map {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case ((uFollow: ConsumerAssoc, state: CondensedUserState), uNeighbors: ConsumerAssoc) =&gt;</dt><dd><dl class="simple">
+<dt>(</dt><dd><p>UserKind.stringInjection(uFollow.consumerId),
+state.state.toString,
+uFollow.assoc mkString “&lt;f&gt;”,
+uNeighbors.assoc mkString “&lt;n&gt;”)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+.shard(shards)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/ann/src/main/scala/com/twitter/ann/scalding/offline/KnnDebug.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

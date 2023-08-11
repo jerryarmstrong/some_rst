@@ -1,0 +1,574 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.core.earlybird.index.inverted;</p>
+<p>import java.io.IOException;
+import java.util.Arrays;</p>
+<p>import org.apache.lucene.store.DataInput;
+import org.apache.lucene.store.DataOutput;
+import org.apache.lucene.util.ArrayUtil;
+import org.apache.lucene.util.ByteBlockPool;
+import org.apache.lucene.util.BytesRef;</p>
+<p>import static org.apache.lucene.util.RamUsageEstimator.NUM_BYTES_OBJECT_REF;</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Base class for BlockPools backed by byte[] arrays.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>public abstract class BaseByteBlockPool {</dt><dd><dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>The extra object with final array is necessary to guarantee visibility to</p></li>
+<li><p>other threads without synchronization/using volatile.</p></li>
+<li></li>
+<li><p>From ‘Java Concurrency in practice’ by Brian Goetz, p. 349:</p></li>
+<li></li>
+<li><p>“Initialization safety guarantees that for properly constructed objects, all</p></li>
+<li><p>threads will see the correct values of final fields that were set by the con-</p></li>
+<li><p>structor, regardless of how the object is published. Further, any variables</p></li>
+<li><p>that can be reached through a final field of a properly constructed object</p></li>
+<li><p>(such as the elements of a final array or the contents of a HashMap refer-</p></li>
+<li><p>enced by a final field) are also guaranteed to be visible to other threads.”</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>public static final class Pool {</dt><dd><p>public final byte[][] buffers;</p>
+<dl class="simple">
+<dt>public Pool(byte[][] buffers) {</dt><dd><p>this.buffers = buffers;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public byte[][] getBlocks() {</dt><dd><p>return buffers;</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>public Pool pool = new Pool(new byte[10][]);
+// The index of the current buffer in pool.buffers.
+public int bufferUpto = -1;
+// The number of bytes that have been written in the current buffer.
+public int byteUpto = ByteBlockPool.BYTE_BLOCK_SIZE;
+// The current buffer, i.e. a reference to pool.buffers[bufferUpto]
+public byte[] buffer;
+// The total number of bytes that have been used up to now, excluding the current buffer.
+public int byteOffset = -ByteBlockPool.BYTE_BLOCK_SIZE;
+// The one and only WriteStream for this pool.
+private WriteStream writeStream = new WriteStream();</p>
+<p>protected BaseByteBlockPool() { }</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Used for loading flushed pool.</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>protected BaseByteBlockPool(Pool pool, int bufferUpto, int byteUpTo, int byteOffset) {</dt><dd><p>this.pool = pool;
+this.bufferUpto = bufferUpto;
+this.byteUpto = byteUpTo;
+this.byteOffset = byteOffset;
+if (bufferUpto &gt;= 0) {</p>
+<blockquote>
+<div><p>this.buffer = pool.buffers[bufferUpto];</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Resets the index of the pool to 0 in the first buffer and resets the byte arrays of</p></li>
+<li><p>all previously allocated buffers to 0s.</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+<dt>public void reset() {</dt><dd><dl>
+<dt>if (bufferUpto != -1) {</dt><dd><p>// We allocated at least one buffer</p>
+<dl class="simple">
+<dt>for (int i = 0; i &lt; bufferUpto; i++) {</dt><dd><p>// Fully zero fill buffers that we fully used
+Arrays.fill(pool.buffers[i], (byte) 0);</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// Partial zero fill the final buffer
+Arrays.fill(pool.buffers[bufferUpto], 0, byteUpto, (byte) 0);</p>
+<p>bufferUpto = 0;
+byteUpto = 0;
+byteOffset = 0;
+buffer = pool.buffers[0];</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Switches to the next buffer and positions the index at its beginning.</p></li>
+</ul>
+<p><a href="#id9"><span class="problematic" id="id10">*</span></a>/</p>
+</dd>
+<dt>public void nextBuffer() {</dt><dd><dl>
+<dt>if (1 + bufferUpto == pool.buffers.length) {</dt><dd><dl class="simple">
+<dt>byte[][] newBuffers = new byte[ArrayUtil.oversize(pool.buffers.length + 1,</dt><dd><p>NUM_BYTES_OBJECT_REF)][];</p>
+</dd>
+</dl>
+<p>System.arraycopy(pool.buffers, 0, newBuffers, 0, pool.buffers.length);
+pool = new Pool(newBuffers);</p>
+</dd>
+</dl>
+<p>}
+buffer = pool.buffers[1 + bufferUpto] = new byte[ByteBlockPool.BYTE_BLOCK_SIZE];
+bufferUpto++;</p>
+<p>byteUpto = 0;
+byteOffset += ByteBlockPool.BYTE_BLOCK_SIZE;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Returns the start offset of the next data that will be added to the pool, UNLESS the data is</p></li>
+<li><p>added using addBytes and avoidSplitting = true</p></li>
+</ul>
+<p><a href="#id11"><span class="problematic" id="id12">*</span></a>/</p>
+</dd>
+<dt>public int getOffset() {</dt><dd><p>return byteOffset + byteUpto;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Returns the start offset of b in the pool</p></li>
+<li><p>&#64;param b byte to put</p></li>
+</ul>
+<p><a href="#id13"><span class="problematic" id="id14">*</span></a>/</p>
+</dd>
+<dt>public int addByte(byte b) {</dt><dd><p>int initOffset = byteOffset + byteUpto;
+int remainingBytesInBuffer = ByteBlockPool.BYTE_BLOCK_SIZE - byteUpto;
+// If the buffer is full, move on to the next one.
+if (remainingBytesInBuffer &lt;= 0) {</p>
+<blockquote>
+<div><p>nextBuffer();</p>
+</div></blockquote>
+<p>}
+buffer[byteUpto] = b;
+byteUpto++;
+return initOffset;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Returns the start offset of the bytes in the pool.</p></li>
+<li><p>If avoidSplitting is false, this is guaranteed to return the same value that would be</p></li>
+<li><p>returned by getOffset()</p></li>
+<li><p>&#64;param bytes source array</p></li>
+<li><p>&#64;param length number of bytes to put</p></li>
+<li><p>&#64;param avoidSplitting if possible (the length is less than ByteBlockPool.BYTE_BLOCK_SIZE),</p></li>
+<li><p>the bytes will not be split across buffer boundaries. This is useful for small data</p></li>
+<li><p>that will be read a lot (small amount of space wasted in return for avoiding copying</p></li>
+<li><p>memory when calling getBytes).</p></li>
+</ul>
+<p><a href="#id15"><span class="problematic" id="id16">*</span></a>/</p>
+</dd>
+<dt>public int addBytes(byte[] bytes, int offset, int length, boolean avoidSplitting) {</dt><dd><p>// The first time this is called, there may not be an existing buffer yet.
+if (buffer == null) {</p>
+<blockquote>
+<div><p>nextBuffer();</p>
+</div></blockquote>
+<p>}</p>
+<p>int remainingBytesInBuffer = ByteBlockPool.BYTE_BLOCK_SIZE - byteUpto;</p>
+<dl>
+<dt>if (avoidSplitting &amp;&amp; length &lt; ByteBlockPool.BYTE_BLOCK_SIZE) {</dt><dd><dl class="simple">
+<dt>if (remainingBytesInBuffer &lt; length) {</dt><dd><p>nextBuffer();</p>
+</dd>
+</dl>
+<p>}
+int initOffset = byteOffset + byteUpto;
+System.arraycopy(bytes, offset, buffer, byteUpto, length);
+byteUpto += length;
+return initOffset;</p>
+</dd>
+<dt>} else {</dt><dd><p>int initOffset = byteOffset + byteUpto;
+if (remainingBytesInBuffer &lt; length) {</p>
+<blockquote>
+<div><p>// Must split the bytes across buffers.
+int remainingLength = length;
+while (remainingLength &gt; ByteBlockPool.BYTE_BLOCK_SIZE - byteUpto) {</p>
+<blockquote>
+<div><p>int lengthToCopy = ByteBlockPool.BYTE_BLOCK_SIZE - byteUpto;
+System.arraycopy(bytes, length - remainingLength + offset,</p>
+<blockquote>
+<div><p>buffer, byteUpto, lengthToCopy);</p>
+</div></blockquote>
+<p>remainingLength -= lengthToCopy;
+nextBuffer();</p>
+</div></blockquote>
+<p>}
+System.arraycopy(bytes, length - remainingLength + offset,</p>
+<blockquote>
+<div><p>buffer, byteUpto, remainingLength);</p>
+</div></blockquote>
+<p>byteUpto += remainingLength;</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>// Just add all bytes to the current buffer.
+System.arraycopy(bytes, offset, buffer, byteUpto, length);
+byteUpto += length;</p>
+</dd>
+</dl>
+<p>}
+return initOffset;</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Default addBytes. Does not avoid splitting.</p></li>
+<li><p>&#64;see #addBytes(byte[], int, boolean)</p></li>
+</ul>
+<p><a href="#id17"><span class="problematic" id="id18">*</span></a>/</p>
+</dd>
+<dt>public int addBytes(byte[] bytes, int length) {</dt><dd><p>return addBytes(bytes, 0, length, false);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Default addBytes. Does not avoid splitting.</p></li>
+<li><p>&#64;see #addBytes(byte[], int, boolean)</p></li>
+</ul>
+<p><a href="#id19"><span class="problematic" id="id20">*</span></a>/</p>
+</dd>
+<dt>public int addBytes(byte[] bytes, int offset, int length) {</dt><dd><p>return addBytes(bytes, offset, length, false);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Reads one byte from the pool.</p></li>
+<li><p>&#64;param offset location to read byte from</p></li>
+</ul>
+<p><a href="#id21"><span class="problematic" id="id22">*</span></a>/</p>
+</dd>
+<dt>public byte getByte(int offset) {</dt><dd><p>int bufferIndex = offset &gt;&gt;&gt; ByteBlockPool.BYTE_BLOCK_SHIFT;
+int bufferOffset = offset &amp; ByteBlockPool.BYTE_BLOCK_MASK;
+return pool.buffers[bufferIndex][bufferOffset];</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Returns false if offset is invalid or there aren’t these many bytes</p></li>
+<li><p>available in the pool.</p></li>
+<li><p>&#64;param offset location to start reading bytes from</p></li>
+<li><p>&#64;param length number of bytes to read</p></li>
+<li><p>&#64;param output the object to write the output to. MUST be non null.</p></li>
+</ul>
+<p><a href="#id23"><span class="problematic" id="id24">*</span></a>/</p>
+</dd>
+<dt>public boolean getBytesToBytesRef(int offset, int length, BytesRef output) {</dt><dd><dl class="simple">
+<dt>if (offset &lt; 0 || offset + length &gt; byteUpto + byteOffset) {</dt><dd><p>return false;</p>
+</dd>
+</dl>
+<p>}
+int currentBuffer = offset &gt;&gt;&gt; ByteBlockPool.BYTE_BLOCK_SHIFT;
+int currentOffset = offset &amp; ByteBlockPool.BYTE_BLOCK_MASK;
+// If the requested bytes are split across pools, we have to make a new array of bytes
+// to copy them into and return a ref to that.
+if (currentOffset + length &lt;= ByteBlockPool.BYTE_BLOCK_SIZE) {</p>
+<blockquote>
+<div><p>output.bytes = pool.buffers[currentBuffer];
+output.offset = currentOffset;
+output.length = length;</p>
+</div></blockquote>
+<dl>
+<dt>} else {</dt><dd><p>byte[] bytes = new byte[length];
+int remainingLength = length;
+while (remainingLength &gt; ByteBlockPool.BYTE_BLOCK_SIZE - currentOffset) {</p>
+<blockquote>
+<div><p>int lengthToCopy = ByteBlockPool.BYTE_BLOCK_SIZE - currentOffset;
+System.arraycopy(pool.buffers[currentBuffer], currentOffset, bytes,</p>
+<blockquote>
+<div><p>length - remainingLength, lengthToCopy);</p>
+</div></blockquote>
+<p>remainingLength -= lengthToCopy;
+currentBuffer++;
+currentOffset = 0;</p>
+</div></blockquote>
+<p>}
+System.arraycopy(pool.buffers[currentBuffer], currentOffset, bytes, length - remainingLength,</p>
+<blockquote>
+<div><p>remainingLength);</p>
+</div></blockquote>
+<p>output.bytes = bytes;
+output.length = bytes.length;
+output.offset = 0;</p>
+</dd>
+</dl>
+<p>}
+return true;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Returns the read bytes, or null if offset is invalid or there aren’t these many bytes</p></li>
+<li><p>available in the pool.</p></li>
+<li><p>&#64;param offset location to start reading bytes from</p></li>
+<li><p>&#64;param length number of bytes to read</p></li>
+</ul>
+<p><a href="#id25"><span class="problematic" id="id26">*</span></a>/</p>
+</dd>
+<dt>public BytesRef getBytes(int offset, int length) {</dt><dd><p>BytesRef result = new BytesRef();
+if (getBytesToBytesRef(offset, length, result)) {</p>
+<blockquote>
+<div><p>return result;</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>return null;</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>get a new readStream at a given offset for this pool.</p></li>
+<li></li>
+<li><p>Notice that individual ReadStreams are not threadsafe, but you can get as many ReadStreams as</p></li>
+<li><p>you want.</p></li>
+</ul>
+<p><a href="#id27"><span class="problematic" id="id28">*</span></a>/</p>
+</dd>
+<dt>public ReadStream getReadStream(int offset) {</dt><dd><p>return new ReadStream(offset);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>get the (one and only) WriteStream for this pool.</p></li>
+<li></li>
+<li><p>Notice that there is exactly one WriteStream per pool, and it is not threadsafe.</p></li>
+</ul>
+<p><a href="#id29"><span class="problematic" id="id30">*</span></a>/</p>
+</dd>
+<dt>public WriteStream getWriteStream() {</dt><dd><p>return writeStream;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>A DataOutput-like interface for writing “contiguous” data to a ByteBlockPool.</p></li>
+<li></li>
+<li><p>This is not threadsafe.</p></li>
+</ul>
+<p><a href="#id31"><span class="problematic" id="id32">*</span></a>/</p>
+</dd>
+<dt>public final class WriteStream extends DataOutput {</dt><dd><p>private WriteStream() { }</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Returns the start offset of the next data that will be added to the pool, UNLESS the data is</p></li>
+<li><p>added using addBytes and avoidSplitting = true</p></li>
+</ul>
+<p><a href="#id33"><span class="problematic" id="id34">*</span></a>/</p>
+</dd>
+<dt>public int getOffset() {</dt><dd><p>return BaseByteBlockPool.this.getOffset();</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Write bytes to the pool.</p></li>
+<li><p>&#64;param bytes  source array</p></li>
+<li><p>&#64;param offset  offset in bytes of the data to write</p></li>
+<li><p>&#64;param length  number of bytes to put</p></li>
+<li><p>&#64;param avoidSplitting  same as {link ByteBlockPool.addBytes}</p></li>
+<li><p>&#64;return  the start offset of the bytes in the pool</p></li>
+</ul>
+<p><a href="#id35"><span class="problematic" id="id36">*</span></a>/</p>
+</dd>
+<dt>public int writeBytes(byte[] bytes, int offset, int length, boolean avoidSplitting) {</dt><dd><p>return addBytes(bytes, offset, length, avoidSplitting);</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;Override
+public void writeBytes(byte[] b, int offset, int length) throws IOException {</p>
+<blockquote>
+<div><p>addBytes(b, offset, length);</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public void writeByte(byte b) {</p>
+<blockquote>
+<div><p>addByte(b);</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>A DataInput-like interface for reading “contiguous” data from a ByteBlockPool.</p></li>
+<li></li>
+<li><p>This is not threadsafe.</p></li>
+<li></li>
+<li><p>This does not fully implement the DataInput interface - its DataInput.readBytes method throws</p></li>
+<li><p>UnsupportedOperationException because this class provides a facility for no-copy reading.</p></li>
+</ul>
+<p><a href="#id37"><span class="problematic" id="id38">*</span></a>/</p>
+</dd>
+<dt>public final class ReadStream extends DataInput {</dt><dd><p>private int offset;</p>
+<dl class="simple">
+<dt>private ReadStream(int offset) {</dt><dd><p>this.offset = offset;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public BytesRef readBytes(int n) {</dt><dd><p>return readBytes(n, false);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>read n bytes that were written with a given value of avoidSplitting</p></li>
+<li><p>&#64;param n  number of bytes to read.</p></li>
+<li><p>&#64;param avoidSplitting  this should be the same that was used at writeBytes time.</p></li>
+<li><p>&#64;return  a reference to the bytes read or null.</p></li>
+</ul>
+<p><a href="#id39"><span class="problematic" id="id40">*</span></a>/</p>
+</dd>
+<dt>public BytesRef readBytes(int n, boolean avoidSplitting) {</dt><dd><p>int currentBuffer = offset &gt;&gt;&gt; ByteBlockPool.BYTE_BLOCK_SHIFT;
+int currentOffset = offset &amp; ByteBlockPool.BYTE_BLOCK_MASK;
+if (avoidSplitting &amp;&amp; n &lt; ByteBlockPool.BYTE_BLOCK_SIZE</p>
+<blockquote>
+<div><blockquote>
+<div><p>&amp;&amp; currentOffset + n &gt; ByteBlockPool.BYTE_BLOCK_SIZE) {</p>
+</div></blockquote>
+<p>++currentBuffer;
+currentOffset = 0;
+offset = currentBuffer &lt;&lt; ByteBlockPool.BYTE_BLOCK_SHIFT;</p>
+</div></blockquote>
+<p>}
+BytesRef result = getBytes(offset, n);
+this.offset += n;
+return result;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;Override
+public byte readByte() {</p>
+<blockquote>
+<div><p>return getByte(offset++);</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public void readBytes(byte[] b, int off, int len) throws IOException {</p>
+<blockquote>
+<div><p>throw new UnsupportedOperationException(“Use the no-copies version of ReadBytes instead.”);</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/src/java/com/twitter/search/core/earlybird/index/inverted/BaseByteBlockPool.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

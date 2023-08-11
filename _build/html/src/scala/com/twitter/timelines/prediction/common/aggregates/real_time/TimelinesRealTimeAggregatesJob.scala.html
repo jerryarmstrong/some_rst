@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.timelines.prediction.common.aggregates.real_time</p>
+<p>import com.twitter.conversions.DurationOps._
+import com.twitter.finagle.stats.DefaultStatsReceiver
+import com.twitter.summingbird.Options
+import com.twitter.summingbird.online.option.FlatMapParallelism
+import com.twitter.summingbird.online.option.SourceParallelism
+import com.twitter.timelines.data_processing.ml_util.aggregation_framework.heron._
+import com.twitter.timelines.data_processing.ml_util.transforms.DownsampleTransform
+import com.twitter.timelines.data_processing.ml_util.transforms.RichITransform
+import com.twitter.timelines.data_processing.ml_util.transforms.UserDownsampleTransform</p>
+<p>import com.twitter.timelines.prediction.common.aggregates.BCELabelTransformFromUUADataRecord</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Sets up relevant topology parameters. Our primary goal is to handle the</p></li>
+<li><p>LogEvent stream and aggregate (sum) on the parsed DataRecords without falling</p></li>
+<li><p>behind. Our constraint is the resulting write (and read) QPS to the backing</p></li>
+<li><p>memcache store.</p></li>
+<li></li>
+<li><p>If the job is falling behind, add more flatMappers and/or Summers after</p></li>
+<li><p>inspecting the viz panels for the respective job (go/heron-ui). An increase in</p></li>
+<li><p>Summers (and/or aggregation keys and features in the config) results in an</p></li>
+<li><p>increase in memcache QPS (go/cb and search for our cache). Adjust with CacheSize</p></li>
+<li><p>settings until QPS is well-controlled.</p></li>
+<li></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>object TimelinesRealTimeAggregatesJobConfigs extends RealTimeAggregatesJobConfigs {</dt><dd><p>import TimelinesOnlineAggregationUtils._</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>We remove input records that do not contain a label/engagement as defined in AllTweetLabels, which includes</p></li>
+<li><p>explicit user engagements including public, private and impression events. By avoiding ingesting records without</p></li>
+<li><p>engagemnts, we guarantee that no distribution shifts occur in computed aggregate features when we add a new spout</p></li>
+<li><p>to input aggregate sources. Counterfactual signal is still available since we aggregate on explicit dwell</p></li>
+<li><p>engagements.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>val NegativeDownsampleTransform =</dt><dd><dl class="simple">
+<dt>DownsampleTransform(</dt><dd><p>negativeSamplingRate = 0.0,
+keepLabels = AllTweetLabels,
+positiveSamplingRate = 1.0)</p>
+</dd>
+</dl>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>We downsample positive engagements for devel topology to reduce traffic, aiming for equivalent of 10% of prod traffic.</p></li>
+<li><p>First apply consistent downsampling to 10% of users, and then apply downsampling to remove records without</p></li>
+<li><p>explicit labels. We apply user-consistent sampling to more closely approximate prod query patterns.</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>val StagingUserBasedDownsampleTransform =</dt><dd><dl class="simple">
+<dt>UserDownsampleTransform(</dt><dd><p>availability = 1000,
+featureName = “rta_devel”</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>override val Prod = RealTimeAggregatesJobConfig(</dt><dd><p>appId = “summingbird_timelines_rta”,
+topologyWorkers = 1450,
+sourceCount = 120,
+flatMapCount = 1800,
+summerCount = 3850,
+cacheSize = 200,
+containerRamGigaBytes = 54,
+name = “timelines_real_time_aggregates”,
+teamName = “timelines”,
+teamEmail = “”,
+// If one component is hitting GC limit at prod, tune componentToMetaSpaceSizeMap.
+// Except for Source bolts. Tune componentToRamGigaBytesMap for Source bolts instead.
+componentToMetaSpaceSizeMap = Map(</p>
+<blockquote>
+<div><p>“Tail-FlatMap” -&gt; “-XX:MaxMetaspaceSize=1024M -XX:MetaspaceSize=1024M”,
+“Tail” -&gt; “-XX:MaxMetaspaceSize=2560M -XX:MetaspaceSize=2560M”</p>
+</div></blockquote>
+<p>),
+// If either component is hitting memory limit at prod
+// its memory need to increase: either increase total memory of container (containerRamGigaBytes),
+// or allocate more memory for one component while keeping total memory unchanged.
+componentToRamGigaBytesMap = Map(</p>
+<blockquote>
+<div><p>“Tail-FlatMap-Source” -&gt; 3, // Home source
+“Tail-FlatMap-Source.2” -&gt; 3, // Profile source
+“Tail-FlatMap-Source.3” -&gt; 3, // Search source
+“Tail-FlatMap-Source.4” -&gt; 3, // UUA source
+“Tail-FlatMap” -&gt; 8
+// Tail will use the leftover memory in the container.
+// Make sure to tune topologyWorkers and containerRamGigaBytes such that this is greater than 10 GB.</p>
+</div></blockquote>
+<p>),
+topologyNamedOptions = Map(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>“TL_EVENTS_SOURCE” -&gt; Options()</dt><dd><p>.set(SourceParallelism(120)),</p>
+</dd>
+<dt>“PROFILE_EVENTS_SOURCE” -&gt; Options()</dt><dd><p>.set(SourceParallelism(30)),</p>
+</dd>
+<dt>“SEARCH_EVENTS_SOURCE” -&gt; Options()</dt><dd><p>.set(SourceParallelism(10)),</p>
+</dd>
+<dt>“UUA_EVENTS_SOURCE” -&gt; Options()</dt><dd><p>.set(SourceParallelism(10)),</p>
+</dd>
+<dt>“COMBINED_PRODUCER” -&gt; Options()</dt><dd><p>.set(FlatMapParallelism(1800))</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>),
+// The UUA datarecord for BCE events inputted will not have binary labels populated.
+// BCELabelTransform will set the datarecord with binary BCE dwell labels features based on the corresponding dwell_time_ms.
+// It’s important to have the BCELabelTransformFromUUADataRecord before ProdNegativeDownsampleTransform
+// because ProdNegativeDownsampleTransform will remove datarecord that contains no features from AllTweetLabels.
+onlinePreTransforms =</p>
+<blockquote>
+<div><p>Seq(RichITransform(BCELabelTransformFromUUADataRecord), NegativeDownsampleTransform)</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>we downsample 10% computation of devel RTA based on [[StagingNegativeDownsampleTransform]].</p></li>
+<li><p>To better test scalability of topology, we reduce computing resource of components “Tail-FlatMap”</p></li>
+<li><p>and “Tail” to be 10% of prod but keep computing resource of component “Tail-FlatMap-Source” unchanged.</p></li>
+<li><p>hence flatMapCount=110, summerCount=105 and sourceCount=100. Hence topologyWorkers =(110+105+100)/5 = 63.</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+<dt>override val Devel = RealTimeAggregatesJobConfig(</dt><dd><p>appId = “summingbird_timelines_rta_devel”,
+topologyWorkers = 120,
+sourceCount = 120,
+flatMapCount = 150,
+summerCount = 300,
+cacheSize = 200,
+containerRamGigaBytes = 54,
+name = “timelines_real_time_aggregates_devel”,
+teamName = “timelines”,
+teamEmail = “”,
+// If one component is hitting GC limit at prod, tune componentToMetaSpaceSizeMap
+// Except for Source bolts. Tune componentToRamGigaBytesMap for Source bolts instead.
+componentToMetaSpaceSizeMap = Map(</p>
+<blockquote>
+<div><p>“Tail-FlatMap” -&gt; “-XX:MaxMetaspaceSize=1024M -XX:MetaspaceSize=1024M”,
+“Tail” -&gt; “-XX:MaxMetaspaceSize=2560M -XX:MetaspaceSize=2560M”</p>
+</div></blockquote>
+<p>),
+// If either component is hitting memory limit at prod
+// its memory need to increase: either increase total memory of container (containerRamGigaBytes),
+// or allocate more memory for one component while keeping total memory unchanged.
+componentToRamGigaBytesMap = Map(</p>
+<blockquote>
+<div><p>“Tail-FlatMap-Source” -&gt; 3, // Home source
+“Tail-FlatMap-Source.2” -&gt; 3, // Profile source
+“Tail-FlatMap-Source.3” -&gt; 3, // Search source
+“Tail-FlatMap-Source.4” -&gt; 3, // UUA source
+“Tail-FlatMap” -&gt; 8
+// Tail will use the leftover memory in the container.
+// Make sure to tune topologyWorkers and containerRamGigaBytes such that this is greater than 10 GB.</p>
+</div></blockquote>
+<p>),
+topologyNamedOptions = Map(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>“TL_EVENTS_SOURCE” -&gt; Options()</dt><dd><p>.set(SourceParallelism(120)),</p>
+</dd>
+<dt>“PROFILE_EVENTS_SOURCE” -&gt; Options()</dt><dd><p>.set(SourceParallelism(30)),</p>
+</dd>
+<dt>“SEARCH_EVENTS_SOURCE” -&gt; Options()</dt><dd><p>.set(SourceParallelism(10)),</p>
+</dd>
+<dt>“UUA_EVENTS_SOURCE” -&gt; Options()</dt><dd><p>.set(SourceParallelism(10)),</p>
+</dd>
+<dt>“COMBINED_PRODUCER” -&gt; Options()</dt><dd><p>.set(FlatMapParallelism(150))</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>),
+// It’s important to have the BCELabelTransformFromUUADataRecord before ProdNegativeDownsampleTransform
+onlinePreTransforms = Seq(</p>
+<blockquote>
+<div><p>StagingUserBasedDownsampleTransform,
+RichITransform(BCELabelTransformFromUUADataRecord),
+NegativeDownsampleTransform),</p>
+</div></blockquote>
+<p>enableUserReindexingNighthawkBtreeStore = true,
+enableUserReindexingNighthawkHashStore = true,
+userReindexingNighthawkBtreeStoreConfig = NighthawkUnderlyingStoreConfig(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>serversetPath =</dt><dd><p>“/twitter/service/cache-user/test/nighthawk_timelines_real_time_aggregates_btree_test_api”,</p>
+</dd>
+</dl>
+<p>// NOTE: table names are prefixed to every pkey so keep it short
+tableName = “u_r_v1”, // (u)ser_(r)eindexing_v1
+// keep ttl &lt;= 1 day because it’s keyed on user, and we will have limited hit rates beyond 1 day
+cacheTTL = 1.day</p>
+</div></blockquote>
+<p>),
+userReindexingNighthawkHashStoreConfig = NighthawkUnderlyingStoreConfig(</p>
+<blockquote>
+<div><p>// For prod: “/s/cache-user/nighthawk_timelines_real_time_aggregates_hash_api”,
+serversetPath =</p>
+<blockquote>
+<div><p>“/twitter/service/cache-user/test/nighthawk_timelines_real_time_aggregates_hash_test_api”,</p>
+</div></blockquote>
+<p>// NOTE: table names are prefixed to every pkey so keep it short
+tableName = “u_r_v1”, // (u)ser_(r)eindexing_v1
+// keep ttl &lt;= 1 day because it’s keyed on user, and we will have limited hit rates beyond 1 day
+cacheTTL = 1.day</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>object TimelinesRealTimeAggregatesJob extends RealTimeAggregatesJobBase {</dt><dd><p>override lazy val statsReceiver = DefaultStatsReceiver.scope(“timelines_real_time_aggregates”)
+override lazy val jobConfigs = TimelinesRealTimeAggregatesJobConfigs
+override lazy val aggregatesToCompute = TimelinesOnlineAggregationConfig.AggregatesToCompute</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/src/scala/com/twitter/timelines/prediction/common/aggregates/real_time/TimelinesRealTimeAggregatesJob.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

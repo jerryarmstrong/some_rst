@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.tweetypie
+package handler</p>
+<p>import com.twitter.servo.util.FutureArrow
+import com.twitter.stitch.Stitch
+import com.twitter.tweetypie.core.FilteredState
+import com.twitter.tweetypie.core.TweetHydrationError
+import com.twitter.tweetypie.repository.ParentUserIdRepository
+import com.twitter.tweetypie.storage.TweetStorageClient.Undelete
+import com.twitter.tweetypie.storage.DeleteState
+import com.twitter.tweetypie.storage.DeletedTweetResponse
+import com.twitter.tweetypie.storage.TweetStorageClient
+import com.twitter.tweetypie.store.UndeleteTweet
+import com.twitter.tweetypie.thriftscala.UndeleteTweetState.{Success =&gt; TweetypieSuccess, _}
+import com.twitter.tweetypie.thriftscala._
+import com.twitter.tweetypie.thriftscala.entities.EntityExtractor
+import scala.util.control.NoStackTrace</p>
+<p>trait UndeleteException extends Exception with NoStackTrace</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Exceptions we return to the user, things that we don’t expect to ever happen unless there is a</p></li>
+<li><p>problem with the underlying data in Manhattan or a bug in [[com.twitter.tweetypie.storage.TweetStorageClient]]</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+</dl>
+<p>object NoDeletedAtTimeException extends UndeleteException
+object NoCreatedAtTimeException extends UndeleteException
+object NoStatusWithSuccessException extends UndeleteException
+object NoUserIdWithTweetException extends UndeleteException
+object NoDeletedTweetException extends UndeleteException
+object SoftDeleteUserIdNotFoundException extends UndeleteException</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>represents a problem that we choose to return to the user as a response state</p></li>
+<li><p>rather than as an exception.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>case class ResponseException(state: UndeleteTweetState) extends Exception with NoStackTrace {</dt><dd><p>def toResponse: UndeleteTweetResponse = UndeleteTweetResponse(state = state)</p>
+</dd>
+</dl>
+<p>}</p>
+<p>private[this] object SoftDeleteExpiredException extends ResponseException(SoftDeleteExpired)
+private[this] object BounceDeleteException extends ResponseException(TweetIsBounceDeleted)
+private[this] object SourceTweetNotFoundException extends ResponseException(SourceTweetNotFound)
+private[this] object SourceUserNotFoundException extends ResponseException(SourceUserNotFound)
+private[this] object TweetExistsException extends ResponseException(TweetAlreadyExists)
+private[this] object TweetNotFoundException extends ResponseException(TweetNotFound)
+private[this] object U13TweetException extends ResponseException(TweetIsU13Tweet)
+private[this] object UserNotFoundException extends ResponseException(UserNotFound)</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Undelete Notes:</p></li>
+<li></li>
+<li><p>If request.force is set to true, then the undelete will take place even if the undeleted tweet</p></li>
+<li><p>is already present in Manhattan. This is useful if a tweet was recently restored to the backend,</p></li>
+<li><p>but the async actions portion of the undelete failed and you want to retry them.</p></li>
+<li></li>
+<li><p>Before undeleting the tweet we check if it’s a retweet, in which case we require that the sourceTweet</p></li>
+<li><p>and sourceUser exist.</p></li>
+<li></li>
+<li><p>Tweets can only be undeleted for N days where N is the number of days before tweets marked with</p></li>
+<li><p>the soft_delete_state flag are deleted permanently by the cleanup job</p></li>
+<li></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+</dl>
+<p>object UndeleteTweetHandler {</p>
+<blockquote>
+<div><p>type Type = FutureArrow[UndeleteTweetRequest, UndeleteTweetResponse]</p>
+<p>/** Extract an optional value inside a future or throw if it’s missing. <a href="#id7"><span class="problematic" id="id8">*</span></a>/
+def required[T](option: Future[Option[T]], ex: =&gt; Exception): Future[T] =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>option.flatMap {</dt><dd><p>case None =&gt; Future.exception(ex)
+case Some(i) =&gt; Future.value(i)</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<dl class="simple">
+<dt>def apply(</dt><dd><p>undelete: TweetStorageClient.Undelete,
+tweetExists: FutureArrow[TweetId, Boolean],
+getUser: FutureArrow[UserId, Option[User]],
+getDeletedTweets: TweetStorageClient.GetDeletedTweets,
+parentUserIdRepo: ParentUserIdRepository.Type,
+save: FutureArrow[UndeleteTweet.Event, Tweet]</p>
+</dd>
+</dl>
+<p>): Type = {</p>
+<blockquote>
+<div><dl>
+<dt>def getParentUserId(tweet: Tweet): Future[Option[UserId]] =</dt><dd><dl>
+<dt>Stitch.run {</dt><dd><dl>
+<dt>parentUserIdRepo(tweet)</dt><dd><dl class="simple">
+<dt>.handle {</dt><dd><p>case ParentUserIdRepository.ParentTweetNotFound(id) =&gt; None</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>val entityExtractor = EntityExtractor.mutationAll.endo</p>
+<dl>
+<dt>val getDeletedTweet: Long =&gt; Future[DeletedTweetResponse] =</dt><dd><p>id =&gt; Stitch.run(getDeletedTweets(Seq(id)).map(_.head))</p>
+</dd>
+<dt>def getRequiredUser(userId: Option[UserId]): Future[User] =</dt><dd><dl class="simple">
+<dt>userId match {</dt><dd><p>case None =&gt; Future.exception(SoftDeleteUserIdNotFoundException)
+case Some(id) =&gt; required(getUser(id), UserNotFoundException)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>def getValidatedDeletedTweet(</dt><dd><p>tweetId: TweetId,
+allowNotDeleted: Boolean</p>
+</dd>
+<dt>): Future[DeletedTweet] = {</dt><dd><p>import DeleteState._
+val deletedTweet = getDeletedTweet(tweetId).map { response =&gt;</p>
+<blockquote>
+<div><dl class="simple">
+<dt>response.deleteState match {</dt><dd><p>case SoftDeleted =&gt; response.tweet
+// BounceDeleted tweets violated Twitter Rules and may not be undeleted
+case BounceDeleted =&gt; throw BounceDeleteException
+case HardDeleted =&gt; throw SoftDeleteExpiredException
+case NotDeleted =&gt; if (allowNotDeleted) response.tweet else throw TweetExistsException
+case NotFound =&gt; throw TweetNotFoundException</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>required(deletedTweet, NoDeletedTweetException)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Fetch the source tweet’s user for a deleted share</p></li>
+</ul>
+<p><a href="#id9"><span class="problematic" id="id10">*</span></a>/</p>
+</dd>
+<dt>def getSourceUser(share: Option[DeletedTweetShare]): Future[Option[User]] =</dt><dd><dl class="simple">
+<dt>share match {</dt><dd><p>case None =&gt; Future.value(None)
+case Some(s) =&gt; required(getUser(s.sourceUserId), SourceUserNotFoundException).map(Some(_))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Ensure that the undelete response contains all the required information to continue with</p></li>
+<li><p>the tweetypie undelete.</p></li>
+</ul>
+<p><a href="#id11"><span class="problematic" id="id12">*</span></a>/</p>
+</dd>
+<dt>def validateUndeleteResponse(response: Undelete.Response, force: Boolean): Future[Tweet] =</dt><dd><dl>
+<dt>Future {</dt><dd><dl>
+<dt>(response.code, response.tweet) match {</dt><dd><p>case (Undelete.UndeleteResponseCode.NotCreated, _) =&gt; throw TweetNotFoundException
+case (Undelete.UndeleteResponseCode.BackupNotFound, _) =&gt; throw SoftDeleteExpiredException
+case (Undelete.UndeleteResponseCode.Success, None) =&gt; throw NoStatusWithSuccessException
+case (Undelete.UndeleteResponseCode.Success, Some(tweet)) =&gt;</p>
+<blockquote>
+<div><p>// archivedAtMillis is required on the response unless force is present
+// or the tweet is a retweet. retweets have no favs or retweets to clean up
+// of their own so the original deleted at time is not needed
+if (response.archivedAtMillis.isEmpty &amp;&amp; !force &amp;&amp; !isRetweet(tweet))</p>
+<blockquote>
+<div><p>throw NoDeletedAtTimeException</p>
+</div></blockquote>
+<dl class="simple">
+<dt>else</dt><dd><p>tweet</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>case (code, _) =&gt; throw new Exception(s”Unknown UndeleteResponseCode $code”)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>def enforceU13Compliance(user: User, deletedTweet: DeletedTweet): Future[Unit] =</dt><dd><dl class="simple">
+<dt>Future.when(U13ValidationUtil.wasTweetCreatedBeforeUserTurned13(user, deletedTweet)) {</dt><dd><p>throw U13TweetException</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Fetch required data and perform before/after validations for undelete.</p></li>
+<li><p>If everything looks good with the undelete, kick off the tweetypie undelete</p></li>
+<li><p>event.</p></li>
+</ul>
+<p><a href="#id13"><span class="problematic" id="id14">*</span></a>/</p>
+</dd>
+<dt>FutureArrow { request =&gt;</dt><dd><p>val hydrationOptions = request.hydrationOptions.getOrElse(WritePathHydrationOptions())
+val force = request.force.getOrElse(false)
+val tweetId = request.tweetId</p>
+<dl>
+<dt>(for {</dt><dd><p>// we must be able to query the tweet from the soft delete table
+deletedTweet &lt;- getValidatedDeletedTweet(tweetId, allowNotDeleted = force)</p>
+<p>// we always require the user
+user &lt;- getRequiredUser(deletedTweet.userId)</p>
+<p>// Make sure we’re not restoring any u13 tweets.
+() &lt;- enforceU13Compliance(user, deletedTweet)</p>
+<p>// if a retweet, then sourceUser is required; sourceTweet will be hydrated in save()
+sourceUser &lt;- getSourceUser(deletedTweet.share)</p>
+<p>// validations passed, perform the undelete.
+undeleteResponse &lt;- Stitch.run(undelete(tweetId))</p>
+<p>// validate the response
+tweet &lt;- validateUndeleteResponse(undeleteResponse, force)</p>
+<p>// Extract entities from tweet text
+tweetWithEntities = entityExtractor(tweet)</p>
+<p>// If a retweet, get user id of parent retweet
+parentUserId &lt;- getParentUserId(tweet)</p>
+<p>// undeletion was successful, hydrate the tweet and
+// kick off tweetypie async undelete actions
+hydratedTweet &lt;- save(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>UndeleteTweet.Event(</dt><dd><p>tweet = tweetWithEntities,
+user = user,
+timestamp = Time.now,
+hydrateOptions = hydrationOptions,
+deletedAt = undeleteResponse.archivedAtMillis.map(Time.fromMilliseconds),
+sourceUser = sourceUser,
+parentUserId = parentUserId</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+<dt>} yield {</dt><dd><p>UndeleteTweetResponse(TweetypieSuccess, Some(hydratedTweet))</p>
+</dd>
+<dt>}).handle {</dt><dd><dl class="simple">
+<dt>case TweetHydrationError(_, Some(FilteredState.Unavailable.SourceTweetNotFound(_))) =&gt;</dt><dd><p>SourceTweetNotFoundException.toResponse</p>
+</dd>
+<dt>case ex: ResponseException =&gt;</dt><dd><p>ex.toResponse</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/tweetypie/server/src/main/scala/com/twitter/tweetypie/handler/UndeleteTweetHandler.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

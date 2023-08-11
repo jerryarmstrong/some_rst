@@ -1,0 +1,772 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>/** Copyright 2012 Twitter, Inc. <a href="#id1"><span class="problematic" id="id2">*</span></a>/
+package com.twitter.tweetypie.service</p>
+<p>import com.twitter.coreservices.StratoPublicApiRequestAttributionCounter
+import com.twitter.finagle.CancelledRequestException
+import com.twitter.finagle.context.Contexts
+import com.twitter.finagle.context.Deadline
+import com.twitter.finagle.mux.ClientDiscardedRequestException
+import com.twitter.finagle.stats.DefaultStatsReceiver
+import com.twitter.finagle.stats.Stat
+import com.twitter.servo.exception.thriftscala.ClientError
+import com.twitter.servo.util.ExceptionCategorizer
+import com.twitter.servo.util.MemoizedExceptionCounterFactory
+import com.twitter.tweetypie.Future
+import com.twitter.tweetypie.Gate
+import com.twitter.tweetypie.Logger
+import com.twitter.tweetypie.StatsReceiver
+import com.twitter.tweetypie.ThriftTweetService
+import com.twitter.tweetypie.TweetId
+import com.twitter.tweetypie.client_id.ClientIdHelper
+import com.twitter.tweetypie.context.TweetypieContext
+import com.twitter.tweetypie.core.OverCapacity
+import com.twitter.tweetypie.serverutil.ExceptionCounter
+import com.twitter.tweetypie.thriftscala._
+import com.twitter.util.Promise</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>A TweetService that takes care of the handling of requests from</p></li>
+<li><p>external services. In particular, this wrapper doesn’t have any</p></li>
+<li><p>logic for handling requests itself. It just serves as a gateway for</p></li>
+<li><p>requests and responses, making sure that the underlying tweet</p></li>
+<li><p>service only sees requests it should handle and that the external</p></li>
+<li><p>clients get clean responses.</p></li>
+<li></li>
+<li><ul>
+<li><p>Ensures that exceptions are propagated cleanly</p></li>
+</ul>
+</li>
+<li><ul>
+<li><p>Sheds traffic if necessary</p></li>
+</ul>
+</li>
+<li><ul>
+<li><p>Authenticates clients</p></li>
+</ul>
+</li>
+<li><ul>
+<li><p>Records stats about clients</p></li>
+</ul>
+</li>
+<li></li>
+<li><p>For each endpoint, we record both client-specific and total metrics for number of requests,</p></li>
+<li><p>successes, exceptions, and latency.  The stats names follow the patterns:</p></li>
+<li><ul>
+<li><p>./&lt;methodName&gt;/requests</p></li>
+</ul>
+</li>
+<li><ul>
+<li><p>./&lt;methodName&gt;/success</p></li>
+</ul>
+</li>
+<li><ul>
+<li><p>./&lt;methodName&gt;/client_errors</p></li>
+</ul>
+</li>
+<li><ul>
+<li><p>./&lt;methodName&gt;/server_errors</p></li>
+</ul>
+</li>
+<li><ul>
+<li><p>./&lt;methodName&gt;/exceptions</p></li>
+</ul>
+</li>
+<li><ul>
+<li><p>./&lt;methodName&gt;/exceptions/&lt;exceptionName&gt;</p></li>
+</ul>
+</li>
+<li><ul>
+<li><p>./&lt;methodName&gt;/&lt;clientId&gt;/requests</p></li>
+</ul>
+</li>
+<li><ul>
+<li><p>./&lt;methodName&gt;/&lt;clientId&gt;/success</p></li>
+</ul>
+</li>
+<li><ul>
+<li><p>./&lt;methodName&gt;/&lt;clientId&gt;/exceptions</p></li>
+</ul>
+</li>
+<li><ul>
+<li><p>./&lt;methodName&gt;/&lt;clientId&gt;/exceptions/&lt;exceptionName&gt;</p></li>
+</ul>
+</li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>class ClientHandlingTweetService(</dt><dd><p>underlying: ThriftTweetService,
+stats: StatsReceiver,
+loadShedEligible: Gate[String],
+shedReadTrafficVoluntarily: Gate[Unit],
+requestAuthorizer: ClientRequestAuthorizer,
+getTweetsAuthorizer: MethodAuthorizer[GetTweetsRequest],
+getTweetFieldsAuthorizer: MethodAuthorizer[GetTweetFieldsRequest],
+requestSizeAuthorizer: MethodAuthorizer[Int],
+clientIdHelper: ClientIdHelper)</p>
+<blockquote>
+<div><p>extends ThriftTweetService {</p>
+</div></blockquote>
+<p>import RescueExceptions._</p>
+<p>private val log = Logger(“com.twitter.tweetypie.service.TweetService”)</p>
+<p>private[this] val Requests = “requests”
+private[this] val Success = “success”
+private[this] val Latency = “latency_ms”</p>
+<dl class="simple">
+<dt>private[this] val StratoStatsCounter = new StratoPublicApiRequestAttributionCounter(</dt><dd><p>DefaultStatsReceiver</p>
+</dd>
+</dl>
+<p>)
+private[this] val clientServerCategorizer =</p>
+<blockquote>
+<div><dl>
+<dt>ExceptionCategorizer.simple {</dt><dd><dl class="simple">
+<dt>_ match {</dt><dd><p>case _: ClientError | _: AccessDenied =&gt; “client_errors”
+case _ =&gt; “server_errors”</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<dl>
+<dt>private[this] val preServoExceptionCountersWithClientId =</dt><dd><p>new MemoizedExceptionCounterFactory(stats)</p>
+</dd>
+<dt>private[this] val preServoExceptionCounters =</dt><dd><p>new MemoizedExceptionCounterFactory(stats, categorizer = ExceptionCounter.defaultCategorizer)</p>
+</dd>
+<dt>private[this] val postServoExceptionCounters =</dt><dd><p>new MemoizedExceptionCounterFactory(stats, categorizer = clientServerCategorizer)</p>
+</dd>
+<dt>private def clientId: String =</dt><dd><p>clientIdHelper.effectiveClientId.getOrElse(ClientIdHelper.UnknownClientId)</p>
+</dd>
+<dt>private def clientIdRoot: String =</dt><dd><p>clientIdHelper.effectiveClientIdRoot.getOrElse(ClientIdHelper.UnknownClientId)</p>
+</dd>
+<dt>private[this] val futureOverCapacityException =</dt><dd><p>Future.exception(OverCapacity(“Request rejected due to load shedding.”))</p>
+</dd>
+<dt>private[this] def ifNotOverCapacityRead[T](</dt><dd><p>methodStats: StatsReceiver,
+requestSize: Long</p>
+</dd>
+<dt>)(</dt><dd><p>f: =&gt; Future[T]</p>
+</dd>
+<dt>): Future[T] = {</dt><dd><p>val couldShed = loadShedEligible(clientId)
+val doShed = couldShed &amp;&amp; shedReadTrafficVoluntarily()</p>
+<p>methodStats.stat(“loadshed_incoming_requests”).add(requestSize)
+if (couldShed) {</p>
+<blockquote>
+<div><p>methodStats.stat(“loadshed_eligible_requests”).add(requestSize)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>methodStats.stat(“loadshed_ineligible_requests”).add(requestSize)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>if (doShed) {</dt><dd><p>methodStats.stat(“loadshed_rejected_requests”).add(requestSize)
+futureOverCapacityException</p>
+</dd>
+<dt>} else {</dt><dd><p>f</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def maybeTimeFuture[A](maybeStat: Option[Stat])(f: =&gt; Future[A]) =</dt><dd><dl class="simple">
+<dt>maybeStat match {</dt><dd><p>case Some(stat) =&gt; Stat.timeFuture(stat)(f)
+case None =&gt; f</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Perform the action, increment the appropriate counters, and clean up the exceptions to servo exceptions</p></li>
+<li></li>
+<li><p>This method also masks all interrupts to prevent request cancellation on hangup.</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>private[this] def trackS[T](</dt><dd><p>name: String,
+requestInfo: Any,
+extraStatPrefix: Option[String] = None,
+requestSize: Option[Long] = None</p>
+</dd>
+<dt>)(</dt><dd><p>action: StatsReceiver =&gt; Future[T]</p>
+</dd>
+<dt>): Future[T] = {</dt><dd><p>val methodStats = stats.scope(name)
+val clientStats = methodStats.scope(clientIdRoot)
+val cancelledCounter = methodStats.counter(“cancelled”)</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Returns an identical future except that it ignores interrupts and increments a counter</p></li>
+<li><p>when a request is cancelled. This is [[Future]].masked but with a counter.</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+<dt>def maskedWithStats[A](f: Future[A]): Future[A] = {</dt><dd><p>val p = Promise[A]()
+p.setInterruptHandler {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case _: ClientDiscardedRequestException | _: CancelledRequestException =&gt;</dt><dd><p>cancelledCounter.incr()</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+f.proxyTo(p)
+p</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>maskedWithStats(</dt><dd><dl>
+<dt>requestAuthorizer(name, clientIdHelper.effectiveClientId)</dt><dd><dl>
+<dt>.flatMap { _ =&gt;</dt><dd><p>methodStats.counter(Requests).incr()
+extraStatPrefix.foreach(p =&gt; methodStats.counter(p, Requests).incr())
+clientStats.counter(Requests).incr()
+StratoStatsCounter.recordStats(name, “tweets”, requestSize.getOrElse(1L))</p>
+<dl>
+<dt>Stat.timeFuture(methodStats.stat(Latency)) {</dt><dd><dl>
+<dt>Stat.timeFuture(clientStats.stat(Latency)) {</dt><dd><dl>
+<dt>maybeTimeFuture(extraStatPrefix.map(p =&gt; methodStats.stat(p, Latency))) {</dt><dd><p>TweetypieContext.Local.trackStats(stats, methodStats, clientStats)</p>
+<p>// Remove the deadline for backend requests when we mask client cancellations so
+// that side-effects are applied to all backend services even after client timeouts.
+// Wrap and then flatten an extra layer of Future to capture any thrown exceptions.
+Future(Contexts.broadcast.letClear(Deadline)(action(methodStats))).flatten</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+<dt>).onSuccess { _ =&gt;</dt><dd><blockquote>
+<div><p>methodStats.counter(Success).incr()
+extraStatPrefix.foreach(p =&gt; methodStats.counter(p, Success).incr())
+clientStats.counter(Success).incr()</p>
+</div></blockquote>
+<p>}
+.onFailure { e =&gt;</p>
+<blockquote>
+<div><p>preServoExceptionCounters(name)(e)
+preServoExceptionCountersWithClientId(name, clientIdRoot)(e)</p>
+</div></blockquote>
+<p>}
+.rescue(rescueToServoFailure(name, clientId))
+.onFailure { e =&gt;</p>
+<blockquote>
+<div><p>postServoExceptionCounters(name)(e)
+logFailure(e, requestInfo)</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>def track[T](</dt><dd><p>name: String,
+requestInfo: Any,
+extraStatPrefix: Option[String] = None,
+requestSize: Option[Long] = None</p>
+</dd>
+<dt>)(</dt><dd><p>action: =&gt; Future[T]</p>
+</dd>
+<dt>): Future[T] = {</dt><dd><p>trackS(name, requestInfo, extraStatPrefix, requestSize) { _: StatsReceiver =&gt; action }</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def logFailure(ex: Throwable, requestInfo: Any): Unit =</dt><dd><p>log.warn(s”Returning failure response: $exn failed request info: $requestInfo”)</p>
+</dd>
+<dt>object RequestWidthPrefix {</dt><dd><dl>
+<dt>private def prefix(width: Int) = {</dt><dd><dl>
+<dt>val bucketMin =</dt><dd><dl class="simple">
+<dt>width match {</dt><dd><p>case c if c &lt; 10 =&gt; “0_9”
+case c if c &lt; 100 =&gt; “10_99”
+case _ =&gt; “100_plus”</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>s”width_$bucketMin”</p>
+</dd>
+</dl>
+<p>}</p>
+<p>def forGetTweetsRequest(r: GetTweetsRequest): String = prefix(r.tweetIds.size)
+def forGetTweetFieldsRequest(r: GetTweetFieldsRequest): String = prefix(r.tweetIds.size)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>object WithMediaPrefix {</dt><dd><dl class="simple">
+<dt>def forPostTweetRequest(r: PostTweetRequest): String =</dt><dd><dl class="simple">
+<dt>if (r.mediaUploadIds.exists(_.nonEmpty))</dt><dd><p>“with_media”</p>
+</dd>
+<dt>else</dt><dd><p>“without_media”</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>override def getTweets(request: GetTweetsRequest): Future[Seq[GetTweetResult]] =</dt><dd><dl>
+<dt>trackS(</dt><dd><p>“get_tweets”,
+request,
+Some(RequestWidthPrefix.forGetTweetsRequest(request)),
+Some(request.tweetIds.size)</p>
+</dd>
+<dt>) { stats =&gt;</dt><dd><dl>
+<dt>getTweetsAuthorizer(request, clientId).flatMap { _ =&gt;</dt><dd><dl class="simple">
+<dt>ifNotOverCapacityRead(stats, request.tweetIds.length) {</dt><dd><p>underlying.getTweets(request)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>override def getTweetFields(request: GetTweetFieldsRequest): Future[Seq[GetTweetFieldsResult]] =</dt><dd><dl>
+<dt>trackS(</dt><dd><p>“get_tweet_fields”,
+request,
+Some(RequestWidthPrefix.forGetTweetFieldsRequest(request)),
+Some(request.tweetIds.size)</p>
+</dd>
+<dt>) { stats =&gt;</dt><dd><dl>
+<dt>getTweetFieldsAuthorizer(request, clientId).flatMap { _ =&gt;</dt><dd><dl class="simple">
+<dt>ifNotOverCapacityRead(stats, request.tweetIds.length) {</dt><dd><p>underlying.getTweetFields(request)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>override def replicatedGetTweets(request: GetTweetsRequest): Future[Unit] =</dt><dd><dl>
+<dt>track(“replicated_get_tweets”, request, requestSize = Some(request.tweetIds.size)) {</dt><dd><dl class="simple">
+<dt>underlying.replicatedGetTweets(request).rescue {</dt><dd><p>case e: Throwable =&gt; Future.Unit // do not need deferredrpc to retry on exceptions</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>override def replicatedGetTweetFields(request: GetTweetFieldsRequest): Future[Unit] =</dt><dd><dl>
+<dt>track(“replicated_get_tweet_fields”, request, requestSize = Some(request.tweetIds.size)) {</dt><dd><dl class="simple">
+<dt>underlying.replicatedGetTweetFields(request).rescue {</dt><dd><p>case e: Throwable =&gt; Future.Unit // do not need deferredrpc to retry on exceptions</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>override def getTweetCounts(request: GetTweetCountsRequest): Future[Seq[GetTweetCountsResult]] =</dt><dd><dl>
+<dt>trackS(“get_tweet_counts”, request, requestSize = Some(request.tweetIds.size)) { stats =&gt;</dt><dd><dl>
+<dt>ifNotOverCapacityRead(stats, request.tweetIds.length) {</dt><dd><dl class="simple">
+<dt>requestSizeAuthorizer(request.tweetIds.size, clientId).flatMap { _ =&gt;</dt><dd><p>underlying.getTweetCounts(request)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>override def replicatedGetTweetCounts(request: GetTweetCountsRequest): Future[Unit] =</dt><dd><dl>
+<dt>track(“replicated_get_tweet_counts”, request, requestSize = Some(request.tweetIds.size)) {</dt><dd><dl class="simple">
+<dt>underlying.replicatedGetTweetCounts(request).rescue {</dt><dd><p>case e: Throwable =&gt; Future.Unit // do not need deferredrpc to retry on exceptions</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>override def postTweet(request: PostTweetRequest): Future[PostTweetResult] =</dt><dd><dl class="simple">
+<dt>track(“post_tweet”, request, Some(WithMediaPrefix.forPostTweetRequest(request))) {</dt><dd><p>underlying.postTweet(request)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>override def postRetweet(request: RetweetRequest): Future[PostTweetResult] =</dt><dd><dl class="simple">
+<dt>track(“post_retweet”, request) {</dt><dd><p>underlying.postRetweet(request)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>override def setAdditionalFields(request: SetAdditionalFieldsRequest): Future[Unit] =</dt><dd><dl class="simple">
+<dt>track(“set_additional_fields”, request) {</dt><dd><p>underlying.setAdditionalFields(request)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>override def deleteAdditionalFields(request: DeleteAdditionalFieldsRequest): Future[Unit] =</dt><dd><dl>
+<dt>track(“delete_additional_fields”, request, requestSize = Some(request.tweetIds.size)) {</dt><dd><dl class="simple">
+<dt>requestSizeAuthorizer(request.tweetIds.size, clientId).flatMap { _ =&gt;</dt><dd><p>underlying.deleteAdditionalFields(request)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>override def asyncSetAdditionalFields(request: AsyncSetAdditionalFieldsRequest): Future[Unit] =</dt><dd><dl class="simple">
+<dt>track(“async_set_additional_fields”, request) {</dt><dd><p>underlying.asyncSetAdditionalFields(request)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>override def asyncDeleteAdditionalFields(</dt><dd><p>request: AsyncDeleteAdditionalFieldsRequest</p>
+</dd>
+<dt>): Future[Unit] =</dt><dd><dl class="simple">
+<dt>track(“async_delete_additional_fields”, request) {</dt><dd><p>underlying.asyncDeleteAdditionalFields(request)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>override def replicatedUndeleteTweet2(request: ReplicatedUndeleteTweet2Request): Future[Unit] =</dt><dd><p>track(“replicated_undelete_tweet2”, request) { underlying.replicatedUndeleteTweet2(request) }</p>
+</dd>
+<dt>override def replicatedInsertTweet2(request: ReplicatedInsertTweet2Request): Future[Unit] =</dt><dd><p>track(“replicated_insert_tweet2”, request) { underlying.replicatedInsertTweet2(request) }</p>
+</dd>
+<dt>override def asyncInsert(request: AsyncInsertRequest): Future[Unit] =</dt><dd><p>track(“async_insert”, request) { underlying.asyncInsert(request) }</p>
+</dd>
+<dt>override def updatePossiblySensitiveTweet(</dt><dd><p>request: UpdatePossiblySensitiveTweetRequest</p>
+</dd>
+<dt>): Future[Unit] =</dt><dd><dl class="simple">
+<dt>track(“update_possibly_sensitive_tweet”, request) {</dt><dd><p>underlying.updatePossiblySensitiveTweet(request)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>override def asyncUpdatePossiblySensitiveTweet(</dt><dd><p>request: AsyncUpdatePossiblySensitiveTweetRequest</p>
+</dd>
+<dt>): Future[Unit] =</dt><dd><dl class="simple">
+<dt>track(“async_update_possibly_sensitive_tweet”, request) {</dt><dd><p>underlying.asyncUpdatePossiblySensitiveTweet(request)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>override def replicatedUpdatePossiblySensitiveTweet(tweet: Tweet): Future[Unit] =</dt><dd><dl class="simple">
+<dt>track(“replicated_update_possibly_sensitive_tweet”, tweet) {</dt><dd><p>underlying.replicatedUpdatePossiblySensitiveTweet(tweet)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>override def undeleteTweet(request: UndeleteTweetRequest): Future[UndeleteTweetResponse] =</dt><dd><dl class="simple">
+<dt>track(“undelete_tweet”, request) {</dt><dd><p>underlying.undeleteTweet(request)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>override def asyncUndeleteTweet(request: AsyncUndeleteTweetRequest): Future[Unit] =</dt><dd><dl class="simple">
+<dt>track(“async_undelete_tweet”, request) {</dt><dd><p>underlying.asyncUndeleteTweet(request)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>override def unretweet(request: UnretweetRequest): Future[UnretweetResult] =</dt><dd><dl class="simple">
+<dt>track(“unretweet”, request) {</dt><dd><p>underlying.unretweet(request)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>override def eraseUserTweets(request: EraseUserTweetsRequest): Future[Unit] =</dt><dd><dl class="simple">
+<dt>track(“erase_user_tweets”, request) {</dt><dd><p>underlying.eraseUserTweets(request)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>override def asyncEraseUserTweets(request: AsyncEraseUserTweetsRequest): Future[Unit] =</dt><dd><dl class="simple">
+<dt>track(“async_erase_user_tweets”, request) {</dt><dd><p>underlying.asyncEraseUserTweets(request)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>override def asyncDelete(request: AsyncDeleteRequest): Future[Unit] =</dt><dd><p>track(“async_delete”, request) { underlying.asyncDelete(request) }</p>
+</dd>
+<dt>override def deleteTweets(request: DeleteTweetsRequest): Future[Seq[DeleteTweetResult]] =</dt><dd><dl>
+<dt>track(“delete_tweets”, request, requestSize = Some(request.tweetIds.size)) {</dt><dd><dl class="simple">
+<dt>requestSizeAuthorizer(request.tweetIds.size, clientId).flatMap { _ =&gt;</dt><dd><p>underlying.deleteTweets(request)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>override def cascadedDeleteTweet(request: CascadedDeleteTweetRequest): Future[Unit] =</dt><dd><p>track(“cascaded_delete_tweet”, request) { underlying.cascadedDeleteTweet(request) }</p>
+</dd>
+<dt>override def replicatedDeleteTweet2(request: ReplicatedDeleteTweet2Request): Future[Unit] =</dt><dd><p>track(“replicated_delete_tweet2”, request) { underlying.replicatedDeleteTweet2(request) }</p>
+</dd>
+<dt>override def incrTweetFavCount(request: IncrTweetFavCountRequest): Future[Unit] =</dt><dd><p>track(“incr_tweet_fav_count”, request) { underlying.incrTweetFavCount(request) }</p>
+</dd>
+<dt>override def asyncIncrFavCount(request: AsyncIncrFavCountRequest): Future[Unit] =</dt><dd><p>track(“async_incr_fav_count”, request) { underlying.asyncIncrFavCount(request) }</p>
+</dd>
+<dt>override def replicatedIncrFavCount(tweetId: TweetId, delta: Int): Future[Unit] =</dt><dd><dl class="simple">
+<dt>track(“replicated_incr_fav_count”, tweetId) {</dt><dd><p>underlying.replicatedIncrFavCount(tweetId, delta)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>override def incrTweetBookmarkCount(request: IncrTweetBookmarkCountRequest): Future[Unit] =</dt><dd><p>track(“incr_tweet_bookmark_count”, request) { underlying.incrTweetBookmarkCount(request) }</p>
+</dd>
+<dt>override def asyncIncrBookmarkCount(request: AsyncIncrBookmarkCountRequest): Future[Unit] =</dt><dd><p>track(“async_incr_bookmark_count”, request) { underlying.asyncIncrBookmarkCount(request) }</p>
+</dd>
+<dt>override def replicatedIncrBookmarkCount(tweetId: TweetId, delta: Int): Future[Unit] =</dt><dd><dl class="simple">
+<dt>track(“replicated_incr_bookmark_count”, tweetId) {</dt><dd><p>underlying.replicatedIncrBookmarkCount(tweetId, delta)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>override def replicatedSetAdditionalFields(request: SetAdditionalFieldsRequest): Future[Unit] =</dt><dd><dl class="simple">
+<dt>track(“replicated_set_additional_fields”, request) {</dt><dd><p>underlying.replicatedSetAdditionalFields(request)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>def setRetweetVisibility(request: SetRetweetVisibilityRequest): Future[Unit] = {</dt><dd><dl class="simple">
+<dt>track(“set_retweet_visibility”, request) {</dt><dd><p>underlying.setRetweetVisibility(request)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def asyncSetRetweetVisibility(request: AsyncSetRetweetVisibilityRequest): Future[Unit] = {</dt><dd><dl class="simple">
+<dt>track(“async_set_retweet_visibility”, request) {</dt><dd><p>underlying.asyncSetRetweetVisibility(request)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>override def replicatedSetRetweetVisibility(</dt><dd><p>request: ReplicatedSetRetweetVisibilityRequest</p>
+</dd>
+<dt>): Future[Unit] =</dt><dd><dl class="simple">
+<dt>track(“replicated_set_retweet_visibility”, request) {</dt><dd><p>underlying.replicatedSetRetweetVisibility(request)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>override def replicatedDeleteAdditionalFields(</dt><dd><p>request: ReplicatedDeleteAdditionalFieldsRequest</p>
+</dd>
+<dt>): Future[Unit] =</dt><dd><dl class="simple">
+<dt>track(“replicated_delete_additional_fields”, request) {</dt><dd><p>underlying.replicatedDeleteAdditionalFields(request)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>override def replicatedTakedown(tweet: Tweet): Future[Unit] =</dt><dd><p>track(“replicated_takedown”, tweet) { underlying.replicatedTakedown(tweet) }</p>
+</dd>
+<dt>override def scrubGeoUpdateUserTimestamp(request: DeleteLocationData): Future[Unit] =</dt><dd><dl class="simple">
+<dt>track(“scrub_geo_update_user_timestamp”, request) {</dt><dd><p>underlying.scrubGeoUpdateUserTimestamp(request)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>override def scrubGeo(request: GeoScrub): Future[Unit] =</dt><dd><dl>
+<dt>track(“scrub_geo”, request, requestSize = Some(request.statusIds.size)) {</dt><dd><dl class="simple">
+<dt>requestSizeAuthorizer(request.statusIds.size, clientId).flatMap { _ =&gt;</dt><dd><p>underlying.scrubGeo(request)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>override def replicatedScrubGeo(tweetIds: Seq[TweetId]): Future[Unit] =</dt><dd><p>track(“replicated_scrub_geo”, tweetIds) { underlying.replicatedScrubGeo(tweetIds) }</p>
+</dd>
+<dt>override def deleteLocationData(request: DeleteLocationDataRequest): Future[Unit] =</dt><dd><dl class="simple">
+<dt>track(“delete_location_data”, request) {</dt><dd><p>underlying.deleteLocationData(request)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>override def flush(request: FlushRequest): Future[Unit] =</dt><dd><dl>
+<dt>track(“flush”, request, requestSize = Some(request.tweetIds.size)) {</dt><dd><dl class="simple">
+<dt>requestSizeAuthorizer(request.tweetIds.size, clientId).flatMap { _ =&gt;</dt><dd><p>underlying.flush(request)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>override def takedown(request: TakedownRequest): Future[Unit] =</dt><dd><p>track(“takedown”, request) { underlying.takedown(request) }</p>
+</dd>
+<dt>override def asyncTakedown(request: AsyncTakedownRequest): Future[Unit] =</dt><dd><dl class="simple">
+<dt>track(“async_takedown”, request) {</dt><dd><p>underlying.asyncTakedown(request)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>override def setTweetUserTakedown(request: SetTweetUserTakedownRequest): Future[Unit] =</dt><dd><p>track(“set_tweet_user_takedown”, request) { underlying.setTweetUserTakedown(request) }</p>
+</dd>
+<dt>override def quotedTweetDelete(request: QuotedTweetDeleteRequest): Future[Unit] =</dt><dd><dl class="simple">
+<dt>track(“quoted_tweet_delete”, request) {</dt><dd><p>underlying.quotedTweetDelete(request)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>override def quotedTweetTakedown(request: QuotedTweetTakedownRequest): Future[Unit] =</dt><dd><dl class="simple">
+<dt>track(“quoted_tweet_takedown”, request) {</dt><dd><p>underlying.quotedTweetTakedown(request)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>override def getDeletedTweets(</dt><dd><p>request: GetDeletedTweetsRequest</p>
+</dd>
+<dt>): Future[Seq[GetDeletedTweetResult]] =</dt><dd><dl>
+<dt>track(“get_deleted_tweets”, request, requestSize = Some(request.tweetIds.size)) {</dt><dd><dl class="simple">
+<dt>requestSizeAuthorizer(request.tweetIds.size, clientId).flatMap { _ =&gt;</dt><dd><p>underlying.getDeletedTweets(request)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>override def getStoredTweets(</dt><dd><p>request: GetStoredTweetsRequest</p>
+</dd>
+<dt>): Future[Seq[GetStoredTweetsResult]] = {</dt><dd><dl>
+<dt>track(“get_stored_tweets”, request, requestSize = Some(request.tweetIds.size)) {</dt><dd><dl class="simple">
+<dt>requestSizeAuthorizer(request.tweetIds.size, clientId).flatMap { _ =&gt;</dt><dd><p>underlying.getStoredTweets(request)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>override def getStoredTweetsByUser(</dt><dd><p>request: GetStoredTweetsByUserRequest</p>
+</dd>
+<dt>): Future[GetStoredTweetsByUserResult] = {</dt><dd><dl class="simple">
+<dt>track(“get_stored_tweets_by_user”, request) {</dt><dd><p>underlying.getStoredTweetsByUser(request)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/tweetypie/server/src/main/scala/com/twitter/tweetypie/service/ClientHandlingTweetService.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

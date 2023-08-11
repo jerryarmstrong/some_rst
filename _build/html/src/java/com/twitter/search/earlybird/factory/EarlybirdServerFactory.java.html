@@ -1,0 +1,465 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../" id="documentation_options" src="../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.earlybird.factory;</p>
+<p>import java.io.IOException;</p>
+<p>import com.google.common.base.Preconditions;</p>
+<p>import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;</p>
+<p>import com.twitter.common.util.Clock;
+import com.twitter.decider.Decider;
+import com.twitter.search.common.aurora.AuroraInstanceKey;
+import com.twitter.search.common.aurora.AuroraSchedulerClient;
+import com.twitter.search.common.concurrent.ScheduledExecutorServiceFactory;
+import com.twitter.search.common.decider.SearchDecider;
+import com.twitter.search.common.metrics.SearchStatsReceiver;
+import com.twitter.search.common.util.ml.tensorflow_engine.TensorflowModelsManager;
+import com.twitter.search.common.util.zktrylock.ZooKeeperTryLockFactory;
+import com.twitter.search.earlybird.EarlybirdDarkProxy;
+import com.twitter.search.earlybird.EarlybirdFinagleServerManager;
+import com.twitter.search.earlybird.EarlybirdFuturePoolManager;
+import com.twitter.search.earlybird.EarlybirdIndexConfig;
+import com.twitter.search.earlybird.EarlybirdServer;
+import com.twitter.search.earlybird.EarlybirdServerSetManager;
+import com.twitter.search.earlybird.EarlybirdWarmUpManager;
+import com.twitter.search.earlybird.QualityFactor;
+import com.twitter.search.earlybird.UpdateableEarlybirdStateManager;
+import com.twitter.search.earlybird.archive.ArchiveEarlybirdIndexConfig;
+import com.twitter.search.earlybird.common.config.EarlybirdConfig;
+import com.twitter.search.earlybird.common.userupdates.UserScrubGeoMap;
+import com.twitter.search.earlybird.common.userupdates.UserUpdatesChecker;
+import com.twitter.search.earlybird.common.userupdates.UserTable;
+import com.twitter.search.earlybird.exception.CriticalExceptionHandler;
+import com.twitter.search.earlybird.index.EarlybirdSegmentFactory;
+import com.twitter.search.earlybird.ml.ScoringModelsManager;
+import com.twitter.search.earlybird.partition.AudioSpaceEventsStreamIndexer;
+import com.twitter.search.earlybird.partition.AudioSpaceTable;
+import com.twitter.search.earlybird.partition.DynamicPartitionConfig;
+import com.twitter.search.earlybird.partition.EarlybirdStartup;
+import com.twitter.search.earlybird.partition.MultiSegmentTermDictionaryManager;
+import com.twitter.search.earlybird.partition.PartitionConfig;
+import com.twitter.search.earlybird.partition.PartitionManager;
+import com.twitter.search.earlybird.partition.SegmentManager;
+import com.twitter.search.earlybird.partition.SegmentSyncConfig;
+import com.twitter.search.earlybird.partition.UserScrubGeoEventStreamIndexer;
+import com.twitter.search.earlybird.partition.UserUpdatesStreamIndexer;
+import com.twitter.search.earlybird.querycache.QueryCacheConfig;
+import com.twitter.search.earlybird.querycache.QueryCacheManager;
+import com.twitter.search.earlybird.stats.EarlybirdSearcherStats;
+import com.twitter.search.earlybird.util.TermCountMonitor;
+import com.twitter.search.earlybird.util.TweetCountMonitor;</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>This is the wiring file that builds EarlybirdServers.</p></li>
+<li><p>Production and test code share this same wiring file.</p></li>
+<li><p>&lt;p/&gt;</p></li>
+<li><p>To supply mocks for testing, one can do so by supplying a different</p></li>
+<li><p>EarlybirdWiringModule to this wiring file.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>public final class EarlybirdServerFactory {</dt><dd><p>private static final Logger LOG = LoggerFactory.getLogger(EarlybirdServerFactory.class);</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Creates the EarlybirdServer based on the bindings in the given wire module.</p></li>
+<li></li>
+<li><p>&#64;param earlybirdWireModule The wire module that specifies all required bindings.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>public EarlybirdServer makeEarlybirdServer(EarlybirdWireModule earlybirdWireModule)</dt><dd><blockquote>
+<div><p>throws IOException {</p>
+</div></blockquote>
+<p>LOG.info(“Started making an Earlybird server”);
+CriticalExceptionHandler criticalExceptionHandler = new CriticalExceptionHandler();
+Decider decider = earlybirdWireModule.provideDecider();
+SearchDecider searchDecider = new SearchDecider(decider);</p>
+<p>EarlybirdWireModule.ZooKeeperClients zkClients = earlybirdWireModule.provideZooKeeperClients();
+ZooKeeperTryLockFactory zkTryLockFactory =</p>
+<blockquote>
+<div><p>zkClients.stateClient.createZooKeeperTryLockFactory();</p>
+</div></blockquote>
+<dl class="simple">
+<dt>EarlybirdIndexConfig earlybirdIndexConfig =</dt><dd><dl class="simple">
+<dt>earlybirdWireModule.provideEarlybirdIndexConfig(</dt><dd><p>decider, earlybirdWireModule.provideSearchIndexingMetricSet(),
+criticalExceptionHandler);</p>
+</dd>
+</dl>
+</dd>
+<dt>SearchStatsReceiver earlybirdServerStats =</dt><dd><p>earlybirdWireModule.provideEarlybirdServerStatsReceiver();</p>
+</dd>
+<dt>EarlybirdSearcherStats tweetsSearcherStats =</dt><dd><p>earlybirdWireModule.provideTweetsSearcherStats();</p>
+</dd>
+<dt>DynamicPartitionConfig dynamicPartitionConfig =</dt><dd><p>earlybirdWireModule.provideDynamicPartitionConfig();</p>
+</dd>
+</dl>
+<p>PartitionConfig partitionConfig = dynamicPartitionConfig.getCurrentPartitionConfig();
+LOG.info(“Partition config info [Cluster: {}, Tier: {}, Partition: {}, Replica: {}]”,</p>
+<blockquote>
+<div><p>partitionConfig.getClusterName(),
+partitionConfig.getTierName(),
+partitionConfig.getIndexingHashPartitionID(),
+partitionConfig.getHostPositionWithinHashPartition());</p>
+</div></blockquote>
+<p>Clock clock = earlybirdWireModule.provideClock();
+UserUpdatesChecker userUpdatesChecker =</p>
+<blockquote>
+<div><p>new UserUpdatesChecker(clock, decider, earlybirdIndexConfig.getCluster());</p>
+</div></blockquote>
+<dl class="simple">
+<dt>UserTable userTable = UserTable.newTableWithDefaultCapacityAndPredicate(</dt><dd><p>earlybirdIndexConfig.getUserTableFilter(partitionConfig)::apply);</p>
+</dd>
+</dl>
+<p>UserScrubGeoMap userScrubGeoMap = new UserScrubGeoMap();</p>
+<p>AudioSpaceTable audioSpaceTable = new AudioSpaceTable(clock);</p>
+<dl class="simple">
+<dt>SegmentSyncConfig segmentSyncConfig =</dt><dd><p>earlybirdWireModule.provideSegmentSyncConfig(earlybirdIndexConfig.getCluster());</p>
+</dd>
+<dt>SegmentManager segmentManager = earlybirdWireModule.provideSegmentManager(</dt><dd><p>dynamicPartitionConfig,
+earlybirdIndexConfig,
+earlybirdWireModule.provideSearchIndexingMetricSet(),
+tweetsSearcherStats,
+earlybirdServerStats,
+userUpdatesChecker,
+segmentSyncConfig,
+userTable,
+userScrubGeoMap,
+clock,
+criticalExceptionHandler);</p>
+</dd>
+</dl>
+<p>QueryCacheConfig config = earlybirdWireModule.provideQueryCacheConfig(earlybirdServerStats);</p>
+<dl class="simple">
+<dt>QueryCacheManager queryCacheManager = earlybirdWireModule.provideQueryCacheManager(</dt><dd><p>config,
+earlybirdIndexConfig,
+partitionConfig.getMaxEnabledLocalSegments(),
+userTable,
+userScrubGeoMap,
+earlybirdWireModule.provideQueryCacheUpdateTaskScheduledExecutorFactory(),
+earlybirdServerStats,
+tweetsSearcherStats,
+decider,
+criticalExceptionHandler,
+clock);</p>
+</dd>
+<dt>EarlybirdServerSetManager serverSetManager = earlybirdWireModule.provideServerSetManager(</dt><dd><p>zkClients.discoveryClient,
+dynamicPartitionConfig,
+earlybirdServerStats,
+EarlybirdConfig.getThriftPort(),
+“”);</p>
+</dd>
+<dt>EarlybirdWarmUpManager warmUpManager =</dt><dd><dl class="simple">
+<dt>earlybirdWireModule.provideWarmUpManager(zkClients.discoveryClient,</dt><dd><p>dynamicPartitionConfig,
+earlybirdServerStats,
+decider,
+clock,
+EarlybirdConfig.getWarmUpThriftPort(),
+“<a href="#id5"><span class="problematic" id="id6">warmup_</span></a>”);</p>
+</dd>
+</dl>
+</dd>
+<dt>EarlybirdDarkProxy earlybirdDarkProxy = earlybirdWireModule.provideEarlybirdDarkProxy(</dt><dd><p>new SearchDecider(decider),
+earlybirdWireModule.provideFinagleStatsReceiver(),
+serverSetManager,
+warmUpManager,
+partitionConfig.getClusterName());</p>
+</dd>
+<dt>UserUpdatesStreamIndexer userUpdatesStreamIndexer =</dt><dd><p>earlybirdWireModule.provideUserUpdatesKafkaConsumer(segmentManager);</p>
+</dd>
+<dt>UserScrubGeoEventStreamIndexer userScrubGeoEventStreamIndexer =</dt><dd><p>earlybirdWireModule.provideUserScrubGeoEventKafkaConsumer(segmentManager);</p>
+</dd>
+<dt>AudioSpaceEventsStreamIndexer audioSpaceEventsStreamIndexer =</dt><dd><p>earlybirdWireModule.provideAudioSpaceEventsStreamIndexer(audioSpaceTable, clock);</p>
+</dd>
+<dt>MultiSegmentTermDictionaryManager.Config termDictionaryConfig =</dt><dd><p>earlybirdWireModule.provideMultiSegmentTermDictionaryManagerConfig();</p>
+</dd>
+<dt>MultiSegmentTermDictionaryManager multiSegmentTermDictionaryManager =</dt><dd><dl class="simple">
+<dt>earlybirdWireModule.provideMultiSegmentTermDictionaryManager(</dt><dd><p>termDictionaryConfig,
+segmentManager,
+earlybirdServerStats,
+decider,
+earlybirdIndexConfig.getCluster());</p>
+</dd>
+</dl>
+</dd>
+<dt>TermCountMonitor termCountMonitor =</dt><dd><dl class="simple">
+<dt>earlybirdWireModule.provideTermCountMonitor(</dt><dd><p>segmentManager, earlybirdWireModule.provideTermCountMonitorScheduledExecutorFactory(),
+earlybirdServerStats,
+criticalExceptionHandler);</p>
+</dd>
+</dl>
+</dd>
+<dt>TweetCountMonitor tweetCountMonitor =</dt><dd><dl class="simple">
+<dt>earlybirdWireModule.provideTweetCountMonitor(</dt><dd><p>segmentManager, earlybirdWireModule.provideTweetCountMonitorScheduledExecutorFactory(),
+earlybirdServerStats,
+criticalExceptionHandler);</p>
+</dd>
+</dl>
+</dd>
+<dt>ScoringModelsManager scoringModelsManager = earlybirdWireModule.provideScoringModelsManager(</dt><dd><p>earlybirdServerStats,
+earlybirdIndexConfig</p>
+</dd>
+</dl>
+<p>);</p>
+<dl>
+<dt>TensorflowModelsManager tensorflowModelsManager =</dt><dd><dl class="simple">
+<dt>earlybirdWireModule.provideTensorflowModelsManager(</dt><dd><p>earlybirdServerStats,
+“tf_loader”,
+decider,
+earlybirdIndexConfig</p>
+</dd>
+</dl>
+<p>);</p>
+</dd>
+</dl>
+<p>AuroraSchedulerClient schedulerClient = null;
+AuroraInstanceKey auroraInstanceKey = EarlybirdConfig.getAuroraInstanceKey();
+if (auroraInstanceKey != null) {</p>
+<blockquote>
+<div><p>schedulerClient = new AuroraSchedulerClient(auroraInstanceKey.getCluster());</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>UpdateableEarlybirdStateManager earlybirdStateManager =</dt><dd><dl class="simple">
+<dt>earlybirdWireModule.provideUpdateableEarlybirdStateManager(</dt><dd><p>earlybirdIndexConfig,
+dynamicPartitionConfig,
+zkClients.stateClient,
+schedulerClient,
+earlybirdWireModule.provideStateUpdateManagerExecutorFactory(),
+scoringModelsManager,
+tensorflowModelsManager,
+earlybirdServerStats,
+new SearchDecider(decider),
+criticalExceptionHandler);</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>EarlybirdFuturePoolManager futurePoolManager = earlybirdWireModule.provideFuturePoolManager();
+EarlybirdFinagleServerManager finagleServerManager =</p>
+<blockquote>
+<div><p>earlybirdWireModule.provideFinagleServerManager(criticalExceptionHandler);</p>
+</div></blockquote>
+<p>PartitionManager partitionManager = null;
+if (EarlybirdIndexConfigUtil.isArchiveSearch()) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>partitionManager = buildArchivePartitionManager(</dt><dd><p>earlybirdWireModule,
+userUpdatesStreamIndexer,
+userScrubGeoEventStreamIndexer,
+zkTryLockFactory,
+earlybirdIndexConfig,
+dynamicPartitionConfig,
+segmentManager,
+queryCacheManager,
+earlybirdServerStats,
+serverSetManager,
+earlybirdWireModule.providePartitionManagerExecutorFactory(),
+earlybirdWireModule.provideSimpleUserUpdateIndexerScheduledExecutorFactory(),
+clock,
+segmentSyncConfig,
+criticalExceptionHandler);</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>LOG.info(“Not creating PartitionManager”);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>EarlybirdSegmentFactory earlybirdSegmentFactory = new EarlybirdSegmentFactory(</dt><dd><p>earlybirdIndexConfig,
+earlybirdWireModule.provideSearchIndexingMetricSet(),
+tweetsSearcherStats,
+clock);</p>
+</dd>
+<dt>EarlybirdStartup earlybirdStartup = earlybirdWireModule.provideEarlybirdStartup(</dt><dd><p>partitionManager,
+userUpdatesStreamIndexer,
+userScrubGeoEventStreamIndexer,
+audioSpaceEventsStreamIndexer,
+dynamicPartitionConfig,
+criticalExceptionHandler,
+segmentManager,
+multiSegmentTermDictionaryManager,
+queryCacheManager,
+zkTryLockFactory,
+serverSetManager,
+clock,
+segmentSyncConfig,
+earlybirdSegmentFactory,
+earlybirdIndexConfig.getCluster(),
+searchDecider);</p>
+</dd>
+<dt>QualityFactor qualityFactor = earlybirdWireModule.provideQualityFactor(</dt><dd><p>decider,
+earlybirdServerStats);</p>
+</dd>
+<dt>EarlybirdServer earlybirdServer = new EarlybirdServer(</dt><dd><p>queryCacheManager,
+zkClients.stateClient,
+decider,
+earlybirdIndexConfig,
+dynamicPartitionConfig,
+partitionManager,
+segmentManager,
+audioSpaceTable,
+termCountMonitor,
+tweetCountMonitor,
+earlybirdStateManager,
+futurePoolManager,
+finagleServerManager,
+serverSetManager,
+warmUpManager,
+earlybirdServerStats,
+tweetsSearcherStats,
+scoringModelsManager,
+tensorflowModelsManager,
+clock,
+multiSegmentTermDictionaryManager,
+earlybirdDarkProxy,
+segmentSyncConfig,
+earlybirdWireModule.provideQueryTimeoutFactory(),
+earlybirdStartup,
+qualityFactor,
+earlybirdWireModule.provideSearchIndexingMetricSet());</p>
+</dd>
+</dl>
+<p>earlybirdStateManager.setEarlybirdServer(earlybirdServer);
+criticalExceptionHandler.setShutdownHook(earlybirdServer::shutdown);</p>
+<p>return earlybirdServer;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private PartitionManager buildArchivePartitionManager(</dt><dd><p>EarlybirdWireModule earlybirdWireModule,
+UserUpdatesStreamIndexer userUpdatesStreamIndexer,
+UserScrubGeoEventStreamIndexer userScrubGeoEventStreamIndexer,
+ZooKeeperTryLockFactory zkTryLockFactory,
+EarlybirdIndexConfig earlybirdIndexConfig,
+DynamicPartitionConfig dynamicPartitionConfig,
+SegmentManager segmentManager,
+QueryCacheManager queryCacheManager,
+SearchStatsReceiver searchStatsReceiver,
+EarlybirdServerSetManager serverSetManager,
+ScheduledExecutorServiceFactory partitionManagerExecutorServiceFactory,
+ScheduledExecutorServiceFactory simpleUserUpdateIndexerExecutorFactory,
+Clock clock,
+SegmentSyncConfig segmentSyncConfig,
+CriticalExceptionHandler criticalExceptionHandler)
+throws IOException {</p>
+<p>Preconditions.checkState(earlybirdIndexConfig instanceof ArchiveEarlybirdIndexConfig);
+LOG.info(“Creating ArchiveSearchPartitionManager”);
+return earlybirdWireModule.provideFullArchivePartitionManager(</p>
+<blockquote>
+<div><p>zkTryLockFactory,
+queryCacheManager,
+segmentManager,
+dynamicPartitionConfig,
+userUpdatesStreamIndexer,
+userScrubGeoEventStreamIndexer,
+searchStatsReceiver,
+(ArchiveEarlybirdIndexConfig) earlybirdIndexConfig,
+serverSetManager,
+partitionManagerExecutorServiceFactory,
+simpleUserUpdateIndexerExecutorFactory,
+earlybirdWireModule.provideSearchIndexingMetricSet(),
+clock,
+segmentSyncConfig,
+criticalExceptionHandler);</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../_sources/src/java/com/twitter/search/earlybird/factory/EarlybirdServerFactory.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

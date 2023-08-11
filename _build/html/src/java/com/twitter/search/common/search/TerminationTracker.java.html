@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../" id="documentation_options" src="../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.common.search;</p>
+<p>import java.util.HashSet;
+import java.util.Set;</p>
+<p>import com.google.common.base.Preconditions;</p>
+<p>import com.twitter.common.util.Clock;
+import com.twitter.search.common.query.thriftjava.CollectorTerminationParams;</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Used for tracking termination criteria for earlybird queries.</p></li>
+<li></li>
+<li><p>Currently this tracks the query time out and query cost, if they are set on the</p></li>
+<li><p><a class="reference external" href="mailto:{&#37;&#52;&#48;link">{<span>&#64;</span>link</a> com.twitter.search.common.query.thriftjava.CollectorTerminationParams}.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>public class TerminationTracker {</dt><dd><p>/** Query start time provided by client. <a href="#id3"><span class="problematic" id="id4">*</span></a>/
+private final long clientStartTimeMillis;</p>
+<p>/** Timeout end times, calculated from <a class="reference external" href="mailto:{&#37;&#52;&#48;link">{<span>&#64;</span>link</a> #clientStartTimeMillis}. <a href="#id5"><span class="problematic" id="id6">*</span></a>/
+private final long timeoutEndTimeMillis;</p>
+<p>/** Query start time recorded at earlybird server. <a href="#id7"><span class="problematic" id="id8">*</span></a>/
+private final long localStartTimeMillis;</p>
+<p>/** Tracking query cost <a href="#id9"><span class="problematic" id="id10">*</span></a>/
+private final double maxQueryCost;</p>
+<p>// Sometimes, we want to early terminate before timeoutEndTimeMillis, to reserve time for
+// work that needs to be done after early termination (E.g. merging results).
+private final int postTerminationOverheadMillis;</p>
+<p>// We don’t check for early termination often enough. Some times requests timeout in between
+// early termination checks. This buffer time is also substracted from deadline.
+// To illustrate how this is used, let’s use a simple example:
+// If we spent 750ms searching 5 segments, a rough estimate is that we need 150ms to search
+// one segment. If the timeout is set to 800ms, we should not starting searching the next segment.
+// In this case, on can set preTerminationSafeBufferTimeMillis to 150ms, so that when early
+// termination check computes the deadline, this buffer is also subtracted. See SEARCH-29723.
+private int preTerminationSafeBufferTimeMillis = 0;</p>
+<p>private EarlyTerminationState earlyTerminationState = EarlyTerminationState.COLLECTING;</p>
+<p>// This flag determines whether the last searched doc ID trackers should be consulted when a
+// timeout occurs.
+private final boolean useLastSearchedDocIdOnTimeout;</p>
+<p>private final Set&lt;DocIdTracker&gt; lastSearchedDocIdTrackers = new HashSet&lt;&gt;();</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Creates a new termination tracker that will not specify a timeout or max query cost.</p></li>
+<li><p>Can be used for queries that explicitly do not want to use a timeout. Meant to be used for</p></li>
+<li><p>tests, and background queries running for the query cache.</p></li>
+</ul>
+<p><a href="#id11"><span class="problematic" id="id12">*</span></a>/</p>
+</dd>
+<dt>public TerminationTracker(Clock clock) {</dt><dd><p>this.clientStartTimeMillis = clock.nowMillis();
+this.localStartTimeMillis = clientStartTimeMillis;
+this.timeoutEndTimeMillis = Long.MAX_VALUE;
+this.maxQueryCost = Double.MAX_VALUE;
+this.postTerminationOverheadMillis = 0;
+this.useLastSearchedDocIdOnTimeout = false;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Convenient method overloading for</p></li>
+<li><p><a class="reference external" href="mailto:{&#37;&#52;&#48;link">{<span>&#64;</span>link</a> #TerminationTracker(CollectorTerminationParams, long, Clock, int)}.</p></li>
+</ul>
+<p><a href="#id13"><span class="problematic" id="id14">*</span></a>/</p>
+</dd>
+<dt>public TerminationTracker(</dt><dd><blockquote>
+<div><p>CollectorTerminationParams terminationParams, Clock clock,
+int postTerminationOverheadMillis) {</p>
+</div></blockquote>
+<p>this(terminationParams, clock.nowMillis(), clock, postTerminationOverheadMillis);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Convenient method overloading for</p></li>
+<li><p><a class="reference external" href="mailto:{&#37;&#52;&#48;link">{<span>&#64;</span>link</a> #TerminationTracker(CollectorTerminationParams, long, Clock, int)}.</p></li>
+</ul>
+<p><a href="#id15"><span class="problematic" id="id16">*</span></a>/</p>
+</dd>
+<dt>public TerminationTracker(</dt><dd><blockquote>
+<div><p>CollectorTerminationParams terminationParams, int postTerminationOverheadMillis) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>this(</dt><dd><p>terminationParams,
+System.currentTimeMillis(),
+Clock.SYSTEM_CLOCK,
+postTerminationOverheadMillis);</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Creates a new TerminationTracker instance.</p></li>
+<li></li>
+<li><p>&#64;param terminationParams  CollectorParams.CollectorTerminationParams carrying parameters</p></li>
+<li><p>about early termination.</p></li>
+<li><p>&#64;param clientStartTimeMillis The query start time (in millis) specified by client. This is used</p></li>
+<li><p>to calculate timeout end time, like <a class="reference external" href="mailto:{&#37;&#52;&#48;link">{<span>&#64;</span>link</a> #timeoutEndTimeMillis}.</p></li>
+<li><p>&#64;param clock used to sample <a class="reference external" href="mailto:{&#37;&#52;&#48;link">{<span>&#64;</span>link</a> #localStartTimeMillis}.</p></li>
+<li><p>&#64;param postTerminationOverheadMillis How much time should be reserved.  E.g. if request time</p></li>
+<li><p>out is 800ms, and this is set to 200ms, early termination</p></li>
+<li><p>will kick in at 600ms mark.</p></li>
+</ul>
+<p><a href="#id17"><span class="problematic" id="id18">*</span></a>/</p>
+</dd>
+<dt>public TerminationTracker(</dt><dd><blockquote>
+<div><p>CollectorTerminationParams terminationParams,
+long clientStartTimeMillis,
+Clock clock,
+int postTerminationOverheadMillis) {</p>
+</div></blockquote>
+<p>Preconditions.checkNotNull(terminationParams);
+Preconditions.checkArgument(postTerminationOverheadMillis &gt;= 0);</p>
+<p>this.clientStartTimeMillis = clientStartTimeMillis;
+this.localStartTimeMillis = clock.nowMillis();</p>
+<dl>
+<dt>if (terminationParams.isSetTimeoutMs()</dt><dd><blockquote>
+<div><p>&amp;&amp; terminationParams.getTimeoutMs() &gt; 0) {</p>
+</div></blockquote>
+<p>Preconditions.checkState(terminationParams.getTimeoutMs() &gt;= postTerminationOverheadMillis);
+this.timeoutEndTimeMillis = this.clientStartTimeMillis + terminationParams.getTimeoutMs();</p>
+</dd>
+<dt>} else {</dt><dd><p>// Effectively no timeout.
+this.timeoutEndTimeMillis = Long.MAX_VALUE;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// Tracking query cost
+if (terminationParams.isSetMaxQueryCost()</p>
+<blockquote>
+<div><blockquote>
+<div><p>&amp;&amp; terminationParams.getMaxQueryCost() &gt; 0) {</p>
+</div></blockquote>
+<p>maxQueryCost = terminationParams.getMaxQueryCost();</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>maxQueryCost = Double.MAX_VALUE;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>this.useLastSearchedDocIdOnTimeout = terminationParams.isEnforceQueryTimeout();
+this.postTerminationOverheadMillis = postTerminationOverheadMillis;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Returns the reserve time to perform post termination work. Return the deadline timestamp</p></li>
+<li><p>with postTerminationWorkEstimate subtracted.</p></li>
+</ul>
+<p><a href="#id19"><span class="problematic" id="id20">*</span></a>/</p>
+</dd>
+<dt>public long getTimeoutEndTimeWithReservation() {</dt><dd><p>// Return huge value if time out is disabled.
+if (timeoutEndTimeMillis == Long.MAX_VALUE) {</p>
+<blockquote>
+<div><p>return timeoutEndTimeMillis;</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><dl class="simple">
+<dt>return timeoutEndTimeMillis</dt><dd><ul class="simple">
+<li><p>postTerminationOverheadMillis</p></li>
+<li><p>preTerminationSafeBufferTimeMillis;</p></li>
+</ul>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>public void setPreTerminationSafeBufferTimeMillis(int preTerminationSafeBufferTimeMillis) {</dt><dd><p>Preconditions.checkArgument(preTerminationSafeBufferTimeMillis &gt;= 0);</p>
+<p>this.preTerminationSafeBufferTimeMillis = preTerminationSafeBufferTimeMillis;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public long getLocalStartTimeMillis() {</dt><dd><p>return localStartTimeMillis;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public long getClientStartTimeMillis() {</dt><dd><p>return clientStartTimeMillis;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public double getMaxQueryCost() {</dt><dd><p>return maxQueryCost;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public boolean isEarlyTerminated() {</dt><dd><p>return earlyTerminationState.isTerminated();</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public EarlyTerminationState getEarlyTerminationState() {</dt><dd><p>return earlyTerminationState;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public void setEarlyTerminationState(EarlyTerminationState earlyTerminationState) {</dt><dd><p>this.earlyTerminationState = earlyTerminationState;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Return the minimum searched doc ID amongst all registered trackers, or -1 if there aren’t any</p></li>
+<li><p>trackers. Doc IDs are stored in ascending order, and trackers update their doc IDs as they</p></li>
+<li><p>search, so the minimum doc ID reflects the most recent fully searched doc ID.</p></li>
+</ul>
+<p><a href="#id21"><span class="problematic" id="id22">*</span></a>/</p>
+</dd>
+<dt>int getLastSearchedDocId() {</dt><dd><dl class="simple">
+<dt>return lastSearchedDocIdTrackers.stream()</dt><dd><p>.mapToInt(DocIdTracker::getCurrentDocId).min().orElse(-1);</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>void resetDocIdTrackers() {</dt><dd><p>lastSearchedDocIdTrackers.clear();</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Add a DocIdTracker, to keep track of the last fully-searched doc ID when early termination</p></li>
+<li><p>occurs.</p></li>
+</ul>
+<p><a href="#id23"><span class="problematic" id="id24">*</span></a>/</p>
+</dd>
+<dt>public void addDocIdTracker(DocIdTracker docIdTracker) {</dt><dd><p>lastSearchedDocIdTrackers.add(docIdTracker);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public boolean useLastSearchedDocIdOnTimeout() {</dt><dd><p>return useLastSearchedDocIdOnTimeout;</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../_sources/src/java/com/twitter/search/common/search/TerminationTracker.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

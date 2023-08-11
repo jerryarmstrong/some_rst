@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.tweetypie
+package config</p>
+<p>import com.twitter.servo.util.FutureArrow
+import com.twitter.stitch.Stitch
+import com.twitter.tweetypie.core._
+import com.twitter.tweetypie.handler.TweetBuilder
+import com.twitter.tweetypie.handler.WritePathQueryOptions
+import com.twitter.tweetypie.hydrator.EscherbirdAnnotationHydrator
+import com.twitter.tweetypie.hydrator.LanguageHydrator
+import com.twitter.tweetypie.hydrator.PlaceHydrator
+import com.twitter.tweetypie.hydrator.ProfileGeoHydrator
+import com.twitter.tweetypie.hydrator.TweetDataValueHydrator
+import com.twitter.tweetypie.repository._
+import com.twitter.tweetypie.store.InsertTweet
+import com.twitter.tweetypie.store.UndeleteTweet
+import com.twitter.tweetypie.thriftscala._
+import com.twitter.tweetypie.util.EditControlUtil</p>
+<dl>
+<dt>object WritePathHydration {</dt><dd><dl class="simple">
+<dt>type HydrateQuotedTweet =</dt><dd><p>FutureArrow[(User, QuotedTweet, WritePathHydrationOptions), Option[QuoteTweetMetadata]]</p>
+</dd>
+<dt>case class QuoteTweetMetadata(</dt><dd><p>quotedTweet: Tweet,
+quotedUser: User,
+quoterHasAlreadyQuotedTweet: Boolean)</p>
+</dd>
+</dl>
+<p>private val log = Logger(getClass)</p>
+<dl>
+<dt>val UserFieldsForInsert: Set[UserField] =</dt><dd><p>TweetBuilder.userFields</p>
+</dd>
+<dt>val AllowedMissingFieldsOnWrite: Set[FieldByPath] =</dt><dd><dl class="simple">
+<dt>Set(</dt><dd><p>EscherbirdAnnotationHydrator.hydratedField,
+LanguageHydrator.hydratedField,
+PlaceHydrator.HydratedField,
+ProfileGeoHydrator.hydratedField</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Builds a FutureArrow that performs the necessary hydration in the write-path for a</p></li>
+<li><p>a InsertTweet.Event.  There are two separate hydration steps, pre-cache and post-cache.</p></li>
+<li><p>The pre-cache hydration step performs the hydration which is safe to cache, while the</p></li>
+<li><p>post-cache hydration step performs the hydration whose results we don’t want to cache</p></li>
+<li><p>on the tweet.</p></li>
+<li></li>
+<li><p>TweetInsertEvent contains two tweet fields, <cite>tweet</cite> and <cite>internalTweet</cite>.  <cite>tweet</cite> is</p></li>
+<li><p>the input value used for hydration, and in the updated InsertTweet.Event returned by the</p></li>
+<li><p>FutureArrow, <cite>tweet</cite> contains the post-cache hydrated tweet while <cite>internalTweet</cite> contains</p></li>
+<li><p>the pre-cache hydrated tweet.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>def hydrateInsertTweetEvent(</dt><dd><p>hydrateTweet: FutureArrow[(TweetData, TweetQuery.Options), TweetData],
+hydrateQuotedTweet: HydrateQuotedTweet</p>
+</dd>
+<dt>): FutureArrow[InsertTweet.Event, InsertTweet.Event] =</dt><dd><dl>
+<dt>FutureArrow { event =&gt;</dt><dd><p>val cause = TweetQuery.Cause.Insert(event.tweet.id)
+val hydrationOpts = event.hydrateOptions
+val isEditControlEdit = event.tweet.editControl.exists(EditControlUtil.isEditControlEdit)
+val queryOpts: TweetQuery.Options =</p>
+<blockquote>
+<div><p>WritePathQueryOptions.insert(cause, event.user, hydrationOpts, isEditControlEdit)</p>
+</div></blockquote>
+<dl>
+<dt>val initTweetData =</dt><dd><dl class="simple">
+<dt>TweetData(</dt><dd><p>tweet = event.tweet,
+sourceTweetResult = event.sourceTweet.map(TweetResult(_))</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>for {</dt><dd><p>tweetData &lt;- hydrateTweet((initTweetData, queryOpts))
+hydratedTweet = tweetData.tweet
+internalTweet =</p>
+<blockquote>
+<div><dl>
+<dt>tweetData.cacheableTweetResult</dt><dd><p>.map(_.value.toCachedTweet)
+.getOrElse(</p>
+<blockquote>
+<div><p>throw new IllegalStateException(s”expected cacheableTweetResult, e=${event}”))</p>
+</div></blockquote>
+</dd>
+</dl>
+</div></blockquote>
+<dl class="simple">
+<dt>optQt = getQuotedTweet(hydratedTweet)</dt><dd><p>.orElse(event.sourceTweet.flatMap(getQuotedTweet))</p>
+</dd>
+<dt>hydratedQT &lt;- optQt match {</dt><dd><p>case None =&gt; Future.value(None)
+case Some(qt) =&gt; hydrateQuotedTweet((event.user, qt, hydrationOpts))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>} yield {</dt><dd><dl class="simple">
+<dt>event.copy(</dt><dd><p>tweet = hydratedTweet,
+_internalTweet = Some(internalTweet),
+quotedTweet = hydratedQT.map { case QuoteTweetMetadata(t, _, _) =&gt; t },
+quotedUser = hydratedQT.map { case QuoteTweetMetadata(_, u, _) =&gt; u },
+quoterHasAlreadyQuotedTweet = hydratedQT.exists { case QuoteTweetMetadata(_, _, b) =&gt; b }</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Builds a FutureArrow for retrieving a quoted tweet metadata</p></li>
+<li><p>QuotedTweet struct.  If either the quoted tweet or the quoted user</p></li>
+<li><p>isn’t visible to the tweeting user, the FutureArrow will return None.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>def hydrateQuotedTweet(</dt><dd><p>tweetRepo: TweetRepository.Optional,
+userRepo: UserRepository.Optional,
+quoterHasAlreadyQuotedRepo: QuoterHasAlreadyQuotedRepository.Type</p>
+</dd>
+<dt>): HydrateQuotedTweet = {</dt><dd><dl>
+<dt>FutureArrow {</dt><dd><dl>
+<dt>case (tweetingUser, qt, hydrateOptions) =&gt;</dt><dd><p>val tweetQueryOpts = WritePathQueryOptions.quotedTweet(tweetingUser, hydrateOptions)
+val userQueryOpts =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>UserQueryOptions(</dt><dd><p>UserFieldsForInsert,
+UserVisibility.Visible,
+forUserId = Some(tweetingUser.id)</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<dl>
+<dt>Stitch.run(</dt><dd><dl>
+<dt>Stitch</dt><dd><dl class="simple">
+<dt>.join(</dt><dd><p>tweetRepo(qt.tweetId, tweetQueryOpts),
+userRepo(UserKey.byId(qt.userId), userQueryOpts),
+// We’re failing open here on tflock exceptions since this should not
+// affect the ability to quote tweet if tflock goes down. (although if
+// this call doesn’t succeed, quote counts may be inaccurate for a brief
+// period of time)
+quoterHasAlreadyQuotedRepo(qt.tweetId, tweetingUser.id).liftToTry</p>
+</dd>
+</dl>
+<p>)
+.map {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case (Some(tweet), Some(user), isAlreadyQuoted) =&gt;</dt><dd><p>Some(QuoteTweetMetadata(tweet, user, isAlreadyQuoted.getOrElse(false)))</p>
+</dd>
+</dl>
+<p>case _ =&gt; None</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Builds a FutureArrow that performs any additional hydration on an UndeleteTweet.Event before</p></li>
+<li><p>being passed to a TweetStore.</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>def hydrateUndeleteTweetEvent(</dt><dd><p>hydrateTweet: FutureArrow[(TweetData, TweetQuery.Options), TweetData],
+hydrateQuotedTweet: HydrateQuotedTweet</p>
+</dd>
+<dt>): FutureArrow[UndeleteTweet.Event, UndeleteTweet.Event] =</dt><dd><dl>
+<dt>FutureArrow { event =&gt;</dt><dd><p>val cause = TweetQuery.Cause.Undelete(event.tweet.id)
+val hydrationOpts = event.hydrateOptions
+val isEditControlEdit = event.tweet.editControl.exists(EditControlUtil.isEditControlEdit)
+val queryOpts = WritePathQueryOptions.insert(cause, event.user, hydrationOpts, isEditControlEdit)</p>
+<p>// when undeleting a retweet, don’t set sourceTweetResult to enable SourceTweetHydrator to
+// hydrate it
+val initTweetData = TweetData(tweet = event.tweet)</p>
+<dl>
+<dt>for {</dt><dd><p>tweetData &lt;- hydrateTweet((initTweetData, queryOpts))
+hydratedTweet = tweetData.tweet
+internalTweet =</p>
+<blockquote>
+<div><dl>
+<dt>tweetData.cacheableTweetResult</dt><dd><p>.map(_.value.toCachedTweet)
+.getOrElse(</p>
+<blockquote>
+<div><p>throw new IllegalStateException(s”expected cacheableTweetResult, e=${event}”))</p>
+</div></blockquote>
+</dd>
+</dl>
+</div></blockquote>
+<dl class="simple">
+<dt>optQt = getQuotedTweet(hydratedTweet)</dt><dd><p>.orElse(tweetData.sourceTweetResult.map(_.value.tweet).flatMap(getQuotedTweet))</p>
+</dd>
+<dt>hydratedQt &lt;- optQt match {</dt><dd><p>case None =&gt; Future.value(None)
+case Some(qt) =&gt; hydrateQuotedTweet((event.user, qt, hydrationOpts))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>} yield {</dt><dd><dl class="simple">
+<dt>event.copy(</dt><dd><p>tweet = hydratedTweet,
+_internalTweet = Some(internalTweet),
+sourceTweet = tweetData.sourceTweetResult.map(_.value.tweet),
+quotedTweet = hydratedQt.map { case QuoteTweetMetadata(t, _, _) =&gt; t },
+quotedUser = hydratedQt.map { case QuoteTweetMetadata(_, u, _) =&gt; u },
+quoterHasAlreadyQuotedTweet = hydratedQt.exists { case QuoteTweetMetadata(_, _, b) =&gt; b }</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Converts a TweetDataValueHydrator into a FutureArrow that hydrates a tweet for the write-path.</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+<dt>def hydrateTweet(</dt><dd><p>hydrator: TweetDataValueHydrator,
+stats: StatsReceiver,
+allowedMissingFields: Set[FieldByPath] = AllowedMissingFieldsOnWrite</p>
+</dd>
+<dt>): FutureArrow[(TweetData, TweetQuery.Options), TweetData] = {</dt><dd><p>val hydrationStats = stats.scope(“hydration”)
+val missingFieldsStats = hydrationStats.scope(“missing_fields”)</p>
+<dl>
+<dt>FutureArrow[(TweetData, TweetQuery.Options), TweetData] {</dt><dd><dl>
+<dt>case (td, opts) =&gt;</dt><dd><dl>
+<dt>Stitch</dt><dd><p>.run(hydrator(td, opts))
+.rescue {</p>
+<blockquote>
+<div><dl>
+<dt>case ex =&gt;</dt><dd><p>log.warn(“Hydration failed with exception”, ex)
+Future.exception(</p>
+<blockquote>
+<div><p>TweetHydrationError(“Hydration failed with exception: “ + ex, Some(ex))</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+.flatMap { r =&gt;</p>
+<blockquote>
+<div><p>// Record missing fields even if the request succeeds)
+for (missingField &lt;- r.state.failedFields)</p>
+<blockquote>
+<div><p>missingFieldsStats.counter(missingField.fieldIdPath.mkString(“.”)).incr()</p>
+</div></blockquote>
+<dl>
+<dt>if ((r.state.failedFields – allowedMissingFields).nonEmpty) {</dt><dd><dl>
+<dt>Future.exception(</dt><dd><dl class="simple">
+<dt>TweetHydrationError(</dt><dd><p>“Failed to hydrate. Missing Fields: “ + r.state.failedFields.mkString(“,”)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>} else {</dt><dd><p>Future.value(r.value)</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}.trackOutcome(stats, (_: Any) =&gt; “hydration”)</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/tweetypie/server/src/main/scala/com/twitter/tweetypie/config/WritePathHydration.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

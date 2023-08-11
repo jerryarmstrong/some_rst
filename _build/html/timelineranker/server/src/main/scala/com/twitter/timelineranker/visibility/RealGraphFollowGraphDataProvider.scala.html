@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.timelineranker.visibility</p>
+<p>import com.twitter.finagle.stats.Stat
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.servo.repository.KeyValueRepository
+import com.twitter.servo.util.Gate
+import com.twitter.timelineranker.core.FollowGraphData
+import com.twitter.timelineranker.core.FollowGraphDataFuture
+import com.twitter.timelines.clients.socialgraph.SocialGraphClient
+import com.twitter.timelines.model.UserId
+import com.twitter.timelines.util.FailOpenHandler
+import com.twitter.util.Future
+import com.twitter.util.Stopwatch
+import com.twitter.wtf.candidate.thriftscala.CandidateSeq</p>
+<dl class="simple">
+<dt>object RealGraphFollowGraphDataProvider {</dt><dd><p>val EmptyRealGraphResponse = CandidateSeq(Nil)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Wraps an underlying FollowGraphDataProvider (which in practice will usually be a</p></li>
+<li><p>[[SgsFollowGraphDataProvider]]) and supplements the list of followings provided by the</p></li>
+<li><p>underlying provider with additional followings fetched from RealGraph if it looks like the</p></li>
+<li><p>underlying provider did not get the full list of the user’s followings.</p></li>
+<li></li>
+<li><p>First checks whether the size of the underlying following list is &gt;= the max requested following</p></li>
+<li><p>count, which implies that there were additional followings beyond the max requested count. If so,</p></li>
+<li><p>fetches the full set of followings from RealGraph (go/realgraph), which will be at most 2000.</p></li>
+<li></li>
+<li><p>Because the RealGraph dataset is not realtime and thus can potentially include stale followings,</p></li>
+<li><p>the provider confirms that the followings fetched from RealGraph are valid using SGS’s</p></li>
+<li><p>getFollowOverlap method, and then merges the valid RealGraph followings with the underlying</p></li>
+<li><p>followings.</p></li>
+<li></li>
+<li><p>Note that this supplementing is expected to be very rare as most users do not have more than</p></li>
+<li><p>the max followings we fetch from SGS. Also note that this class is mainly intended for use</p></li>
+<li><p>in the home timeline materialization path, with the goal of preventing a case where users</p></li>
+<li><p>who follow a very large number of accounts may not see Tweets from their earlier follows if we</p></li>
+<li><p>used SGS-based follow fetching alone.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>class RealGraphFollowGraphDataProvider(</dt><dd><p>underlying: FollowGraphDataProvider,
+realGraphClient: KeyValueRepository[Seq[UserId], UserId, CandidateSeq],
+socialGraphClient: SocialGraphClient,
+supplementFollowsWithRealGraphGate: Gate[UserId],
+statsReceiver: StatsReceiver)</p>
+<blockquote>
+<div><p>extends FollowGraphDataProvider {</p>
+</div></blockquote>
+<p>import RealGraphFollowGraphDataProvider._</p>
+<p>private[this] val scopedStatsReceiver = statsReceiver.scope(“realGraphFollowGraphDataProvider”)
+private[this] val requestCounter = scopedStatsReceiver.counter(“requests”)
+private[this] val atMaxCounter = scopedStatsReceiver.counter(“followsAtMax”)
+private[this] val totalLatencyStat = scopedStatsReceiver.stat(“totalLatencyWhenSupplementing”)
+private[this] val supplementLatencyStat = scopedStatsReceiver.stat(“supplementFollowsLatency”)
+private[this] val realGraphResponseSizeStat = scopedStatsReceiver.stat(“realGraphFollows”)
+private[this] val realGraphEmptyCounter = scopedStatsReceiver.counter(“realGraphEmpty”)
+private[this] val nonOverlappingSizeStat = scopedStatsReceiver.stat(“nonOverlappingFollows”)</p>
+<p>private[this] val failOpenHandler = new FailOpenHandler(scopedStatsReceiver)</p>
+<dl class="simple">
+<dt>override def get(userId: UserId, maxFollowingCount: Int): Future[FollowGraphData] = {</dt><dd><p>getAsync(userId, maxFollowingCount).get()</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>override def getAsync(userId: UserId, maxFollowingCount: Int): FollowGraphDataFuture = {</dt><dd><p>val startTime = Stopwatch.timeMillis()
+val underlyingResult = underlying.getAsync(userId, maxFollowingCount)
+if (supplementFollowsWithRealGraphGate(userId)) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>val supplementedFollows = underlyingResult.followedUserIdsFuture.flatMap { sgsFollows =&gt;</dt><dd><p>supplementFollowsWithRealGraph(userId, maxFollowingCount, sgsFollows, startTime)</p>
+</dd>
+</dl>
+<p>}
+underlyingResult.copy(followedUserIdsFuture = supplementedFollows)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>underlyingResult</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>override def getFollowing(userId: UserId, maxFollowingCount: Int): Future[Seq[UserId]] = {</dt><dd><p>val startTime = Stopwatch.timeMillis()
+val underlyingFollows = underlying.getFollowing(userId, maxFollowingCount)
+if (supplementFollowsWithRealGraphGate(userId)) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>underlying.getFollowing(userId, maxFollowingCount).flatMap { sgsFollows =&gt;</dt><dd><p>supplementFollowsWithRealGraph(userId, maxFollowingCount, sgsFollows, startTime)</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>underlyingFollows</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private[this] def supplementFollowsWithRealGraph(</dt><dd><p>userId: UserId,
+maxFollowingCount: Int,
+sgsFollows: Seq[Long],
+startTime: Long</p>
+</dd>
+<dt>): Future[Seq[UserId]] = {</dt><dd><p>requestCounter.incr()
+if (sgsFollows.size &gt;= maxFollowingCount) {</p>
+<blockquote>
+<div><p>atMaxCounter.incr()
+val supplementedFollowsFuture = realGraphClient(Seq(userId))</p>
+<blockquote>
+<div><p>.map(_.getOrElse(userId, EmptyRealGraphResponse))
+.map(_.candidates.map(_.userId))
+.flatMap {</p>
+<blockquote>
+<div><dl>
+<dt>case realGraphFollows if realGraphFollows.nonEmpty =&gt;</dt><dd><p>realGraphResponseSizeStat.add(realGraphFollows.size)
+// Filter out “stale” follows from realgraph by checking them against SGS
+val verifiedRealGraphFollows =</p>
+<blockquote>
+<div><p>socialGraphClient.getFollowOverlap(userId, realGraphFollows)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>verifiedRealGraphFollows.map { follows =&gt;</dt><dd><p>val combinedFollows = (sgsFollows ++ follows).distinct
+val additionalFollows = combinedFollows.size - sgsFollows.size
+if (additionalFollows &gt; 0) nonOverlappingSizeStat.add(additionalFollows)
+combinedFollows</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>case _ =&gt;</dt><dd><p>realGraphEmptyCounter.incr()
+Future.value(sgsFollows)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+.onSuccess { _ =&gt; totalLatencyStat.add(Stopwatch.timeMillis() - startTime) }</p>
+</div></blockquote>
+<dl class="simple">
+<dt>Stat.timeFuture(supplementLatencyStat) {</dt><dd><p>failOpenHandler(supplementedFollowsFuture) { _ =&gt; Future.value(sgsFollows) }</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>Future.value(sgsFollows)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>override def getMutuallyFollowingUserIds(</dt><dd><p>userId: UserId,
+followingIds: Seq[UserId]</p>
+</dd>
+<dt>): Future[Set[UserId]] = {</dt><dd><p>underlying.getMutuallyFollowingUserIds(userId, followingIds)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/timelineranker/server/src/main/scala/com/twitter/timelineranker/visibility/RealGraphFollowGraphDataProvider.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

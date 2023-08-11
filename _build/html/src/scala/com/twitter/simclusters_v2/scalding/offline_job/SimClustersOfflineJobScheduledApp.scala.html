@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../" id="documentation_options" src="../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.simclusters_v2.scalding.offline_job</p>
+<p>import com.twitter.scalding._
+import com.twitter.scalding_internal.dalv2.DAL
+import com.twitter.scalding_internal.dalv2.DALWrite._
+import com.twitter.simclusters_v2.hdfs_sources._
+import com.twitter.simclusters_v2.scalding.offline_job.SimClustersOfflineJob._
+import com.twitter.simclusters_v2.scalding.offline_job.SimClustersOfflineJobUtil._
+import com.twitter.simclusters_v2.thriftscala.TweetAndClusterScores
+import com.twitter.wtf.scalding.jobs.common.ScheduledExecutionApp
+import java.util.TimeZone</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>The offline job runs every 12 hours, and save these two data sets to HDFS.</p></li>
+<li></li>
+<li><p>capesospy-v2 update –build_locally –start_cron </p></li>
+<li><p>–start_cron offline_tweet_job src/scala/com/twitter/simclusters_v2/capesos_config/atla_proc3.yaml</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>object SimClustersOfflineJobScheduledApp extends ScheduledExecutionApp {</dt><dd><p>import com.twitter.simclusters_v2.scalding.common.TypedRichPipe._</p>
+<dl class="simple">
+<dt>private val tweetClusterScoresDatasetPath: String =</dt><dd><p>“/user/cassowary/processed/simclusters/tweet_cluster_scores”</p>
+</dd>
+<dt>private val tweetTopKClustersDatasetPath: String =</dt><dd><p>“/user/cassowary/processed/simclusters/tweet_top_k_clusters”</p>
+</dd>
+<dt>private val clusterTopKTweetsDatasetPath: String =</dt><dd><p>“/user/cassowary/processed/simclusters/cluster_top_k_tweets”</p>
+</dd>
+</dl>
+<p>override def batchIncrement: Duration = Hours(12)</p>
+<p>override def firstTime: RichDate = RichDate(“2020-05-25”)</p>
+<dl class="simple">
+<dt>override def runOnDateRange(</dt><dd><p>args: Args</p>
+</dd>
+<dt>)(</dt><dd><p>implicit dateRange: DateRange,
+timeZone: TimeZone,
+uniqueID: UniqueID</p>
+</dd>
+</dl>
+<p>): Execution[Unit] = {</p>
+<blockquote>
+<div><dl>
+<dt>val previousTweetClusterScores: TypedPipe[TweetAndClusterScores] =</dt><dd><dl>
+<dt>if (firstTime.timestamp == dateRange.start.timestamp) { // if it is the first batch</dt><dd><p>TypedPipe.from(Nil)</p>
+</dd>
+<dt>} else {</dt><dd><dl>
+<dt>DAL</dt><dd><dl class="simple">
+<dt>.readMostRecentSnapshot(</dt><dd><p>SimclustersOfflineTweetClusterScoresScalaDataset,
+dateRange - batchIncrement</p>
+</dd>
+</dl>
+<p>)
+.toTypedPipe
+.count(“NumPreviousTweetClusterScores”)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>// we have to use some way to throw away old tweets, otherwise the data set will be growing
+// all the time. We only keep the tweets that received at least 1 engagement in the last day.
+// This parameter can be adjusted
+val tweetsToKeep = getSubsetOfValidTweets(Days(1))</p>
+<blockquote>
+<div><p>.count(“NumTweetsToKeep”)</p>
+</div></blockquote>
+<dl>
+<dt>val updatedTweetClusterScores = computeAggregatedTweetClusterScores(</dt><dd><p>dateRange,
+readInterestedInScalaDataset(dateRange),
+readTimelineFavoriteData(dateRange),
+previousTweetClusterScores</p>
+</dd>
+<dt>).map { tweetClusterScore =&gt;</dt><dd><blockquote>
+<div><p>tweetClusterScore.tweetId -&gt; tweetClusterScore</p>
+</div></blockquote>
+<p>}
+.count(“NumUpdatedTweetClusterScoresBeforeFiltering”)
+.join(tweetsToKeep.asKeys) // filter out invalid tweets
+.map {</p>
+<blockquote>
+<div><p>case (_, (tweetClusterScore, _)) =&gt; tweetClusterScore</p>
+</div></blockquote>
+<p>}
+.count(“NumUpdatedTweetClusterScores”)
+.forceToDisk</p>
+</dd>
+<dt>val tweetTopKClusters = computeTweetTopKClusters(updatedTweetClusterScores)</dt><dd><p>.count(“NumTweetTopKSaved”)</p>
+</dd>
+<dt>val clusterTopKTweets = computeClusterTopKTweets(updatedTweetClusterScores)</dt><dd><p>.count(“NumClusterTopKSaved”)</p>
+</dd>
+<dt>val writeTweetClusterScoresExec = updatedTweetClusterScores</dt><dd><dl class="simple">
+<dt>.writeDALSnapshotExecution(</dt><dd><p>SimclustersOfflineTweetClusterScoresScalaDataset,
+D.Hourly, // note that we use hourly in order to make it flexible for hourly batch size
+D.Suffix(tweetClusterScoresDatasetPath),
+D.EBLzo(),
+dateRange.end</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>val writeTweetTopKClustersExec = tweetTopKClusters</dt><dd><dl class="simple">
+<dt>.writeDALSnapshotExecution(</dt><dd><p>SimclustersOfflineTweetTopKClustersScalaDataset,
+D.Hourly, // note that we use hourly in order to make it flexible for hourly batch size
+D.Suffix(tweetTopKClustersDatasetPath),
+D.EBLzo(),
+dateRange.end</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>val writeClusterTopKTweetsExec = clusterTopKTweets</dt><dd><dl class="simple">
+<dt>.writeDALSnapshotExecution(</dt><dd><p>SimclustersOfflineClusterTopKTweetsScalaDataset,
+D.Hourly, // note that we use hourly in order to make it flexible for hourly batch size
+D.Suffix(clusterTopKTweetsDatasetPath),
+D.EBLzo(),
+dateRange.end</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>Execution</dt><dd><p>.zip(writeTweetClusterScoresExec, writeTweetTopKClustersExec, writeClusterTopKTweetsExec)
+.unit</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../_sources/src/scala/com/twitter/simclusters_v2/scalding/offline_job/SimClustersOfflineJobScheduledApp.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

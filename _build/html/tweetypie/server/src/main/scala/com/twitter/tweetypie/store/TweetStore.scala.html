@@ -1,0 +1,493 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.tweetypie
+package store</p>
+<p>import com.twitter.finagle.service.RetryPolicy
+import com.twitter.finagle.stats.Stat
+import com.twitter.servo.util.RetryHandler
+import com.twitter.tweetypie.thriftscala._
+import com.twitter.util.Timer</p>
+<dl>
+<dt>object TweetStore {</dt><dd><p>// Using the old-school c.t.logging.Logger here as this log is only used by
+// servo.FutureEffect’s trackOutcome method, which needs that kind of logger.
+val log: com.twitter.logging.Logger = com.twitter.logging.Logger(getClass)</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Adapts a tweet store on a specific TweetStoreEvent type to one that handles</p></li>
+<li><p>TweetStoreRetryEvents of that type that match the given AsyncWriteAction.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>def retry[T &lt;: AsyncTweetStoreEvent](</dt><dd><p>action: AsyncWriteAction,
+store: FutureEffect[T]</p>
+</dd>
+<dt>): FutureEffect[TweetStoreRetryEvent[T]] =</dt><dd><p>store.contramap[TweetStoreRetryEvent[T]](_.event).onlyIf(_.action == action)</p>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Defines an abstract polymorphic operation to be applied to FutureEffects over any</p></li>
+<li><p>TweetStoreEvent type.  The Wrap operation is defined over all possible</p></li>
+<li><p>FutureEffect[E &lt;: TweetStoreEvent] types.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>trait Wrap {</dt><dd><p>def apply[E &lt;: TweetStoreEvent](handler: FutureEffect[E]): FutureEffect[E]</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>A Wrap operation that applies standardized metrics collection to the FutureEffect.</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>case class Tracked(stats: StatsReceiver) extends Wrap {</dt><dd><dl>
+<dt>def apply[E &lt;: TweetStoreEvent](handler: FutureEffect[E]): FutureEffect[E] =</dt><dd><dl>
+<dt>FutureEffect[E] { event =&gt;</dt><dd><dl class="simple">
+<dt>Stat.timeFuture(stats.scope(event.name).stat(“latency_ms”)) {</dt><dd><p>handler(event)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}.trackOutcome(stats, _.name, log)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>A Wrap operation that makes the FutureEffect enabled according to the given gate.</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+<dt>case class Gated(gate: Gate[Unit]) extends Wrap {</dt><dd><dl class="simple">
+<dt>def apply[E &lt;: TweetStoreEvent](handler: FutureEffect[E]): FutureEffect[E] =</dt><dd><p>handler.enabledBy(gate)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>A Wrap operation that updates the FutureEffect to ignore failures.</p></li>
+</ul>
+<p><a href="#id9"><span class="problematic" id="id10">*</span></a>/</p>
+</dd>
+<dt>object IgnoreFailures extends Wrap {</dt><dd><dl class="simple">
+<dt>def apply[E &lt;: TweetStoreEvent](handler: FutureEffect[E]): FutureEffect[E] =</dt><dd><p>handler.ignoreFailures</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>A Wrap operation that updates the FutureEffect to ignore failures upon completion.</p></li>
+</ul>
+<p><a href="#id11"><span class="problematic" id="id12">*</span></a>/</p>
+</dd>
+<dt>object IgnoreFailuresUponCompletion extends Wrap {</dt><dd><dl class="simple">
+<dt>def apply[E &lt;: TweetStoreEvent](handler: FutureEffect[E]): FutureEffect[E] =</dt><dd><p>handler.ignoreFailuresUponCompletion</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>A Wrap operation that applies a RetryHandler to FutureEffects.</p></li>
+</ul>
+<p><a href="#id13"><span class="problematic" id="id14">*</span></a>/</p>
+</dd>
+<dt>case class Retry(retryHandler: RetryHandler[Unit]) extends Wrap {</dt><dd><dl class="simple">
+<dt>def apply[E &lt;: TweetStoreEvent](handler: FutureEffect[E]): FutureEffect[E] =</dt><dd><p>handler.retry(retryHandler)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>A Wrap operation that applies a RetryHandler to FutureEffects.</p></li>
+</ul>
+<p><a href="#id15"><span class="problematic" id="id16">*</span></a>/</p>
+</dd>
+<dt>case class ReplicatedEventRetry(retryHandler: RetryHandler[Unit]) extends Wrap {</dt><dd><dl>
+<dt>def apply[E &lt;: TweetStoreEvent](handler: FutureEffect[E]): FutureEffect[E] =</dt><dd><dl>
+<dt>FutureEffect[E] { event =&gt;</dt><dd><dl class="simple">
+<dt>event.retryStrategy match {</dt><dd><p>case TweetStoreEvent.ReplicatedEventLocalRetry =&gt; handler.retry(retryHandler)(event)
+case _ =&gt; handler(event)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>A Wrap operation that configures async-retry behavior to async-write events.</p></li>
+</ul>
+<p><a href="#id17"><span class="problematic" id="id18">*</span></a>/</p>
+</dd>
+<dt>class AsyncRetry(</dt><dd><p>localRetryPolicy: RetryPolicy[Try[Nothing]],
+enqueueRetryPolicy: RetryPolicy[Try[Nothing]],
+timer: Timer,
+tweetService: ThriftTweetService,
+scribe: FutureEffect[FailedAsyncWrite]</p>
+</dd>
+<dt>)(</dt><dd><p>stats: StatsReceiver,
+action: AsyncWriteAction)</p>
+<blockquote>
+<div><p>extends Wrap {</p>
+</div></blockquote>
+<dl>
+<dt>override def apply[E &lt;: TweetStoreEvent](handler: FutureEffect[E]): FutureEffect[E] =</dt><dd><dl>
+<dt>FutureEffect[E] { event =&gt;</dt><dd><dl class="simple">
+<dt>event.retryStrategy match {</dt><dd><dl class="simple">
+<dt>case TweetStoreEvent.EnqueueAsyncRetry(enqueueRetry) =&gt;</dt><dd><p>enqueueAsyncRetry(handler, enqueueRetry)(event)</p>
+</dd>
+<dt>case TweetStoreEvent.LocalRetryThenScribeFailure(toFailedAsyncWrite) =&gt;</dt><dd><p>localRetryThenScribeFailure(handler, toFailedAsyncWrite)(event)</p>
+</dd>
+<dt>case _ =&gt;</dt><dd><p>handler(event)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>private def enqueueAsyncRetry[E &lt;: TweetStoreEvent](</dt><dd><p>handler: FutureEffect[E],
+enqueueRetry: (ThriftTweetService, AsyncWriteAction) =&gt; Future[Unit]</p>
+</dd>
+<dt>): FutureEffect[E] = {</dt><dd><p>val retryInitCounter = stats.counter(“retries_initiated”)</p>
+<p>// enqueues failed TweetStoreEvents to the deferredrpc-backed tweetService
+// to be retried.  this store uses the enqueueRetryPolicy to retry the enqueue
+// attempts in the case of deferredrpc application failures.
+val enqueueRetryHandler =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>FutureEffect[E](_ =&gt; enqueueRetry(tweetService, action))</dt><dd><p>.retry(RetryHandler.failuresOnly(enqueueRetryPolicy, timer, stats.scope(“enqueue_retry”)))</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl class="simple">
+<dt>handler.rescue {</dt><dd><dl class="simple">
+<dt>case ex =&gt;</dt><dd><p>TweetStore.log.warning(ex, s”will retry $action”)
+retryInitCounter.incr()
+enqueueRetryHandler</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def localRetryThenScribeFailure[E &lt;: TweetStoreEvent](</dt><dd><p>handler: FutureEffect[E],
+toFailedAsyncWrite: AsyncWriteAction =&gt; FailedAsyncWrite</p>
+</dd>
+<dt>): FutureEffect[E] = {</dt><dd><p>val exhaustedCounter = stats.counter(“retries_exhausted”)</p>
+<p>// scribe events that failed after exhausting all retries
+val scribeEventHandler =</p>
+<blockquote>
+<div><p>FutureEffect[E](_ =&gt; scribe(toFailedAsyncWrite(action)))</p>
+</div></blockquote>
+<p>// wraps <cite>handle</cite> with a retry policy to retry failures with a backoff. if we exhaust
+// all retries, then we pass the event to <cite>scribeEventStore</cite> to scribe the failure.
+handler</p>
+<blockquote>
+<div><p>.retry(RetryHandler.failuresOnly(localRetryPolicy, timer, stats))
+.rescue {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case ex =&gt;</dt><dd><p>TweetStore.log.warning(ex, s”exhausted retries on $action”)
+exhaustedCounter.incr()
+scribeEventHandler</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Parent trait for defining a “module” that defines a TweetStoreEvent type and corresponding</p></li>
+<li><p>TweetStore and TweetStoreWrapper types.</p></li>
+</ul>
+<p><a href="#id19"><span class="problematic" id="id20">*</span></a>/</p>
+</dd>
+<dt>sealed trait Module {</dt><dd><p>type Store
+type StoreWrapper &lt;: Store</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Parent trait for defining a “module” that defines a sync TweetStoreEvent.</p></li>
+</ul>
+<p><a href="#id21"><span class="problematic" id="id22">*</span></a>/</p>
+</dd>
+<dt>trait SyncModule extends Module {</dt><dd><p>type Event &lt;: SyncTweetStoreEvent</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Parent trait for defining a “module” that defines an async TweetStoreEvent and a</p></li>
+<li><p>TweetStoreRetryEvent.</p></li>
+</ul>
+<p><a href="#id23"><span class="problematic" id="id24">*</span></a>/</p>
+</dd>
+<dt>trait AsyncModule extends Module {</dt><dd><p>type Event &lt;: AsyncTweetStoreEvent
+type RetryEvent &lt;: TweetStoreRetryEvent[Event]</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Parent trait for defining a “module” that defines a replicated TweetStoreEvent.</p></li>
+</ul>
+<p><a href="#id25"><span class="problematic" id="id26">*</span></a>/</p>
+</dd>
+<dt>trait ReplicatedModule extends Module {</dt><dd><p>type Event &lt;: ReplicatedTweetStoreEvent</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Trait for TweetStore implementations that support handler wrapping.</p></li>
+</ul>
+<p><a href="#id27"><span class="problematic" id="id28">*</span></a>/</p>
+</dd>
+<dt>trait TweetStoreBase[Self] {</dt><dd><p>import TweetStore._</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Returns a new store of type Self with Wrap applied to each event handler in this instance.</p></li>
+</ul>
+<p><a href="#id29"><span class="problematic" id="id30">*</span></a>/</p>
+</dd>
+</dl>
+<p>def wrap(w: Wrap): Self</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Applies the Tracked Wrap operation to the store.</p></li>
+</ul>
+<p><a href="#id31"><span class="problematic" id="id32">*</span></a>/</p>
+</dd>
+</dl>
+<p>def tracked(stats: StatsReceiver): Self = wrap(Tracked(stats))</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Applies the Gated Wrap operation to the store.</p></li>
+</ul>
+<p><a href="#id33"><span class="problematic" id="id34">*</span></a>/</p>
+</dd>
+</dl>
+<p>def enabledBy(gate: Gate[Unit]): Self = wrap(Gated(gate))</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Applies the IgnoreFailures Wrap operation to the store.</p></li>
+</ul>
+<p><a href="#id35"><span class="problematic" id="id36">*</span></a>/</p>
+</dd>
+</dl>
+<p>def ignoreFailures: Self = wrap(IgnoreFailures)</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Applies the IgnoreFailuresUponCompletion Wrap operation to the store.</p></li>
+</ul>
+<p><a href="#id37"><span class="problematic" id="id38">*</span></a>/</p>
+</dd>
+</dl>
+<p>def ignoreFailuresUponCompletion: Self = wrap(IgnoreFailuresUponCompletion)</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Applies a RetryHandler to each event handler.</p></li>
+</ul>
+<p><a href="#id39"><span class="problematic" id="id40">*</span></a>/</p>
+</dd>
+</dl>
+<p>def retry(retryHandler: RetryHandler[Unit]): Self = wrap(Retry(retryHandler))</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Applies a RetryHandler to replicated event handlers.</p></li>
+</ul>
+<p><a href="#id41"><span class="problematic" id="id42">*</span></a>/</p>
+</dd>
+<dt>def replicatedRetry(retryHandler: RetryHandler[Unit]): Self =</dt><dd><p>wrap(ReplicatedEventRetry(retryHandler))</p>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Applies the AsyncRetryConfig Wrap operation to the store.</p></li>
+</ul>
+<p><a href="#id43"><span class="problematic" id="id44">*</span></a>/</p>
+</dd>
+</dl>
+<p>def asyncRetry(cfg: AsyncRetry): Self = wrap(cfg)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>An abstract base class for tweet store instances that wrap another tweet store instance.</p></li>
+<li><p>You can mix event-specific store wrapper traits into this class to automatically</p></li>
+<li><p>have the event-specific handlers wrapped.</p></li>
+</ul>
+<p><a href="#id45"><span class="problematic" id="id46">*</span></a>/</p>
+</dd>
+<dt>abstract class TweetStoreWrapper[+T](</dt><dd><p>protected val wrap: TweetStore.Wrap,
+protected val underlying: T)</p>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>A TweetStore that has a handler for all possible TweetStoreEvents.</p></li>
+</ul>
+<p><a href="#id47"><span class="problematic" id="id48">*</span></a>/</p>
+</dd>
+<dt>trait TotalTweetStore</dt><dd><p>extends AsyncDeleteAdditionalFields.Store
+with AsyncDeleteTweet.Store
+with AsyncIncrBookmarkCount.Store
+with AsyncIncrFavCount.Store
+with AsyncInsertTweet.Store
+with AsyncSetAdditionalFields.Store
+with AsyncSetRetweetVisibility.Store
+with AsyncTakedown.Store
+with AsyncUndeleteTweet.Store
+with AsyncUpdatePossiblySensitiveTweet.Store
+with DeleteAdditionalFields.Store
+with DeleteTweet.Store
+with Flush.Store
+with IncrBookmarkCount.Store
+with IncrFavCount.Store
+with InsertTweet.Store
+with QuotedTweetDelete.Store
+with QuotedTweetTakedown.Store
+with ReplicatedDeleteAdditionalFields.Store
+with ReplicatedDeleteTweet.Store
+with ReplicatedIncrBookmarkCount.Store
+with ReplicatedIncrFavCount.Store
+with ReplicatedInsertTweet.Store
+with ReplicatedScrubGeo.Store
+with ReplicatedSetAdditionalFields.Store
+with ReplicatedSetRetweetVisibility.Store
+with ReplicatedTakedown.Store
+with ReplicatedUndeleteTweet.Store
+with ReplicatedUpdatePossiblySensitiveTweet.Store
+with ScrubGeo.Store
+with ScrubGeoUpdateUserTimestamp.Store
+with SetAdditionalFields.Store
+with SetRetweetVisibility.Store
+with Takedown.Store
+with UndeleteTweet.Store
+with UpdatePossiblySensitiveTweet.Store</p>
+</dd>
+</dl>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/tweetypie/server/src/main/scala/com/twitter/tweetypie/store/TweetStore.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

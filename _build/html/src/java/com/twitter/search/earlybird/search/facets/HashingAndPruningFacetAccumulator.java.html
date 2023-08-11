@@ -1,0 +1,697 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../" id="documentation_options" src="../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.earlybird.search.facets;</p>
+<p>import java.util.Arrays;
+import java.util.Comparator;
+import java.util.PriorityQueue;</p>
+<p>import com.twitter.search.common.ranking.thriftjava.ThriftFacetEarlybirdSortingMode;
+import com.twitter.search.core.earlybird.facets.FacetAccumulator;
+import com.twitter.search.core.earlybird.facets.FacetLabelProvider;
+import com.twitter.search.core.earlybird.facets.FacetLabelProvider.FacetLabelAccessor;
+import com.twitter.search.core.earlybird.facets.LanguageHistogram;
+import com.twitter.search.earlybird.thrift.ThriftFacetCount;
+import com.twitter.search.earlybird.thrift.ThriftFacetCountMetadata;
+import com.twitter.search.earlybird.thrift.ThriftFacetFieldResults;</p>
+<dl>
+<dt>public class HashingAndPruningFacetAccumulator extends FacetAccumulator {</dt><dd><p>private static final int DEFAULT_HASH_SIZE = 4096;
+/**</p>
+<blockquote>
+<div><ul class="simple">
+<li><p>4 longs per entry accommodates long termIDs.</p></li>
+<li><p>Although entries could be encoded in 3 bytes, 4 ensures that no entry is split</p></li>
+<li><p>across cache lines.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</div></blockquote>
+<p>protected static final int LONGS_PER_ENTRY = 4;
+private static final double LOAD_FACTOR = 0.5;
+private static final long BITSHIFT_MAX_TWEEPCRED = 32;
+private static final long PENALTY_COUNT_MASK = (1L &lt;&lt; BITSHIFT_MAX_TWEEPCRED) - 1;</p>
+<p>protected static final long UNASSIGNED = -1;</p>
+<p>protected LanguageHistogram languageHistogram = new LanguageHistogram();</p>
+<dl>
+<dt>protected static final class HashTable {</dt><dd><p>protected final long[] hash;
+protected final int size;
+protected final int maxLoad;
+protected final int mask;</p>
+<dl class="simple">
+<dt>public HashTable(int size) {</dt><dd><p>hash = new long[LONGS_PER_ENTRY * size];
+Arrays.fill(hash, UNASSIGNED);
+this.size = size;
+// Ensure alignment to LONGS_PER_ENTRY-byte boundaries
+this.mask = LONGS_PER_ENTRY * (size - 1);
+this.maxLoad = (int) (size * LOAD_FACTOR);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>protected void reset() {</dt><dd><p>Arrays.fill(hash, UNASSIGNED);</p>
+</dd>
+</dl>
+<p>}</p>
+<p>private final Cursor cursor = new Cursor();</p>
+<dl>
+<dt>public int findHashPosition(long termID) {</dt><dd><p>int code = (new Long(termID)).hashCode();
+int hashPos = code &amp; mask;</p>
+<dl>
+<dt>if (cursor.readFromHash(hashPos) &amp;&amp; (cursor.termID != termID)) {</dt><dd><p>final int inc = ((code &gt;&gt; 8) + code) | 1;
+do {</p>
+<blockquote>
+<div><p>code += inc;
+hashPos = code &amp; this.mask;</p>
+</div></blockquote>
+<p>} while (cursor.readFromHash(hashPos) &amp;&amp; (cursor.termID != termID));</p>
+</dd>
+</dl>
+<p>}</p>
+<p>return hashPos;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>The cursor can be used to access the different fields of a hash entry.</p></li>
+<li><p>Callers should always position the cursor with readFromHash() before</p></li>
+<li><p>accessing the members.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>private final class Cursor {</dt><dd><p>private int simpleCount;
+private int weightedCount;
+private int penaltyCount;
+private int maxTweepcred;
+private long termID;</p>
+<dl>
+<dt>public void writeToHash(int position) {</dt><dd><dl>
+<dt>long payload = (((long) maxTweepcred) &lt;&lt; BITSHIFT_MAX_TWEEPCRED)</dt><dd><div class="line-block">
+<div class="line">((long) penaltyCount);</div>
+</div>
+</dd>
+<dt>assert itemPenaltyCount(payload) == penaltyCount<span class="classifier">payload + “, “</span></dt><dd><ul class="simple">
+<li><p>itemPenaltyCount(payload) + “ != “ + penaltyCount;</p></li>
+</ul>
+</dd>
+</dl>
+<p>assert itemMaxTweepCred(payload) == maxTweepcred;</p>
+<p>hash[position] = termID;
+hash[position + 1] = simpleCount;
+hash[position + 2] = weightedCount;
+hash[position + 3] = payload;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>/** Returns the item ID, or UNASSIGNED <a href="#id5"><span class="problematic" id="id6">*</span></a>/
+public boolean readFromHash(int position) {</p>
+<blockquote>
+<div><p>long entry = hash[position];
+if (entry == UNASSIGNED) {</p>
+<blockquote>
+<div><p>termID = UNASSIGNED;
+return false;</p>
+</div></blockquote>
+<p>}</p>
+<p>termID = entry;</p>
+<p>simpleCount = (int) hash[position + 1];
+weightedCount = (int) hash[position + 2];
+long payload = hash[position + 3];</p>
+<p>penaltyCount = itemPenaltyCount(payload);
+maxTweepcred = itemMaxTweepCred(payload);</p>
+<p>return true;</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>protected static int itemPenaltyCount(long payload) {</dt><dd><p>return (int) (payload &amp; PENALTY_COUNT_MASK);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>protected static int itemMaxTweepCred(long payload) {</dt><dd><p>return (int) (payload &gt;&gt;&gt; BITSHIFT_MAX_TWEEPCRED);</p>
+</dd>
+</dl>
+<p>}</p>
+<p>protected int numItems;
+protected final HashTable hashTable;
+protected final long[] sortBuffer;
+private FacetLabelProvider facetLabelProvider;</p>
+<p>private int totalSimpleCount;
+private int totalWeightedCount;
+private int totalPenalty;</p>
+<p>static final double DEFAULT_QUERY_INDEPENDENT_PENALTY_WEIGHT = 1.0;
+private final double queryIndependentPenaltyWeight;</p>
+<p>private final FacetComparator facetComparator;</p>
+<dl>
+<dt>public HashingAndPruningFacetAccumulator(FacetLabelProvider facetLabelProvider,</dt><dd><blockquote>
+<div><p>FacetComparator comparator) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>this(DEFAULT_HASH_SIZE, facetLabelProvider,</dt><dd><p>DEFAULT_QUERY_INDEPENDENT_PENALTY_WEIGHT, comparator);</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>public HashingAndPruningFacetAccumulator(FacetLabelProvider facetLabelProvider,</dt><dd><blockquote>
+<div><p>double queryIndependentPenaltyWeight, FacetComparator comparator) {</p>
+</div></blockquote>
+<p>this(DEFAULT_HASH_SIZE, facetLabelProvider, queryIndependentPenaltyWeight, comparator);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Creates a new, empty HashingAndPruningFacetAccumulator with the given initial size.</p></li>
+<li><p>HashSize will be rounded up to the next power-of-2 value.</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+<dt>public HashingAndPruningFacetAccumulator(int hashSize, FacetLabelProvider facetLabelProvider,</dt><dd><blockquote>
+<div><p>double queryIndependentPenaltyWeight, FacetComparator comparator) {</p>
+</div></blockquote>
+<p>int powerOfTwoSize = 2;
+while (hashSize &gt; powerOfTwoSize) {</p>
+<blockquote>
+<div><p>powerOfTwoSize <a href="#id9"><span class="problematic" id="id10">*</span></a>= 2;</p>
+</div></blockquote>
+<p>}</p>
+<p>this.facetComparator  = comparator;
+hashTable = new HashTable(powerOfTwoSize);
+sortBuffer = new long[LONGS_PER_ENTRY * (int) Math.ceil(LOAD_FACTOR * powerOfTwoSize)];
+this.facetLabelProvider = facetLabelProvider;
+this.queryIndependentPenaltyWeight = queryIndependentPenaltyWeight;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;Override
+public void reset(FacetLabelProvider facetLabelProviderToReset) {</p>
+<blockquote>
+<div><p>this.facetLabelProvider = facetLabelProviderToReset;
+this.numItems = 0;
+this.hashTable.reset();
+this.totalSimpleCount = 0;
+this.totalPenalty = 0;
+this.totalWeightedCount = 0;
+languageHistogram.clear();</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public int add(long termID, int weightedCounterIncrement, int penaltyIncrement, int tweepCred) {</p>
+<blockquote>
+<div><p>int hashPos = hashTable.findHashPosition(termID);</p>
+<p>totalPenalty += penaltyIncrement;
+totalSimpleCount++;
+totalWeightedCount += weightedCounterIncrement;</p>
+<dl>
+<dt>if (hashTable.cursor.termID == UNASSIGNED) {</dt><dd><p>hashTable.cursor.termID = termID;
+hashTable.cursor.simpleCount = 1;
+hashTable.cursor.weightedCount = weightedCounterIncrement;
+hashTable.cursor.penaltyCount = penaltyIncrement;
+hashTable.cursor.maxTweepcred = tweepCred;
+hashTable.cursor.writeToHash(hashPos);</p>
+<p>numItems++;
+if (numItems &gt;= hashTable.maxLoad) {</p>
+<blockquote>
+<div><p>prune();</p>
+</div></blockquote>
+<p>}
+return 1;</p>
+</dd>
+</dl>
+<p>} else {</p>
+<blockquote>
+<div><p>hashTable.cursor.simpleCount++;
+hashTable.cursor.weightedCount += weightedCounterIncrement;</p>
+<dl class="simple">
+<dt>if (tweepCred &gt; hashTable.cursor.maxTweepcred) {</dt><dd><p>hashTable.cursor.maxTweepcred = tweepCred;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>hashTable.cursor.penaltyCount += penaltyIncrement;
+hashTable.cursor.writeToHash(hashPos);
+return hashTable.cursor.simpleCount;</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public void recordLanguage(int languageId) {</p>
+<blockquote>
+<div><p>languageHistogram.increment(languageId);</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public LanguageHistogram getLanguageHistogram() {</p>
+<blockquote>
+<div><p>return languageHistogram;</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>private void prune() {</dt><dd><p>copyToSortBuffer();
+hashTable.reset();</p>
+<p>int targetNumItems = (int) (hashTable.maxLoad &gt;&gt; 1);</p>
+<p>int minCount = 2;
+int nextMinCount = Integer.MAX_VALUE;</p>
+<p>final int n = LONGS_PER_ENTRY * numItems;</p>
+<dl>
+<dt>while (numItems &gt; targetNumItems) {</dt><dd><dl>
+<dt>for (int i = 0; i &lt; n; i += LONGS_PER_ENTRY) {</dt><dd><p>long item = sortBuffer[i];
+if (item != UNASSIGNED) {</p>
+<blockquote>
+<div><p>int count = (int) sortBuffer[i + 1];
+if (count &lt; minCount) {</p>
+<blockquote>
+<div><p>evict(i);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else if (count &lt; nextMinCount) {</dt><dd><p>nextMinCount = count;</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}
+if (minCount == nextMinCount) {</p>
+<blockquote>
+<div><p>minCount++;</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>minCount = nextMinCount;</p>
+</dd>
+</dl>
+<p>}
+nextMinCount = Integer.MAX_VALUE;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// rehash
+for (int i = 0; i &lt; n; i += LONGS_PER_ENTRY) {</p>
+<blockquote>
+<div><p>long item = sortBuffer[i];
+if (item != UNASSIGNED) {</p>
+<blockquote>
+<div><p>final long termID = item;
+int hashPos = hashTable.findHashPosition(termID);
+for (int j = 0; j &lt; LONGS_PER_ENTRY; ++j) {</p>
+<blockquote>
+<div><p>hashTable.hash[hashPos + j] = sortBuffer[i + j];</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// overridable for unit test
+protected void evict(int index) {</p>
+<blockquote>
+<div><p>sortBuffer[index] = UNASSIGNED;
+numItems–;</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public ThriftFacetFieldResults getAllFacets() {</p>
+<blockquote>
+<div><p>return getTopFacets(numItems);</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public ThriftFacetFieldResults getTopFacets(final int numRequested) {</p>
+<blockquote>
+<div><p>int n = numRequested &gt; numItems ? numItems : numRequested;</p>
+<dl class="simple">
+<dt>if (n == 0) {</dt><dd><p>return null;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>ThriftFacetFieldResults facetResults = new ThriftFacetFieldResults();
+facetResults.setTotalCount(totalSimpleCount);
+facetResults.setTotalScore(totalWeightedCount);
+facetResults.setTotalPenalty(totalPenalty);</p>
+<p>copyToSortBuffer();</p>
+<p>// sort table using the facet comparator
+PriorityQueue&lt;Item&gt; pq = new PriorityQueue&lt;&gt;(numItems, facetComparator.getComparator(true));</p>
+<dl class="simple">
+<dt>for (int i = 0; i &lt; LONGS_PER_ENTRY * numItems; i += LONGS_PER_ENTRY) {</dt><dd><p>pq.add(new Item(sortBuffer, i));</p>
+</dd>
+</dl>
+<p>}</p>
+<p>FacetLabelAccessor accessor = facetLabelProvider.getLabelAccessor();</p>
+<dl>
+<dt>for (int i = 0; i &lt; n; i++) {</dt><dd><p>Item item = pq.poll();
+long id = item.getTermId();</p>
+<dl class="simple">
+<dt>int penalty = item.getPenaltyCount() + (int) (queryIndependentPenaltyWeight</dt><dd><ul class="simple">
+<li><p>accessor.getOffensiveCount(id));</p></li>
+</ul>
+</dd>
+</dl>
+<p>ThriftFacetCount result = new ThriftFacetCount().setFacetLabel(accessor.getTermText(id));
+result.setPenaltyCount(penalty);
+result.setSimpleCount(item.getSimpleCount());
+result.setWeightedCount(item.getWeightedCount());
+result.setMetadata(new ThriftFacetCountMetadata().setMaxTweepCred(item.getMaxTweetCred()));</p>
+<p>result.setFacetCount(result.getWeightedCount());
+facetResults.addToTopFacets(result);</p>
+</dd>
+</dl>
+<p>}</p>
+<p>return facetResults;</p>
+</div></blockquote>
+<p>}</p>
+<p>// Compacts the hashtable entries in place by removing empty hashes.  After
+// this operation it’s no longer a hash table but a array of entries.
+private void copyToSortBuffer() {</p>
+<blockquote>
+<div><p>int upto = 0;</p>
+<dl>
+<dt>for (int i = 0; i &lt; hashTable.hash.length; i += LONGS_PER_ENTRY) {</dt><dd><dl>
+<dt>if (hashTable.hash[i] != UNASSIGNED) {</dt><dd><dl class="simple">
+<dt>for (int j = 0; j &lt; LONGS_PER_ENTRY; ++j) {</dt><dd><p>sortBuffer[upto + j] = hashTable.hash[i + j];</p>
+</dd>
+</dl>
+<p>}
+upto += LONGS_PER_ENTRY;</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}
+assert upto == numItems * LONGS_PER_ENTRY;</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Sorts facets in the following order:</p></li>
+<li><ol class="arabic simple">
+<li><p>ascending by weightedCount</p></li>
+</ol>
+</li>
+<li><ol class="arabic simple" start="2">
+<li><p>if weightedCount equal: ascending by simpleCount</p></li>
+</ol>
+</li>
+<li><ol class="arabic simple" start="3">
+<li><p>if weightedCount and simpleCount equal: descending by penaltyCount</p></li>
+</ol>
+</li>
+</ul>
+<p><a href="#id11"><span class="problematic" id="id12">*</span></a>/</p>
+</dd>
+<dt>public static int compareFacetCounts(int weightedCount1, int simpleCount1, int penaltyCount1,</dt><dd><blockquote>
+<div><p>int weightedCount2, int simpleCount2, int penaltyCount2,
+boolean simpleCountPrecedence) {</p>
+</div></blockquote>
+<dl>
+<dt>if (simpleCountPrecedence) {</dt><dd><dl>
+<dt>if (simpleCount1 &lt; simpleCount2) {</dt><dd><p>return -1;</p>
+</dd>
+<dt>} else if (simpleCount1 &gt; simpleCount2) {</dt><dd><p>return 1;</p>
+</dd>
+<dt>} else {</dt><dd><dl>
+<dt>if (weightedCount1 &lt; weightedCount2) {</dt><dd><p>return -1;</p>
+</dd>
+<dt>} else if (weightedCount1 &gt; weightedCount2) {</dt><dd><p>return 1;</p>
+</dd>
+<dt>} else {</dt><dd><dl class="simple">
+<dt>if (penaltyCount1 &lt; penaltyCount2) {</dt><dd><p>// descending
+return 1;</p>
+</dd>
+<dt>} else if (penaltyCount1 &gt; penaltyCount2) {</dt><dd><p>return -1;</p>
+</dd>
+<dt>} else {</dt><dd><p>return 0;</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>} else {</dt><dd><dl>
+<dt>if (weightedCount1 &lt; weightedCount2) {</dt><dd><p>return -1;</p>
+</dd>
+<dt>} else if (weightedCount1 &gt; weightedCount2) {</dt><dd><p>return 1;</p>
+</dd>
+<dt>} else {</dt><dd><dl>
+<dt>if (simpleCount1 &lt; simpleCount2) {</dt><dd><p>return -1;</p>
+</dd>
+<dt>} else if (simpleCount1 &gt; simpleCount2) {</dt><dd><p>return 1;</p>
+</dd>
+<dt>} else {</dt><dd><dl class="simple">
+<dt>if (penaltyCount1 &lt; penaltyCount2) {</dt><dd><p>// descending
+return 1;</p>
+</dd>
+<dt>} else if (penaltyCount1 &gt; penaltyCount2) {</dt><dd><p>return -1;</p>
+</dd>
+<dt>} else {</dt><dd><p>return 0;</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>public static final class FacetComparator {</dt><dd><p>private final Comparator&lt;ThriftFacetCount&gt; thriftComparator;
+private final Comparator&lt;Item&gt; comparator;</p>
+<dl>
+<dt>private FacetComparator(Comparator&lt;ThriftFacetCount&gt; thriftComparator,</dt><dd><blockquote>
+<div><p>Comparator&lt;Item&gt; comparator) {</p>
+</div></blockquote>
+<p>this.thriftComparator = thriftComparator;
+this.comparator = comparator;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public Comparator&lt;ThriftFacetCount&gt; getThriftComparator() {</dt><dd><p>return getThriftComparator(false);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public Comparator&lt;ThriftFacetCount&gt; getThriftComparator(boolean reverse) {</dt><dd><p>return reverse ? getReverseComparator(thriftComparator) : thriftComparator;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private Comparator&lt;Item&gt; getComparator(boolean reverse) {</dt><dd><p>return reverse ? getReverseComparator(comparator) : comparator;</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>public static final FacetComparator SIMPLE_COUNT_COMPARATOR = new FacetComparator(</dt><dd><dl class="simple">
+<dt>(facet1, facet2) -&gt; compareFacetCounts(</dt><dd><p>facet1.weightedCount, facet1.simpleCount, facet1.penaltyCount,
+facet2.weightedCount, facet2.simpleCount, facet2.penaltyCount,
+true),</p>
+</dd>
+<dt>(facet1, facet2) -&gt; compareFacetCounts(</dt><dd><p>facet1.getWeightedCount(), facet1.getSimpleCount(), facet1.getPenaltyCount(),
+facet2.getWeightedCount(), facet2.getSimpleCount(), facet2.getPenaltyCount(),
+true));</p>
+</dd>
+</dl>
+</dd>
+<dt>public static final FacetComparator WEIGHTED_COUNT_COMPARATOR = new FacetComparator(</dt><dd><dl class="simple">
+<dt>(facet1, facet2) -&gt; compareFacetCounts(</dt><dd><p>facet1.weightedCount, facet1.simpleCount, facet1.penaltyCount,
+facet2.weightedCount, facet2.simpleCount, facet2.penaltyCount,
+false),</p>
+</dd>
+<dt>(facet1, facet2) -&gt; compareFacetCounts(</dt><dd><p>facet1.getWeightedCount(), facet1.getSimpleCount(), facet1.getPenaltyCount(),
+facet2.getWeightedCount(), facet2.getSimpleCount(), facet2.getPenaltyCount(),
+false));</p>
+</dd>
+</dl>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Returns the appropriate FacetComparator for the specified sortingMode.</p></li>
+</ul>
+<p><a href="#id13"><span class="problematic" id="id14">*</span></a>/</p>
+</dd>
+<dt>public static FacetComparator getComparator(ThriftFacetEarlybirdSortingMode sortingMode) {</dt><dd><dl>
+<dt>switch (sortingMode) {</dt><dd><dl class="simple">
+<dt>case SORT_BY_WEIGHTED_COUNT:</dt><dd><p>return WEIGHTED_COUNT_COMPARATOR;</p>
+</dd>
+</dl>
+<p>case SORT_BY_SIMPLE_COUNT:
+default:</p>
+<blockquote>
+<div><p>return SIMPLE_COUNT_COMPARATOR;</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private static &lt;T&gt; Comparator&lt;T&gt; getReverseComparator(final Comparator&lt;T&gt; comparator) {</dt><dd><p>return (t1, t2) -&gt; -comparator.compare(t1, t2);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>static final class Item {</dt><dd><p>private final long[] data;
+private final int offset;</p>
+<dl class="simple">
+<dt>Item(long[] data, int offset) {</dt><dd><p>this.data = data;
+this.offset = offset;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public long getTermId() {</dt><dd><p>return data[offset];</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public int getSimpleCount() {</dt><dd><p>return (int) data[offset + 1];</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public int getWeightedCount() {</dt><dd><p>return (int) data[offset + 2];</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public int getPenaltyCount() {</dt><dd><p>return itemPenaltyCount(data[offset + 3]);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public int getMaxTweetCred() {</dt><dd><p>return itemMaxTweepCred(data[offset + 3]);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>&#64;Override public int hashCode() {</dt><dd><p>return (int) (31 * getTermId());</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>&#64;Override public boolean equals(Object o) {</dt><dd><p>return getTermId() == ((Item) o).getTermId();</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../_sources/src/java/com/twitter/search/earlybird/search/facets/HashingAndPruningFacetAccumulator.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.core.earlybird.index.inverted;</p>
+<p>import java.io.IOException;
+import java.util.Arrays;</p>
+<p>import com.google.common.annotations.VisibleForTesting;</p>
+<p>import com.twitter.search.common.metrics.SearchLongGauge;
+import com.twitter.search.common.util.io.flushable.DataDeserializer;
+import com.twitter.search.common.util.io.flushable.DataSerializer;
+import com.twitter.search.common.util.io.flushable.FlushInfo;
+import com.twitter.search.common.util.io.flushable.Flushable;</p>
+<p>// Modeled after TwitterCharBlockPool, with a lot of simplification.
+public class IntBlockPool implements Flushable {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>private static final SearchLongGauge INT_BLOCK_POOL_MAX_LENGTH =</dt><dd><p>SearchLongGauge.export(“twitter_int_block_pool_max_size”);</p>
+</dd>
+</dl>
+<p>private static final String STAT_PREFIX = “<a href="#id5"><span class="problematic" id="id6">twitter_int_block_pool_size_</span></a>”;</p>
+<p>private static final int BLOCK_SHIFT = 14;
+public static final int BLOCK_SIZE = 1 &lt;&lt; BLOCK_SHIFT;
+private static final int BLOCK_MASK = BLOCK_SIZE - 1;</p>
+<p>// We can address up to 2^31 elements with an int. We use 1 &lt;&lt; 14 bits for the block offset,
+// so we can use the remaining 17 bits for the blocks index. Therefore the maximum number of
+// addressable blocks is 1 &lt;&lt; 17 or maxInt &gt;&gt; 14.
+private static final int MAX_NUM_BLOCKS = Integer.MAX_VALUE &gt;&gt; BLOCK_SHIFT;</p>
+<p>// Initial value written into the blocks.
+private final int initialValue;</p>
+<p>// Extra object with final array is necessary to guarantee visibility
+// to other threads without synchronization / volatiles.  See comment
+// in TwitterCharBlockPool.
+public static final class Pool {</p>
+<blockquote>
+<div><p>public final int[][] blocks;
+Pool(int[][] blocks) {</p>
+<blockquote>
+<div><p>this.blocks = blocks;</p>
+<p>// Adjust max size if exceeded maximum value.
+synchronized (INT_BLOCK_POOL_MAX_LENGTH) {</p>
+<blockquote>
+<div><dl>
+<dt>if (this.blocks != null) {</dt><dd><p>final long currentSize = (long) (this.blocks.length * BLOCK_SIZE);
+if (currentSize &gt; INT_BLOCK_POOL_MAX_LENGTH.get()) {</p>
+<blockquote>
+<div><p>INT_BLOCK_POOL_MAX_LENGTH.set(currentSize);</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}
+public Pool pool;</p>
+<p>private int currBlockIndex;   // Index into blocks array.
+private int[] currBlock = null;
+private int currBlockOffset;  // Index into current block.
+private final String poolName;
+private final SearchLongGauge sizeGauge;</p>
+<dl class="simple">
+<dt>public IntBlockPool(String poolName) {</dt><dd><p>this(0, poolName);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>public IntBlockPool(int initialValue, String poolName) {</dt><dd><p>// Start with room for 16 initial blocks (does not allocate these blocks).
+this.pool = new Pool(new int[16][]);
+this.initialValue = initialValue;</p>
+<p>// Start at the end of a previous, non-existent blocks.
+this.currBlockIndex = -1;
+this.currBlock = null;
+this.currBlockOffset = BLOCK_SIZE;
+this.poolName = poolName;
+this.sizeGauge = createGauge(poolName, pool);</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// Constructor for FlushHandler.
+protected IntBlockPool(</p>
+<blockquote>
+<div><blockquote>
+<div><p>int currBlockIndex,
+int currBlockOffset,
+int[][]blocks,
+String poolName) {</p>
+</div></blockquote>
+<p>this.initialValue = 0;
+this.pool = new Pool(blocks);
+this.currBlockIndex = currBlockIndex;
+this.currBlockOffset = currBlockOffset;
+if (currBlockIndex &gt;= 0) {</p>
+<blockquote>
+<div><p>this.currBlock = this.pool.blocks[currBlockIndex];</p>
+</div></blockquote>
+<p>}
+this.poolName = poolName;
+this.sizeGauge = createGauge(poolName, pool);</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>private static SearchLongGauge createGauge(String suffix, Pool pool) {</dt><dd><p>SearchLongGauge gauge = SearchLongGauge.export(STAT_PREFIX + suffix);
+if (pool.blocks != null) {</p>
+<blockquote>
+<div><p>gauge.set(pool.blocks.length * BLOCK_SIZE);</p>
+</div></blockquote>
+<p>}
+return gauge;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Adds an int to the current block and returns it’s overall index.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>public int add(int value) {</dt><dd><dl class="simple">
+<dt>if (currBlockOffset == BLOCK_SIZE) {</dt><dd><p>newBlock();</p>
+</dd>
+</dl>
+<p>}
+currBlock[currBlockOffset++] = value;
+return (currBlockIndex &lt;&lt; BLOCK_SHIFT) + currBlockOffset - 1;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// Returns number of ints in this blocks
+public int length() {</p>
+<blockquote>
+<div><p>return currBlockOffset + currBlockIndex * BLOCK_SIZE;</p>
+</div></blockquote>
+<p>}</p>
+<p>// Gets an int from the specified index.
+public final int get(int index) {</p>
+<blockquote>
+<div><p>return getBlock(index)[getOffsetInBlock(index)];</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>public static int getBlockStart(int index) {</dt><dd><p>return (index &gt;&gt;&gt; BLOCK_SHIFT) * BLOCK_SIZE;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public static int getOffsetInBlock(int index) {</dt><dd><p>return index &amp; BLOCK_MASK;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public final int[] getBlock(int index) {</dt><dd><p>final int blockIndex = index &gt;&gt;&gt; BLOCK_SHIFT;
+return pool.blocks[blockIndex];</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// Sets an int value at the specified index.
+public void set(int index, int value) {</p>
+<blockquote>
+<div><p>final int blockIndex = index &gt;&gt;&gt; BLOCK_SHIFT;
+final int offset = index &amp; BLOCK_MASK;
+pool.blocks[blockIndex][offset] = value;</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Evaluates whether two instances of IntBlockPool are equal by value. It is</p></li>
+<li><p>slow because it has to check every element in the pool.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+</dl>
+<p>&#64;VisibleForTesting
+public boolean verySlowEqualsForTests(IntBlockPool that) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (length() != that.length()) {</dt><dd><p>return false;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>for (int i = 0; i &lt; length(); i++) {</dt><dd><dl class="simple">
+<dt>if (get(i) != that.get(i)) {</dt><dd><p>return false;</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>return true;</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>private void newBlock() {</dt><dd><p>final int newBlockIndex = 1 + currBlockIndex;
+if (newBlockIndex &gt;= MAX_NUM_BLOCKS) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>throw new RuntimeException(</dt><dd><p>“Too many blocks, would overflow int index for blocks “ + poolName);</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+if (newBlockIndex == pool.blocks.length) {</p>
+<blockquote>
+<div><p>// Blocks array is too small to add a new block.  Resize.
+int[][] newBlocks = new int[pool.blocks.length * 2][];
+System.arraycopy(pool.blocks, 0, newBlocks, 0, pool.blocks.length);
+pool = new Pool(newBlocks);</p>
+<p>sizeGauge.set(pool.blocks.length * BLOCK_SIZE);</p>
+</div></blockquote>
+<p>}</p>
+<p>currBlock = pool.blocks[newBlockIndex] = allocateBlock();
+currBlockOffset = 0;
+currBlockIndex = newBlockIndex;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private int[] allocateBlock() {</dt><dd><p>int[] block = new int[BLOCK_SIZE];
+Arrays.fill(block, initialValue);
+return block;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;SuppressWarnings(“unchecked”)
+&#64;Override
+public FlushHandler getFlushHandler() {</p>
+<blockquote>
+<div><p>return new FlushHandler(this);</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>public static final class FlushHandler extends Flushable.Handler&lt;IntBlockPool&gt; {</dt><dd><p>private static final String CURRENT_BLOCK_INDEX_PROP_NAME = “currentBlockIndex”;
+private static final String CURRENT_BLOCK_OFFSET_PROP_NAME = “currentBlockOffset”;
+private static final String POOL_NAME = “poolName”;</p>
+<dl class="simple">
+<dt>public FlushHandler() {</dt><dd><p>super();</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public FlushHandler(IntBlockPool objToFlush) {</dt><dd><p>super(objToFlush);</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;Override
+protected void doFlush(FlushInfo flushInfo, DataSerializer out) throws IOException {</p>
+<blockquote>
+<div><p>IntBlockPool pool = getObjectToFlush();
+flushInfo.addIntProperty(CURRENT_BLOCK_INDEX_PROP_NAME, pool.currBlockIndex);
+flushInfo.addIntProperty(CURRENT_BLOCK_OFFSET_PROP_NAME, pool.currBlockOffset);
+flushInfo.addStringProperty(POOL_NAME, pool.poolName);
+out.writeIntArray2D(pool.pool.blocks, pool.currBlockIndex + 1);</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+protected IntBlockPool doLoad(FlushInfo flushInfo, DataDeserializer in) throws IOException {</p>
+<blockquote>
+<div><p>String poolName = flushInfo.getStringProperty(POOL_NAME);
+return new IntBlockPool(</p>
+<blockquote>
+<div><p>flushInfo.getIntProperty(CURRENT_BLOCK_INDEX_PROP_NAME),
+flushInfo.getIntProperty(CURRENT_BLOCK_OFFSET_PROP_NAME),
+in.readIntArray2D(),
+poolName);</p>
+</div></blockquote>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/src/java/com/twitter/search/core/earlybird/index/inverted/IntBlockPool.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

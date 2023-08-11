@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../" id="documentation_options" src="../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../_static/doctools.js?v=888ff710"></script>
+    <script src="../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+   
+  <link rel="stylesheet" href="../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>“””Loss functions – including multi task ones.”””</p>
+<p>import typing</p>
+<p>from tml.core.loss_type import LossType
+from tml.ml_logging.torch_logging import logging</p>
+<p>import torch</p>
+<dl>
+<dt>def _maybe_warn(reduction: str):</dt><dd><p>“””
+Warning for reduction different than mean.
+“””
+if reduction != “mean”:</p>
+<blockquote>
+<div><dl class="simple">
+<dt>logging.warn(</dt><dd><p>f”For the same global_batch_size, the gradient in DDP is guaranteed to be equal,”
+f”to the gradient without DDP only for mean reduction. If you need this property for”
+f”the provided reduction {reduction}, it needs to be implemented.”</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+</dd>
+<dt>def build_loss(</dt><dd><p>loss_type: LossType,
+reduction=”mean”,</p>
+</dd>
+<dt>):</dt><dd><p>_maybe_warn(reduction)
+f = _LOSS_TYPE_TO_FUNCTION[loss_type]</p>
+<dl class="simple">
+<dt>def loss_fn(logits, labels):</dt><dd><p>return f(logits, labels.type_as(logits), reduction=reduction)</p>
+</dd>
+</dl>
+<p>return loss_fn</p>
+</dd>
+<dt>def get_global_loss_detached(local_loss, reduction=”mean”):</dt><dd><p>“””
+Perform all_reduce to obtain the global loss function using the provided reduction.
+:param local_loss: The local loss of the current rank.
+:param reduction: The reduction to use for all_reduce. Should match the reduction used by DDP.
+:return: The reduced &amp; detached global loss.
+“””
+if reduction != “mean”:</p>
+<blockquote>
+<div><dl class="simple">
+<dt>logging.warn(</dt><dd><p>f”The reduction used in this function should be the same as the one used by ”
+f”the DDP model. By default DDP uses mean, So ensure that DDP is appropriately”
+f”modified for reduction {reduction}.”</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>if reduction not in [“mean”, “sum”]:</dt><dd><p>raise ValueError(f”Reduction {reduction} is currently unsupported.”)</p>
+</dd>
+</dl>
+<p>global_loss = local_loss.detach()</p>
+<dl class="simple">
+<dt>if reduction == “mean”:</dt><dd><p>global_loss.div_(torch.distributed.get_world_size())</p>
+</dd>
+</dl>
+<p>torch.distributed.all_reduce(global_loss)
+return global_loss</p>
+</dd>
+<dt>def build_multi_task_loss(</dt><dd><p>loss_type: LossType,
+tasks: typing.List[str],
+task_loss_reduction=”mean”,
+global_reduction=”mean”,
+pos_weights=None,</p>
+</dd>
+<dt>):</dt><dd><p>_maybe_warn(global_reduction)
+_maybe_warn(task_loss_reduction)
+f = _LOSS_TYPE_TO_FUNCTION[loss_type]</p>
+<dl class="simple">
+<dt>loss_reduction_fns = {</dt><dd><p>“mean”: torch.mean,
+“sum”: torch.sum,
+“min”: torch.min,
+“max”: torch.max,
+“median”: torch.median,</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def loss_fn(logits: torch.Tensor, labels: torch.Tensor, weights: torch.Tensor):</dt><dd><dl class="simple">
+<dt>if pos_weights is None:</dt><dd><p>torch_weights = torch.ones([len(tasks)])</p>
+</dd>
+<dt>else:</dt><dd><p>torch_weights = torch.tensor(pos_weights)</p>
+</dd>
+</dl>
+<p>losses = {}
+for task_idx, task in enumerate(tasks):</p>
+<blockquote>
+<div><p>task_logits = logits[:, task_idx]
+label = labels[:, task_idx].type_as(task_logits)</p>
+<dl class="simple">
+<dt>loss = f(</dt><dd><p>task_logits,
+label,
+reduction=task_loss_reduction,
+pos_weight=torch_weights[task_idx],
+weight=weights[:, task_idx],</p>
+</dd>
+</dl>
+<p>)
+losses[f”loss/{task}”] = loss</p>
+</div></blockquote>
+<p>losses[“loss”] = loss_reduction_fns[global_reduction](torch.stack(list(losses.values())))
+return losses</p>
+</dd>
+</dl>
+<p>return loss_fn</p>
+</dd>
+<dt>_LOSS_TYPE_TO_FUNCTION = {</dt><dd><p>LossType.BCE_WITH_LOGITS: torch.nn.functional.binary_cross_entropy_with_logits</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../_sources/core/losses.py.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

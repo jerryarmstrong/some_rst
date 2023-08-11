@@ -1,0 +1,907 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../" id="documentation_options" src="../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.common.converter.earlybird;</p>
+<p>import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
+import javax.annotation.Nullable;</p>
+<p>import com.google.common.base.Joiner;
+import com.google.common.base.Preconditions;
+import com.google.common.collect.Lists;</p>
+<p>import org.apache.commons.lang.StringUtils;
+import org.apache.http.annotation.NotThreadSafe;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;</p>
+<p>import com.twitter.common.text.token.TokenizedCharSequenceStream;
+import com.twitter.common.text.util.TokenStreamSerializer;
+import com.twitter.common_internal.text.version.PenguinVersion;
+import com.twitter.cuad.ner.plain.thriftjava.NamedEntity;
+import com.twitter.decider.Decider;
+import com.twitter.search.common.constants.SearchCardType;
+import com.twitter.search.common.decider.DeciderUtil;
+import com.twitter.search.common.indexing.thriftjava.SearchCard2;
+import com.twitter.search.common.indexing.thriftjava.ThriftExpandedUrl;
+import com.twitter.search.common.indexing.thriftjava.ThriftVersionedEvents;
+import com.twitter.search.common.indexing.thriftjava.TwitterPhotoUrl;
+import com.twitter.search.common.relevance.entities.TwitterMessage;
+import com.twitter.search.common.relevance.entities.TwitterMessageUser;
+import com.twitter.search.common.relevance.features.TweetTextFeatures;
+import com.twitter.search.common.schema.base.ImmutableSchemaInterface;
+import com.twitter.search.common.schema.base.Schema;
+import com.twitter.search.common.schema.earlybird.EarlybirdEncodedFeatures;
+import com.twitter.search.common.schema.earlybird.EarlybirdFieldConstants;
+import com.twitter.search.common.schema.earlybird.EarlybirdThriftDocumentBuilder;
+import com.twitter.search.common.schema.thriftjava.ThriftDocument;
+import com.twitter.search.common.schema.thriftjava.ThriftField;
+import com.twitter.search.common.schema.thriftjava.ThriftFieldData;
+import com.twitter.search.common.schema.thriftjava.ThriftIndexingEvent;
+import com.twitter.search.common.schema.thriftjava.ThriftIndexingEventType;
+import com.twitter.search.common.util.lang.ThriftLanguageUtil;
+import com.twitter.search.common.util.text.LanguageIdentifierHelper;
+import com.twitter.search.common.util.text.NormalizerHelper;
+import com.twitter.search.common.util.text.TokenizerHelper;
+import com.twitter.search.common.util.text.TokenizerResult;
+import com.twitter.search.common.util.text.TweetTokenStreamSerializer;
+import com.twitter.service.spiderduck.gen.MediaTypes;
+import com.twitter.search.common.metrics.SearchCounter;</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Create and populate ThriftVersionedEvents from the URL data, card data, and named entities</p></li>
+<li><p>contained in a TwitterMessage. This data is delayed because these services take a few seconds</p></li>
+<li><p>to process tweets, and we want to send the basic data available in the BasicIndexingConverter as</p></li>
+<li><p>soon as possible, so we send the additional data a few seconds later, as an update.</p></li>
+<li></li>
+<li><p>Prefer to add data and processing to the BasicIndexingConverter when possible. Only add data here</p></li>
+<li><p>if your data source _requires_ data from an external service AND the external service takes at</p></li>
+<li><p>least a few seconds to process new tweets.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+</dl>
+<p>&#64;NotThreadSafe
+public class DelayedIndexingConverter {</p>
+<blockquote>
+<div><dl>
+<dt>private static final SearchCounter NUM_TWEETS_WITH_CARD_URL =</dt><dd><p>SearchCounter.export(“tweets_with_card_url”);</p>
+</dd>
+<dt>private static final SearchCounter NUM_TWEETS_WITH_NUMERIC_CARD_URI =</dt><dd><p>SearchCounter.export(“tweets_with_numeric_card_uri”);</p>
+</dd>
+<dt>private static final SearchCounter NUM_TWEETS_WITH_INVALID_CARD_URI =</dt><dd><p>SearchCounter.export(“tweets_with_invalid_card_uri”);</p>
+</dd>
+<dt>private static final SearchCounter TOTAL_URLS =</dt><dd><p>SearchCounter.export(“total_urls_on_tweets”);</p>
+</dd>
+<dt>private static final SearchCounter MEDIA_URLS_ON_TWEETS =</dt><dd><p>SearchCounter.export(“media_urls_on_tweets”);</p>
+</dd>
+<dt>private static final SearchCounter NON_MEDIA_URLS_ON_TWEETS =</dt><dd><p>SearchCounter.export(“non_media_urls_on_tweets”);</p>
+</dd>
+<dt>public static final String INDEX_URL_DESCRIPTION_AND_TITLE_DECIDER =</dt><dd><p>“index_url_description_and_title”;</p>
+</dd>
+<dt>private static class ThriftDocumentWithEncodedTweetFeatures {</dt><dd><p>private final ThriftDocument document;
+private final EarlybirdEncodedFeatures encodedFeatures;</p>
+<dl>
+<dt>public ThriftDocumentWithEncodedTweetFeatures(ThriftDocument document,</dt><dd><blockquote>
+<div><p>EarlybirdEncodedFeatures encodedFeatures) {</p>
+</div></blockquote>
+<p>this.document = document;
+this.encodedFeatures = encodedFeatures;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public ThriftDocument getDocument() {</dt><dd><p>return document;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public EarlybirdEncodedFeatures getEncodedFeatures() {</dt><dd><p>return encodedFeatures;</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// The list of all the encoded_tweet_features flags that might be updated by this converter.
+// No extended_encoded_tweet_features are updated (otherwise they should be in this list too).
+private static final List&lt;EarlybirdFieldConstants.EarlybirdFieldConstant&gt; UPDATED_FLAGS =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>Lists.newArrayList(</dt><dd><p>EarlybirdFieldConstants.EarlybirdFieldConstant.IS_OFFENSIVE_FLAG,
+EarlybirdFieldConstants.EarlybirdFieldConstant.HAS_LINK_FLAG,
+EarlybirdFieldConstants.EarlybirdFieldConstant.IS_SENSITIVE_CONTENT,
+EarlybirdFieldConstants.EarlybirdFieldConstant.TEXT_SCORE,
+EarlybirdFieldConstants.EarlybirdFieldConstant.TWEET_SIGNATURE,
+EarlybirdFieldConstants.EarlybirdFieldConstant.LINK_LANGUAGE,
+EarlybirdFieldConstants.EarlybirdFieldConstant.HAS_IMAGE_URL_FLAG,
+EarlybirdFieldConstants.EarlybirdFieldConstant.HAS_VIDEO_URL_FLAG,
+EarlybirdFieldConstants.EarlybirdFieldConstant.HAS_NEWS_URL_FLAG,
+EarlybirdFieldConstants.EarlybirdFieldConstant.HAS_EXPANDO_CARD_FLAG,
+EarlybirdFieldConstants.EarlybirdFieldConstant.HAS_MULTIPLE_MEDIA_FLAG,
+EarlybirdFieldConstants.EarlybirdFieldConstant.HAS_CARD_FLAG,
+EarlybirdFieldConstants.EarlybirdFieldConstant.HAS_VISIBLE_LINK_FLAG,
+EarlybirdFieldConstants.EarlybirdFieldConstant.HAS_CONSUMER_VIDEO_FLAG,
+EarlybirdFieldConstants.EarlybirdFieldConstant.HAS_PRO_VIDEO_FLAG,
+EarlybirdFieldConstants.EarlybirdFieldConstant.HAS_VINE_FLAG,
+EarlybirdFieldConstants.EarlybirdFieldConstant.HAS_PERISCOPE_FLAG,
+EarlybirdFieldConstants.EarlybirdFieldConstant.HAS_NATIVE_IMAGE_FLAG</p>
+</dd>
+</dl>
+<p>);</p>
+</div></blockquote>
+<p>private static final Logger LOG = LoggerFactory.getLogger(DelayedIndexingConverter.class);
+private static final String AMPLIFY_CARD_NAME = “amplify”;
+private static final String PLAYER_CARD_NAME = “player”;</p>
+<p>private final EncodedFeatureBuilder featureBuilder = new EncodedFeatureBuilder();</p>
+<p>private final Schema schema;
+private final Decider decider;</p>
+<dl class="simple">
+<dt>public DelayedIndexingConverter(Schema schema, Decider decider) {</dt><dd><p>this.schema = schema;
+this.decider = decider;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Converts the given message to two ThriftVersionedEvents instances: the first one is a feature</p></li>
+<li><p>update event for all link and card related flags, and the second one is the append event that</p></li>
+<li><p>might contain updates to all link and card related fields.</p></li>
+<li></li>
+<li><p>We need to split the updates to fields and flags into two separate events because:</p></li>
+<li><ul>
+<li><p>When a tweet is created, earlybirds get the “main” event, which does not have resolved URLs.</p></li>
+</ul>
+</li>
+<li><ul>
+<li><p>Then the earlybirds might get a feature update from the signal ingesters, marking the tweet</p></li>
+</ul>
+</li>
+<li><p>as spam.</p></li>
+<li><ul>
+<li><p>Then the ingesters resolve the URLs and send an update event. At this point, the ingesters</p></li>
+</ul>
+</li>
+<li><p>need to send updates for link-related flags too (HAS_LINK_FLAG, etc.). And there are a few</p></li>
+<li><p>ways to do this:</p></li>
+<li><ol class="arabic simple">
+<li><p>Encode these flags into encoded_tweet_features and extended_encoded_tweet_features and</p></li>
+</ol>
+</li>
+<li><p>add these fields to the update event. The problem is that earlybirds will then override</p></li>
+<li><p>the encoded_tweet_features ane extended_encoded_tweet_features fields in the index for</p></li>
+<li><p>this tweet, which will override the feature update the earlybirds got earlier, which</p></li>
+<li><p>means that a spammy tweet might no longer be marked as spam in the index.</p></li>
+<li><ol class="arabic simple" start="2">
+<li><p>Send updates only for the flags that might’ve been updated by this converter. Since</p></li>
+</ol>
+</li>
+<li><p>ThriftIndexingEvent already has a map of field -&gt; value, it seems like the natural place</p></li>
+<li><p>to add these updates to. However, earlybirds can correctly process flag updates only if</p></li>
+<li><p>they come in a feature update event (PARTIAL_UPDATE). So we need to send the field</p></li>
+<li><p>updates in an OUT_OF_ORDER_UPDATE event, and the flag updates in a PARTIAL_UPDATE event.</p></li>
+<li></li>
+<li><p>We need to send the feature update event before the append event to avoid issues like the one</p></li>
+<li><p>in SEARCH-30919 where tweets were returned from the card name field index before the HAS_CARD</p></li>
+<li><p>feature was updated to true.</p></li>
+<li></li>
+<li><p>&#64;param message The TwitterMessage to convert.</p></li>
+<li><p>&#64;param penguinVersions The Penguin versions for which ThriftIndexingEvents should be created.</p></li>
+<li><p>&#64;return An out of order update event for all link- and card-related fields and a feature update</p></li>
+<li><p>event for all link- and card-related flags.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>public List&lt;ThriftVersionedEvents&gt; convertMessageToOutOfOrderAppendAndFeatureUpdate(</dt><dd><blockquote>
+<div><p>TwitterMessage message, List&lt;PenguinVersion&gt; penguinVersions) {</p>
+</div></blockquote>
+<p>Preconditions.checkNotNull(message);
+Preconditions.checkNotNull(penguinVersions);</p>
+<p>ThriftVersionedEvents featureUpdateVersionedEvents = new ThriftVersionedEvents();
+ThriftVersionedEvents outOfOrderAppendVersionedEvents = new ThriftVersionedEvents();
+ImmutableSchemaInterface schemaSnapshot = schema.getSchemaSnapshot();</p>
+<dl>
+<dt>for (PenguinVersion penguinVersion<span class="classifier">penguinVersions) {</span></dt><dd><dl class="simple">
+<dt>ThriftDocumentWithEncodedTweetFeatures documentWithEncodedFeatures =</dt><dd><p>buildDocumentForPenguinVersion(schemaSnapshot, message, penguinVersion);</p>
+</dd>
+</dl>
+<p>ThriftIndexingEvent featureUpdateThriftIndexingEvent = new ThriftIndexingEvent();
+featureUpdateThriftIndexingEvent.setEventType(ThriftIndexingEventType.PARTIAL_UPDATE);
+featureUpdateThriftIndexingEvent.setUid(message.getId());
+featureUpdateThriftIndexingEvent.setDocument(</p>
+<blockquote>
+<div><p>buildFeatureUpdateDocument(documentWithEncodedFeatures.getEncodedFeatures()));</p>
+</div></blockquote>
+<dl class="simple">
+<dt>featureUpdateVersionedEvents.putToVersionedEvents(</dt><dd><p>penguinVersion.getByteValue(), featureUpdateThriftIndexingEvent);</p>
+</dd>
+</dl>
+<p>ThriftIndexingEvent outOfOrderAppendThriftIndexingEvent = new ThriftIndexingEvent();
+outOfOrderAppendThriftIndexingEvent.setDocument(documentWithEncodedFeatures.getDocument());
+outOfOrderAppendThriftIndexingEvent.setEventType(ThriftIndexingEventType.OUT_OF_ORDER_APPEND);
+message.getFromUserTwitterId().ifPresent(outOfOrderAppendThriftIndexingEvent::setUid);
+outOfOrderAppendThriftIndexingEvent.setSortId(message.getId());
+outOfOrderAppendVersionedEvents.putToVersionedEvents(</p>
+<blockquote>
+<div><p>penguinVersion.getByteValue(), outOfOrderAppendThriftIndexingEvent);</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<p>featureUpdateVersionedEvents.setId(message.getId());
+outOfOrderAppendVersionedEvents.setId(message.getId());</p>
+<p>return Lists.newArrayList(featureUpdateVersionedEvents, outOfOrderAppendVersionedEvents);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private ThriftDocument buildFeatureUpdateDocument(EarlybirdEncodedFeatures encodedFeatures) {</dt><dd><p>ThriftDocument document = new ThriftDocument();
+for (EarlybirdFieldConstants.EarlybirdFieldConstant flag : UPDATED_FLAGS) {</p>
+<blockquote>
+<div><p>ThriftField field = new ThriftField();
+field.setFieldConfigId(flag.getFieldId());
+field.setFieldData(new ThriftFieldData().setIntValue(encodedFeatures.getFeatureValue(flag)));
+document.addToFields(field);</p>
+</div></blockquote>
+<p>}
+return document;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private ThriftDocumentWithEncodedTweetFeatures buildDocumentForPenguinVersion(</dt><dd><blockquote>
+<div><p>ImmutableSchemaInterface schemaSnapshot,
+TwitterMessage message,
+PenguinVersion penguinVersion) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>EarlybirdEncodedFeatures encodedFeatures = featureBuilder.createTweetFeaturesFromTwitterMessage(</dt><dd><p>message, penguinVersion, schemaSnapshot).encodedFeatures;</p>
+</dd>
+<dt>EarlybirdThriftDocumentBuilder builder = new EarlybirdThriftDocumentBuilder(</dt><dd><p>encodedFeatures,
+null,
+new EarlybirdFieldConstants(),
+schemaSnapshot);</p>
+</dd>
+</dl>
+<p>builder.setAddLatLonCSF(false);
+builder.withID(message.getId());
+buildFieldsFromUrlInfo(builder, message, penguinVersion, encodedFeatures);
+buildCardFields(builder, message, penguinVersion);
+buildNamedEntityFields(builder, message);
+builder.withTweetSignature(message.getTweetSignature(penguinVersion));</p>
+<p>buildSpaceAdminAndTitleFields(builder, message, penguinVersion);</p>
+<p>builder.setAddEncodedTweetFeatures(false);</p>
+<p>return new ThriftDocumentWithEncodedTweetFeatures(builder.build(), encodedFeatures);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>public static void buildNamedEntityFields(</dt><dd><blockquote>
+<div><p>EarlybirdThriftDocumentBuilder builder, TwitterMessage message) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>for (NamedEntity namedEntity<span class="classifier">message.getNamedEntities()) {</span></dt><dd><p>builder.withNamedEntity(namedEntity);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private void buildFieldsFromUrlInfo(</dt><dd><blockquote>
+<div><p>EarlybirdThriftDocumentBuilder builder,
+TwitterMessage message,
+PenguinVersion penguinVersion,
+EarlybirdEncodedFeatures encodedFeatures) {</p>
+</div></blockquote>
+<p>// We need to update the RESOLVED_LINKS_TEXT_FIELD, since we might have new resolved URLs.
+// Use the same logic as in EncodedFeatureBuilder.java.
+TweetTextFeatures textFeatures = message.getTweetTextFeatures(penguinVersion);
+String resolvedUrlsText = Joiner.on(” “).skipNulls().join(textFeatures.getResolvedUrlTokens());
+builder.withResolvedLinksText(resolvedUrlsText);</p>
+<p>buildURLFields(builder, message, encodedFeatures);
+buildAnalyzedURLFields(builder, message, penguinVersion);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private void buildAnalyzedURLFields(</dt><dd><p>EarlybirdThriftDocumentBuilder builder, TwitterMessage message, PenguinVersion penguinVersion</p>
+</dd>
+<dt>) {</dt><dd><p>TOTAL_URLS.add(message.getExpandedUrls().size());
+if (DeciderUtil.isAvailableForRandomRecipient(</p>
+<blockquote>
+<div><blockquote>
+<div><p>decider,
+INDEX_URL_DESCRIPTION_AND_TITLE_DECIDER)) {</p>
+</div></blockquote>
+<p>for (ThriftExpandedUrl expandedUrl : message.getExpandedUrls()) {
+/*</p>
+<blockquote>
+<div><blockquote>
+<div><p>Consumer Media URLs are added to the expanded URLs in
+TweetEventParserHelper.addMediaEntitiesToMessage. These Twitter.com media URLs contain
+the tweet text as the description and the title is “&lt;User Name&gt; on Twitter”. This is
+redundant information at best and misleading at worst. We will ignore these URLs to avoid
+polluting the url_description and url_title field as well as saving space.</p>
+</div></blockquote>
+<dl>
+<dt><a href="#id5"><span class="problematic" id="id6">*</span></a>/</dt><dd><dl>
+<dt>if (!expandedUrl.isSetConsumerMedia() || !expandedUrl.isConsumerMedia()) {</dt><dd><p>NON_MEDIA_URLS_ON_TWEETS.increment();
+if (expandedUrl.isSetDescription()) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>buildTweetTokenizerTokenizedField(builder,</dt><dd><p>EarlybirdFieldConstants.EarlybirdFieldConstant.URL_DESCRIPTION_FIELD.getFieldName(),
+expandedUrl.getDescription(),
+penguinVersion);</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+if (expandedUrl.isSetTitle()) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>buildTweetTokenizerTokenizedField(builder,</dt><dd><p>EarlybirdFieldConstants.EarlybirdFieldConstant.URL_TITLE_FIELD.getFieldName(),
+expandedUrl.getTitle(),
+penguinVersion);</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+<dt>} else {</dt><dd><p>MEDIA_URLS_ON_TWEETS.increment();</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Build the URL based fields from a tweet.</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+<dt>public static void buildURLFields(</dt><dd><p>EarlybirdThriftDocumentBuilder builder,
+TwitterMessage message,
+EarlybirdEncodedFeatures encodedFeatures</p>
+</dd>
+<dt>) {</dt><dd><p>Map&lt;String, ThriftExpandedUrl&gt; expandedUrlMap = message.getExpandedUrlMap();</p>
+<dl>
+<dt>for (ThriftExpandedUrl expandedUrl<span class="classifier">expandedUrlMap.values()) {</span></dt><dd><dl class="simple">
+<dt>if (expandedUrl.getMediaType() == MediaTypes.NATIVE_IMAGE) {</dt><dd><p>EncodedFeatureBuilder.addPhotoUrl(message, expandedUrl.getCanonicalLastHopUrl());</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// now add all twitter photos links that came with the tweet’s payload
+Map&lt;Long, String&gt; photos = message.getPhotoUrls();
+List&lt;TwitterPhotoUrl&gt; photoURLs = new ArrayList&lt;&gt;();
+if (photos != null) {</p>
+<blockquote>
+<div><dl>
+<dt>for (Map.Entry&lt;Long, String&gt; entry<span class="classifier">photos.entrySet()) {</span></dt><dd><p>TwitterPhotoUrl photo = new TwitterPhotoUrl(entry.getKey());
+String mediaUrl = entry.getValue();
+if (mediaUrl != null) {</p>
+<blockquote>
+<div><p>photo.setMediaUrl(mediaUrl);</p>
+</div></blockquote>
+<p>}
+photoURLs.add(photo);</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>try {</dt><dd><dl class="simple">
+<dt>builder</dt><dd><p>.withURLs(Lists.newArrayList(expandedUrlMap.values()))
+.withTwimgURLs(photoURLs);</p>
+</dd>
+</dl>
+</dd>
+<dt>} catch (IOException ioe) {</dt><dd><p>LOG.error(“URL field creation threw an IOException”, ioe);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>if (encodedFeatures.isFlagSet(</dt><dd><blockquote>
+<div><p>EarlybirdFieldConstants.EarlybirdFieldConstant.IS_OFFENSIVE_FLAG)) {</p>
+</div></blockquote>
+<p>builder.withOffensiveFlag();</p>
+</dd>
+</dl>
+<p>}
+if (encodedFeatures.isFlagSet(</p>
+<blockquote>
+<div><blockquote>
+<div><p>EarlybirdFieldConstants.EarlybirdFieldConstant.HAS_CONSUMER_VIDEO_FLAG)) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>builder.addFilterInternalFieldTerm(</dt><dd><p>EarlybirdFieldConstants.EarlybirdFieldConstant.CONSUMER_VIDEO_FILTER_TERM);</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+if (encodedFeatures.isFlagSet(</p>
+<blockquote>
+<div><blockquote>
+<div><p>EarlybirdFieldConstants.EarlybirdFieldConstant.HAS_PRO_VIDEO_FLAG)) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>builder.addFilterInternalFieldTerm(</dt><dd><p>EarlybirdFieldConstants.EarlybirdFieldConstant.PRO_VIDEO_FILTER_TERM);</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+if (encodedFeatures.isFlagSet(EarlybirdFieldConstants.EarlybirdFieldConstant.HAS_VINE_FLAG)) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>builder.addFilterInternalFieldTerm(</dt><dd><p>EarlybirdFieldConstants.EarlybirdFieldConstant.VINE_FILTER_TERM);</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+if (encodedFeatures.isFlagSet(</p>
+<blockquote>
+<div><blockquote>
+<div><p>EarlybirdFieldConstants.EarlybirdFieldConstant.HAS_PERISCOPE_FLAG)) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>builder.addFilterInternalFieldTerm(</dt><dd><p>EarlybirdFieldConstants.EarlybirdFieldConstant.PERISCOPE_FILTER_TERM);</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Build the card information inside ThriftIndexingEvent’s fields.</p></li>
+</ul>
+<p><a href="#id9"><span class="problematic" id="id10">*</span></a>/</p>
+</dd>
+<dt>static void buildCardFields(EarlybirdThriftDocumentBuilder builder,</dt><dd><blockquote>
+<div><p>TwitterMessage message,
+PenguinVersion penguinVersion) {</p>
+</div></blockquote>
+<dl>
+<dt>if (message.hasCard()) {</dt><dd><dl class="simple">
+<dt>SearchCard2 card = buildSearchCardFromTwitterMessage(</dt><dd><p>message,
+TweetTokenStreamSerializer.getTweetTokenStreamSerializer(),
+penguinVersion);</p>
+</dd>
+</dl>
+<p>buildCardFeatures(message.getId(), builder, card);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private static SearchCard2 buildSearchCardFromTwitterMessage(</dt><dd><blockquote>
+<div><p>TwitterMessage message,
+TokenStreamSerializer streamSerializer,
+PenguinVersion penguinVersion) {</p>
+</div></blockquote>
+<p>SearchCard2 card = new SearchCard2();
+card.setCardName(message.getCardName());
+if (message.getCardDomain() != null) {</p>
+<blockquote>
+<div><p>card.setCardDomain(message.getCardDomain());</p>
+</div></blockquote>
+<p>}
+if (message.getCardLang() != null) {</p>
+<blockquote>
+<div><p>card.setCardLang(message.getCardLang());</p>
+</div></blockquote>
+<p>}
+if (message.getCardUrl() != null) {</p>
+<blockquote>
+<div><p>card.setCardUrl(message.getCardUrl());</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>if (message.getCardTitle() != null &amp;&amp; !message.getCardTitle().isEmpty()) {</dt><dd><dl class="simple">
+<dt>String normalizedTitle = NormalizerHelper.normalize(</dt><dd><p>message.getCardTitle(), message.getLocale(), penguinVersion);</p>
+</dd>
+<dt>TokenizerResult result = TokenizerHelper.tokenizeTweet(</dt><dd><p>normalizedTitle, message.getLocale(), penguinVersion);</p>
+</dd>
+</dl>
+<p>TokenizedCharSequenceStream tokenSeqStream = new TokenizedCharSequenceStream();
+tokenSeqStream.reset(result.tokenSequence);
+try {</p>
+<blockquote>
+<div><p>card.setCardTitleTokenStream(streamSerializer.serialize(tokenSeqStream));
+card.setCardTitleTokenStreamText(result.tokenSequence.toString());</p>
+</div></blockquote>
+<dl>
+<dt>} catch (IOException e) {</dt><dd><dl class="simple">
+<dt>LOG.error(“TwitterTokenStream serialization error! Could not serialize card title: “</dt><dd><ul class="simple">
+<li><p>result.tokenSequence);</p></li>
+</ul>
+</dd>
+</dl>
+<p>card.unsetCardTitleTokenStream();
+card.unsetCardTitleTokenStreamText();</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}
+if (message.getCardDescription() != null &amp;&amp; !message.getCardDescription().isEmpty()) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>String normalizedDesc = NormalizerHelper.normalize(</dt><dd><p>message.getCardDescription(), message.getLocale(), penguinVersion);</p>
+</dd>
+<dt>TokenizerResult result = TokenizerHelper.tokenizeTweet(</dt><dd><p>normalizedDesc, message.getLocale(), penguinVersion);</p>
+</dd>
+</dl>
+<p>TokenizedCharSequenceStream tokenSeqStream = new TokenizedCharSequenceStream();
+tokenSeqStream.reset(result.tokenSequence);
+try {</p>
+<blockquote>
+<div><p>card.setCardDescriptionTokenStream(streamSerializer.serialize(tokenSeqStream));
+card.setCardDescriptionTokenStreamText(result.tokenSequence.toString());</p>
+</div></blockquote>
+<dl>
+<dt>} catch (IOException e) {</dt><dd><dl class="simple">
+<dt>LOG.error(“TwitterTokenStream serialization error! Could not serialize card description: “</dt><dd><ul class="simple">
+<li><p>result.tokenSequence);</p></li>
+</ul>
+</dd>
+</dl>
+<p>card.unsetCardDescriptionTokenStream();
+card.unsetCardDescriptionTokenStreamText();</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>return card;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Builds card features.</p></li>
+</ul>
+<p><a href="#id11"><span class="problematic" id="id12">*</span></a>/</p>
+</dd>
+<dt>private static void buildCardFeatures(</dt><dd><blockquote>
+<div><p>long tweetId, EarlybirdThriftDocumentBuilder builder, SearchCard2 card) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>if (card == null) {</dt><dd><p>return;</p>
+</dd>
+</dl>
+<p>}
+builder</p>
+<blockquote>
+<div><dl class="simple">
+<dt>.withTokenStreamField(</dt><dd><p>EarlybirdFieldConstants.EarlybirdFieldConstant.CARD_TITLE_FIELD.getFieldName(),
+card.getCardTitleTokenStreamText(),
+card.isSetCardTitleTokenStream() ? card.getCardTitleTokenStream() : null)</p>
+</dd>
+<dt>.withTokenStreamField(</dt><dd><p>EarlybirdFieldConstants.EarlybirdFieldConstant.CARD_DESCRIPTION_FIELD.getFieldName(),
+card.getCardDescriptionTokenStreamText(),
+card.isSetCardDescriptionTokenStream() ? card.getCardDescriptionTokenStream() : null)</p>
+</dd>
+<dt>.withStringField(</dt><dd><p>EarlybirdFieldConstants.EarlybirdFieldConstant.CARD_NAME_FIELD.getFieldName(),
+card.getCardName())</p>
+</dd>
+<dt>.withIntField(</dt><dd><p>EarlybirdFieldConstants.EarlybirdFieldConstant.CARD_TYPE_CSF_FIELD.getFieldName(),
+SearchCardType.cardTypeFromStringName(card.getCardName()).getByteValue());</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl class="simple">
+<dt>if (card.getCardLang() != null) {</dt><dd><dl class="simple">
+<dt>builder.withStringField(</dt><dd><p>EarlybirdFieldConstants.EarlybirdFieldConstant.CARD_LANG.getFieldName(),
+card.getCardLang()).withIntField(
+EarlybirdFieldConstants.EarlybirdFieldConstant.CARD_LANG_CSF.getFieldName(),
+ThriftLanguageUtil.getThriftLanguageOf(card.getCardLang()).getValue());</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+if (card.getCardDomain() != null) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>builder.withStringField(</dt><dd><p>EarlybirdFieldConstants.EarlybirdFieldConstant.CARD_DOMAIN_FIELD.getFieldName(),
+card.getCardDomain());</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+if (card.getCardUrl() != null) {</p>
+<blockquote>
+<div><p>NUM_TWEETS_WITH_CARD_URL.increment();
+if (card.getCardUrl().startsWith(“card://”)) {</p>
+<blockquote>
+<div><p>String suffix = card.getCardUrl().replace(“card://”, “”);
+if (StringUtils.isNumeric(suffix)) {</p>
+<blockquote>
+<div><p>NUM_TWEETS_WITH_NUMERIC_CARD_URI.increment();
+builder.withLongField(</p>
+<blockquote>
+<div><p>EarlybirdFieldConstants.EarlybirdFieldConstant.CARD_URI_CSF.getFieldName(),
+Long.parseLong(suffix));</p>
+</div></blockquote>
+<dl class="simple">
+<dt>LOG.debug(String.format(</dt><dd><p>“Good card URL for tweet %s: %s”,
+tweetId,
+card.getCardUrl()));</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl>
+<dt>} else {</dt><dd><p>NUM_TWEETS_WITH_INVALID_CARD_URI.increment();
+LOG.debug(String.format(</p>
+<blockquote>
+<div><p>“Card URL starts with &quot;card://&quot; but followed by non-numeric for tweet %s: %s”,
+tweetId,
+card.getCardUrl()));</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}
+if (isCardVideo(card)) {</p>
+<blockquote>
+<div><p>// Add into “internal” field so that this tweet is returned by filter:videos.
+builder.addFacetSkipList(</p>
+<blockquote>
+<div><p>EarlybirdFieldConstants.EarlybirdFieldConstant.VIDEO_LINKS_FIELD.getFieldName());</p>
+</div></blockquote>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Determines if a card is a video.</p></li>
+</ul>
+<p><a href="#id13"><span class="problematic" id="id14">*</span></a>/</p>
+</dd>
+<dt>private static boolean isCardVideo(&#64;Nullable SearchCard2 card) {</dt><dd><dl class="simple">
+<dt>if (card == null) {</dt><dd><p>return false;</p>
+</dd>
+</dl>
+<p>}
+return AMPLIFY_CARD_NAME.equalsIgnoreCase(card.getCardName())</p>
+<blockquote>
+<div><p>|| PLAYER_CARD_NAME.equalsIgnoreCase(card.getCardName());</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private void buildSpaceAdminAndTitleFields(</dt><dd><blockquote>
+<div><p>EarlybirdThriftDocumentBuilder builder,
+TwitterMessage message,
+PenguinVersion penguinVersion) {</p>
+</div></blockquote>
+<p>buildSpaceAdminFields(builder, message.getSpaceAdmins(), penguinVersion);</p>
+<p>// build the space title field.
+buildTweetTokenizerTokenizedField(</p>
+<blockquote>
+<div><p>builder,
+EarlybirdFieldConstants.EarlybirdFieldConstant.SPACE_TITLE_FIELD.getFieldName(),
+message.getSpaceTitle(),
+penguinVersion);</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private void buildSpaceAdminFields(</dt><dd><blockquote>
+<div><p>EarlybirdThriftDocumentBuilder builder,
+Set&lt;TwitterMessageUser&gt; spaceAdmins,
+PenguinVersion penguinVersion) {</p>
+</div></blockquote>
+<dl>
+<dt>for (TwitterMessageUser spaceAdmin<span class="classifier">spaceAdmins) {</span></dt><dd><dl>
+<dt>if (spaceAdmin.getScreenName().isPresent()) {</dt><dd><p>// build screen name (aka handle) fields.
+String screenName = spaceAdmin.getScreenName().get();
+String normalizedScreenName =</p>
+<blockquote>
+<div><p>NormalizerHelper.normalizeWithUnknownLocale(screenName, penguinVersion);</p>
+</div></blockquote>
+<dl>
+<dt>builder.withStringField(</dt><dd><p>EarlybirdFieldConstants.EarlybirdFieldConstant.SPACE_ADMIN_FIELD.getFieldName(),
+normalizedScreenName);</p>
+</dd>
+<dt>builder.withWhiteSpaceTokenizedScreenNameField(</dt><dd><dl class="simple">
+<dt>EarlybirdFieldConstants</dt><dd><p>.EarlybirdFieldConstant.TOKENIZED_SPACE_ADMIN_FIELD.getFieldName(),</p>
+</dd>
+</dl>
+<p>normalizedScreenName);</p>
+</dd>
+<dt>if (spaceAdmin.getTokenizedScreenName().isPresent()) {</dt><dd><dl>
+<dt>builder.withCamelCaseTokenizedScreenNameField(</dt><dd><dl class="simple">
+<dt>EarlybirdFieldConstants</dt><dd><p>.EarlybirdFieldConstant.CAMELCASE_TOKENIZED_SPACE_ADMIN_FIELD.getFieldName(),</p>
+</dd>
+</dl>
+<p>screenName,
+normalizedScreenName,
+spaceAdmin.getTokenizedScreenName().get());</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>if (spaceAdmin.getDisplayName().isPresent()) {</dt><dd><dl>
+<dt>buildTweetTokenizerTokenizedField(</dt><dd><p>builder,
+EarlybirdFieldConstants</p>
+<blockquote>
+<div><p>.EarlybirdFieldConstant.TOKENIZED_SPACE_ADMIN_DISPLAY_NAME_FIELD.getFieldName(),</p>
+</div></blockquote>
+<p>spaceAdmin.getDisplayName().get(),
+penguinVersion);</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private void buildTweetTokenizerTokenizedField(</dt><dd><blockquote>
+<div><p>EarlybirdThriftDocumentBuilder builder,
+String fieldName,
+String text,
+PenguinVersion penguinVersion) {</p>
+</div></blockquote>
+<dl>
+<dt>if (StringUtils.isNotEmpty(text)) {</dt><dd><dl class="simple">
+<dt>Locale locale = LanguageIdentifierHelper</dt><dd><p>.identifyLanguage(text);</p>
+</dd>
+<dt>String normalizedText = NormalizerHelper.normalize(</dt><dd><p>text, locale, penguinVersion);</p>
+</dd>
+<dt>TokenizerResult result = TokenizerHelper</dt><dd><p>.tokenizeTweet(normalizedText, locale, penguinVersion);</p>
+</dd>
+</dl>
+<p>TokenizedCharSequenceStream tokenSeqStream = new TokenizedCharSequenceStream();
+tokenSeqStream.reset(result.tokenSequence);
+TokenStreamSerializer streamSerializer =</p>
+<blockquote>
+<div><p>TweetTokenStreamSerializer.getTweetTokenStreamSerializer();</p>
+</div></blockquote>
+<dl class="simple">
+<dt>try {</dt><dd><dl class="simple">
+<dt>builder.withTokenStreamField(</dt><dd><p>fieldName,
+result.tokenSequence.toString(),
+streamSerializer.serialize(tokenSeqStream));</p>
+</dd>
+</dl>
+</dd>
+<dt>} catch (IOException e) {</dt><dd><p>LOG.error(“TwitterTokenStream serialization error! Could not serialize: “ + text);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../_sources/src/java/com/twitter/search/common/converter/earlybird/DelayedIndexingConverter.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.frigate.pushservice.ml</p>
+<p>import com.twitter.abuse.detection.scoring.thriftscala.{Model =&gt; TweetHealthModel}
+import com.twitter.abuse.detection.scoring.thriftscala.TweetScoringRequest
+import com.twitter.abuse.detection.scoring.thriftscala.TweetScoringResponse
+import com.twitter.frigate.common.base.FeatureMap
+import com.twitter.frigate.common.base.TweetAuthor
+import com.twitter.frigate.common.base.TweetAuthorDetails
+import com.twitter.frigate.common.base.TweetCandidate
+import com.twitter.frigate.common.rec_types.RecTypes
+import com.twitter.frigate.pushservice.model.PushTypes.PushCandidate
+import com.twitter.frigate.pushservice.params.PushConstants
+import com.twitter.frigate.pushservice.params.PushFeatureSwitchParams
+import com.twitter.frigate.pushservice.predicate.HealthPredicates.userHealthSignalValueToDouble
+import com.twitter.frigate.pushservice.util.CandidateHydrationUtil
+import com.twitter.frigate.pushservice.util.CandidateUtil
+import com.twitter.frigate.pushservice.util.MediaAnnotationsUtil
+import com.twitter.frigate.thriftscala.UserMediaRepresentation
+import com.twitter.hss.api.thriftscala.SignalValue
+import com.twitter.hss.api.thriftscala.UserHealthSignal
+import com.twitter.hss.api.thriftscala.UserHealthSignal.AgathaCalibratedNsfwDouble
+import com.twitter.hss.api.thriftscala.UserHealthSignal.NsfwTextUserScoreDouble
+import com.twitter.hss.api.thriftscala.UserHealthSignalResponse
+import com.twitter.storehaus.ReadableStore
+import com.twitter.util.Future
+import com.twitter.util.Time</p>
+<p>object HealthFeatureGetter {</p>
+<blockquote>
+<div><dl>
+<dt>def getFeatures(</dt><dd><p>pushCandidate: PushCandidate,
+producerMediaRepresentationStore: ReadableStore[Long, UserMediaRepresentation],
+userHealthScoreStore: ReadableStore[Long, UserHealthSignalResponse],
+tweetHealthScoreStoreOpt: Option[ReadableStore[TweetScoringRequest, TweetScoringResponse]] =</p>
+<blockquote>
+<div><p>None</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>): Future[FeatureMap] = {</p>
+<blockquote>
+<div><dl>
+<dt>pushCandidate match {</dt><dd><dl>
+<dt>case cand: PushCandidate with TweetCandidate with TweetAuthor with TweetAuthorDetails =&gt;</dt><dd><dl>
+<dt>val pMediaNsfwRequest =</dt><dd><p>TweetScoringRequest(cand.tweetId, TweetHealthModel.ExperimentalHealthModelScore4)</p>
+</dd>
+<dt>val pTweetTextNsfwRequest =</dt><dd><p>TweetScoringRequest(cand.tweetId, TweetHealthModel.ExperimentalHealthModelScore1)</p>
+</dd>
+<dt>cand.authorId match {</dt><dd><dl>
+<dt>case Some(authorId) =&gt;</dt><dd><dl>
+<dt>Future</dt><dd><dl>
+<dt>.join(</dt><dd><p>userHealthScoreStore.get(authorId),
+producerMediaRepresentationStore.get(authorId),
+tweetHealthScoreStoreOpt.map(_.get(pMediaNsfwRequest)).getOrElse(Future.None),
+tweetHealthScoreStoreOpt.map(_.get(pTweetTextNsfwRequest)).getOrElse(Future.None),
+cand.tweetAuthor</p>
+</dd>
+<dt>).map {</dt><dd><dl>
+<dt>case (</dt><dd><blockquote>
+<div><p>healthSignalsResponseOpt,
+producerMuOpt,
+pMediaNsfwOpt,
+pTweetTextNsfwOpt,
+tweetAuthorOpt) =&gt;</p>
+</div></blockquote>
+<dl class="simple">
+<dt>val healthSignalScoreMap = healthSignalsResponseOpt</dt><dd><p>.map(_.signalValues).getOrElse(Map.empty[UserHealthSignal, SignalValue])</p>
+</dd>
+<dt>val agathaNSFWScore = userHealthSignalValueToDouble(</dt><dd><dl class="simple">
+<dt>healthSignalScoreMap</dt><dd><p>.getOrElse(AgathaCalibratedNsfwDouble, SignalValue.DoubleValue(0.5)))</p>
+</dd>
+</dl>
+</dd>
+<dt>val userTextNSFWScore = userHealthSignalValueToDouble(</dt><dd><dl class="simple">
+<dt>healthSignalScoreMap</dt><dd><p>.getOrElse(NsfwTextUserScoreDouble, SignalValue.DoubleValue(0.15)))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>val pMediaNsfwScore = pMediaNsfwOpt.map(_.score).getOrElse(0.0)
+val pTweetTextNsfwScore = pTweetTextNsfwOpt.map(_.score).getOrElse(0.0)</p>
+<dl class="simple">
+<dt>val mediaRepresentationMap =</dt><dd><p>producerMuOpt.map(_.mediaRepresentation).getOrElse(Map.empty[String, Double])</p>
+</dd>
+</dl>
+<p>val sumScore: Double = mediaRepresentationMap.values.sum
+val nudityRate =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (sumScore &gt; 0)</dt><dd><dl class="simple">
+<dt>mediaRepresentationMap.getOrElse(</dt><dd><p>MediaAnnotationsUtil.nudityCategoryId,
+0.0) / sumScore</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>else 0.0</p>
+</div></blockquote>
+<dl>
+<dt>val beautyRate =</dt><dd><dl class="simple">
+<dt>if (sumScore &gt; 0)</dt><dd><dl class="simple">
+<dt>mediaRepresentationMap.getOrElse(</dt><dd><p>MediaAnnotationsUtil.beautyCategoryId,
+0.0) / sumScore</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>else 0.0</p>
+</dd>
+<dt>val singlePersonRate =</dt><dd><dl class="simple">
+<dt>if (sumScore &gt; 0)</dt><dd><dl class="simple">
+<dt>mediaRepresentationMap.getOrElse(</dt><dd><p>MediaAnnotationsUtil.singlePersonCategoryId,
+0.0) / sumScore</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>else 0.0</p>
+</dd>
+<dt>val dislikeCt = cand.numericFeatures.getOrElse(</dt><dd><p>“tweet.magic_recs_tweet_real_time_aggregates_v2.pair.v2.magicrecs.realtime.is_ntab_disliked.any_feature.Duration.Top.count”,
+0.0)</p>
+</dd>
+<dt>val sentCt = cand.numericFeatures.getOrElse(</dt><dd><p>“tweet.magic_recs_tweet_real_time_aggregates_v2.pair.v2.magicrecs.realtime.is_sent.any_feature.Duration.Top.count”,
+0.0)</p>
+</dd>
+</dl>
+<p>val dislikeRate = if (sentCt &gt; 0) dislikeCt / sentCt else 0.0</p>
+<dl>
+<dt>val authorDislikeCt = cand.numericFeatures.getOrElse(</dt><dd><p>“tweet_author_aggregate.pair.label.ntab.isDisliked.any_feature.28.days.count”,
+0.0)</p>
+</dd>
+<dt>val authorReportCt = cand.numericFeatures.getOrElse(</dt><dd><p>“tweet_author_aggregate.pair.label.reportTweetDone.any_feature.28.days.count”,
+0.0)</p>
+</dd>
+<dt>val authorSentCt = cand.numericFeatures</dt><dd><dl class="simple">
+<dt>.getOrElse(</dt><dd><p>“tweet_author_aggregate.pair.any_label.any_feature.28.days.count”,
+0.0)</p>
+</dd>
+</dl>
+</dd>
+<dt>val authorDislikeRate =</dt><dd><p>if (authorSentCt &gt; 0) authorDislikeCt / authorSentCt else 0.0</p>
+</dd>
+<dt>val authorReportRate =</dt><dd><p>if (authorSentCt &gt; 0) authorReportCt / authorSentCt else 0.0</p>
+</dd>
+<dt>val (isNsfwAccount, authorAccountAge) = tweetAuthorOpt match {</dt><dd><dl>
+<dt>case Some(tweetAuthor) =&gt;</dt><dd><dl>
+<dt>(</dt><dd><dl class="simple">
+<dt>CandidateHydrationUtil.isNsfwAccount(</dt><dd><p>tweetAuthor,
+cand.target.params(PushFeatureSwitchParams.NsfwTokensParam)),</p>
+</dd>
+</dl>
+<p>(Time.now - Time.fromMilliseconds(tweetAuthor.createdAtMsec)).inHours</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>case _ =&gt; (false, 0)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>val tweetSemanticCoreIds = cand.sparseBinaryFeatures</dt><dd><p>.getOrElse(PushConstants.TweetSemanticCoreIdFeature, Set.empty[String])</p>
+</dd>
+<dt>val continuousFeatures = Map[String, Double](</dt><dd><p>“agathaNsfwScore” -&gt; agathaNSFWScore,
+“textNsfwScore” -&gt; userTextNSFWScore,
+“pMediaNsfwScore” -&gt; pMediaNsfwScore,
+“pTweetTextNsfwScore” -&gt; pTweetTextNsfwScore,
+“nudityRate” -&gt; nudityRate,
+“beautyRate” -&gt; beautyRate,
+“singlePersonRate” -&gt; singlePersonRate,
+“numSources” -&gt; CandidateUtil.getTagsCRCount(cand),
+“favCount” -&gt; cand.numericFeatures</p>
+<blockquote>
+<div><p>.getOrElse(“tweet.core.tweet_counts.favorite_count”, 0.0),</p>
+</div></blockquote>
+<dl class="simple">
+<dt>“activeFollowers” -&gt; cand.numericFeatures</dt><dd><p>.getOrElse(“RecTweetAuthor.User.ActiveFollowers”, 0.0),</p>
+</dd>
+<dt>“favorsRcvd28Days” -&gt; cand.numericFeatures</dt><dd><p>.getOrElse(“RecTweetAuthor.User.FavorsRcvd28Days”, 0.0),</p>
+</dd>
+<dt>“tweets28Days” -&gt; cand.numericFeatures</dt><dd><p>.getOrElse(“RecTweetAuthor.User.Tweets28Days”, 0.0),</p>
+</dd>
+</dl>
+<p>“dislikeCount” -&gt; dislikeCt,
+“dislikeRate” -&gt; dislikeRate,
+“sentCount” -&gt; sentCt,
+“authorDislikeCount” -&gt; authorDislikeCt,
+“authorDislikeRate” -&gt; authorDislikeRate,
+“authorReportCount” -&gt; authorReportCt,
+“authorReportRate” -&gt; authorReportRate,
+“authorSentCount” -&gt; authorSentCt,
+“authorAgeInHour” -&gt; authorAccountAge.toDouble</p>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>val booleanFeatures = Map[String, Boolean](</dt><dd><dl class="simple">
+<dt>“isSimclusterBased” -&gt; RecTypes.simclusterBasedTweets</dt><dd><p>.contains(cand.commonRecType),</p>
+</dd>
+</dl>
+<p>“isTopicTweet” -&gt; RecTypes.isTopicTweetType(cand.commonRecType),
+“isHashSpace” -&gt; RecTypes.tagspaceTypes.contains(cand.commonRecType),
+“isFRS” -&gt; RecTypes.frsTypes.contains(cand.commonRecType),
+“isModelingBased” -&gt; RecTypes.mrModelingBasedTypes.contains(cand.commonRecType),
+“isGeoPop” -&gt; RecTypes.GeoPopTweetTypes.contains(cand.commonRecType),
+“hasPhoto” -&gt; cand.booleanFeatures</p>
+<blockquote>
+<div><p>.getOrElse(“RecTweet.TweetyPieResult.HasPhoto”, false),</p>
+</div></blockquote>
+<dl class="simple">
+<dt>“hasVideo” -&gt; cand.booleanFeatures</dt><dd><p>.getOrElse(“RecTweet.TweetyPieResult.HasVideo”, false),</p>
+</dd>
+<dt>“hasUrl” -&gt; cand.booleanFeatures</dt><dd><p>.getOrElse(“RecTweet.TweetyPieResult.HasUrl”, false),</p>
+</dd>
+</dl>
+<p>“isMrTwistly” -&gt; CandidateUtil.isMrTwistlyCandidate(cand),
+“abuseStrikeTop2Percent” -&gt; tweetSemanticCoreIds.contains(</p>
+<blockquote>
+<div><p>PushConstants.AbuseStrike_Top2Percent_Id),</p>
+</div></blockquote>
+<dl class="simple">
+<dt>“abuseStrikeTop1Percent” -&gt; tweetSemanticCoreIds.contains(</dt><dd><p>PushConstants.AbuseStrike_Top1Percent_Id),</p>
+</dd>
+<dt>“abuseStrikeTop05Percent” -&gt; tweetSemanticCoreIds.contains(</dt><dd><p>PushConstants.AbuseStrike_Top05Percent_Id),</p>
+</dd>
+<dt>“abuseStrikeTop025Percent” -&gt; tweetSemanticCoreIds.contains(</dt><dd><p>PushConstants.AbuseStrike_Top025Percent_Id),</p>
+</dd>
+<dt>“allSpamReportsPerFavTop1Percent” -&gt; tweetSemanticCoreIds.contains(</dt><dd><p>PushConstants.AllSpamReportsPerFav_Top1Percent_Id),</p>
+</dd>
+<dt>“reportsPerFavTop1Percent” -&gt; tweetSemanticCoreIds.contains(</dt><dd><p>PushConstants.ReportsPerFav_Top1Percent_Id),</p>
+</dd>
+<dt>“reportsPerFavTop2Percent” -&gt; tweetSemanticCoreIds.contains(</dt><dd><p>PushConstants.ReportsPerFav_Top2Percent_Id),</p>
+</dd>
+<dt>“isNudity” -&gt; tweetSemanticCoreIds.contains(</dt><dd><p>PushConstants.MediaUnderstanding_Nudity_Id),</p>
+</dd>
+<dt>“beautyStyleFashion” -&gt; tweetSemanticCoreIds.contains(</dt><dd><p>PushConstants.MediaUnderstanding_Beauty_Id),</p>
+</dd>
+<dt>“singlePerson” -&gt; tweetSemanticCoreIds.contains(</dt><dd><p>PushConstants.MediaUnderstanding_SinglePerson_Id),</p>
+</dd>
+</dl>
+<p>“pornList” -&gt; tweetSemanticCoreIds.contains(PushConstants.PornList_Id),
+“pornographyAndNsfwContent” -&gt; tweetSemanticCoreIds.contains(</p>
+<blockquote>
+<div><p>PushConstants.PornographyAndNsfwContent_Id),</p>
+</div></blockquote>
+<p>“sexLife” -&gt; tweetSemanticCoreIds.contains(PushConstants.SexLife_Id),
+“sexLifeOrSexualOrientation” -&gt; tweetSemanticCoreIds.contains(</p>
+<blockquote>
+<div><p>PushConstants.SexLifeOrSexualOrientation_Id),</p>
+</div></blockquote>
+<p>“profanity” -&gt; tweetSemanticCoreIds.contains(PushConstants.ProfanityFilter_Id),
+“isVerified” -&gt; cand.booleanFeatures</p>
+<blockquote>
+<div><p>.getOrElse(“RecTweetAuthor.User.IsVerified”, false),</p>
+</div></blockquote>
+<p>“hasNsfwToken” -&gt; isNsfwAccount</p>
+</dd>
+</dl>
+<p>)</p>
+<dl class="simple">
+<dt>val stringFeatures = Map[String, String](</dt><dd><dl class="simple">
+<dt>“tweetLanguage” -&gt; cand.categoricalFeatures</dt><dd><p>.getOrElse(“tweet.core.tweet_text.language”, “”)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>)</p>
+<dl class="simple">
+<dt>FeatureMap(</dt><dd><p>booleanFeatures = booleanFeatures,
+numericFeatures = continuousFeatures,
+categoricalFeatures = stringFeatures)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>case _ =&gt; Future.value(FeatureMap())</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>case _ =&gt; Future.value(FeatureMap())</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/pushservice/src/main/scala/com/twitter/frigate/pushservice/ml/HealthFeatureGetter.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

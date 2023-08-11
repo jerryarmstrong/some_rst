@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.tsp.modules</p>
+<p>import com.google.inject.Module
+import com.google.inject.Provides
+import com.google.inject.Singleton
+import com.twitter.bijection.scrooge.BinaryScalaCodec
+import com.twitter.conversions.DurationOps._
+import com.twitter.finagle.memcached.{Client =&gt; MemClient}
+import com.twitter.finagle.mtls.authentication.ServiceIdentifier
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.frigate.common.store.health.TweetHealthModelStore
+import com.twitter.frigate.common.store.health.TweetHealthModelStore.TweetHealthModelStoreConfig
+import com.twitter.frigate.common.store.health.UserHealthModelStore
+import com.twitter.frigate.common.store.interests.UserId
+import com.twitter.frigate.thriftscala.TweetHealthScores
+import com.twitter.frigate.thriftscala.UserAgathaScores
+import com.twitter.hermit.store.common.DeciderableReadableStore
+import com.twitter.hermit.store.common.ObservedCachedReadableStore
+import com.twitter.hermit.store.common.ObservedMemcachedReadableStore
+import com.twitter.inject.TwitterModule
+import com.twitter.simclusters_v2.common.TweetId
+import com.twitter.stitch.tweetypie.TweetyPie
+import com.twitter.storehaus.ReadableStore
+import com.twitter.strato.client.{Client =&gt; StratoClient}
+import com.twitter.tsp.common.DeciderKey
+import com.twitter.tsp.common.TopicSocialProofDecider
+import com.twitter.tsp.stores.TweetInfoStore
+import com.twitter.tsp.stores.TweetyPieFieldsStore
+import com.twitter.tweetypie.thriftscala.TweetService
+import com.twitter.tsp.thriftscala.TspTweetInfo
+import com.twitter.util.JavaTimer
+import com.twitter.util.Timer</p>
+<dl>
+<dt>object TweetInfoStoreModule extends TwitterModule {</dt><dd><p>override def modules: Seq[Module] = Seq(UnifiedCacheClient)
+implicit val timer: Timer = new JavaTimer(true)</p>
+<p>&#64;Provides
+&#64;Singleton
+def providesTweetInfoStore(</p>
+<blockquote>
+<div><p>decider: TopicSocialProofDecider,
+serviceIdentifier: ServiceIdentifier,
+statsReceiver: StatsReceiver,
+stratoClient: StratoClient,
+tspUnifiedCacheClient: MemClient,
+tweetyPieService: TweetService.MethodPerEndpoint</p>
+</div></blockquote>
+<dl>
+<dt>): ReadableStore[TweetId, TspTweetInfo] = {</dt><dd><dl>
+<dt>val tweetHealthModelStore: ReadableStore[TweetId, TweetHealthScores] = {</dt><dd><dl>
+<dt>val underlyingStore = TweetHealthModelStore.buildReadableStore(</dt><dd><p>stratoClient,
+Some(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>TweetHealthModelStoreConfig(</dt><dd><p>enablePBlock = true,
+enableToxicity = true,
+enablePSpammy = true,
+enablePReported = true,
+enableSpammyTweetContent = true,
+enablePNegMultimodal = false))</p>
+</dd>
+</dl>
+</div></blockquote>
+</dd>
+</dl>
+<p>)(statsReceiver.scope(“UnderlyingTweetHealthModelStore”))</p>
+<dl>
+<dt>DeciderableReadableStore(</dt><dd><dl class="simple">
+<dt>ObservedMemcachedReadableStore.fromCacheClient(</dt><dd><p>backingStore = underlyingStore,
+cacheClient = tspUnifiedCacheClient,
+ttl = 2.hours</p>
+</dd>
+<dt>)(</dt><dd><p>valueInjection = BinaryScalaCodec(TweetHealthScores),
+statsReceiver = statsReceiver.scope(“TweetHealthModelStore”),
+keyToString = { k: TweetId =&gt; s”tHMS/$k” }</p>
+</dd>
+</dl>
+<p>),
+decider.deciderGateBuilder.idGate(DeciderKey.enableHealthSignalsScoreDeciderKey),
+statsReceiver.scope(“TweetHealthModelStore”)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>val userHealthModelStore: ReadableStore[UserId, UserAgathaScores] = {</dt><dd><dl>
+<dt>val underlyingStore =</dt><dd><dl class="simple">
+<dt>UserHealthModelStore.buildReadableStore(stratoClient)(</dt><dd><p>statsReceiver.scope(“UnderlyingUserHealthModelStore”))</p>
+</dd>
+</dl>
+</dd>
+<dt>DeciderableReadableStore(</dt><dd><dl class="simple">
+<dt>ObservedMemcachedReadableStore.fromCacheClient(</dt><dd><p>backingStore = underlyingStore,
+cacheClient = tspUnifiedCacheClient,
+ttl = 18.hours</p>
+</dd>
+<dt>)(</dt><dd><p>valueInjection = BinaryScalaCodec(UserAgathaScores),
+statsReceiver = statsReceiver.scope(“UserHealthModelStore”),
+keyToString = { k: UserId =&gt; s”uHMS/$k” }</p>
+</dd>
+</dl>
+<p>),
+decider.deciderGateBuilder.idGate(DeciderKey.enableUserAgathaScoreDeciderKey),
+statsReceiver.scope(“UserHealthModelStore”)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>val tweetInfoStore: ReadableStore[TweetId, TspTweetInfo] = {</dt><dd><dl class="simple">
+<dt>val underlyingStore = TweetInfoStore(</dt><dd><p>TweetyPieFieldsStore.getStoreFromTweetyPie(TweetyPie(tweetyPieService, statsReceiver)),
+tweetHealthModelStore: ReadableStore[TweetId, TweetHealthScores],
+userHealthModelStore: ReadableStore[UserId, UserAgathaScores],
+timer: Timer</p>
+</dd>
+</dl>
+<p>)(statsReceiver.scope(“tweetInfoStore”))</p>
+<dl class="simple">
+<dt>val memcachedStore = ObservedMemcachedReadableStore.fromCacheClient(</dt><dd><p>backingStore = underlyingStore,
+cacheClient = tspUnifiedCacheClient,
+ttl = 15.minutes,
+// Hydrating tweetInfo is now a required step for all candidates,
+// hence we needed to tune these thresholds.
+asyncUpdate = serviceIdentifier.environment == “prod”</p>
+</dd>
+<dt>)(</dt><dd><p>valueInjection = BinaryScalaCodec(TspTweetInfo),
+statsReceiver = statsReceiver.scope(“memCachedTweetInfoStore”),
+keyToString = { k: TweetId =&gt; s”tIS/$k” }</p>
+</dd>
+</dl>
+<p>)</p>
+<dl class="simple">
+<dt>val inMemoryStore = ObservedCachedReadableStore.from(</dt><dd><p>memcachedStore,
+ttl = 15.minutes,
+maxKeys = 8388607, // Check TweetInfo definition. size~92b. Around 736 MB
+windowSize = 10000L,
+cacheName = “tweet_info_cache”,
+maxMultiGetSize = 20</p>
+</dd>
+</dl>
+<p>)(statsReceiver.scope(“inMemoryCachedTweetInfoStore”))</p>
+<p>inMemoryStore</p>
+</dd>
+</dl>
+<p>}
+tweetInfoStore</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/topic-social-proof/server/src/main/scala/com/twitter/tsp/modules/TweetInfoStoreModule.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

@@ -1,0 +1,451 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../" id="documentation_options" src="../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.visibility.engine</p>
+<p>import com.twitter.servo.util.Gate
+import com.twitter.spam.rtf.thriftscala.{SafetyLevel =&gt; ThriftSafetyLevel}
+import com.twitter.stitch.Stitch
+import com.twitter.visibility.builder.VisibilityResult
+import com.twitter.visibility.builder.VisibilityResultBuilder
+import com.twitter.visibility.features._
+import com.twitter.visibility.models.SafetyLevel
+import com.twitter.visibility.models.SafetyLevel.DeprecatedSafetyLevel
+import com.twitter.visibility.rules.EvaluationContext
+import com.twitter.visibility.rules.State._
+import com.twitter.visibility.rules._
+import com.twitter.visibility.rules.providers.ProvidedEvaluationContext
+import com.twitter.visibility.rules.providers.PolicyProvider</p>
+<dl>
+<dt>class VisibilityRuleEngine private[VisibilityRuleEngine] (</dt><dd><p>rulePreprocessor: VisibilityRulePreprocessor,
+metricsRecorder: VisibilityResultsMetricRecorder,
+enableComposableActions: Gate[Unit],
+enableFailClosed: Gate[Unit],
+policyProviderOpt: Option[PolicyProvider] = None)</p>
+<blockquote>
+<div><p>extends DeciderableVisibilityRuleEngine {</p>
+</div></blockquote>
+<dl>
+<dt>private[visibility] def apply(</dt><dd><p>evaluationContext: ProvidedEvaluationContext,
+visibilityPolicy: VisibilityPolicy,
+visibilityResultBuilder: VisibilityResultBuilder,
+enableShortCircuiting: Gate[Unit],
+preprocessedRules: Option[Seq[Rule]]</p>
+</dd>
+<dt>): Stitch[VisibilityResult] = {</dt><dd><dl class="simple">
+<dt>val (resultBuilder, rules) = preprocessedRules match {</dt><dd><dl class="simple">
+<dt>case Some(r) =&gt;</dt><dd><p>(visibilityResultBuilder, r)</p>
+</dd>
+<dt>case None =&gt;</dt><dd><p>rulePreprocessor.evaluate(evaluationContext, visibilityPolicy, visibilityResultBuilder)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+evaluate(evaluationContext, resultBuilder, rules, enableShortCircuiting)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def apply(</dt><dd><p>evaluationContext: EvaluationContext,
+safetyLevel: SafetyLevel,
+visibilityResultBuilder: VisibilityResultBuilder,
+enableShortCircuiting: Gate[Unit] = Gate.True,
+preprocessedRules: Option[Seq[Rule]] = None</p>
+</dd>
+<dt>): Stitch[VisibilityResult] = {</dt><dd><dl>
+<dt>val visibilityPolicy = policyProviderOpt match {</dt><dd><dl class="simple">
+<dt>case Some(policyProvider) =&gt;</dt><dd><p>policyProvider.policyForSurface(safetyLevel)</p>
+</dd>
+</dl>
+<p>case None =&gt; RuleBase.RuleMap(safetyLevel)</p>
+</dd>
+</dl>
+<p>}
+if (evaluationContext.params(safetyLevel.enabledParam)) {</p>
+<blockquote>
+<div><dl>
+<dt>apply(</dt><dd><dl class="simple">
+<dt>ProvidedEvaluationContext.injectRuntimeRulesIntoEvaluationContext(</dt><dd><p>evaluationContext = evaluationContext,
+safetyLevel = Some(safetyLevel),
+policyProviderOpt = policyProviderOpt</p>
+</dd>
+</dl>
+<p>),
+visibilityPolicy,
+visibilityResultBuilder,
+enableShortCircuiting,
+preprocessedRules</p>
+</dd>
+<dt>).onSuccess { result =&gt;</dt><dd><blockquote>
+<div><p>metricsRecorder.recordSuccess(safetyLevel, result)</p>
+</div></blockquote>
+<p>}
+.onFailure { _ =&gt;</p>
+<blockquote>
+<div><p>metricsRecorder.recordAction(safetyLevel, “failure”)</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl>
+<dt>} else {</dt><dd><p>metricsRecorder.recordAction(safetyLevel, “disabled”)
+val rules: Seq[Rule] = visibilityPolicy.forContentId(visibilityResultBuilder.contentId)
+Stitch.value(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>visibilityResultBuilder</dt><dd><p>.withRuleResultMap(rules.map(r =&gt; r -&gt; RuleResult(Allow, Skipped)).toMap)
+.withVerdict(verdict = Allow)
+.withFinished(finished = true)
+.build</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def apply(</dt><dd><p>evaluationContext: EvaluationContext,
+thriftSafetyLevel: ThriftSafetyLevel,
+visibilityResultBuilder: VisibilityResultBuilder</p>
+</dd>
+<dt>): Stitch[VisibilityResult] = {</dt><dd><p>val safetyLevel: SafetyLevel = SafetyLevel.fromThrift(thriftSafetyLevel)
+safetyLevel match {</p>
+<blockquote>
+<div><dl>
+<dt>case DeprecatedSafetyLevel =&gt;</dt><dd><p>metricsRecorder.recordUnknownSafetyLevel(safetyLevel)
+Stitch.value(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>visibilityResultBuilder</dt><dd><p>.withVerdict(verdict = Allow)
+.withFinished(finished = true)
+.build</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>)</p>
+</dd>
+<dt>case thriftSafetyLevel: SafetyLevel =&gt;</dt><dd><dl>
+<dt>this(</dt><dd><dl class="simple">
+<dt>ProvidedEvaluationContext.injectRuntimeRulesIntoEvaluationContext(</dt><dd><p>evaluationContext = evaluationContext,
+safetyLevel = Some(safetyLevel),
+policyProviderOpt = policyProviderOpt</p>
+</dd>
+</dl>
+<p>),
+thriftSafetyLevel,
+visibilityResultBuilder</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private[visibility] def evaluateRules(</dt><dd><p>evaluationContext: ProvidedEvaluationContext,
+resolvedFeatureMap: Map[Feature[_], Any],
+failedFeatures: Map[Feature[_], Throwable],
+resultBuilderWithoutFailedFeatures: VisibilityResultBuilder,
+preprocessedRules: Seq[Rule],
+enableShortCircuiting: Gate[Unit]</p>
+</dd>
+<dt>): VisibilityResultBuilder = {</dt><dd><dl>
+<dt>preprocessedRules</dt><dd><dl>
+<dt>.foldLeft(resultBuilderWithoutFailedFeatures) { (builder, rule) =&gt;</dt><dd><dl>
+<dt>builder.ruleResults.get(rule) match {</dt><dd><dl>
+<dt>case Some(RuleResult(_, state)) if state == Evaluated || state == ShortCircuited =&gt;</dt><dd><p>builder</p>
+</dd>
+<dt>case _ =&gt;</dt><dd><dl>
+<dt>val failedFeatureDependencies: Map[Feature[_], Throwable] =</dt><dd><p>failedFeatures.filterKeys(key =&gt; rule.featureDependencies.contains(key))</p>
+</dd>
+<dt>val shortCircuit =</dt><dd><dl class="simple">
+<dt>builder.finished &amp;&amp; enableShortCircuiting() &amp;&amp;</dt><dd><p>!(enableComposableActions() &amp;&amp; builder.isVerdictComposable())</p>
+</dd>
+</dl>
+</dd>
+<dt>if (failedFeatureDependencies.nonEmpty &amp;&amp; rule.fallbackActionBuilder.isEmpty) {</dt><dd><p>metricsRecorder.recordRuleFailedFeatures(rule.name, failedFeatureDependencies)
+builder.withRuleResult(</p>
+<blockquote>
+<div><p>rule,
+RuleResult(NotEvaluated, FeatureFailed(failedFeatureDependencies)))</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>} else if (shortCircuit) {</p>
+<blockquote>
+<div><p>metricsRecorder.recordRuleEvaluation(rule.name, NotEvaluated, ShortCircuited)
+builder.withRuleResult(rule, RuleResult(builder.verdict, ShortCircuited))</p>
+</div></blockquote>
+<p>} else {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (failedFeatureDependencies.nonEmpty &amp;&amp; rule.fallbackActionBuilder.nonEmpty) {</dt><dd><p>metricsRecorder.recordRuleFallbackAction(rule.name)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>val ruleResult =</dt><dd><p>rule.evaluate(evaluationContext, resolvedFeatureMap)</p>
+</dd>
+<dt>metricsRecorder</dt><dd><p>.recordRuleEvaluation(rule.name, ruleResult.action, ruleResult.state)</p>
+</dd>
+<dt>val nextBuilder = (ruleResult.action, builder.finished) match {</dt><dd><dl>
+<dt>case (NotEvaluated | Allow, _) =&gt;</dt><dd><dl>
+<dt>ruleResult.state match {</dt><dd><dl class="simple">
+<dt>case Heldback =&gt;</dt><dd><p>metricsRecorder.recordRuleHoldBack(rule.name)</p>
+</dd>
+<dt>case RuleFailed(_) =&gt;</dt><dd><p>metricsRecorder.recordRuleFailed(rule.name)</p>
+</dd>
+</dl>
+<p>case _ =&gt;</p>
+</dd>
+</dl>
+<p>}
+builder.withRuleResult(rule, ruleResult)</p>
+</dd>
+<dt>case (_, true) =&gt;</dt><dd><dl class="simple">
+<dt>builder</dt><dd><p>.withRuleResult(rule, ruleResult)
+.withSecondaryVerdict(ruleResult.action, rule)</p>
+</dd>
+</dl>
+</dd>
+<dt>case _ =&gt;</dt><dd><dl class="simple">
+<dt>builder</dt><dd><p>.withRuleResult(rule, ruleResult)
+.withVerdict(ruleResult.action, Some(rule))
+.withFinished(true)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>nextBuilder</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}.withResolvedFeatureMap(resolvedFeatureMap)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private[visibility] def evaluateFailClosed(</dt><dd><p>evaluationContext: ProvidedEvaluationContext</p>
+</dd>
+<dt>): VisibilityResultBuilder =&gt; Stitch[VisibilityResultBuilder] = { builder =&gt;</dt><dd><dl>
+<dt>builder.failClosedException(evaluationContext) match {</dt><dd><dl class="simple">
+<dt>case Some(e: FailClosedException) if enableFailClosed() =&gt;</dt><dd><p>metricsRecorder.recordFailClosed(e.getRuleName, e.getState);
+Stitch.exception(e)</p>
+</dd>
+</dl>
+<p>case _ =&gt; Stitch.value(builder)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private[visibility] def checkMarkFinished(</dt><dd><p>builder: VisibilityResultBuilder</p>
+</dd>
+<dt>): VisibilityResult = {</dt><dd><dl class="simple">
+<dt>val allRulesEvaluated: Boolean = builder.ruleResults.values.forall {</dt><dd><dl class="simple">
+<dt>case RuleResult(_, state) =&gt;</dt><dd><p>state == Evaluated || state == Disabled || state == Skipped</p>
+</dd>
+<dt>case _ =&gt;</dt><dd><p>false</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>if (allRulesEvaluated) {</dt><dd><p>builder.withFinished(true).build</p>
+</dd>
+<dt>} else {</dt><dd><p>builder.build</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private[visibility] def evaluate(</dt><dd><p>evaluationContext: ProvidedEvaluationContext,
+visibilityResultBuilder: VisibilityResultBuilder,
+preprocessedRules: Seq[Rule],
+enableShortCircuiting: Gate[Unit] = Gate.True</p>
+</dd>
+</dl>
+<p>): Stitch[VisibilityResult] = {</p>
+<blockquote>
+<div><dl>
+<dt>val finalBuilder =</dt><dd><dl>
+<dt>FeatureMap.resolve(visibilityResultBuilder.features, evaluationContext.statsReceiver).map {</dt><dd><dl>
+<dt>resolvedFeatureMap =&gt;</dt><dd><dl class="simple">
+<dt>val (failedFeatureMap, successfulFeatureMap) = resolvedFeatureMap.constantMap.partition({</dt><dd><p>case (_, _: FeatureFailedPlaceholderObject) =&gt; true
+case _ =&gt; false</p>
+</dd>
+</dl>
+<p>})</p>
+<dl>
+<dt>val failedFeatures: Map[Feature[_], Throwable] =</dt><dd><dl class="simple">
+<dt>failedFeatureMap.mapValues({</dt><dd><dl class="simple">
+<dt>case failurePlaceholder: FeatureFailedPlaceholderObject =&gt;</dt><dd><p>failurePlaceholder.throwable</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>})</p>
+</dd>
+<dt>val resultBuilderWithoutFailedFeatures =</dt><dd><p>visibilityResultBuilder.withFeatureMap(ResolvedFeatureMap(successfulFeatureMap))</p>
+</dd>
+<dt>evaluateRules(</dt><dd><p>evaluationContext,
+successfulFeatureMap,
+failedFeatures,
+resultBuilderWithoutFailedFeatures,
+preprocessedRules,
+enableShortCircuiting</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>finalBuilder.flatMap(evaluateFailClosed(evaluationContext)).map(checkMarkFinished)</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>object VisibilityRuleEngine {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>def apply(</dt><dd><p>rulePreprocessor: Option[VisibilityRulePreprocessor] = None,
+metricsRecorder: VisibilityResultsMetricRecorder = NullVisibilityResultsMetricsRecorder,
+enableComposableActions: Gate[Unit] = Gate.False,
+enableFailClosed: Gate[Unit] = Gate.False,
+policyProviderOpt: Option[PolicyProvider] = None,</p>
+</dd>
+<dt>): VisibilityRuleEngine = {</dt><dd><dl class="simple">
+<dt>new VisibilityRuleEngine(</dt><dd><p>rulePreprocessor.getOrElse(VisibilityRulePreprocessor(metricsRecorder)),
+metricsRecorder,
+enableComposableActions,
+enableFailClosed,
+policyProviderOpt = policyProviderOpt)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../_sources/visibilitylib/src/main/scala/com/twitter/visibility/engine/VisibilityRuleEngine.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

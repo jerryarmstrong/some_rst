@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.cr_mixer.similarity_engine</p>
+<p>import com.twitter.ann.common.thriftscala.AnnQueryService
+import com.twitter.ann.common.thriftscala.Distance
+import com.twitter.ann.common.thriftscala.NearestNeighborQuery
+import com.twitter.ann.common.thriftscala.NearestNeighborResult
+import com.twitter.ann.hnsw.HnswCommon
+import com.twitter.ann.hnsw.HnswParams
+import com.twitter.bijection.Injection
+import com.twitter.conversions.DurationOps._
+import com.twitter.cortex.ml.embeddings.common.TweetKind
+import com.twitter.cr_mixer.model.SimilarityEngineInfo
+import com.twitter.cr_mixer.model.TweetWithScore
+import com.twitter.cr_mixer.thriftscala.SimilarityEngineType
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.frigate.common.util.StatsUtil
+import com.twitter.mediaservices.commons.codec.ArrayByteBufferCodec
+import com.twitter.ml.api.thriftscala.{Embedding =&gt; ThriftEmbedding}
+import com.twitter.ml.featurestore.lib
+import com.twitter.simclusters_v2.thriftscala.InternalId
+import com.twitter.storehaus.ReadableStore
+import com.twitter.util.Duration
+import com.twitter.util.Future
+import javax.inject.Singleton</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>This store looks for tweets whose similarity is close to a Source Dense Embedding.</p></li>
+<li><p>Only support Long based embedding lookup. UserId or TweetId</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+</dl>
+<p>&#64;Singleton
+class ModelBasedANNStore(</p>
+<blockquote>
+<div><p>embeddingStoreLookUpMap: Map[String, ReadableStore[InternalId, ThriftEmbedding]],
+annServiceLookUpMap: Map[String, AnnQueryService.MethodPerEndpoint],
+globalStats: StatsReceiver)</p>
+<blockquote>
+<div><dl class="simple">
+<dt>extends ReadableStore[</dt><dd><p>ModelBasedANNStore.Query,
+Seq[TweetWithScore]</p>
+</dd>
+</dl>
+<p>] {</p>
+</div></blockquote>
+<p>import ModelBasedANNStore._</p>
+<p>private val stats = globalStats.scope(this.getClass.getSimpleName)
+private val fetchEmbeddingStat = stats.scope(“fetchEmbedding”)
+private val fetchCandidatesStat = stats.scope(“fetchCandidates”)</p>
+<dl>
+<dt>override def get(query: Query): Future[Option[Seq[TweetWithScore]]] = {</dt><dd><dl>
+<dt>for {</dt><dd><dl class="simple">
+<dt>maybeEmbedding &lt;- StatsUtil.trackOptionStats(fetchEmbeddingStat.scope(query.modelId)) {</dt><dd><p>fetchEmbedding(query)</p>
+</dd>
+</dl>
+<p>}
+maybeCandidates &lt;- StatsUtil.trackOptionStats(fetchCandidatesStat.scope(query.modelId)) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>maybeEmbedding match {</dt><dd><dl class="simple">
+<dt>case Some(embedding) =&gt;</dt><dd><p>fetchCandidates(query, embedding)</p>
+</dd>
+<dt>case None =&gt;</dt><dd><p>Future.None</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+<dt>} yield {</dt><dd><dl>
+<dt>maybeCandidates.map(</dt><dd><dl>
+<dt>_.nearestNeighbors</dt><dd><dl>
+<dt>.map { nearestNeighbor =&gt;</dt><dd><dl class="simple">
+<dt>val candidateId = TweetIdByteInjection</dt><dd><p>.invert(ArrayByteBufferCodec.decode(nearestNeighbor.id))
+.toOption
+.map(_.tweetId)</p>
+</dd>
+</dl>
+<p>(candidateId, nearestNeighbor.distance)</p>
+</dd>
+<dt>}.collect {</dt><dd><dl class="simple">
+<dt>case (Some(candidateId), Some(distance)) =&gt;</dt><dd><p>TweetWithScore(candidateId, toScore(distance))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>})</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def fetchEmbedding(query: Query): Future[Option[ThriftEmbedding]] = {</dt><dd><dl class="simple">
+<dt>embeddingStoreLookUpMap.get(query.modelId) match {</dt><dd><dl class="simple">
+<dt>case Some(embeddingStore) =&gt;</dt><dd><p>embeddingStore.get(query.sourceId)</p>
+</dd>
+<dt>case _ =&gt;</dt><dd><p>Future.None</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def fetchCandidates(</dt><dd><p>query: Query,
+embedding: ThriftEmbedding</p>
+</dd>
+<dt>): Future[Option[NearestNeighborResult]] = {</dt><dd><p>val hnswParams = HnswCommon.RuntimeParamsInjection.apply(HnswParams(query.ef))</p>
+<dl>
+<dt>annServiceLookUpMap.get(query.modelId) match {</dt><dd><dl>
+<dt>case Some(annService) =&gt;</dt><dd><dl class="simple">
+<dt>val annQuery =</dt><dd><p>NearestNeighborQuery(embedding, withDistance = true, hnswParams, MaxNumResults)</p>
+</dd>
+</dl>
+<p>annService.query(annQuery).map(v =&gt; Some(v))</p>
+</dd>
+<dt>case _ =&gt;</dt><dd><p>Future.None</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>object ModelBasedANNStore {</p>
+<blockquote>
+<div><p>val MaxNumResults: Int = 200
+val MaxTweetCandidateAge: Duration = 1.day</p>
+<p>val TweetIdByteInjection: Injection[lib.TweetId, Array[Byte]] = TweetKind.byteInjection</p>
+<p>// For more information about HNSW algorithm: <a class="reference external" href="https://docbird.twitter.biz/ann/hnsw.html">https://docbird.twitter.biz/ann/hnsw.html</a>
+case class Query(</p>
+<blockquote>
+<div><p>sourceId: InternalId,
+modelId: String,
+similarityEngineType: SimilarityEngineType,
+ef: Int = 800)</p>
+</div></blockquote>
+<dl>
+<dt>def toScore(distance: Distance): Double = {</dt><dd><dl class="simple">
+<dt>distance match {</dt><dd><dl class="simple">
+<dt>case Distance.L2Distance(l2Distance) =&gt;</dt><dd><p>// (-Infinite, 0.0]
+0.0 - l2Distance.distance</p>
+</dd>
+<dt>case Distance.CosineDistance(cosineDistance) =&gt;</dt><dd><p>// [0.0 - 1.0]
+1.0 - cosineDistance.distance</p>
+</dd>
+<dt>case Distance.InnerProductDistance(innerProductDistance) =&gt;</dt><dd><p>// (-Infinite, Infinite)
+1.0 - innerProductDistance.distance</p>
+</dd>
+<dt>case _ =&gt;</dt><dd><p>0.0</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}
+def toSimilarityEngineInfo(query: Query, score: Double): SimilarityEngineInfo = {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>SimilarityEngineInfo(</dt><dd><p>similarityEngineType = query.similarityEngineType,
+modelId = Some(query.modelId),
+score = Some(score))</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/cr-mixer/server/src/main/scala/com/twitter/cr_mixer/similarity_engine/ModelBasedANNStore.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

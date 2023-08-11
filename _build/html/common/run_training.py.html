@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../" id="documentation_options" src="../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../_static/doctools.js?v=888ff710"></script>
+    <script src="../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+   
+  <link rel="stylesheet" href="../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>import os
+import subprocess
+import sys
+from typing import Optional</p>
+<p>from tml.ml_logging.torch_logging import logging  # type: ignore[attr-defined]
+from twitter.ml.tensorflow.experimental.distributed import utils</p>
+<p>import torch
+import torch.distributed.run</p>
+<dl>
+<dt>def is_distributed_worker():</dt><dd><p>world_size = os.environ.get(“WORLD_SIZE”, None)
+rank = os.environ.get(“RANK”, None)
+return world_size is not None and rank is not None</p>
+</dd>
+<dt>def maybe_run_training(</dt><dd><p>train_fn,
+module_name,
+nproc_per_node: Optional[int] = None,
+num_nodes: Optional[int] = None,
+set_python_path_in_subprocess: bool = False,
+is_chief: Optional[bool] = False,
+<a href="#id1"><span class="problematic" id="id2">**</span></a>training_kwargs,</p>
+</dd>
+<dt>):</dt><dd><p>“””Wrapper function for single node, multi-GPU Pytorch training.</p>
+<p>If the necessary distributed Pytorch environment variables
+(WORLD_SIZE, RANK) have been set, then this function executes
+<cite>train_fn(**training_kwargs)</cite>.</p>
+<p>Otherwise, this function calls torchrun and points at the calling module
+<cite>module_name</cite>.  After this call, the necessary environment variables are set
+and training will commence.</p>
+<dl>
+<dt>Args:</dt><dd><p>train_fn:  The function that is responsible for training
+module_name:  The name of the module that this function was called from;</p>
+<blockquote>
+<div><p>used to indicate torchrun entrypoint.</p>
+</div></blockquote>
+<p>nproc_per_node: Number of workers per node; supported values.
+num_nodes: Number of nodes, otherwise inferred from environment.
+is_chief: If process is running on chief.
+set_python_path_in_subprocess: A bool denoting whether to set PYTHONPATH.</p>
+</dd>
+</dl>
+<p>“””</p>
+<p>machines = utils.machine_from_env()
+if num_nodes is None:</p>
+<blockquote>
+<div><p>num_nodes = 1
+if machines.num_workers:</p>
+<blockquote>
+<div><p>num_nodes += machines.num_workers</p>
+</div></blockquote>
+</div></blockquote>
+<dl>
+<dt>if is_distributed_worker():</dt><dd><p># world_size, rank, etc are set; assuming any other env vars are set (checks to come)
+# start the actual training!
+train_fn(<a href="#id3"><span class="problematic" id="id4">**</span></a>training_kwargs)</p>
+</dd>
+<dt>else:</dt><dd><dl class="simple">
+<dt>if nproc_per_node is None:</dt><dd><dl class="simple">
+<dt>if torch.cuda.is_available():</dt><dd><p>nproc_per_node = torch.cuda.device_count()</p>
+</dd>
+<dt>else:</dt><dd><p>nproc_per_node = machines.chief.num_accelerators</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p># Rejoin all arguments to send back through torchrec
+# this is a temporary measure, will replace the os.system call
+# with torchrun API calls
+args = list(f”–{key}={val}” for key, val in training_kwargs.items())</p>
+<dl class="simple">
+<dt>cmd = [</dt><dd><p>“–nnodes”,
+str(num_nodes),</p>
+</dd>
+</dl>
+<p>]
+if nproc_per_node:</p>
+<blockquote>
+<div><p>cmd.extend([”–nproc_per_node”, str(nproc_per_node)])</p>
+</div></blockquote>
+<dl>
+<dt>if num_nodes &gt; 1:</dt><dd><p>cluster_resolver = utils.cluster_resolver()
+backend_address = cluster_resolver.cluster_spec().task_address(“chief”, 0)
+cmd.extend(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>[</dt><dd><p>“–rdzv_backend”,
+“c10d”,
+“–rdzv_id”,
+backend_address,</p>
+</dd>
+</dl>
+<p>]</p>
+</div></blockquote>
+<p>)
+# Set localhost on chief because of <a class="reference external" href="https://github.com/pytorch/pytorch/issues/79388">https://github.com/pytorch/pytorch/issues/79388</a>
+if is_chief:</p>
+<blockquote>
+<div><p>cmd.extend([”–rdzv_endpoint”, “localhost:2222”])</p>
+</div></blockquote>
+<dl class="simple">
+<dt>else:</dt><dd><p>cmd.extend([”–rdzv_endpoint”, backend_address])</p>
+</dd>
+</dl>
+</dd>
+<dt>else:</dt><dd><p>cmd.append(”–standalone”)</p>
+</dd>
+<dt>cmd.extend(</dt><dd><dl class="simple">
+<dt>[</dt><dd><p>str(module_name),
+<a href="#id5"><span class="problematic" id="id6">*</span></a>args,</p>
+</dd>
+</dl>
+<p>]</p>
+</dd>
+</dl>
+<p>)
+logging.info(f”””Distributed running with cmd: ‘{” “.join(cmd)}’”””)</p>
+<p># Call torchrun on this module;  will spawn new processes and re-run this
+# function, eventually calling “train_fn”. The following line sets the PYTHONPATH to accommodate
+# bazel stubbing for the main binary.
+if set_python_path_in_subprocess:</p>
+<blockquote>
+<div><p>subprocess.run([“torchrun”] + cmd, env={<a href="#id7"><span class="problematic" id="id8">**</span></a>os.environ, “PYTHONPATH”: “:”.join(sys.path)})</p>
+</div></blockquote>
+<dl class="simple">
+<dt>else:</dt><dd><p>torch.distributed.run.main(cmd)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../_sources/common/run_training.py.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

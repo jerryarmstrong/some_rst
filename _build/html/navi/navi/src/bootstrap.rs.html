@@ -1,0 +1,530 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../" id="documentation_options" src="../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>use anyhow::Result;
+use log::{info, warn};
+use x509_parser::{prelude::{parse_x509_pem}, parse_x509_certificate};
+use std::collections::HashMap;
+use tokio::time::Instant;
+use tonic::{</p>
+<blockquote>
+<div><p>Request,
+Response, Status, transport::{Certificate, Identity, Server, ServerTlsConfig},</p>
+</div></blockquote>
+<p>};</p>
+<p>// protobuf related
+use crate::tf_proto::tensorflow_serving::{</p>
+<blockquote>
+<div><p>ClassificationRequest, ClassificationResponse, GetModelMetadataRequest,
+GetModelMetadataResponse, MultiInferenceRequest, MultiInferenceResponse, PredictRequest,
+PredictResponse, RegressionRequest, RegressionResponse,</p>
+</div></blockquote>
+<p>};
+use crate::{kf_serving::{</p>
+<blockquote>
+<div><p>grpc_inference_service_server::GrpcInferenceService, ModelInferRequest, ModelInferResponse,
+ModelMetadataRequest, ModelMetadataResponse, ModelReadyRequest, ModelReadyResponse,
+ServerLiveRequest, ServerLiveResponse, ServerMetadataRequest, ServerMetadataResponse,
+ServerReadyRequest, ServerReadyResponse,</p>
+</div></blockquote>
+<dl class="simple">
+<dt>}, ModelFactory, tf_proto::tensorflow_serving::prediction_service_server::{</dt><dd><p>PredictionService, PredictionServiceServer,</p>
+</dd>
+</dl>
+<p>}, VERSION, NAME};</p>
+<p>use crate::PredictResult;
+use crate::cli_args::{ARGS, INPUTS, OUTPUTS};
+use crate::metrics::{</p>
+<blockquote>
+<div><p>NAVI_VERSION, NUM_PREDICTIONS, NUM_REQUESTS_FAILED, NUM_REQUESTS_FAILED_BY_MODEL,
+NUM_REQUESTS_RECEIVED, NUM_REQUESTS_RECEIVED_BY_MODEL, RESPONSE_TIME_COLLECTOR,
+CERT_EXPIRY_EPOCH</p>
+</div></blockquote>
+<p>};
+use crate::predict_service::{Model, PredictService};
+use crate::tf_proto::tensorflow_serving::model_spec::VersionChoice::Version;
+use crate::tf_proto::tensorflow_serving::ModelSpec;</p>
+<p>#[derive(Debug)]
+pub enum TensorInputEnum {</p>
+<blockquote>
+<div><p>String(Vec&lt;Vec&lt;u8&gt;&gt;),
+Int(Vec&lt;i32&gt;),
+Int64(Vec&lt;i64&gt;),
+Float(Vec&lt;f32&gt;),
+Double(Vec&lt;f64&gt;),
+Boolean(Vec&lt;bool&gt;),</p>
+</div></blockquote>
+<p>}</p>
+<p>#[derive(Debug)]
+pub struct TensorInput {</p>
+<blockquote>
+<div><p>pub tensor_data: TensorInputEnum,
+pub name: String,
+pub dims: Option&lt;Vec&lt;i64&gt;&gt;,</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>impl TensorInput {</dt><dd><dl>
+<dt>pub fn new(tensor_data: TensorInputEnum, name: String, dims: Option&lt;Vec&lt;i64&gt;&gt;) -&gt; TensorInput {</dt><dd><dl class="simple">
+<dt>TensorInput {</dt><dd><p>tensor_data,
+name,
+dims,</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>impl TensorInputEnum {</dt><dd><p>#[inline(always)]
+pub(crate) fn extend(&amp;mut self, another: TensorInputEnum) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>match (self, another) {</dt><dd><p>(Self::String(input), Self::String(ex)) =&gt; input.extend(ex),
+(Self::Int(input), Self::Int(ex)) =&gt; input.extend(ex),
+(Self::Int64(input), Self::Int64(ex)) =&gt; input.extend(ex),
+(Self::Float(input), Self::Float(ex)) =&gt; input.extend(ex),
+(Self::Double(input), Self::Double(ex)) =&gt; input.extend(ex),
+(Self::Boolean(input), Self::Boolean(ex)) =&gt; input.extend(ex),
+x =&gt; panic!(“input enum type not matched. input:{:?}, ex:{:?}”, x.0, x.1),</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}
+#[inline(always)]
+pub(crate) fn merge_batch(input_tensors: Vec&lt;Vec&lt;TensorInput&gt;&gt;) -&gt; Vec&lt;TensorInput&gt; {</p>
+<blockquote>
+<div><dl>
+<dt>input_tensors</dt><dd><p>.into_iter()
+.reduce(<a href="#id3"><span class="problematic" id="id4">|mut acc, e|</span></a> {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>for (i, ext) in acc.iter_mut().zip(e) {</dt><dd><p>i.tensor_data.extend(ext.tensor_data);</p>
+</dd>
+</dl>
+<p>}
+acc</p>
+</div></blockquote>
+<p>})
+.unwrap() //invariant: we expect there’s always rows in input_tensors</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>///entry point for tfServing gRPC
+#[tonic::async_trait]
+impl&lt;T: Model&gt; GrpcInferenceService for PredictService&lt;T&gt; {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>async fn server_live(</dt><dd><p>&amp;self,
+_request: Request&lt;ServerLiveRequest&gt;,</p>
+</dd>
+<dt>) -&gt; Result&lt;Response&lt;ServerLiveResponse&gt;, Status&gt; {</dt><dd><p>unimplemented!()</p>
+</dd>
+</dl>
+<p>}
+async fn server_ready(</p>
+<blockquote>
+<div><p>&amp;self,
+_request: Request&lt;ServerReadyRequest&gt;,</p>
+</div></blockquote>
+<dl class="simple">
+<dt>) -&gt; Result&lt;Response&lt;ServerReadyResponse&gt;, Status&gt; {</dt><dd><p>unimplemented!()</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>async fn model_ready(</dt><dd><p>&amp;self,
+_request: Request&lt;ModelReadyRequest&gt;,</p>
+</dd>
+<dt>) -&gt; Result&lt;Response&lt;ModelReadyResponse&gt;, Status&gt; {</dt><dd><p>unimplemented!()</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>async fn server_metadata(</dt><dd><p>&amp;self,
+_request: Request&lt;ServerMetadataRequest&gt;,</p>
+</dd>
+<dt>) -&gt; Result&lt;Response&lt;ServerMetadataResponse&gt;, Status&gt; {</dt><dd><p>unimplemented!()</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>async fn model_metadata(</dt><dd><p>&amp;self,
+_request: Request&lt;ModelMetadataRequest&gt;,</p>
+</dd>
+<dt>) -&gt; Result&lt;Response&lt;ModelMetadataResponse&gt;, Status&gt; {</dt><dd><p>unimplemented!()</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>async fn model_infer(</dt><dd><p>&amp;self,
+_request: Request&lt;ModelInferRequest&gt;,</p>
+</dd>
+<dt>) -&gt; Result&lt;Response&lt;ModelInferResponse&gt;, Status&gt; {</dt><dd><p>unimplemented!()</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>#[tonic::async_trait]
+impl&lt;T: Model&gt; PredictionService for PredictService&lt;T&gt; {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>async fn classify(</dt><dd><p>&amp;self,
+_request: Request&lt;ClassificationRequest&gt;,</p>
+</dd>
+<dt>) -&gt; Result&lt;Response&lt;ClassificationResponse&gt;, Status&gt; {</dt><dd><p>unimplemented!()</p>
+</dd>
+</dl>
+<p>}
+async fn regress(</p>
+<blockquote>
+<div><p>&amp;self,
+_request: Request&lt;RegressionRequest&gt;,</p>
+</div></blockquote>
+<dl class="simple">
+<dt>) -&gt; Result&lt;Response&lt;RegressionResponse&gt;, Status&gt; {</dt><dd><p>unimplemented!()</p>
+</dd>
+</dl>
+<p>}
+async fn predict(</p>
+<blockquote>
+<div><p>&amp;self,
+request: Request&lt;PredictRequest&gt;,</p>
+</div></blockquote>
+<dl>
+<dt>) -&gt; Result&lt;Response&lt;PredictResponse&gt;, Status&gt; {</dt><dd><p>NUM_REQUESTS_RECEIVED.inc();
+let start = Instant::now();
+let mut req = request.into_inner();
+let (model_spec, version) = req.take_model_spec();
+NUM_REQUESTS_RECEIVED_BY_MODEL</p>
+<blockquote>
+<div><p>.with_label_values(&amp;[&amp;model_spec])
+.inc();</p>
+</div></blockquote>
+<dl class="simple">
+<dt>let idx = PredictService::&lt;T&gt;::get_model_index(&amp;model_spec).ok_or_else(|| {</dt><dd><p>Status::failed_precondition(format!(“model spec not found:{}”, model_spec))</p>
+</dd>
+</dl>
+<p>})?;
+let input_spec = match INPUTS[idx].get() {</p>
+<blockquote>
+<div><p>Some(input) =&gt; input,
+_ =&gt; return Err(Status::not_found(format!(“model input spec {}”, idx))),</p>
+</div></blockquote>
+<p>};
+let input_val = req.take_input_vals(input_spec);
+self.predict(idx, version, input_val, start)</p>
+<blockquote>
+<div><p>.await
+.map_or_else(</p>
+<blockquote>
+<div><dl>
+<dt><a href="#id5"><span class="problematic" id="id6">|e|</span></a> {</dt><dd><p>NUM_REQUESTS_FAILED.inc();
+NUM_REQUESTS_FAILED_BY_MODEL</p>
+<blockquote>
+<div><p>.with_label_values(&amp;[&amp;model_spec])
+.inc();</p>
+</div></blockquote>
+<p>Err(Status::internal(e.to_string()))</p>
+</dd>
+</dl>
+<p>},
+<a href="#id7"><span class="problematic" id="id8">|res|</span></a> {</p>
+<blockquote>
+<div><dl>
+<dt>RESPONSE_TIME_COLLECTOR</dt><dd><p>.with_label_values(&amp;[&amp;model_spec])
+.observe(start.elapsed().as_millis() as f64);</p>
+</dd>
+<dt>match res {</dt><dd><dl>
+<dt>PredictResult::Ok(tensors, version) =&gt; {</dt><dd><p>let mut outputs = HashMap::new();
+NUM_PREDICTIONS.with_label_values(&amp;[&amp;model_spec]).inc();
+//FIXME: uncomment when prediction scores are normal
+// PREDICTION_SCORE_SUM
+// .with_label_values(&amp;[&amp;model_spec])
+// .inc_by(tensors[0]as f64);
+for (tp, output_name) in tensors</p>
+<blockquote>
+<div><p>.into_iter()
+.map(<a href="#id9"><span class="problematic" id="id10">|tensor|</span></a> tensor.create_tensor_proto())
+.zip(OUTPUTS[idx].iter())</p>
+</div></blockquote>
+<dl class="simple">
+<dt>{</dt><dd><p>outputs.insert(output_name.to_owned(), tp);</p>
+</dd>
+</dl>
+<p>}
+let reply = PredictResponse {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>model_spec: Some(ModelSpec {</dt><dd><p>version_choice: Some(Version(version)),
+..Default::default()</p>
+</dd>
+</dl>
+<p>}),
+outputs,</p>
+</div></blockquote>
+<p>};
+Ok(Response::new(reply))</p>
+</dd>
+</dl>
+<p>}
+PredictResult::DropDueToOverload =&gt; Err(Status::resource_exhausted(“”)),
+PredictResult::ModelNotFound(idx) =&gt; {</p>
+<blockquote>
+<div><p>Err(Status::not_found(format!(“model index {}”, idx)))</p>
+</div></blockquote>
+<p>},
+PredictResult::ModelNotReady(idx) =&gt; {</p>
+<blockquote>
+<div><p>Err(Status::unavailable(format!(“model index {}”, idx)))</p>
+</div></blockquote>
+<p>}
+PredictResult::ModelVersionNotFound(idx, version) =&gt; Err(</p>
+<blockquote>
+<div><p>Status::not_found(format!(“model index:{}, version {}”, idx, version)),</p>
+</div></blockquote>
+<p>),</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>},</p>
+</div></blockquote>
+<p>)</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>async fn multi_inference(</dt><dd><p>&amp;self,
+_request: Request&lt;MultiInferenceRequest&gt;,</p>
+</dd>
+<dt>) -&gt; Result&lt;Response&lt;MultiInferenceResponse&gt;, Status&gt; {</dt><dd><p>unimplemented!()</p>
+</dd>
+</dl>
+<p>}
+async fn get_model_metadata(</p>
+<blockquote>
+<div><p>&amp;self,
+_request: Request&lt;GetModelMetadataRequest&gt;,</p>
+</div></blockquote>
+<dl class="simple">
+<dt>) -&gt; Result&lt;Response&lt;GetModelMetadataResponse&gt;, Status&gt; {</dt><dd><p>unimplemented!()</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>// A function that takes a timestamp as input and returns a ticker stream
+fn report_expiry(expiry_time: i64) {</p>
+<blockquote>
+<div><p>info!(“Certificate expires at epoch: {:?}”, expiry_time);
+CERT_EXPIRY_EPOCH.set(expiry_time as i64);</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>pub fn bootstrap&lt;T: Model&gt;(model_factory: ModelFactory&lt;T&gt;) -&gt; Result&lt;()&gt; {</dt><dd><p>info!(“package: {}, version: {}, args: {:?}”, NAME, VERSION, <a href="#id1"><span class="problematic" id="id2">*</span></a>ARGS);
+//we follow SemVer. So here we assume MAJOR.MINOR.PATCH
+let parts = VERSION</p>
+<blockquote>
+<div><p>.split(“.”)
+.map(<a href="#id11"><span class="problematic" id="id12">|v|</span></a> v.parse::&lt;i64&gt;())
+.collect::&lt;std::result::Result&lt;Vec&lt;_&gt;, _&gt;&gt;()?;</p>
+</div></blockquote>
+<dl>
+<dt>if let [major, minor, patch] = &amp;parts[..] {</dt><dd><p>NAVI_VERSION.set(major * 1000_000 + minor * 1000 + patch);</p>
+</dd>
+<dt>} else {</dt><dd><dl class="simple">
+<dt>warn!(</dt><dd><p>“version {} doesn’t follow SemVer conversion of MAJOR.MINOR.PATCH”,
+VERSION</p>
+</dd>
+</dl>
+<p>);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>tokio::runtime::Builder::new_multi_thread()</dt><dd><p>.thread_name(“async worker”)
+.worker_threads(ARGS.num_worker_threads)
+.max_blocking_threads(ARGS.max_blocking_threads)
+.enable_all()
+.build()
+.unwrap()
+.block_on(async {</p>
+<blockquote>
+<div><p>#[cfg(feature = “navi_console”)]
+console_subscriber::init();
+let addr = format!(“0.0.0.0:{}”, ARGS.port).parse()?;</p>
+<p>let ps = PredictService::init(model_factory).await;</p>
+<dl>
+<dt>let mut builder = if ARGS.ssl_dir.is_empty() {</dt><dd><p>Server::builder()</p>
+</dd>
+<dt>} else {</dt><dd><p>// Read the pem file as a string
+let pem_str = std::fs::read_to_string(format!(“{}/server.crt”, ARGS.ssl_dir)).unwrap();
+let res = parse_x509_pem(&amp;pem_str.as_bytes());
+match res {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>Ok((rem, pem_2)) =&gt; {</dt><dd><p>assert!(rem.is_empty());
+assert_eq!(pem_2.label, String::from(“CERTIFICATE”));
+let res_x509 = parse_x509_certificate(&amp;pem_2.contents);
+info!(“Certificate label: {}”, pem_2.label);
+assert!(res_x509.is_ok());
+report_expiry(res_x509.unwrap().1.validity().not_after.timestamp());</p>
+</dd>
+</dl>
+<p>},
+_ =&gt; panic!(“PEM parsing failed: {:?}”, res),</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>let key = tokio::fs::read(format!(“{}/server.key”, ARGS.ssl_dir))</dt><dd><p>.await
+.expect(“can’t find key file”);</p>
+</dd>
+<dt>let crt = tokio::fs::read(format!(“{}/server.crt”, ARGS.ssl_dir))</dt><dd><p>.await
+.expect(“can’t find crt file”);</p>
+</dd>
+<dt>let chain = tokio::fs::read(format!(“{}/server.chain”, ARGS.ssl_dir))</dt><dd><p>.await
+.expect(“can’t find chain file”);</p>
+</dd>
+</dl>
+<p>let mut pem = Vec::new();
+pem.extend(crt);
+pem.extend(chain);
+let identity = Identity::from_pem(pem.clone(), key);
+let client_ca_cert = Certificate::from_pem(pem.clone());
+let tls = ServerTlsConfig::new()</p>
+<blockquote>
+<div><p>.identity(identity)
+.client_ca_root(client_ca_cert);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>Server::builder()</dt><dd><p>.tls_config(tls)
+.expect(“fail to config SSL”)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>};</p>
+<dl class="simple">
+<dt>info!(</dt><dd><p>“Prometheus server started: 0.0.0.0: {}”,
+ARGS.prometheus_port</p>
+</dd>
+</dl>
+<p>);</p>
+<dl class="simple">
+<dt>let ps_server = builder</dt><dd><p>.add_service(PredictionServiceServer::new(ps).accept_gzip().send_gzip())
+.serve(addr);</p>
+</dd>
+</dl>
+<p>info!(“Prediction server started: {}”, addr);
+ps_server.await.map_err(anyhow::Error::msg)</p>
+</div></blockquote>
+<p>})</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../_sources/navi/navi/src/bootstrap.rs.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

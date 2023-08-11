@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../../" id="documentation_options" src="../../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.servo.cache</p>
+<p>import com.twitter.conversions.DurationOps._
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.servo.cache.thriftscala.CachedValueStatus.DoNotCache
+import com.twitter.servo.util.{Gate, Transformer}
+import com.twitter.util.{Duration, Return, Throw, Time}
+import java.nio.ByteBuffer</p>
+<p>object Cached {</p>
+<blockquote>
+<div><dl>
+<dt>private[this] val millisToTime: Long =&gt; Time =</dt><dd><p>ms =&gt; Time.fromMilliseconds(ms)</p>
+</dd>
+<dt>private val timeToMills: Time =&gt; Long =</dt><dd><p>time =&gt; time.inMilliseconds</p>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Deserialize a CachedValue to a Cached[V]</p></li>
+<li></li>
+<li><p>If the ByteBuffer contained in the <cite>cachedValue</cite> is backed by an <cite>Array[Byte]</cite> with its offset</p></li>
+<li><p>at 0, we will apply the serializer directly to the backing array for performance reasons.</p></li>
+<li></li>
+<li><p>As such, the <cite>Serializer[V]</cite> the caller provides MUST NOT mutate the buffer it is given.</p></li>
+<li><p>This exhortation is also given in com.twitter.servo.util.Transformer, but repeated here.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>def apply[V](cachedValue: CachedValue, serializer: Serializer[V]): Cached[V] = {</dt><dd><dl>
+<dt>val value: Option[V] = cachedValue.value match {</dt><dd><dl class="simple">
+<dt>case Some(buf) if buf.hasArray &amp;&amp; buf.arrayOffset() == 0 =&gt;</dt><dd><p>serializer.from(buf.array).toOption</p>
+</dd>
+<dt>case Some(buf) =&gt;</dt><dd><p>val array = new Array[Byte](buf.remaining)
+buf.duplicate.get(array)
+serializer.from(array).toOption</p>
+</dd>
+</dl>
+<p>case None =&gt; None</p>
+</dd>
+</dl>
+<p>}
+val status =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (cachedValue.value.nonEmpty &amp;&amp; value.isEmpty)</dt><dd><p>CachedValueStatus.DeserializationFailed</p>
+</dd>
+<dt>else</dt><dd><p>cachedValue.status</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl class="simple">
+<dt>Cached(</dt><dd><p>value,
+status,
+Time.fromMilliseconds(cachedValue.cachedAtMsec),
+cachedValue.readThroughAtMsec.map(millisToTime),
+cachedValue.writtenThroughAtMsec.map(millisToTime),
+cachedValue.doNotCacheUntilMsec.map(millisToTime),
+cachedValue.softTtlStep</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>A simple metadata wrapper for cached values. This is stored in the cache</p></li>
+<li><p>using the [[com.twitter.servo.cache.thriftscala.CachedValue]] struct, which is similar, but</p></li>
+<li><p>untyped.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>case class Cached[V](</dt><dd><p>value: Option[V],
+status: CachedValueStatus,
+cachedAt: Time,
+readThroughAt: Option[Time] = None,
+writtenThroughAt: Option[Time] = None,
+doNotCacheUntil: Option[Time] = None,
+softTtlStep: Option[Short] = None) {</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>produce a new cached value with the same metadata</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+</dl>
+<p>def map[W](f: V =&gt; W): Cached[W] = copy(value = value.map(f))</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>serialize to a CachedValue</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+<dt>def toCachedValue(serializer: Serializer[V]): CachedValue = {</dt><dd><p>var serializedValue: Option[ByteBuffer] = None
+val cachedValueStatus = value match {</p>
+<blockquote>
+<div><dl>
+<dt>case Some(v) =&gt;</dt><dd><dl>
+<dt>serializer.to(v) match {</dt><dd><dl class="simple">
+<dt>case Return(sv) =&gt;</dt><dd><p>serializedValue = Some(ByteBuffer.wrap(sv))
+status</p>
+</dd>
+</dl>
+<p>case Throw(_) =&gt; CachedValueStatus.SerializationFailed</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>case None =&gt; status</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>CachedValue(</dt><dd><p>serializedValue,
+cachedValueStatus,
+cachedAt.inMilliseconds,
+readThroughAt.map(Cached.timeToMills),
+writtenThroughAt.map(Cached.timeToMills),
+doNotCacheUntil.map(Cached.timeToMills),
+softTtlStep</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Resolves conflicts between a value being inserted into cache and a value already in cache by</p></li>
+<li><p>using the time a cached value was last updated.</p></li>
+<li><p>If the cached value has a writtenThroughAt, returns it. Otherwise returns readThroughAt, but</p></li>
+<li><p>if that doesn’t exist, returns cachedAt.</p></li>
+<li><p>This makes it favor writes to reads in the event of a race condition.</p></li>
+</ul>
+<p><a href="#id9"><span class="problematic" id="id10">*</span></a>/</p>
+</dd>
+<dt>def effectiveUpdateTime[V](writtenThroughBuffer: Duration = 0.second): Time = {</dt><dd><dl>
+<dt>this.writtenThroughAt match {</dt><dd><p>case Some(wta) =&gt; wta + writtenThroughBuffer
+case None =&gt;</p>
+<blockquote>
+<div><dl class="simple">
+<dt>this.readThroughAt match {</dt><dd><p>case Some(rta) =&gt; rta
+case None =&gt; this.cachedAt</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Switch between two cache pickers by providing deciderable gate</p></li>
+</ul>
+<p><a href="#id11"><span class="problematic" id="id12">*</span></a>/</p>
+</dd>
+<dt>class DeciderablePicker[V](</dt><dd><p>primaryPicker: LockingCache.Picker[Cached[V]],
+secondaryPicker: LockingCache.Picker[Cached[V]],
+usePrimary: Gate[Unit],
+statsReceiver: StatsReceiver)</p>
+<blockquote>
+<div><p>extends LockingCache.Picker[Cached[V]] {</p>
+</div></blockquote>
+<p>private[this] val stats = statsReceiver.scope(“deciderable_picker”)
+private[this] val pickerScope = stats.scope(“picker”)
+private[this] val primaryPickerCount = pickerScope.counter(“primary”)
+private[this] val secondaryPickerCount = pickerScope.counter(“secondary”)</p>
+<p>private[this] val pickedScope = stats.scope(“picked_values”)
+private[this] val pickedValuesMatched = pickedScope.counter(“matched”)
+private[this] val pickedValuesMismatched = pickedScope.counter(“mismatched”)</p>
+<dl>
+<dt>override def apply(newValue: Cached[V], oldValue: Cached[V]): Option[Cached[V]] = {</dt><dd><p>val secondaryPickerValue = secondaryPicker(newValue, oldValue)</p>
+<dl>
+<dt>if (usePrimary()) {</dt><dd><p>val primaryPickerValue = primaryPicker(newValue, oldValue)</p>
+<p>primaryPickerCount.incr()
+if (primaryPickerValue == secondaryPickerValue) pickedValuesMatched.incr()
+else pickedValuesMismatched.incr()</p>
+<p>primaryPickerValue</p>
+</dd>
+<dt>} else {</dt><dd><p>secondaryPickerCount.incr()
+secondaryPickerValue</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>override def toString(): String = “DeciderablePicker”</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>It’s similar to the PreferNewestCached picker, but it prefers written-through value</p></li>
+<li><p>over read-through as long as written-through value + writtenThroughExtra is</p></li>
+<li><p>newer than read-through value. Same as in PreferNewestCached, if values cached</p></li>
+<li><p>have the same cached method and time picker picks the new value.</p></li>
+<li></li>
+<li><p>It intends to solve race condition when the read and write requests come at the</p></li>
+<li><p>same time, but write requests is getting cached first and then getting override with</p></li>
+<li><p>a stale value from the read request.</p></li>
+<li></li>
+<li><p>If enabled gate is disabled, it falls back to PreferNewestCached logic.</p></li>
+<li></li>
+</ul>
+<p><a href="#id13"><span class="problematic" id="id14">*</span></a>/</p>
+</dd>
+<dt>class PreferWrittenThroughCached[V](</dt><dd><dl>
+<dt>writtenThroughBuffer: Duration = 1.second)</dt><dd><p>extends PreferNewestCached[V] {</p>
+</dd>
+<dt>override def apply(newValue: Cached[V], oldValue: Cached[V]): Option[Cached[V]] = {</dt><dd><p>// the tie goes to newValue
+if (oldValue.effectiveUpdateTime(writtenThroughBuffer) &gt; newValue.effectiveUpdateTime(</p>
+<blockquote>
+<div><blockquote>
+<div><p>writtenThroughBuffer))</p>
+</div></blockquote>
+<p>None</p>
+</div></blockquote>
+<dl class="simple">
+<dt>else</dt><dd><p>Some(newValue)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+override def toString(): String = “PreferWrittenThroughCached”</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>prefer one value over another based on Cached metadata</p></li>
+</ul>
+<p><a href="#id15"><span class="problematic" id="id16">*</span></a>/</p>
+</dd>
+</dl>
+<p>class PreferNewestCached[V] extends LockingCache.Picker[Cached[V]] {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>override def apply(newValue: Cached[V], oldValue: Cached[V]): Option[Cached[V]] = {</dt><dd><dl class="simple">
+<dt>if (oldValue.effectiveUpdateTime() &gt; newValue.effectiveUpdateTime())</dt><dd><p>None</p>
+</dd>
+<dt>else</dt><dd><p>Some(newValue)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>override def toString(): String = “PreferNewestCached”</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Prefer non-empty values. If a non-empty value is in cache, and the</p></li>
+<li><p>value to store is empty, return the non-empty value with a fresh cachedAt</p></li>
+<li><p>instead.</p></li>
+</ul>
+<p><a href="#id17"><span class="problematic" id="id18">*</span></a>/</p>
+</dd>
+<dt>class PreferNewestNonEmptyCached[V] extends PreferNewestCached[V] {</dt><dd><dl>
+<dt>override def apply(newValue: Cached[V], oldValue: Cached[V]) = {</dt><dd><dl class="simple">
+<dt>(newValue.value, oldValue.value) match {</dt><dd><p>// Some/Some and None/None cases are handled by the super class
+case (Some(_), Some(_)) =&gt; super.apply(newValue, oldValue)
+case (None, None) =&gt; super.apply(newValue, oldValue)
+case (Some(_), None) =&gt; Some(newValue)
+case (None, Some(_)) =&gt; Some(oldValue.copy(cachedAt = Time.now))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Prefer do not cache entries if they’re not expired. Otherwise uses fallbackPicker</p></li>
+<li><p>&#64;param fallBackPicker the picker to use when the oldvalue isn’t do not cache or is expired.</p></li>
+<li><p>Defaults to PreferNewestCache.</p></li>
+</ul>
+<p><a href="#id19"><span class="problematic" id="id20">*</span></a>/</p>
+</dd>
+<dt>class PreferDoNotCache[V](</dt><dd><p>fallBackPicker: LockingCache.Picker[Cached[V]] = new PreferNewestCached[V]: PreferNewestCached[V],
+statsReceiver: StatsReceiver)</p>
+<blockquote>
+<div><p>extends LockingCache.Picker[Cached[V]] {</p>
+</div></blockquote>
+<p>private[this] val pickDoNotCacheEntryCounter = statsReceiver.counter(“pick_do_not_cache_entry”)
+private[this] val useFallbackCounter = statsReceiver.counter(“use_fallback”)
+override def apply(newValue: Cached[V], oldValue: Cached[V]): Option[Cached[V]] = {</p>
+<blockquote>
+<div><dl>
+<dt>if (oldValue.status == DoNotCache &amp;&amp; oldValue.doNotCacheUntil.forall(</dt><dd><blockquote>
+<div><p>_ &gt; newValue.effectiveUpdateTime())) { // evaluates to true if dnc until is None</p>
+</div></blockquote>
+<p>pickDoNotCacheEntryCounter.incr()
+None</p>
+</dd>
+<dt>} else {</dt><dd><p>useFallbackCounter.incr()
+fallBackPicker.apply(newValue, oldValue)</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>A Transformer of Cached values composed of a Transformer of the underlying values.</p></li>
+</ul>
+<p><a href="#id21"><span class="problematic" id="id22">*</span></a>/</p>
+</dd>
+<dt>class CachedTransformer[A, B](underlying: Transformer[A, B])</dt><dd><blockquote>
+<div><p>extends Transformer[Cached[A], Cached[B]] {</p>
+</div></blockquote>
+<dl>
+<dt>def to(cachedA: Cached[A]) = cachedA.value match {</dt><dd><p>case None =&gt; Return(cachedA.copy(value = None))
+case Some(a) =&gt;</p>
+<blockquote>
+<div><dl class="simple">
+<dt>underlying.to(a) map { b =&gt;</dt><dd><p>cachedA.copy(value = Some(b))</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def from(cachedB: Cached[B]) = cachedB.value match {</dt><dd><p>case None =&gt; Return(cachedB.copy(value = None))
+case Some(b) =&gt;</p>
+<blockquote>
+<div><dl class="simple">
+<dt>underlying.from(b) map { a =&gt;</dt><dd><p>cachedB.copy(value = Some(a))</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../../_sources/tweetypie/servo/repo/src/main/scala/com/twitter/servo/cache/Cached.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

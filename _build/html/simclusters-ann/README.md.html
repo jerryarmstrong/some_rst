@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../" id="documentation_options" src="../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../_static/doctools.js?v=888ff710"></script>
+    <script src="../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+   
+  <link rel="stylesheet" href="../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p># SimClusters ANN</p>
+<p>SimClusters ANN is a service that returns tweet candidate recommendations given a SimClusters embedding. The service implements tweet recommendations based on the Approximate Cosine Similarity algorithm.</p>
+<p>The cosine similarity between two Tweet SimClusters Embedding represents the relevance level of two tweets in SimCluster space. The traditional algorithm for calculating cosine similarity is expensive and hard to support by the existing infrastructure. Therefore, the Approximate Cosine Similarity algorithm is introduced to save response time by reducing I/O operations.</p>
+<p>## Background
+SimClusters V2 runtime infra introduces the SimClusters and its online and offline approaches. A heron job builds the mapping between SimClusters and Tweets. The job saves top 400 Tweets for a SimClusters and top 100 SimClusters for a Tweet. Favorite score and follow score are two types of tweet score.  In the document, the top 100 SimClusters based on the favorite score for a Tweet stands for the Tweet SimClusters Embedding.</p>
+<p>The cosine similarity between two Tweet SimClusters Embedding presents the relevant level of two tweets in SimCluster space. The score varies from 0 to 1. The high cosine similarity score(&gt;= 0.7 in Prod) means that the users who like two tweets share the same SimClusters.</p>
+<p>SimClusters from the Linear Algebra Perspective discussed the difference between the dot-product and cosine similarity in SimCluster space. We believe the cosine similarity approach is better because it avoids the bias of tweet popularity.</p>
+<blockquote>
+<div><p>However, calculating the cosine similarity between two Tweets is pretty expensive in Tweet candidate generation. In TWISTLY, we scan at most 15,000 (6 source tweets * 25 clusters * 100 tweets per clusters) tweet candidates for every Home Timeline request. The traditional algorithm needs to make API calls to fetch 15,000 tweet SimCluster embeddings. Consider that we need to process over 6,000 RPS, it’s hard to support by the existing infrastructure.</p>
+</div></blockquote>
+<p>## SimClusters Approximate Cosine Similarity Core Algorithm</p>
+<ol class="arabic simple">
+<li><p>Provide a source SimCluster Embedding <em>SV</em>, <em>SV = [(SC1, Score), (SC2, Score), (SC3, Score) …]</em></p></li>
+<li><p>Fetch top <em>M</em> tweets for each Top <em>N</em> SimClusters based on SV. In Prod, <em>M = 400</em>, <em>N = 50</em>.  Tweets may appear in multiple SimClusters.</p></li>
+</ol>
+<div class="line-block">
+<div class="line">|   |   |   |</div>
+</div>
+<p><a href="#id1"><span class="problematic" id="id2">|---|</span></a>—<a href="#id3"><span class="problematic" id="id4">|---|</span></a>—|
+| SC1  | T1:Score  | T2: Score  | …   |
+| SC2 |  T3: Score | T4: Score  |  … |</p>
+<ol class="arabic simple" start="3">
+<li><p>Based on the previous table, generate an <em>(M x N) x N</em> Matrix <em>R</em>. The <em>R</em> represents the approximate SimCluster embeddings for <em>MxN</em> tweets. The embedding only contains top <em>N</em> SimClusters from <em>SV</em>. Only top <em>M</em> tweets from each SimCluster have the score. Others are 0.</p></li>
+</ol>
+<div class="line-block">
+<div class="line">|  SC1 |  SC2 | …   |</div>
+</div>
+<p><a href="#id5"><span class="problematic" id="id6">|---|</span></a>—<a href="#id7"><span class="problematic" id="id8">|---|</span></a>—|
+| T1  | Score  | 0  | …   |
+| T2 |  Score | 0 |  … |
+| T3 |  0 | Score  |  … |</p>
+<ol class="arabic simple" start="4">
+<li><p>Compute the dot product between source vector and the approximate vectors for each tweet. (Calculate <em>R • SV^T</em>). Take top <em>X</em> tweets. In Prod, <em>X = 200</em></p></li>
+<li><p>Fetch <em>X</em> tweet SimClusters Embedding, Calculate Cosine Similarity between <em>X</em> tweets and <em>SV</em>, Return top <em>Y</em> above a certain threshold <em>Z</em>.</p></li>
+</ol>
+<p>Approximate Cosine Similarity is an approximate algorithm. Instead of fetching <em>M * N</em> tweets embedding, it only fetches <em>X</em> tweets embedding. In prod, <em>X / M * N * 100% = 6%</em>. Based on the metrics during TWISTLY development, most of the response time is consumed by I/O operation. The Approximate Cosine Similarity is a good approach to save a large amount of response time.</p>
+<p>The idea of the approximate algorithm is based on the assumption that the higher dot-product between source tweets’ SimCluster embedding and candidate tweet’s limited SimCluster Embedding, the possibility that these two tweets are relevant is higher. Additional Cosine Similarity filter is to guarantee that the results are not affected by popularity bias.</p>
+<p>Adjusting the M, N, X, Y, Z is able to balance the precision and recall for different products. The implementation of approximate cosine similarity is used by TWISTLY, Interest-based tweet recommendation, Similar Tweet in RUX, and Author based recommendation. This algorithm is also suitable for future user or entity recommendation based on SimClusters Embedding.</p>
+<p># ——————————-
+# Build and Test
+# ——————————-
+Compile the service</p>
+<blockquote>
+<div><p>$ ./bazel build simclusters-ann/server:bin</p>
+</div></blockquote>
+<p>Unit tests</p>
+<blockquote>
+<div><p>$ ./bazel test simclusters-ann/server:bin</p>
+</div></blockquote>
+<p># ——————————-
+# Deploy
+# ——————————-</p>
+<p>## Prerequisite for devel deployments
+First of all, you need to generate Service to Service certificates for use while developing locally. This only needs to be done ONCE:</p>
+<p>To add cert files to Aurora (if you want to deploy to DEVEL):
+<code class="docutils literal notranslate"><span class="pre">`</span>
+<span class="pre">$</span> <span class="pre">developer-cert-util</span> <span class="pre">--env</span> <span class="pre">devel</span> <span class="pre">--job</span> <span class="pre">simclusters-ann</span>
+<span class="pre">`</span></code></p>
+<p>## Deploying to devel/staging from a local build
+Reference -</p>
+<blockquote>
+<div><p>$ ./simclusters-ann/bin/deploy.sh –help</p>
+</div></blockquote>
+<p>Use the script to build the service in your local branch, upload it to packer and deploy in devel aurora:</p>
+<blockquote>
+<div><p>$ ./simclusters-ann/bin/deploy.sh atla $USER devel simclusters-ann</p>
+</div></blockquote>
+<p>You can also deploy to staging with this script. E.g. to deploy to instance 1:</p>
+<blockquote>
+<div><p>$ ./simclusters-ann/bin/deploy.sh atla simclusters-ann staging simclusters-ann &lt;instance-number&gt;</p>
+</div></blockquote>
+<p>## Deploying to production</p>
+<p>Production deploys should be managed by Workflows.
+_Do <a href="#id9"><span class="problematic" id="id10">not_</span></a> deploy to production unless it is an emergency and you have approval from oncall.</p>
+<p>##### It is not recommended to deploy from Command Lines into production environments, unless 1) you’re testing a small change in Canary shard [0,9]. 2) Tt is an absolute emergency. Be sure to make oncalls aware of the changes you’re deploying.</p>
+<blockquote>
+<div><p>$ ./simclusters-ann/bin/deploy.sh atla simclusters-ann prod simclusters-ann &lt;instance-number&gt;</p>
+</div></blockquote>
+<p>In the case of multiple instances,</p>
+<blockquote>
+<div><p>$ ./simclusters-ann/bin/deploy.sh atla simclusters-ann prod simclusters-ann &lt;instance-number-start&gt;-&lt;instance-number-end&gt;</p>
+</div></blockquote>
+<p>## Checking Deployed Version and Rolling Back</p>
+<p>Wherever possible, roll back using Workflows by finding an earlier good version and clicking the “rollback” button in the UI. This is the safest and least error-prone method.</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../_sources/simclusters-ann/README.md.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

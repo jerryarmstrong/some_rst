@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.frigate.pushservice.adaptor</p>
+<p>import com.twitter.content_mixer.thriftscala.ContentMixerProductResponse
+import com.twitter.content_mixer.thriftscala.ContentMixerRequest
+import com.twitter.content_mixer.thriftscala.ContentMixerResponse
+import com.twitter.content_mixer.thriftscala.NotificationsTripTweetsProductContext
+import com.twitter.content_mixer.thriftscala.Product
+import com.twitter.content_mixer.thriftscala.ProductContext
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.frigate.common.base.CandidateSource
+import com.twitter.frigate.common.base.CandidateSourceEligible
+import com.twitter.frigate.common.predicate.CommonOutNetworkTweetCandidatesSourcePredicates.filterOutReplyTweet
+import com.twitter.frigate.pushservice.model.PushTypes.RawCandidate
+import com.twitter.frigate.pushservice.model.PushTypes.Target
+import com.twitter.frigate.pushservice.params.PushFeatureSwitchParams
+import com.twitter.frigate.pushservice.params.PushParams
+import com.twitter.frigate.pushservice.util.MediaCRT
+import com.twitter.frigate.pushservice.util.PushAdaptorUtil
+import com.twitter.frigate.pushservice.util.PushDeviceUtil
+import com.twitter.frigate.thriftscala.CommonRecommendationType
+import com.twitter.geoduck.util.country.CountryInfo
+import com.twitter.product_mixer.core.thriftscala.ClientContext
+import com.twitter.stitch.tweetypie.TweetyPie.TweetyPieResult
+import com.twitter.storehaus.ReadableStore
+import com.twitter.trends.trip_v1.trip_tweets.thriftscala.TripDomain
+import com.twitter.trends.trip_v1.trip_tweets.thriftscala.TripTweets
+import com.twitter.util.Future</p>
+<dl>
+<dt>case class TripGeoCandidatesAdaptor(</dt><dd><p>tripTweetCandidateStore: ReadableStore[TripDomain, TripTweets],
+contentMixerStore: ReadableStore[ContentMixerRequest, ContentMixerResponse],
+tweetyPieStore: ReadableStore[Long, TweetyPieResult],
+tweetyPieStoreNoVF: ReadableStore[Long, TweetyPieResult],
+statsReceiver: StatsReceiver)</p>
+<blockquote>
+<div><p>extends CandidateSource[Target, RawCandidate]
+with CandidateSourceEligible[Target, RawCandidate] {</p>
+</div></blockquote>
+<p>override def name: String = this.getClass.getSimpleName</p>
+<p>private val stats = statsReceiver.scope(name.stripSuffix(“$”))</p>
+<p>private val contentMixerRequests = stats.counter(“getTripCandidatesContentMixerRequests”)
+private val loggedOutTripTweetIds = stats.counter(“logged_out_trip_tweet_ids_count”)
+private val loggedOutRawCandidates = stats.counter(“logged_out_raw_candidates_count”)
+private val rawCandidates = stats.counter(“raw_candidates_count”)
+private val loggedOutEmptyplaceId = stats.counter(“logged_out_empty_place_id_count”)
+private val loggedOutPlaceId = stats.counter(“logged_out_place_id_count”)
+private val nonReplyTweetsCounter = stats.counter(“non_reply_tweets”)</p>
+<dl>
+<dt>override def isCandidateSourceAvailable(target: Target): Future[Boolean] = {</dt><dd><dl>
+<dt>if (target.isLoggedOutUser) {</dt><dd><p>Future.True</p>
+</dd>
+<dt>} else {</dt><dd><dl class="simple">
+<dt>for {</dt><dd><p>isRecommendationsSettingEnabled &lt;- PushDeviceUtil.isRecommendationsEligible(target)
+inferredLanguage &lt;- target.inferredUserDeviceLanguage</p>
+</dd>
+<dt>} yield {</dt><dd><p>isRecommendationsSettingEnabled &amp;&amp;
+inferredLanguage.nonEmpty &amp;&amp;
+target.params(PushParams.TripGeoTweetCandidatesDecider)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def buildRawCandidate(target: Target, tweetyPieResult: TweetyPieResult): RawCandidate = {</dt><dd><dl>
+<dt>PushAdaptorUtil.generateOutOfNetworkTweetCandidates(</dt><dd><p>inputTarget = target,
+id = tweetyPieResult.tweet.id,
+mediaCRT = MediaCRT(</p>
+<blockquote>
+<div><p>CommonRecommendationType.TripGeoTweet,
+CommonRecommendationType.TripGeoTweet,
+CommonRecommendationType.TripGeoTweet</p>
+</div></blockquote>
+<p>),
+result = Some(tweetyPieResult),
+localizedEntity = None</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>override def get(target: Target): Future[Option[Seq[RawCandidate]]] = {</dt><dd><dl>
+<dt>if (target.isLoggedOutUser) {</dt><dd><dl>
+<dt>for {</dt><dd><p>tripTweetIds &lt;- getTripCandidatesForLoggedOutTarget(target)
+tweetyPieResults &lt;- Future.collect(tweetyPieStoreNoVF.multiGet(tripTweetIds))</p>
+</dd>
+<dt>} yield {</dt><dd><p>val candidates = tweetyPieResults.values.flatten.map(buildRawCandidate(target, _))
+if (candidates.nonEmpty) {</p>
+<blockquote>
+<div><p>loggedOutRawCandidates.incr(candidates.size)
+Some(candidates.toSeq)</p>
+</div></blockquote>
+<p>} else None</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>} else {</dt><dd><dl>
+<dt>for {</dt><dd><p>tripTweetIds &lt;- getTripCandidatesContentMixer(target)
+tweetyPieResults &lt;-</p>
+<blockquote>
+<div><dl class="simple">
+<dt>Future.collect((target.params(PushFeatureSwitchParams.EnableVFInTweetypie) match {</dt><dd><p>case true =&gt; tweetyPieStore
+case false =&gt; tweetyPieStoreNoVF</p>
+</dd>
+</dl>
+<p>}).multiGet(tripTweetIds))</p>
+</div></blockquote>
+</dd>
+<dt>} yield {</dt><dd><p>val nonReplyTweets = filterOutReplyTweet(tweetyPieResults, nonReplyTweetsCounter)
+val candidates = nonReplyTweets.values.flatten.map(buildRawCandidate(target, _))
+if (candidates.nonEmpty &amp;&amp; target.params(</p>
+<blockquote>
+<div><blockquote>
+<div><p>PushFeatureSwitchParams.TripTweetCandidateReturnEnable)) {</p>
+</div></blockquote>
+<p>rawCandidates.incr(candidates.size)
+Some(candidates.toSeq)</p>
+</div></blockquote>
+<p>} else None</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def getTripCandidatesContentMixer(</dt><dd><p>target: Target</p>
+</dd>
+<dt>): Future[Set[Long]] = {</dt><dd><p>contentMixerRequests.incr()
+Future</p>
+<blockquote>
+<div><dl class="simple">
+<dt>.join(</dt><dd><p>target.inferredUserDeviceLanguage,
+target.deviceInfo</p>
+</dd>
+</dl>
+<p>)
+.flatMap {</p>
+<blockquote>
+<div><dl>
+<dt>case (languageOpt, deviceInfoOpt) =&gt;</dt><dd><dl>
+<dt>contentMixerStore</dt><dd><dl>
+<dt>.get(</dt><dd><dl>
+<dt>ContentMixerRequest(</dt><dd><dl class="simple">
+<dt>clientContext = ClientContext(</dt><dd><p>userId = Some(target.targetId),
+languageCode = languageOpt,
+userAgent = deviceInfoOpt.flatMap(_.guessedPrimaryDeviceUserAgent.map(_.toString))</p>
+</dd>
+</dl>
+<p>),
+product = Product.NotificationsTripTweets,
+productContext = Some(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>ProductContext.NotificationsTripTweetsProductContext(</dt><dd><p>NotificationsTripTweetsProductContext()</p>
+</dd>
+</dl>
+<p>)),</p>
+</div></blockquote>
+<p>cursor = None,
+maxResults =</p>
+<blockquote>
+<div><p>Some(target.params(PushFeatureSwitchParams.TripTweetMaxTotalCandidates))</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>).map {</dt><dd><dl>
+<dt>_.map { rawResponse =&gt;</dt><dd><dl>
+<dt>val tripResponse =</dt><dd><dl>
+<dt>rawResponse.contentMixerProductResponse</dt><dd><dl class="simple">
+<dt>.asInstanceOf[</dt><dd><p>ContentMixerProductResponse.NotificationsTripTweetsProductResponse]</p>
+</dd>
+</dl>
+<p>.notificationsTripTweetsProductResponse</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>tripResponse.results.map(_.tweetResult.tweetId).toSet</p>
+</dd>
+</dl>
+<p>}.getOrElse(Set.empty)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def getTripCandidatesForLoggedOutTarget(</dt><dd><p>target: Target</p>
+</dd>
+<dt>): Future[Set[Long]] = {</dt><dd><dl>
+<dt>Future.join(target.targetLanguage, target.countryCode).flatMap {</dt><dd><dl>
+<dt>case (Some(lang), Some(country)) =&gt;</dt><dd><p>val placeId = CountryInfo.lookupByCode(country).map(_.placeIdLong)
+if (placeId.nonEmpty) {</p>
+<blockquote>
+<div><p>loggedOutPlaceId.incr()</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>loggedOutEmptyplaceId.incr()</p>
+</dd>
+</dl>
+<p>}
+val tripSource = “TOP_GEO_V3_LR”
+val tripQuery = TripDomain(</p>
+<blockquote>
+<div><p>sourceId = tripSource,
+language = Some(lang),
+placeId = placeId,
+topicId = None</p>
+</div></blockquote>
+<p>)
+val response = tripTweetCandidateStore.get(tripQuery)
+val tripTweetIds =</p>
+<blockquote>
+<div><dl>
+<dt>response.map { res =&gt;</dt><dd><dl class="simple">
+<dt>if (res.isDefined) {</dt><dd><dl class="simple">
+<dt>res.get.tweets</dt><dd><p>.sortBy(_.score)(Ordering[Double].reverse).map(_.tweetId).toSet</p>
+</dd>
+</dl>
+</dd>
+<dt>} else {</dt><dd><p>Set.empty[Long]</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>tripTweetIds.map { ids =&gt; loggedOutTripTweetIds.incr(ids.size) }
+tripTweetIds</p>
+</dd>
+</dl>
+<p>case (_, _) =&gt; Future.value(Set.empty)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/pushservice/src/main/scala/com/twitter/frigate/pushservice/adaptor/TripGeoCandidatesAdaptor.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../" id="documentation_options" src="../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.interaction_graph.scio.agg_notifications</p>
+<p>import com.spotify.scio.ScioMetrics
+import com.twitter.clientapp.thriftscala.EventNamespace
+import com.twitter.clientapp.thriftscala.LogEvent
+import com.twitter.interaction_graph.thriftscala.FeatureName</p>
+<p>object InteractionGraphNotificationUtil {</p>
+<blockquote>
+<div><p>val PUSH_OPEN_ACTIONS = Set(“open”, “background_open”)
+val NTAB_CLICK_ACTIONS = Set(“navigate”, “click”)
+val STATUS_ID_REGEX = “^twitter:\/\/tweet\?status_id=([0-9]+).*”.r
+val TWEET_ID_REGEX = “^twitter:\/\/tweet.id=([0-9]+).*”.r</p>
+<dl>
+<dt>def extractTweetIdFromUrl(url: String): Option[Long] = url match {</dt><dd><dl class="simple">
+<dt>case STATUS_ID_REGEX(statusId) =&gt;</dt><dd><p>ScioMetrics.counter(“regex matching”, “status_id=”).inc()
+Some(statusId.toLong)</p>
+</dd>
+<dt>case TWEET_ID_REGEX(tweetId) =&gt;</dt><dd><p>ScioMetrics.counter(“regex matching”, “tweet?id=”).inc()
+Some(tweetId.toLong)</p>
+</dd>
+</dl>
+<p>case _ =&gt; None</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def getPushNtabEvents(e: LogEvent): Seq[(Long, (Long, FeatureName))] = {</dt><dd><dl>
+<dt>for {</dt><dd><p>logBase &lt;- e.logBase.toSeq
+userId &lt;- logBase.userId.toSeq
+namespace &lt;- e.eventNamespace.toSeq
+(tweetId, featureName) &lt;- namespace match {</p>
+<blockquote>
+<div><dl>
+<dt>case EventNamespace(_, _, _, _, _, Some(action)) if PUSH_OPEN_ACTIONS.contains(action) =&gt;</dt><dd><dl class="simple">
+<dt>(for {</dt><dd><p>details &lt;- e.eventDetails
+url &lt;- details.url
+tweetId &lt;- extractTweetIdFromUrl(url)</p>
+</dd>
+<dt>} yield {</dt><dd><p>ScioMetrics.counter(“event type”, “push open”).inc()
+(tweetId, FeatureName.NumPushOpens)</p>
+</dd>
+</dl>
+<p>}).toSeq</p>
+</dd>
+<dt>case EventNamespace(_, Some(“ntab”), _, _, _, Some(“navigate”)) =&gt;</dt><dd><dl class="simple">
+<dt>val tweetIds = for {</dt><dd><p>details &lt;- e.eventDetails.toSeq
+items &lt;- details.items.toSeq
+item &lt;- items
+ntabDetails &lt;- item.notificationTabDetails.toSeq
+clientEventMetadata &lt;- ntabDetails.clientEventMetadata.toSeq
+tweetIds &lt;- clientEventMetadata.tweetIds.toSeq
+tweetId &lt;- tweetIds</p>
+</dd>
+<dt>} yield {</dt><dd><p>ScioMetrics.counter(“event type”, “ntab navigate”).inc()
+tweetId</p>
+</dd>
+</dl>
+<p>}
+tweetIds.map((_, FeatureName.NumNtabClicks))</p>
+</dd>
+<dt>case EventNamespace(_, Some(“ntab”), _, _, _, Some(“click”)) =&gt;</dt><dd><dl class="simple">
+<dt>val tweetIds = for {</dt><dd><p>details &lt;- e.eventDetails.toSeq
+items &lt;- details.items.toSeq
+item &lt;- items
+tweetId &lt;- item.id</p>
+</dd>
+<dt>} yield {</dt><dd><p>ScioMetrics.counter(“event type”, “ntab click”).inc()
+tweetId</p>
+</dd>
+</dl>
+<p>}
+tweetIds.map((_, FeatureName.NumNtabClicks))</p>
+</dd>
+</dl>
+<p>case _ =&gt; Nil</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>} yield (tweetId, (userId, featureName))</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Returns events corresponding to ntab clicks. We have the tweet id from ntab clicks and can join</p></li>
+<li><p>those with public tweets.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>def getNtabEvents(e: LogEvent): Seq[(Long, (Long, FeatureName))] = {</dt><dd><dl>
+<dt>for {</dt><dd><p>logBase &lt;- e.logBase.toSeq
+userId &lt;- logBase.userId.toSeq
+namespace &lt;- e.eventNamespace.toSeq
+(tweetId, featureName) &lt;- namespace match {</p>
+<blockquote>
+<div><dl>
+<dt>case EventNamespace(_, Some(“ntab”), _, _, _, Some(“navigate”)) =&gt;</dt><dd><dl class="simple">
+<dt>val tweetIds = for {</dt><dd><p>details &lt;- e.eventDetails.toSeq
+items &lt;- details.items.toSeq
+item &lt;- items
+ntabDetails &lt;- item.notificationTabDetails.toSeq
+clientEventMetadata &lt;- ntabDetails.clientEventMetadata.toSeq
+tweetIds &lt;- clientEventMetadata.tweetIds.toSeq
+tweetId &lt;- tweetIds</p>
+</dd>
+<dt>} yield {</dt><dd><p>ScioMetrics.counter(“event type”, “ntab navigate”).inc()
+tweetId</p>
+</dd>
+</dl>
+<p>}
+tweetIds.map((_, FeatureName.NumNtabClicks))</p>
+</dd>
+<dt>case EventNamespace(_, Some(“ntab”), _, _, _, Some(“click”)) =&gt;</dt><dd><dl class="simple">
+<dt>val tweetIds = for {</dt><dd><p>details &lt;- e.eventDetails.toSeq
+items &lt;- details.items.toSeq
+item &lt;- items
+tweetId &lt;- item.id</p>
+</dd>
+<dt>} yield {</dt><dd><p>ScioMetrics.counter(“event type”, “ntab click”).inc()
+tweetId</p>
+</dd>
+</dl>
+<p>}
+tweetIds.map((_, FeatureName.NumNtabClicks))</p>
+</dd>
+</dl>
+<p>case _ =&gt; Nil</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>} yield (tweetId, (userId, featureName))</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>get push open events, keyed by impressionId (as the client event does not always have the tweetId nor the authorId)</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>def getPushOpenEvents(e: LogEvent): Seq[(String, (Long, FeatureName))] = {</dt><dd><dl>
+<dt>for {</dt><dd><p>logBase &lt;- e.logBase.toSeq
+userId &lt;- logBase.userId.toSeq
+namespace &lt;- e.eventNamespace.toSeq
+(tweetId, featureName) &lt;- namespace match {</p>
+<blockquote>
+<div><dl>
+<dt>case EventNamespace(_, _, _, _, _, Some(action)) if PUSH_OPEN_ACTIONS.contains(action) =&gt;</dt><dd><dl class="simple">
+<dt>val impressionIdOpt = for {</dt><dd><p>details &lt;- e.notificationDetails
+impressionId &lt;- details.impressionId</p>
+</dd>
+<dt>} yield {</dt><dd><p>ScioMetrics.counter(“event type”, “push open”).inc()
+impressionId</p>
+</dd>
+</dl>
+<p>}
+impressionIdOpt.map((_, FeatureName.NumPushOpens)).toSeq</p>
+</dd>
+</dl>
+<p>case _ =&gt; Nil</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>} yield (tweetId, (userId, featureName))</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../_sources/src/scala/com/twitter/interaction_graph/scio/agg_notifications/InteractionGraphNotificationUtil.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../" id="documentation_options" src="../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.recos.user_user_graph</p>
+<p>import com.twitter.abdecider.ABDeciderFactory
+import com.twitter.abdecider.LoggingABDecider
+import com.twitter.app.Flag
+import com.twitter.conversions.DurationOps._
+import com.twitter.finagle.ThriftMux
+import com.twitter.finagle.http.HttpMuxer
+import com.twitter.finagle.mtls.authentication.ServiceIdentifier
+import com.twitter.finagle.mtls.server.MtlsStackServer._
+import com.twitter.finagle.mux.transport.OpportunisticTls
+import com.twitter.finagle.thrift.ClientId
+import com.twitter.finatra.kafka.consumers.FinagleKafkaConsumerBuilder
+import com.twitter.finatra.kafka.domain.KafkaGroupId
+import com.twitter.finatra.kafka.domain.SeekStrategy
+import com.twitter.finatra.kafka.serde.ScalaSerdes
+import com.twitter.frigate.common.util.ElfOwlFilter
+import com.twitter.frigate.common.util.ElfOwlFilter.ByLdapGroup
+import com.twitter.logging._
+import com.twitter.recos.decider.UserUserGraphDecider
+import com.twitter.recos.graph_common.FinagleStatsReceiverWrapper
+import com.twitter.recos.graph_common.NodeMetadataLeftIndexedPowerLawMultiSegmentBipartiteGraphBuilder
+import com.twitter.recos.internal.thriftscala.RecosHoseMessage
+import com.twitter.recos.model.Constants
+import com.twitter.recos.user_user_graph.KafkaConfig._
+import com.twitter.recos.user_user_graph.RecosConfig._
+import com.twitter.server.Deciderable
+import com.twitter.server.TwitterServer
+import com.twitter.server.logging.{Logging =&gt; JDK14Logging}
+import com.twitter.servo.request._
+import com.twitter.servo.util.ExceptionCounter
+import com.twitter.thriftwebforms._
+import com.twitter.util.Await
+import com.twitter.util.Duration
+import java.net.InetSocketAddress
+import java.util.concurrent.TimeUnit
+import org.apache.kafka.clients.CommonClientConfigs
+import org.apache.kafka.common.config.SaslConfigs
+import org.apache.kafka.common.config.SslConfigs
+import org.apache.kafka.common.security.auth.SecurityProtocol
+import org.apache.kafka.common.serialization.StringDeserializer</p>
+<dl>
+<dt>object Main extends TwitterServer with JDK14Logging with Deciderable {</dt><dd><p>profile =&gt;</p>
+<p>val shardId: Flag[Int] = flag(“shardId”, 0, “Shard ID”)
+val servicePort: Flag[InetSocketAddress] =</p>
+<blockquote>
+<div><p>flag(“service.port”, new InetSocketAddress(10143), “Thrift service port”)</p>
+</div></blockquote>
+<p>val logDir: Flag[String] = flag(“logdir”, “recos”, “Logging directory”)
+val hoseName: Flag[String] =</p>
+<blockquote>
+<div><p>flag(“hosename”, “recos_injector_user_user”, “the kafka stream used for incoming edges”)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>val maxNumSegments: Flag[Int] =</dt><dd><p>flag(“maxNumSegments”, graphBuilderConfig.maxNumSegments, “the number of segments in the graph”)</p>
+</dd>
+</dl>
+<p>val numShards: Flag[Int] = flag(“numShards”, 1, “Number of shards for this service”)
+val truststoreLocation: Flag[String] =</p>
+<blockquote>
+<div><p>flag[String](“truststore_location”, “”, “Truststore file location”)</p>
+</div></blockquote>
+<p>val dataCenter: Flag[String] = flag(“service.cluster”, “atla”, “Data Center”)
+val serviceRole: Flag[String] = flag(“service.role”, “Service Role”)
+val serviceEnv: Flag[String] = flag(“service.env”, “Service Env”)
+val serviceName: Flag[String] = flag(“service.name”, “Service Name”)</p>
+<dl class="simple">
+<dt>val statsReceiverWrapper: FinagleStatsReceiverWrapper = FinagleStatsReceiverWrapper(</dt><dd><p>statsReceiver</p>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>A ClientRequestAuthorizer to be used in a request-authorization RequestFilter.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>lazy val clientAuthorizer: ClientRequestAuthorizer =</dt><dd><dl class="simple">
+<dt>ClientRequestAuthorizer.observed(</dt><dd><p>ClientRequestAuthorizer.permissive,
+new ClientRequestObserver(statsReceiver)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>lazy val clientId = ClientId(“userusergraph.%s”.format(serviceEnv().replace(“devel”, “dev”)))</p>
+<dl class="simple">
+<dt>val shutdownTimeout: Flag[Duration] = flag(</dt><dd><p>“service.shutdownTimeout”,
+5.seconds,
+“Maximum amount of time to wait for pending requests to complete on shutdown”</p>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>ExceptionCounter for tracking failures from RequestHandler(s).</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+</dl>
+<p>lazy val exceptionCounter = new ExceptionCounter(statsReceiver)</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Function for translating exceptions returned by a RequestHandler. Useful</p></li>
+<li><p>for cases where underlying exception types should be wrapped in those</p></li>
+<li><p>defined in the project’s Thrift IDL.</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>lazy val translateExceptions: PartialFunction[Throwable, Throwable] = {</dt><dd><p>case t =&gt; t</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// <strong>*****</strong> logging <strong>******</strong></p>
+<p>lazy val loggingLevel: Level = Level.INFO
+lazy val recosLogPath: String = logDir() + “/recos.log”
+lazy val graphLogPath: String = logDir() + “/graph.log”
+lazy val accessLogPath: String = logDir() + “/access.log”</p>
+<dl>
+<dt>override def loggerFactories: List[LoggerFactory] =</dt><dd><dl>
+<dt>List(</dt><dd><dl>
+<dt>LoggerFactory(</dt><dd><p>level = Some(loggingLevel),
+handlers = QueueingHandler(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>handler = FileHandler(</dt><dd><p>filename = recosLogPath,
+level = Some(loggingLevel),
+rollPolicy = Policy.Hourly,
+rotateCount = 6,
+formatter = new Formatter</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<p>) :: Nil</p>
+</dd>
+</dl>
+<p>),
+LoggerFactory(</p>
+<blockquote>
+<div><p>node = “graph”,
+useParents = false,
+level = Some(loggingLevel),
+handlers = QueueingHandler(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>handler = FileHandler(</dt><dd><p>filename = graphLogPath,
+level = Some(loggingLevel),
+rollPolicy = Policy.Hourly,
+rotateCount = 6,
+formatter = new Formatter</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<p>) :: Nil</p>
+</div></blockquote>
+<p>),
+LoggerFactory(</p>
+<blockquote>
+<div><p>node = “access”,
+useParents = false,
+level = Some(loggingLevel),
+handlers = QueueingHandler(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>handler = FileHandler(</dt><dd><p>filename = accessLogPath,
+level = Some(loggingLevel),
+rollPolicy = Policy.Hourly,
+rotateCount = 6,
+formatter = new Formatter</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<p>) :: Nil</p>
+</div></blockquote>
+<p>),
+LoggerFactory(</p>
+<blockquote>
+<div><p>node = “client_event”,
+level = Some(loggingLevel),
+useParents = false,
+handlers = QueueingHandler(</p>
+<blockquote>
+<div><p>maxQueueSize = 10000,
+handler = ScribeHandler(</p>
+<blockquote>
+<div><p>category = “client_event”,
+formatter = BareFormatter</p>
+</div></blockquote>
+<p>)</p>
+</div></blockquote>
+<p>) :: Nil</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>// <strong>****</strong> Decider <strong>*********</strong></p>
+<p>val recosDecider: UserUserGraphDecider = UserUserGraphDecider()</p>
+<p>// <strong>*****</strong> ABdecider <strong>******</strong></p>
+<p>val abDeciderYmlPath: String = “/usr/local/config/abdecider/abdecider.yml”</p>
+<p>val scribeLogger: Option[Logger] = Some(Logger.get(“client_event”))</p>
+<dl>
+<dt>val abDecider: LoggingABDecider =</dt><dd><dl class="simple">
+<dt>ABDeciderFactory(</dt><dd><p>abDeciderYmlPath = abDeciderYmlPath,
+scribeLogger = scribeLogger,
+environment = Some(“production”)</p>
+</dd>
+</dl>
+<p>).buildWithLogging()</p>
+</dd>
+</dl>
+<p>val ldapGroups = Seq(“eng”, “cassowary-group”, “timeline-team”)</p>
+<p>// <strong>*****</strong> Recos service <strong>******</strong></p>
+<dl>
+<dt>def main(): Unit = {</dt><dd><p>log.info(“building graph with maxNumSegments = “ + profile.maxNumSegments())
+log.info(“Reading from: “ + hoseName())</p>
+<dl class="simple">
+<dt>val graph = NodeMetadataLeftIndexedPowerLawMultiSegmentBipartiteGraphBuilder(</dt><dd><p>graphBuilderConfig.copy(maxNumSegments = profile.maxNumSegments()),
+statsReceiverWrapper</p>
+</dd>
+</dl>
+<p>)</p>
+<dl class="simple">
+<dt>val kafkaConfigBuilder = FinagleKafkaConsumerBuilder[String, RecosHoseMessage]()</dt><dd><p>.dest(“/s/kafka/recommendations:kafka-tls”)
+.groupId(KafkaGroupId(f”user_user_graph-${shardId()}%06d”))
+.keyDeserializer(new StringDeserializer)
+.valueDeserializer(ScalaSerdes.Thrift[RecosHoseMessage].deserializer)
+.seekStrategy(SeekStrategy.REWIND)
+.rewindDuration(24.hours)
+.withConfig(CommonClientConfigs.SECURITY_PROTOCOL_CONFIG, SecurityProtocol.SASL_SSL.toString)
+.withConfig(SslConfigs.SSL_TRUSTSTORE_LOCATION_CONFIG, truststoreLocation())
+.withConfig(SaslConfigs.SASL_MECHANISM, SaslConfigs.GSSAPI_MECHANISM)
+.withConfig(SaslConfigs.SASL_KERBEROS_SERVICE_NAME, “kafka”)
+.withConfig(SaslConfigs.SASL_KERBEROS_SERVER_NAME, “kafka”)</p>
+</dd>
+<dt>val graphWriter = UserUserGraphWriter(</dt><dd><p>shardId = shardId().toString,
+env = serviceEnv(),
+hosename = hoseName(),
+bufferSize = bufferSize,
+kafkaConsumerBuilder = kafkaConfigBuilder,
+clientId = clientId.name,
+statsReceiver = statsReceiver</p>
+</dd>
+</dl>
+<p>)
+graphWriter.initHose(graph)</p>
+<dl class="simple">
+<dt>val recommendUsersHandler = RecommendUsersHandlerImpl(</dt><dd><p>graph,
+Constants.salsaRunnerConfig,
+recosDecider,
+statsReceiverWrapper</p>
+</dd>
+</dl>
+<p>)</p>
+<p>val recos = new UserUserGraph(recommendUsersHandler) with LoggingUserUserGraph</p>
+<p>// For MutualTLS
+val serviceIdentifier = ServiceIdentifier(</p>
+<blockquote>
+<div><p>role = serviceRole(),
+service = serviceName(),
+environment = serviceEnv(),
+zone = dataCenter()</p>
+</div></blockquote>
+<p>)</p>
+<dl class="simple">
+<dt>val thriftServer = ThriftMux.server</dt><dd><p>.withOpportunisticTls(OpportunisticTls.Required)
+.withMutualTls(serviceIdentifier)
+.serveIface(servicePort(), recos)</p>
+</dd>
+</dl>
+<p>this.addAdminRoute(ElfOwlFilter.getPostbackRoute())</p>
+<dl class="simple">
+<dt>val elfowlFilter = ElfOwlFilter(</dt><dd><p>ByLdapGroup(ldapGroups),
+Duration.fromTimeUnit(5, TimeUnit.DAYS)</p>
+</dd>
+</dl>
+<p>)</p>
+<p>log.info(s”ServiceIdentifier = ${serviceIdentifier.toString}”)
+log.info(“clientid: “ + clientId.toString)
+log.info(“servicePort: “ + servicePort().toString)
+log.info(“adding shutdown hook”)
+onExit {</p>
+<blockquote>
+<div><p>graphWriter.shutdown()
+thriftServer.close(shutdownTimeout().fromNow)</p>
+</div></blockquote>
+<p>}
+log.info(“added shutdown hook”)
+// Wait on the thriftServer so that shutdownTimeout is respected.
+Await.result(thriftServer)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../_sources/src/scala/com/twitter/recos/user_user_graph/Main.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

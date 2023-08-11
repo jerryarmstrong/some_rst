@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../" id="documentation_options" src="../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.simclusters_v2.summingbird.storm</p>
+<p>import com.twitter.simclusters_v2.common.ModelVersions._
+import com.twitter.simclusters_v2.summingbird.common.SimClustersProfile.SimClustersTweetProfile
+import com.twitter.simclusters_v2.summingbird.common.Configs
+import com.twitter.simclusters_v2.summingbird.common.Implicits
+import com.twitter.simclusters_v2.summingbird.common.SimClustersHashUtil
+import com.twitter.simclusters_v2.summingbird.common.SimClustersInterestedInUtil
+import com.twitter.simclusters_v2.summingbird.common.StatsUtil
+import com.twitter.simclusters_v2.thriftscala._
+import com.twitter.snowflake.id.SnowflakeId
+import com.twitter.summingbird._
+import com.twitter.summingbird.option.JobId
+import com.twitter.timelineservice.thriftscala.Event
+import com.twitter.conversions.DurationOps._
+import com.twitter.timelineservice.thriftscala.EventAliases.FavoriteAlias</p>
+<p>object TweetJob {</p>
+<blockquote>
+<div><p>import Implicits._
+import StatsUtil._</p>
+<dl class="simple">
+<dt>object NodeName {</dt><dd><p>final val TweetClusterScoreFlatMapNodeName: String = “TweetClusterScoreFlatMap”
+final val TweetClusterUpdatedScoresFlatMapNodeName: String = “TweetClusterUpdatedScoreFlatMap”
+final val TweetClusterScoreSummerNodeName: String = “TweetClusterScoreSummer”
+final val TweetTopKNodeName: String = “TweetTopKSummer”
+final val ClusterTopKTweetsNodeName: String = “ClusterTopKTweetsSummer”
+final val ClusterTopKTweetsLightNodeName: String = “ClusterTopKTweetsLightSummer”</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>def generate[P &lt;: Platform[P]](</dt><dd><p>profile: SimClustersTweetProfile,
+timelineEventSource: Producer[P, Event],
+userInterestedInService: P#Service[Long, ClustersUserIsInterestedIn],
+tweetClusterScoreStore: P#Store[(SimClusterEntity, FullClusterIdBucket), ClustersWithScores],
+tweetTopKClustersStore: P#Store[EntityWithVersion, TopKClustersWithScores],
+clusterTopKTweetsStore: P#Store[FullClusterId, TopKTweetsWithScores],
+clusterTopKTweetsLightStore: Option[P#Store[FullClusterId, TopKTweetsWithScores]]</p>
+</dd>
+<dt>)(</dt><dd><p>implicit jobId: JobId</p>
+</dd>
+</dl>
+<p>): TailProducer[P, Any] = {</p>
+<blockquote>
+<div><p>val userInterestNonEmptyCount = Counter(Group(jobId.get), Name(“num_user_interests_non_empty”))
+val userInterestEmptyCount = Counter(Group(jobId.get), Name(“num_user_interests_empty”))</p>
+<p>val numClustersCount = Counter(Group(jobId.get), Name(“num_clusters”))</p>
+<p>val entityClusterPairCount = Counter(Group(jobId.get), Name(“num_entity_cluster_pairs_emitted”))</p>
+<p>// Fav QPS is around 6K
+val qualifiedFavEvents = timelineEventSource</p>
+<blockquote>
+<div><dl>
+<dt>.collect {</dt><dd><dl>
+<dt>case Event.Favorite(favEvent)</dt><dd><blockquote>
+<div><p>if favEvent.userId != favEvent.tweetUserId &amp;&amp; !isTweetTooOld(favEvent) =&gt;</p>
+</div></blockquote>
+<p>(favEvent.userId, favEvent)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+.observe(“num_qualified_favorite_events”)</p>
+</div></blockquote>
+<dl>
+<dt>val entityWithSimClustersProducer = qualifiedFavEvents</dt><dd><p>.leftJoin(userInterestedInService)
+.map {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case (_, (favEvent, userInterestOpt)) =&gt;</dt><dd><p>(favEvent.tweetId, (favEvent, userInterestOpt))</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+.flatMap {</p>
+<blockquote>
+<div><dl>
+<dt>case (_, (favEvent, Some(userInterests))) =&gt;</dt><dd><p>userInterestNonEmptyCount.incr()</p>
+<p>val timestamp = favEvent.eventTimeMs</p>
+<p>val clustersWithScores = SimClustersInterestedInUtil.topClustersWithScores(userInterests)</p>
+<p>// clusters.size is around 25 in average
+numClustersCount.incrBy(clustersWithScores.size)</p>
+<dl class="simple">
+<dt>val simClusterScoresByHashBucket = clustersWithScores.groupBy {</dt><dd><p>case (clusterId, _) =&gt; SimClustersHashUtil.clusterIdToBucket(clusterId)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>for {</dt><dd><p>(hashBucket, scores) &lt;- simClusterScoresByHashBucket</p>
+</dd>
+<dt>} yield {</dt><dd><p>entityClusterPairCount.incr()</p>
+<p>val clusterBucket = FullClusterIdBucket(userInterests.knownForModelVersion, hashBucket)</p>
+<p>val tweetId: SimClusterEntity = SimClusterEntity.TweetId(favEvent.tweetId)</p>
+<dl>
+<dt>(tweetId, clusterBucket) -&gt; SimClustersInterestedInUtil</dt><dd><dl class="simple">
+<dt>.buildClusterWithScores(</dt><dd><p>scores,
+timestamp,
+profile.favScoreThresholdForUserInterest</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>case _ =&gt;</dt><dd><p>userInterestEmptyCount.incr()
+None</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+.observe(“entity_cluster_delta_scores”)
+.name(NodeName.TweetClusterScoreFlatMapNodeName)
+.sumByKey(tweetClusterScoreStore)(clustersWithScoreMonoid)
+.name(NodeName.TweetClusterScoreSummerNodeName)
+.map {</p>
+<blockquote>
+<div><dl>
+<dt>case ((simClusterEntity, clusterBucket), (oldValueOpt, deltaValue)) =&gt;</dt><dd><p>val updatedClusterIds = deltaValue.clustersToScore.map(_.keySet).getOrElse(Set.empty[Int])</p>
+<dl>
+<dt>(simClusterEntity, clusterBucket) -&gt; clustersWithScoreMonoid.plus(</dt><dd><dl>
+<dt>oldValueOpt</dt><dd><dl>
+<dt>.map { oldValue =&gt;</dt><dd><dl class="simple">
+<dt>oldValue.copy(</dt><dd><dl class="simple">
+<dt>clustersToScore =</dt><dd><p>oldValue.clustersToScore.map(_.filterKeys(updatedClusterIds.contains))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}.getOrElse(clustersWithScoreMonoid.zero),</p>
+</dd>
+</dl>
+<p>deltaValue</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+.observe(“entity_cluster_updated_scores”)
+.name(NodeName.TweetClusterUpdatedScoresFlatMapNodeName)</p>
+</dd>
+<dt>val tweetTopK = entityWithSimClustersProducer</dt><dd><dl>
+<dt>.flatMap {</dt><dd><dl>
+<dt>case ((simClusterEntity, FullClusterIdBucket(modelVersion, _)), clusterWithScores)</dt><dd><blockquote>
+<div><p>if simClusterEntity.isInstanceOf[SimClusterEntity.TweetId] =&gt;</p>
+</div></blockquote>
+<dl>
+<dt>clusterWithScores.clustersToScore</dt><dd><dl>
+<dt>.map { clustersToScores =&gt;</dt><dd><dl>
+<dt>val topClustersWithFavScores = clustersToScores.mapValues { scores: Scores =&gt;</dt><dd><dl>
+<dt>Scores(</dt><dd><dl>
+<dt>favClusterNormalized8HrHalfLifeScore =</dt><dd><dl class="simple">
+<dt>scores.favClusterNormalized8HrHalfLifeScore.filter(</dt><dd><p>_.value &gt;= Configs.scoreThresholdForTweetTopKClustersCache</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>(</dt><dd><p>EntityWithVersion(simClusterEntity, modelVersion),
+TopKClustersWithScores(Some(topClustersWithFavScores), None)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+<dt>case _ =&gt;</dt><dd><p>None</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+.observe(“tweet_topk_updates”)
+.sumByKey(tweetTopKClustersStore)(topKClustersWithScoresMonoid)
+.name(NodeName.TweetTopKNodeName)</p>
+</dd>
+<dt>val clusterTopKTweets = entityWithSimClustersProducer</dt><dd><dl>
+<dt>.flatMap {</dt><dd><dl>
+<dt>case ((simClusterEntity, FullClusterIdBucket(modelVersion, _)), clusterWithScores) =&gt;</dt><dd><dl>
+<dt>simClusterEntity match {</dt><dd><dl>
+<dt>case SimClusterEntity.TweetId(tweetId) =&gt;</dt><dd><dl>
+<dt>clusterWithScores.clustersToScore</dt><dd><dl>
+<dt>.map { clustersToScores =&gt;</dt><dd><dl>
+<dt>clustersToScores.toSeq.map {</dt><dd><dl>
+<dt>case (clusterId, scores) =&gt;</dt><dd><dl class="simple">
+<dt>val topTweetsByFavScore = Map(</dt><dd><dl class="simple">
+<dt>tweetId -&gt; Scores(favClusterNormalized8HrHalfLifeScore =</dt><dd><dl class="simple">
+<dt>scores.favClusterNormalized8HrHalfLifeScore.filter(_.value &gt;=</dt><dd><p>Configs.scoreThresholdForClusterTopKTweetsCache)))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<dl class="simple">
+<dt>(</dt><dd><p>FullClusterId(modelVersion, clusterId),
+TopKTweetsWithScores(Some(topTweetsByFavScore), None)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}.getOrElse(Nil)</p>
+</dd>
+</dl>
+</dd>
+<dt>case _ =&gt;</dt><dd><p>Nil</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+.observe(“cluster_topk_tweets_updates”)
+.sumByKey(clusterTopKTweetsStore)(topKTweetsWithScoresMonoid)
+.name(NodeName.ClusterTopKTweetsNodeName)</p>
+</dd>
+<dt>val clusterTopKTweetsLight = clusterTopKTweetsLightStore.map { lightStore =&gt;</dt><dd><dl>
+<dt>entityWithSimClustersProducer</dt><dd><dl>
+<dt>.flatMap {</dt><dd><dl>
+<dt>case ((simClusterEntity, FullClusterIdBucket(modelVersion, _)), clusterWithScores) =&gt;</dt><dd><dl>
+<dt>simClusterEntity match {</dt><dd><dl>
+<dt>case SimClusterEntity.TweetId(tweetId) if isTweetTooOldForLight(tweetId) =&gt;</dt><dd><dl>
+<dt>clusterWithScores.clustersToScore</dt><dd><dl>
+<dt>.map { clustersToScores =&gt;</dt><dd><dl>
+<dt>clustersToScores.toSeq.map {</dt><dd><dl>
+<dt>case (clusterId, scores) =&gt;</dt><dd><dl class="simple">
+<dt>val topTweetsByFavScore = Map(</dt><dd><dl class="simple">
+<dt>tweetId -&gt; Scores(favClusterNormalized8HrHalfLifeScore =</dt><dd><dl class="simple">
+<dt>scores.favClusterNormalized8HrHalfLifeScore.filter(_.value &gt;=</dt><dd><p>Configs.scoreThresholdForClusterTopKTweetsCache)))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<dl class="simple">
+<dt>(</dt><dd><p>FullClusterId(modelVersion, clusterId),
+TopKTweetsWithScores(Some(topTweetsByFavScore), None)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}.getOrElse(Nil)</p>
+</dd>
+</dl>
+</dd>
+<dt>case _ =&gt;</dt><dd><p>Nil</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+.observe(“cluster_topk_tweets_updates”)
+.sumByKey(lightStore)(topKTweetsWithScoresLightMonoid)
+.name(NodeName.ClusterTopKTweetsLightNodeName)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>clusterTopKTweetsLight match {</dt><dd><dl class="simple">
+<dt>case Some(lightNode) =&gt;</dt><dd><p>tweetTopK.also(clusterTopKTweets).also(lightNode)</p>
+</dd>
+<dt>case None =&gt;</dt><dd><p>tweetTopK.also(clusterTopKTweets)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>// Boolean check to see if the tweet is too old
+private def isTweetTooOld(favEvent: FavoriteAlias): Boolean = {</p>
+<blockquote>
+<div><dl>
+<dt>favEvent.tweet.forall { tweet =&gt;</dt><dd><dl class="simple">
+<dt>SnowflakeId.unixTimeMillisOptFromId(tweet.id).exists { millis =&gt;</dt><dd><p>System.currentTimeMillis() - millis &gt;= Configs.OldestTweetFavEventTimeInMillis</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>private def isTweetTooOldForLight(tweetId: Long): Boolean = {</dt><dd><dl class="simple">
+<dt>SnowflakeId.unixTimeMillisOptFromId(tweetId).exists { millis =&gt;</dt><dd><p>System.currentTimeMillis() - millis &gt;= Configs.OldestTweetInLightIndexInMillis</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../_sources/src/scala/com/twitter/simclusters_v2/summingbird/storm/TweetJob.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

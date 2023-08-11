@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../../../" id="documentation_options" src="../../../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.follow_recommendations.common.rankers.first_n_ranker</p>
+<p>import com.google.inject.Inject
+import com.google.inject.Singleton
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.follow_recommendations.common.base.Ranker
+import com.twitter.follow_recommendations.common.models.CandidateUser
+import com.twitter.follow_recommendations.common.models.HasQualityFactor
+import com.twitter.follow_recommendations.common.rankers.utils.Utils
+import com.twitter.product_mixer.core.model.common.identifier.CandidateSourceIdentifier
+import com.twitter.product_mixer.core.model.marshalling.request.HasClientContext
+import com.twitter.stitch.Stitch
+import com.twitter.timelines.configapi.HasParams</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>This class is meant to filter candidates between stages of our ranker by taking the first N</p></li>
+<li><p>candidates, merging any candidate source information for candidates with multiple entries.</p></li>
+<li><p>To allow us to chain this truncation operation any number of times sequentially within the main</p></li>
+<li><p>ranking builder, we abstract the truncation as a separate Ranker</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+</dl>
+<p>&#64;Singleton
+class FirstNRanker[Target &lt;: HasClientContext with HasParams with HasQualityFactor] &#64;Inject() (</p>
+<blockquote>
+<div><dl class="simple">
+<dt>stats: StatsReceiver)</dt><dd><p>extends Ranker[Target, CandidateUser] {</p>
+</dd>
+</dl>
+<p>val name: String = this.getClass.getSimpleName
+private val baseStats = stats.scope(“first_n_ranker”)
+val scaledDownByQualityFactorCounter =</p>
+<blockquote>
+<div><p>baseStats.counter(“scaled_down_by_quality_factor”)</p>
+</div></blockquote>
+<p>private val mergeStat = baseStats.scope(“merged_candidates”)
+private val mergeStat2 = mergeStat.counter(“2”)
+private val mergeStat3 = mergeStat.counter(“3”)
+private val mergeStat4 = mergeStat.counter(“4+”)
+private val candidateSizeStats = baseStats.scope(“candidate_size”)</p>
+<dl>
+<dt>private case class CandidateSourceScore(</dt><dd><p>candidateId: Long,
+sourceId: CandidateSourceIdentifier,
+score: Option[Double])</p>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Adds the rank of each candidate based on the primary candidate source’s score.</p></li>
+<li><p>In the event where the provided ordering of candidates do not align with the score,</p></li>
+<li><p>we will respect the score, since the ordering might have been mixed up due to other previous</p></li>
+<li><p>steps like the shuffleFn in the <cite>WeightedCandidateSourceRanker</cite>.</p></li>
+<li><p>&#64;param candidates  ordered list of candidates</p></li>
+<li><p>&#64;return            same ordered list of candidates, but with the rank information appended</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>def addRank(candidates: Seq[CandidateUser]): Seq[CandidateUser] = {</dt><dd><dl class="simple">
+<dt>val candidateSourceRanks = for {</dt><dd><p>(sourceIdOpt, sourceCandidates) &lt;- candidates.groupBy(_.getPrimaryCandidateSource)
+(candidate, rank) &lt;- sourceCandidates.sortBy(-_.score.getOrElse(0.0)).zipWithIndex</p>
+</dd>
+<dt>} yield {</dt><dd><p>(candidate, sourceIdOpt) -&gt; rank</p>
+</dd>
+</dl>
+<p>}
+candidates.map { c =&gt;</p>
+<blockquote>
+<div><dl>
+<dt>c.getPrimaryCandidateSource</dt><dd><dl class="simple">
+<dt>.map { sourceId =&gt;</dt><dd><p>val sourceRank = candidateSourceRanks((c, c.getPrimaryCandidateSource))
+c.addCandidateSourceRanksMap(Map(sourceId -&gt; sourceRank))</p>
+</dd>
+</dl>
+<p>}.getOrElse(c)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>override def rank(target: Target, candidates: Seq[CandidateUser]): Stitch[Seq[CandidateUser]] = {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>val scaleDownFactor = Math.max(</dt><dd><p>target.qualityFactor.getOrElse(1.0d),
+target.params(FirstNRankerParams.MinNumCandidatesScoredScaleDownFactor)</p>
+</dd>
+</dl>
+<p>)</p>
+<dl class="simple">
+<dt>if (scaleDownFactor &lt; 1.0d)</dt><dd><p>scaledDownByQualityFactorCounter.incr()</p>
+</dd>
+</dl>
+<p>val n = (target.params(FirstNRankerParams.CandidatesToRank) * scaleDownFactor).toInt
+val scribeRankingInfo: Boolean =</p>
+<blockquote>
+<div><p>target.params(FirstNRankerParams.ScribeRankingInfoInFirstNRanker)</p>
+</div></blockquote>
+<p>candidateSizeStats.counter(s”n$n”).incr()
+val candidatesWithRank = addRank(candidates)
+if (target.params(FirstNRankerParams.GroupDuplicateCandidates)) {</p>
+<blockquote>
+<div><p>val groupedCandidates: Map[Long, Seq[CandidateUser]] = candidatesWithRank.groupBy(_.id)
+val topN = candidates</p>
+<blockquote>
+<div><dl class="simple">
+<dt>.map { c =&gt;</dt><dd><p>merge(groupedCandidates(c.id))</p>
+</dd>
+</dl>
+<p>}.distinct.take(n)</p>
+</div></blockquote>
+<p>Stitch.value(if (scribeRankingInfo) Utils.addRankingInfo(topN, name) else topN)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><dl class="simple">
+<dt>Stitch.value(</dt><dd><p>if (scribeRankingInfo) Utils.addRankingInfo(candidatesWithRank, name).take(n)
+else candidatesWithRank.take(n))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>} // for efficiency, if don’t need to deduplicate</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>we use the primary candidate source of the first entry, and aggregate all of the other entries’</p></li>
+<li><p>candidate source scores into the first entry’s candidateSourceScores</p></li>
+<li><p>&#64;param candidates list of candidates with the same id</p></li>
+<li><p>&#64;return           a single merged candidate</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>private[first_n_ranker] def merge(candidates: Seq[CandidateUser]): CandidateUser = {</dt><dd><dl>
+<dt>if (candidates.size == 1) {</dt><dd><p>candidates.head</p>
+</dd>
+<dt>} else {</dt><dd><dl class="simple">
+<dt>candidates.size match {</dt><dd><p>case 2 =&gt; mergeStat2.incr()
+case 3 =&gt; mergeStat3.incr()
+case i if i &gt;= 4 =&gt; mergeStat4.incr()
+case _ =&gt;</p>
+</dd>
+</dl>
+<p>}
+val allSources = candidates.flatMap(_.getCandidateSources).toMap
+val allRanks = candidates.flatMap(_.getCandidateRanks).toMap
+candidates.head.addCandidateSourceScoresMap(allSources).addCandidateSourceRanksMap(allRanks)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../../../_sources/follow-recommendations-service/common/src/main/scala/com/twitter/follow_recommendations/common/rankers/first_n_ranker/FirstNRanker.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

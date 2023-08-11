@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../" id="documentation_options" src="../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../_static/doctools.js?v=888ff710"></script>
+    <script src="../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+   
+  <link rel="stylesheet" href="../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>“””
+AUROC metrics.
+“””
+from typing import Union</p>
+<p>from tml.ml_logging.torch_logging import logging</p>
+<p>import torch
+import torchmetrics
+from torchmetrics.utilities.data import dim_zero_cat</p>
+<dl>
+<dt>def _compute_helper(</dt><dd><p>predictions: torch.Tensor,
+target: torch.Tensor,
+weights: torch.Tensor,
+max_positive_negative_weighted_sum: torch.Tensor,
+min_positive_negative_weighted_sum: torch.Tensor,
+equal_predictions_as_incorrect: bool,</p>
+</dd>
+<dt>) -&gt; torch.Tensor:</dt><dd><p>“””
+Compute AUROC.
+Args:</p>
+<blockquote>
+<div><p>predictions: The predictions probabilities.
+target: The target.
+weights: The sample weights to assign to each sample in the batch.
+max_positive_negative_weighted_sum: The sum of the weights for the positive labels.
+min_positive_negative_weighted_sum:
+equal_predictions_as_incorrect: For positive &amp; negative labels having identical scores,</p>
+<blockquote>
+<div><p>we assume that they are correct prediction (i.e weight = 1) when ths is False. Otherwise,
+we assume that they are correct prediction (i.e weight = 0).</p>
+</div></blockquote>
+</div></blockquote>
+<p>“””
+dim = 0</p>
+<p># Sort predictions based on key (score, true_label). The order is ascending for score.
+# For true_label, order is ascending if equal_predictions_as_incorrect is True;
+# otherwise it is descending.
+target_order = torch.argsort(target, dim=dim, descending=equal_predictions_as_incorrect)
+score_order = torch.sort(torch.gather(predictions, dim, target_order), stable=True, dim=dim)[1]
+score_order = torch.gather(target_order, dim, score_order)
+sorted_target = torch.gather(target, dim, score_order)
+sorted_weights = torch.gather(weights, dim, score_order)</p>
+<p>negatives_from_left = torch.cumsum((1.0 - sorted_target) * sorted_weights, 0)</p>
+<dl class="simple">
+<dt>numerator = torch.sum(</dt><dd><p>sorted_weights * (sorted_target * negatives_from_left / max_positive_negative_weighted_sum)</p>
+</dd>
+</dl>
+<p>)</p>
+<p>return numerator / min_positive_negative_weighted_sum</p>
+</dd>
+<dt>class AUROCWithMWU(torchmetrics.Metric):</dt><dd><p>“””
+AUROC using Mann-Whitney U-test.
+See <a class="reference external" href="https://en.wikipedia.org/wiki/Receiver_operating_characteristic#Area_under_the_curve">https://en.wikipedia.org/wiki/Receiver_operating_characteristic#Area_under_the_curve</a>.</p>
+<p>This AUROC implementation is well suited to (non-zero) low-CTR. In particular it will return
+the correct AUROC even if the predicted probabilities are all close to 0.
+Currently only support binary classification.
+“””</p>
+<dl>
+<dt>def __init__(self, label_threshold: float = 0.5, raise_missing_class: bool = False, <a href="#id1"><span class="problematic" id="id2">**</span></a>kwargs):</dt><dd><p>“””</p>
+<dl>
+<dt>Args:</dt><dd><dl class="simple">
+<dt>label_threshold: Labels strictly above this threshold are considered positive labels,</dt><dd><p>otherwise, they are considered negative.</p>
+</dd>
+<dt>raise_missing_class: If True, an error will be raise if negative or positive class is missing.</dt><dd><p>Otherwise, we will simply log a warning.</p>
+</dd>
+</dl>
+<p><a href="#id3"><span class="problematic" id="id4">**</span></a>kwargs: Additional parameters supported by all torchmetrics.Metric.</p>
+</dd>
+</dl>
+<p>“””
+super().__init__(<a href="#id5"><span class="problematic" id="id6">**</span></a>kwargs)
+self.add_state(“predictions”, default=[], dist_reduce_fx=”cat”)
+self.add_state(“target”, default=[], dist_reduce_fx=”cat”)
+self.add_state(“weights”, default=[], dist_reduce_fx=”cat”)</p>
+<p>self.label_threshold = label_threshold
+self.raise_missing_class = raise_missing_class</p>
+</dd>
+<dt>def update(</dt><dd><p>self,
+predictions: torch.Tensor,
+target: torch.Tensor,
+weight: Union[float, torch.Tensor] = 1.0,</p>
+</dd>
+<dt>) -&gt; None:</dt><dd><p>“””
+Update the current auroc.
+Args:</p>
+<blockquote>
+<div><p>predictions: Predicted values, 1D Tensor or 2D Tensor of shape batch_size x 1.
+target: Ground truth. Must have same shape as predictions.
+weight: The weight to use for the predicted values. Shape should be
+broadcastable to that of predictions.</p>
+</div></blockquote>
+<p>“””
+self.predictions.append(predictions)
+self.target.append(target)
+if not isinstance(weight, torch.Tensor):</p>
+<blockquote>
+<div><p>weight = torch.as_tensor(weight, dtype=predictions.dtype, device=target.device)</p>
+</div></blockquote>
+<p>self.weights.append(torch.broadcast_to(weight, predictions.size()))</p>
+</dd>
+<dt>def compute(self) -&gt; torch.Tensor:</dt><dd><p>“””
+Compute and return the accumulated AUROC.
+“””
+weights = dim_zero_cat(self.weights)
+predictions = dim_zero_cat(self.predictions)
+target = dim_zero_cat(self.target).type_as(predictions)</p>
+<p>negative_mask = target &lt;= self.label_threshold
+positive_mask = torch.logical_not(negative_mask)</p>
+<dl>
+<dt>if not negative_mask.any():</dt><dd><p>msg = “Negative class missing. AUROC returned will be meaningless.”
+if self.raise_missing_class:</p>
+<blockquote>
+<div><p>raise ValueError(msg)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>else:</dt><dd><p>logging.warn(msg)</p>
+</dd>
+</dl>
+</dd>
+<dt>if not positive_mask.any():</dt><dd><p>msg = “Positive class missing. AUROC returned will be meaningless.”
+if self.raise_missing_class:</p>
+<blockquote>
+<div><p>raise ValueError(msg)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>else:</dt><dd><p>logging.warn(msg)</p>
+</dd>
+</dl>
+</dd>
+<dt>weighted_actual_negative_sum = torch.sum(</dt><dd><p>torch.where(negative_mask, weights, torch.zeros_like(weights))</p>
+</dd>
+</dl>
+<p>)</p>
+<dl class="simple">
+<dt>weighted_actual_positive_sum = torch.sum(</dt><dd><p>torch.where(positive_mask, weights, torch.zeros_like(weights))</p>
+</dd>
+</dl>
+<p>)</p>
+<dl class="simple">
+<dt>max_positive_negative_weighted_sum = torch.max(</dt><dd><p>weighted_actual_negative_sum, weighted_actual_positive_sum</p>
+</dd>
+</dl>
+<p>)</p>
+<dl class="simple">
+<dt>min_positive_negative_weighted_sum = torch.min(</dt><dd><p>weighted_actual_negative_sum, weighted_actual_positive_sum</p>
+</dd>
+</dl>
+<p>)</p>
+<p># Compute auroc with the weight set to 1 when positive &amp; negative have identical scores.
+auroc_le = _compute_helper(</p>
+<blockquote>
+<div><p>target=target,
+weights=weights,
+predictions=predictions,
+min_positive_negative_weighted_sum=min_positive_negative_weighted_sum,
+max_positive_negative_weighted_sum=max_positive_negative_weighted_sum,
+equal_predictions_as_incorrect=False,</p>
+</div></blockquote>
+<p>)</p>
+<p># Compute auroc with the weight set to 0 when positive &amp; negative have identical scores.
+auroc_lt = _compute_helper(</p>
+<blockquote>
+<div><p>target=target,
+weights=weights,
+predictions=predictions,
+min_positive_negative_weighted_sum=min_positive_negative_weighted_sum,
+max_positive_negative_weighted_sum=max_positive_negative_weighted_sum,
+equal_predictions_as_incorrect=True,</p>
+</div></blockquote>
+<p>)</p>
+<p># Compute auroc with the weight set to 1/2 when positive &amp; negative have identical scores.
+return auroc_le - (auroc_le - auroc_lt) / 2.0</p>
+</dd>
+</dl>
+</dd>
+</dl>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../_sources/metrics/auroc.py.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

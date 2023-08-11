@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../../" id="documentation_options" src="../../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.follow_recommendations.common.predicates</p>
+<p>import com.google.inject.name.Named
+import com.twitter.core_workflows.user_model.thriftscala.UserState
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.follow_recommendations.common.base.Predicate
+import com.twitter.follow_recommendations.common.base.PredicateResult
+import com.twitter.follow_recommendations.common.constants.GuiceNamedConstants
+import com.twitter.follow_recommendations.common.models.CandidateUser
+import com.twitter.follow_recommendations.common.models.FilterReason
+import com.twitter.follow_recommendations.common.predicates.InactivePredicateParams._
+import com.twitter.service.metastore.gen.thriftscala.UserRecommendabilityFeatures
+import com.twitter.stitch.Stitch
+import com.twitter.strato.client.Fetcher
+import com.twitter.timelines.configapi.HasParams
+import com.twitter.util.Duration
+import com.twitter.util.Time
+import javax.inject.Inject
+import javax.inject.Singleton
+import com.twitter.conversions.DurationOps._
+import com.twitter.escherbird.util.stitchcache.StitchCache
+import com.twitter.follow_recommendations.common.models.HasUserState
+import com.twitter.follow_recommendations.common.predicates.InactivePredicateParams.DefaultInactivityThreshold
+import com.twitter.product_mixer.core.model.marshalling.request.HasClientContext</p>
+<p>import java.lang.{Long =&gt; JLong}</p>
+<p>&#64;Singleton
+case class InactivePredicate &#64;Inject() (</p>
+<blockquote>
+<div><p>statsReceiver: StatsReceiver,
+&#64;Named(GuiceNamedConstants.USER_RECOMMENDABILITY_FETCHER) userRecommendabilityFetcher: Fetcher[</p>
+<blockquote>
+<div><p>Long,
+Unit,
+UserRecommendabilityFeatures</p>
+</div></blockquote>
+<p>]) extends Predicate[(HasParams with HasClientContext with HasUserState, CandidateUser)] {</p>
+<p>private val stats: StatsReceiver = statsReceiver.scope(“InactivePredicate”)
+private val cacheStats = stats.scope(“cache”)</p>
+<dl>
+<dt>private def queryUserRecommendable(userId: Long): Stitch[Option[UserRecommendabilityFeatures]] =</dt><dd><p>userRecommendabilityFetcher.fetch(userId).map(_.v)</p>
+</dd>
+<dt>private val userRecommendableCache =</dt><dd><dl class="simple">
+<dt>StitchCache[JLong, Option[UserRecommendabilityFeatures]](</dt><dd><p>maxCacheSize = 100000,
+ttl = 12.hours,
+statsReceiver = cacheStats.scope(“UserRecommendable”),
+underlyingCall = (userId: JLong) =&gt; queryUserRecommendable(userId)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>override def apply(</dt><dd><p>targetAndCandidate: (HasParams with HasClientContext with HasUserState, CandidateUser)</p>
+</dd>
+<dt>): Stitch[PredicateResult] = {</dt><dd><p>val (target, candidate) = targetAndCandidate</p>
+<dl>
+<dt>userRecommendableCache</dt><dd><dl>
+<dt>.readThrough(candidate.id).map {</dt><dd><dl>
+<dt>case recFeaturesFetchResult =&gt;</dt><dd><dl>
+<dt>recFeaturesFetchResult match {</dt><dd><dl>
+<dt>case None =&gt;</dt><dd><p>PredicateResult.Invalid(Set(FilterReason.MissingRecommendabilityData))</p>
+</dd>
+<dt>case Some(recFeatures) =&gt;</dt><dd><dl>
+<dt>if (disableInactivityPredicate(target, target.userState, recFeatures.userState)) {</dt><dd><p>PredicateResult.Valid</p>
+</dd>
+<dt>} else {</dt><dd><p>val defaultInactivityThreshold = target.params(DefaultInactivityThreshold).days
+val hasBeenActiveRecently = recFeatures.lastStatusUpdateMs</p>
+<blockquote>
+<div><dl class="simple">
+<dt>.map(Time.now - Time.fromMilliseconds(_)).getOrElse(</dt><dd><p>Duration.Top) &lt; defaultInactivityThreshold</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl>
+<dt>stats</dt><dd><dl class="simple">
+<dt>.scope(defaultInactivityThreshold.toString).counter(</dt><dd><dl class="simple">
+<dt>if (hasBeenActiveRecently)</dt><dd><p>“active”</p>
+</dd>
+<dt>else</dt><dd><p>“inactive”</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>).incr()</p>
+</dd>
+<dt>if (hasBeenActiveRecently &amp;&amp; (!target</dt><dd><blockquote>
+<div><p>.params(UseEggFilter) || recFeatures.isNotEgg.contains(1))) {</p>
+</div></blockquote>
+<p>PredicateResult.Valid</p>
+</dd>
+<dt>} else {</dt><dd><p>PredicateResult.Invalid(Set(FilterReason.Inactive))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+<dt>}.rescue {</dt><dd><dl class="simple">
+<dt>case e: Exception =&gt;</dt><dd><p>stats.counter(e.getClass.getSimpleName).incr()
+Stitch(PredicateResult.Invalid(Set(FilterReason.FailOpen)))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private[this] def disableInactivityPredicate(</dt><dd><p>target: HasParams,
+consumerState: Option[UserState],
+candidateState: Option[UserState]</p>
+</dd>
+<dt>): Boolean = {</dt><dd><p>target.params(MightBeDisabled) &amp;&amp;
+consumerState.exists(InactivePredicate.ValidConsumerStates.contains) &amp;&amp;
+(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>(</dt><dd><p>candidateState.exists(InactivePredicate.ValidCandidateStates.contains) &amp;&amp;
+!target.params(OnlyDisableForNewUserStateCandidates)</p>
+</dd>
+</dl>
+<p>) ||
+(</p>
+<blockquote>
+<div><p>candidateState.contains(UserState.New) &amp;&amp;
+target.params(OnlyDisableForNewUserStateCandidates)</p>
+</div></blockquote>
+<p>)</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>object InactivePredicate {</dt><dd><dl class="simple">
+<dt>val ValidConsumerStates: Set[UserState] = Set(</dt><dd><p>UserState.HeavyNonTweeter,
+UserState.MediumNonTweeter,
+UserState.HeavyTweeter,
+UserState.MediumTweeter</p>
+</dd>
+</dl>
+<p>)
+val ValidCandidateStates: Set[UserState] =</p>
+<blockquote>
+<div><p>Set(UserState.New, UserState.VeryLight, UserState.Light, UserState.NearZero)</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../../_sources/follow-recommendations-service/common/src/main/scala/com/twitter/follow_recommendations/common/predicates/InactivePredicate.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

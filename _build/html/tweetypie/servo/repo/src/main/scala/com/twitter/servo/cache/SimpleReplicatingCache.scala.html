@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../../" id="documentation_options" src="../../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.servo.cache</p>
+<p>import com.twitter.servo.keyvalue._
+import com.twitter.servo.util.{OptionOrdering, TryOrdering}
+import com.twitter.util.{Future, Return, Throw, Time, Try}</p>
+<p>object SimpleReplicatingCache {</p>
+<blockquote>
+<div><dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Builds a SimpleReplicatingCache that writes a value multiple times to the same underlying</p></li>
+<li><p>cache but under different keys.  If the underlying cache is backed by enough shards, there</p></li>
+<li><p>is a good chance that the different keys will end up on different shards, giving you similar</p></li>
+<li><p>behavior to having multiple distinct caches.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>def apply[K, K2, V](</dt><dd><p>underlying: LockingCache[K2, Cached[V]],
+keyReplicator: (K, Int) =&gt; K2,
+replicas: Int = 2</p>
+</dd>
+<dt>) = new SimpleReplicatingCache(</dt><dd><dl>
+<dt>(0 until replicas).toSeq map { replica =&gt;</dt><dd><dl class="simple">
+<dt>new KeyTransformingLockingCache(</dt><dd><p>underlying,
+(key: K) =&gt; keyReplicator(key, replica)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>A very simple replicating cache implementation.  It writes the same key/value pair to</p></li>
+<li><p>multiple underlying caches. On read, each underlying cache is queried with the key; if the</p></li>
+<li><p>results are not all the same for a given key, then the most recent value is chosen and</p></li>
+<li><p>replicated to all caches.</p></li>
+<li></li>
+<li><p>Some cache operations are not currently supported, because their semantics are a little fuzzy</p></li>
+<li><p>in the replication case.  Specifically: add and checkAndSet.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>class SimpleReplicatingCache[K, V](underlyingCaches: Seq[LockingCache[K, Cached[V]]])</dt><dd><blockquote>
+<div><p>extends LockingCache[K, Cached[V]] {</p>
+</div></blockquote>
+<p>private type CsValue = (Try[Cached[V]], Checksum)</p>
+<dl class="simple">
+<dt>private val cachedOrdering = new Ordering[Cached[V]] {</dt><dd><p>// sort by ascending timestamp
+def compare(a: Cached[V], b: Cached[V]) = a.cachedAt.compare(b.cachedAt)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private val csValueOrdering = new Ordering[CsValue] {</dt><dd><p>// order by Try[V], ignore checksum
+val subordering = TryOrdering(cachedOrdering)
+def compare(a: CsValue, b: CsValue) = subordering.compare(a._1, b._1)</p>
+</dd>
+</dl>
+<p>}</p>
+<p>private val tryOptionCsValueOrdering = TryOrdering(OptionOrdering(csValueOrdering))
+private val tryOptionCachedOrdering = TryOrdering(OptionOrdering(cachedOrdering))</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>release any underlying resources</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>def release(): Unit = {</dt><dd><p>underlyingCaches foreach { _.release() }</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Fetches from all underlying caches in parallel, and if results differ, will choose a</p></li>
+<li><p>winner and push updated results back to the stale caches.</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+<dt>def get(keys: Seq[K]): Future[KeyValueResult[K, Cached[V]]] = {</dt><dd><dl>
+<dt>getWithChecksum(keys) map { csKvRes =&gt;</dt><dd><p>val resBldr = new KeyValueResultBuilder[K, Cached[V]]</p>
+<dl class="simple">
+<dt>csKvRes.found foreach {</dt><dd><p>case (k, (Return(v), _)) =&gt; resBldr.addFound(k, v)
+case (k, (Throw(t), _)) =&gt; resBldr.addFailed(k, t)</p>
+</dd>
+</dl>
+<p>}</p>
+<p>resBldr.addNotFound(csKvRes.notFound)
+resBldr.addFailed(csKvRes.failed)
+resBldr.result()</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Fetches from all underlying caches in parallel, and if results differ, will choose a</p></li>
+<li><p>winner and push updated results back to the stale caches.</p></li>
+</ul>
+<p><a href="#id9"><span class="problematic" id="id10">*</span></a>/</p>
+</dd>
+<dt>def getWithChecksum(keys: Seq[K]): Future[CsKeyValueResult[K, Cached[V]]] = {</dt><dd><dl>
+<dt>Future.collect {</dt><dd><dl class="simple">
+<dt>underlyingCaches map { underlying =&gt;</dt><dd><p>underlying.getWithChecksum(keys)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>} map { underlyingResults =&gt;</dt><dd><p>val resBldr = new KeyValueResultBuilder[K, CsValue]</p>
+<dl>
+<dt>for (key &lt;- keys) {</dt><dd><p>val keyResults = underlyingResults map { _(key) }
+resBldr(key) = getAndReplicate(key, keyResults) map {</p>
+<blockquote>
+<div><p>// treat evictions as misses
+case Some((Return(c), _)) if c.status == CachedValueStatus.Evicted =&gt; None
+case v =&gt; v</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>resBldr.result()</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Looks at all the returned values for a given set of replication keys, returning the most recent</p></li>
+<li><p>cached value if available, or indicate a miss if applicable, or return a failure if all</p></li>
+<li><p>keys failed.  If a cached value is returned, and some keys don’t have that cached value,</p></li>
+<li><p>the cached value will be replicated to those keys, possibly overwriting stale data.</p></li>
+</ul>
+<p><a href="#id11"><span class="problematic" id="id12">*</span></a>/</p>
+</dd>
+<dt>private def getAndReplicate(</dt><dd><p>key: K,
+keyResults: Seq[Try[Option[CsValue]]]</p>
+</dd>
+<dt>): Try[Option[CsValue]] = {</dt><dd><p>val max = keyResults.max(tryOptionCsValueOrdering)</p>
+<dl>
+<dt>max match {</dt><dd><p>// if one of the replication keys returned a cached value, then make sure all replication
+// keys contain that cached value.
+case Return(Some((Return(cached), cs))) =&gt;</p>
+<blockquote>
+<div><dl>
+<dt>for ((underlying, keyResult) &lt;- underlyingCaches zip keyResults) {</dt><dd><dl class="simple">
+<dt>if (keyResult != max) {</dt><dd><p>replicate(key, cached, keyResult, underlying)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>case _ =&gt;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>max</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def replicate(</dt><dd><p>key: K,
+cached: Cached[V],
+current: Try[Option[CsValue]],
+underlying: LockingCache[K, Cached[V]]</p>
+</dd>
+<dt>): Future[Unit] = {</dt><dd><dl class="simple">
+<dt>current match {</dt><dd><dl class="simple">
+<dt>case Throw(_) =&gt;</dt><dd><p>// if we failed to read a particular value, we don’t want to write to that key
+// because that key could potentially have the real newest value
+Future.Unit</p>
+</dd>
+<dt>case Return(None) =&gt;</dt><dd><p>// add rather than set, and fail if another value is written first
+underlying.add(key, cached).unit</p>
+</dd>
+<dt>case Return(Some((_, cs))) =&gt;</dt><dd><p>underlying.checkAndSet(key, cached, cs).unit</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Currently not supported.  Use set or lockAndSet.</p></li>
+</ul>
+<p><a href="#id13"><span class="problematic" id="id14">*</span></a>/</p>
+</dd>
+<dt>def add(key: K, value: Cached[V]): Future[Boolean] = {</dt><dd><p>Future.exception(new UnsupportedOperationException(“use set or lockAndSet”))</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Currently not supported.</p></li>
+</ul>
+<p><a href="#id15"><span class="problematic" id="id16">*</span></a>/</p>
+</dd>
+<dt>def checkAndSet(key: K, value: Cached[V], checksum: Checksum): Future[Boolean] = {</dt><dd><p>Future.exception(new UnsupportedOperationException(“use set or lockAndSet”))</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Calls set on all underlying caches.  If at least one set succeeds, Future.Unit is</p></li>
+<li><p>returned.  If all fail, a Future.exception will be returned.</p></li>
+</ul>
+<p><a href="#id17"><span class="problematic" id="id18">*</span></a>/</p>
+</dd>
+<dt>def set(key: K, value: Cached[V]): Future[Unit] = {</dt><dd><dl>
+<dt>liftAndCollect {</dt><dd><p>underlyingCaches map { _.set(key, value) }</p>
+</dd>
+<dt>} flatMap { seqTryUnits =&gt;</dt><dd><p>// return Future.Unit if any underlying call succeeded, otherwise return
+// the first failure.
+if (seqTryUnits exists { _.isReturn })</p>
+<blockquote>
+<div><p>Future.Unit</p>
+</div></blockquote>
+<dl class="simple">
+<dt>else</dt><dd><p>Future.const(seqTryUnits.head)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Calls lockAndSet on the underlying cache for all replication keys.  If at least one</p></li>
+<li><p>underlying call succeeds, a successful result will be returned.</p></li>
+</ul>
+<p><a href="#id19"><span class="problematic" id="id20">*</span></a>/</p>
+</dd>
+<dt>def lockAndSet(key: K, handler: LockingCache.Handler[Cached[V]]): Future[Option[Cached[V]]] = {</dt><dd><dl class="simple">
+<dt>liftAndCollect {</dt><dd><p>underlyingCaches map { _.lockAndSet(key, handler) }</p>
+</dd>
+<dt>} flatMap { seqTryOptionCached =&gt;</dt><dd><p>Future.const(seqTryOptionCached.max(tryOptionCachedOrdering))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Returns Future(true) if any of the underlying caches return Future(true); otherwise,</p></li>
+<li><p>returns Future(false) if any of the underlying caches return Future(false); otherwise,</p></li>
+<li><p>returns the first failure.</p></li>
+</ul>
+<p><a href="#id21"><span class="problematic" id="id22">*</span></a>/</p>
+</dd>
+<dt>def replace(key: K, value: Cached[V]): Future[Boolean] = {</dt><dd><dl class="simple">
+<dt>liftAndCollect {</dt><dd><p>underlyingCaches map { _.replace(key, value) }</p>
+</dd>
+<dt>} flatMap { seqTryBools =&gt;</dt><dd><dl class="simple">
+<dt>if (seqTryBools.contains(Return.True))</dt><dd><p>Future.value(true)</p>
+</dd>
+<dt>else if (seqTryBools.contains(Return.False))</dt><dd><p>Future.value(false)</p>
+</dd>
+<dt>else</dt><dd><p>Future.const(seqTryBools.head)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Performing an actual deletion on the underlying caches is not a good idea in the face</p></li>
+<li><p>of potential failure, because failing to remove all values would allow a cached value to</p></li>
+<li><p>be resurrected.  Instead, delete actually does a replace on the underlying caches with a</p></li>
+<li><p>CachedValueStatus of Evicted, which will be treated as a miss on read.</p></li>
+</ul>
+<p><a href="#id23"><span class="problematic" id="id24">*</span></a>/</p>
+</dd>
+<dt>def delete(key: K): Future[Boolean] = {</dt><dd><p>replace(key, Cached(None, CachedValueStatus.Evicted, Time.now))</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Convets a Seq[Future[A]] into a Future[Seq[Try[A]]], isolating failures into Trys, instead</p></li>
+<li><p>of allowing the entire Future to failure.</p></li>
+</ul>
+<p><a href="#id25"><span class="problematic" id="id26">*</span></a>/</p>
+</dd>
+<dt>private def liftAndCollect[A](seq: Seq[Future[A]]): Future[Seq[Try[A]]] = {</dt><dd><p>Future.collect { seq map { _ transform { Future(_) } } }</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../../_sources/tweetypie/servo/repo/src/main/scala/com/twitter/servo/cache/SimpleReplicatingCache.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

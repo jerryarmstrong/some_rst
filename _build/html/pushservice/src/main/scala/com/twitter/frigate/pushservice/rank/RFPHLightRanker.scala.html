@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.frigate.pushservice.rank
+import com.twitter.contentrecommender.thriftscala.LightRankingCandidate
+import com.twitter.contentrecommender.thriftscala.LightRankingFeatureHydrationContext
+import com.twitter.contentrecommender.thriftscala.MagicRecsFeatureHydrationContext
+import com.twitter.finagle.stats.Counter
+import com.twitter.finagle.stats.Stat
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.frigate.common.base.CandidateDetails
+import com.twitter.frigate.common.base.RandomRanker
+import com.twitter.frigate.common.base.Ranker
+import com.twitter.frigate.common.base.TweetAuthor
+import com.twitter.frigate.common.base.TweetCandidate
+import com.twitter.frigate.pushservice.model.PushTypes.PushCandidate
+import com.twitter.frigate.pushservice.model.PushTypes.Target
+import com.twitter.frigate.pushservice.params.PushConstants
+import com.twitter.frigate.pushservice.params.PushFeatureSwitchParams
+import com.twitter.frigate.pushservice.params.PushParams
+import com.twitter.ml.featurestore.lib.UserId
+import com.twitter.nrel.lightranker.MagicRecsServeDataRecordLightRanker
+import com.twitter.util.Future</p>
+<dl>
+<dt>class RFPHLightRanker(</dt><dd><p>lightRanker: MagicRecsServeDataRecordLightRanker,
+stats: StatsReceiver)</p>
+<blockquote>
+<div><p>extends Ranker[Target, PushCandidate] {</p>
+</div></blockquote>
+<p>private val statsReceiver = stats.scope(this.getClass.getSimpleName)</p>
+<p>private val lightRankerCandidateCounter = statsReceiver.counter(“light_ranker_candidate_count”)
+private val lightRankerRequestCounter = statsReceiver.counter(“light_ranker_request_count”)
+private val lightRankingStats: StatsReceiver = statsReceiver.scope(“light_ranking”)
+private val restrictLightRankingCounter: Counter =</p>
+<blockquote>
+<div><p>lightRankingStats.counter(“restrict_light_ranking”)</p>
+</div></blockquote>
+<dl>
+<dt>private val selectedLightRankerScribedTargetCandidateCountStats: Stat =</dt><dd><p>lightRankingStats.stat(“selected_light_ranker_scribed_target_candidate_count”)</p>
+</dd>
+<dt>private val selectedLightRankerScribedCandidatesStats: Stat =</dt><dd><p>lightRankingStats.stat(“selected_light_ranker_scribed_candidates”)</p>
+</dd>
+<dt>private val lightRankingRandomBaselineStats: StatsReceiver =</dt><dd><p>statsReceiver.scope(“light_ranking_random_baseline”)</p>
+</dd>
+<dt>override def rank(</dt><dd><p>target: Target,
+candidates: Seq[CandidateDetails[PushCandidate]]</p>
+</dd>
+<dt>): Future[Seq[CandidateDetails[PushCandidate]]] = {</dt><dd><p>val enableLightRanker = target.params(PushFeatureSwitchParams.EnableLightRankingParam)
+val restrictLightRanker = target.params(PushParams.RestrictLightRankingParam)
+val lightRankerSelectionThreshold =</p>
+<blockquote>
+<div><p>target.params(PushFeatureSwitchParams.LightRankingNumberOfCandidatesParam)</p>
+</div></blockquote>
+<p>val randomRanker = RandomRanker[Target, PushCandidate]()(lightRankingRandomBaselineStats)</p>
+<dl>
+<dt>if (enableLightRanker &amp;&amp; candidates.length &gt; lightRankerSelectionThreshold &amp;&amp; !target.scribeFeatureForRequestScribe) {</dt><dd><dl>
+<dt>val (tweetCandidates, nonTweetCandidates) =</dt><dd><dl class="simple">
+<dt>candidates.partition {</dt><dd><p>case CandidateDetails(pushCandidate: PushCandidate with TweetCandidate, source) =&gt; true
+case _ =&gt; false</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>val lightRankerSelectedTweetCandidatesFut = {</dt><dd><dl>
+<dt>if (restrictLightRanker) {</dt><dd><p>restrictLightRankingCounter.incr()
+lightRankThenTake(</p>
+<blockquote>
+<div><p>target,
+tweetCandidates</p>
+<blockquote>
+<div><p>.asInstanceOf[Seq[CandidateDetails[PushCandidate with TweetCandidate]]],</p>
+</div></blockquote>
+<p>PushConstants.RestrictLightRankingCandidatesThreshold</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+<dt>} else if (target.params(PushFeatureSwitchParams.EnableRandomBaselineLightRankingParam)) {</dt><dd><dl class="simple">
+<dt>randomRanker.rank(target, tweetCandidates).map { randomLightRankerCands =&gt;</dt><dd><p>randomLightRankerCands.take(lightRankerSelectionThreshold)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>} else {</dt><dd><dl>
+<dt>lightRankThenTake(</dt><dd><p>target,
+tweetCandidates</p>
+<blockquote>
+<div><p>.asInstanceOf[Seq[CandidateDetails[PushCandidate with TweetCandidate]]],</p>
+</div></blockquote>
+<p>lightRankerSelectionThreshold</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}
+lightRankerSelectedTweetCandidatesFut.map { returnedTweetCandidates =&gt;</p>
+<blockquote>
+<div><p>nonTweetCandidates ++ returnedTweetCandidates</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+<dt>} else if (target.scribeFeatureForRequestScribe) {</dt><dd><dl>
+<dt>val downSampleRate: Double =</dt><dd><dl class="simple">
+<dt>if (target.params(PushParams.DownSampleLightRankingScribeCandidatesParam))</dt><dd><p>PushConstants.DownSampleLightRankingScribeCandidatesRate</p>
+</dd>
+</dl>
+<p>else target.params(PushFeatureSwitchParams.LightRankingScribeCandidatesDownSamplingParam)</p>
+</dd>
+</dl>
+<p>val selectedCandidateCounter: Int = math.ceil(candidates.size * downSampleRate).toInt
+selectedLightRankerScribedTargetCandidateCountStats.add(selectedCandidateCounter.toFloat)</p>
+<dl class="simple">
+<dt>randomRanker.rank(target, candidates).map { randomLightRankerCands =&gt;</dt><dd><p>val selectedCandidates = randomLightRankerCands.take(selectedCandidateCounter)
+selectedLightRankerScribedCandidatesStats.add(selectedCandidates.size.toFloat)
+selectedCandidates</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>} else Future.value(candidates)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def lightRankThenTake(</dt><dd><p>target: Target,
+candidates: Seq[CandidateDetails[PushCandidate with TweetCandidate]],
+numOfCandidates: Int</p>
+</dd>
+<dt>): Future[Seq[CandidateDetails[PushCandidate]]] = {</dt><dd><p>lightRankerCandidateCounter.incr(candidates.length)
+lightRankerRequestCounter.incr()
+val lightRankerCandidates: Seq[LightRankingCandidate] = candidates.map {</p>
+<blockquote>
+<div><dl>
+<dt>case CandidateDetails(tweetCandidate, _) =&gt;</dt><dd><dl class="simple">
+<dt>val tweetAuthor = tweetCandidate match {</dt><dd><p>case t: TweetCandidate with TweetAuthor =&gt; t.authorId
+case _ =&gt; None</p>
+</dd>
+</dl>
+<p>}
+val hydrationContext: LightRankingFeatureHydrationContext =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>LightRankingFeatureHydrationContext.MagicRecsHydrationContext(</dt><dd><dl class="simple">
+<dt>MagicRecsFeatureHydrationContext(</dt><dd><p>tweetAuthor = tweetAuthor,
+pushString = tweetCandidate.getPushCopy.flatMap(_.pushStringGroup).map(_.toString))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>LightRankingCandidate(</dt><dd><p>tweetId = tweetCandidate.tweetId,
+hydrationContext = Some(hydrationContext)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+val modelName = target.params(PushFeatureSwitchParams.LightRankingModelTypeParam)
+val lightRankedCandidatesFut = {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>lightRanker</dt><dd><p>.rank(UserId(target.targetId), lightRankerCandidates, modelName)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>lightRankedCandidatesFut.map { lightRankedCandidates =&gt;</dt><dd><dl class="simple">
+<dt>val lrScoreMap = lightRankedCandidates.map { lrCand =&gt;</dt><dd><p>lrCand.tweetId -&gt; lrCand.score</p>
+</dd>
+</dl>
+<p>}.toMap
+val candScoreMap: Seq[Option[Double]] = candidates.map { candidateDetails =&gt;</p>
+<blockquote>
+<div><p>lrScoreMap.get(candidateDetails.candidate.tweetId)</p>
+</div></blockquote>
+<p>}
+sortCandidatesByScore(candidates, candScoreMap)</p>
+<blockquote>
+<div><p>.take(numOfCandidates)</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/pushservice/src/main/scala/com/twitter/frigate/pushservice/rank/RFPHLightRanker.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

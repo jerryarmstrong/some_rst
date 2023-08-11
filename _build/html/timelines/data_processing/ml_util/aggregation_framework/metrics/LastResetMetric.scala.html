@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../" id="documentation_options" src="../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.timelines.data_processing.ml_util.aggregation_framework.metrics</p>
+<p>import java.lang.{Long =&gt; JLong}
+import com.twitter.ml.api._
+import com.twitter.ml.api.util.SRichDataRecord
+import com.twitter.timelines.data_processing.ml_util.aggregation_framework.metrics.ConversionUtils._
+import com.twitter.util.Duration
+import com.twitter.util.Time
+import scala.math.max</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>This metric measures how recently an action has taken place. A value of 1.0</p></li>
+<li><p>indicates the action happened just now. This value decays with time if the</p></li>
+<li><p>action has not taken place and is reset to 1 when the action happens. So lower</p></li>
+<li><p>value indicates a stale or older action.</p></li>
+<li></li>
+<li><p>For example consider an action of “user liking a video”. The last reset metric</p></li>
+<li><p>value changes as follows for a half life of 1 day.</p></li>
+<li></li>
+<li></li>
+<li><p>day  |         action           |  feature value |      Description</p></li>
+<li></li>
+<li><p>1   | user likes the video     |      1.0       |    Set the value to 1</p></li>
+<li><p>2   | user does not like video |      0.5       |    Decay the value</p></li>
+<li><p>3   | user does not like video |      0.25      |    Decay the value</p></li>
+<li><p>4   | user likes the video     |      1.0       |    Reset the value to 1</p></li>
+<li></li>
+<li></li>
+<li><p>&#64;tparam T</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>case class TypedLastResetMetric[T]() extends TimedValueAggregationMetric[T] {</dt><dd><p>import AggregationMetricCommon._</p>
+<p>override val operatorName = “last_reset”</p>
+<dl>
+<dt>override def getIncrementValue(</dt><dd><p>record: DataRecord,
+feature: Option[Feature[T]],
+timestampFeature: Feature[JLong]</p>
+</dd>
+<dt>): TimedValue[Double] = {</dt><dd><dl class="simple">
+<dt>val featureExists: Boolean = feature match {</dt><dd><p>case Some(f) =&gt; SRichDataRecord(record).hasFeature(f)
+case None =&gt; true</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>TimedValue[Double](</dt><dd><p>value = booleanToDouble(featureExists),
+timestamp = Time.fromMilliseconds(getTimestamp(record, timestampFeature))</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}
+private def getDecayedValue(</p>
+<blockquote>
+<div><p>olderTimedValue: TimedValue[Double],
+newerTimestamp: Time,
+halfLife: Duration</p>
+</div></blockquote>
+<dl>
+<dt>): Double = {</dt><dd><dl class="simple">
+<dt>if (halfLife.inMilliseconds == 0L) {</dt><dd><p>0.0</p>
+</dd>
+<dt>} else {</dt><dd><p>val timeDelta = newerTimestamp.inMilliseconds - olderTimedValue.timestamp.inMilliseconds
+val resultValue = olderTimedValue.value / math.pow(2.0, timeDelta / halfLife.inMillis)
+if (resultValue &gt; AggregationMetricCommon.Epsilon) resultValue else 0.0</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>override def plus(</dt><dd><p>left: TimedValue[Double],
+right: TimedValue[Double],
+halfLife: Duration</p>
+</dd>
+</dl>
+<p>): TimedValue[Double] = {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>val (newerTimedValue, olderTimedValue) = if (left.timestamp &gt; right.timestamp) {</dt><dd><p>(left, right)</p>
+</dd>
+<dt>} else {</dt><dd><p>(right, left)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>val optionallyDecayedOlderValue = if (halfLife == Duration.Top) {</dt><dd><p>// Since we don’t want to decay, older value is not changed
+olderTimedValue.value</p>
+</dd>
+<dt>} else {</dt><dd><p>// Decay older value
+getDecayedValue(olderTimedValue, newerTimedValue.timestamp, halfLife)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>TimedValue[Double](</dt><dd><p>value = max(newerTimedValue.value, optionallyDecayedOlderValue),
+timestamp = newerTimedValue.timestamp</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>override def zero(timeOpt: Option[Long]): TimedValue[Double] = TimedValue[Double](</dt><dd><p>value = 0.0,
+timestamp = Time.fromMilliseconds(0)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Syntactic sugar for the last reset metric that works with</p></li>
+<li><p>any feature type as opposed to being tied to a specific type.</p></li>
+<li><p>See EasyMetric.scala for more details on why this is useful.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>object LastResetMetric extends EasyMetric {</dt><dd><dl class="simple">
+<dt>override def forFeatureType[T](</dt><dd><p>featureType: FeatureType</p>
+</dd>
+<dt>): Option[AggregationMetric[T, _]] =</dt><dd><p>Some(TypedLastResetMetric[T]())</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../_sources/timelines/data_processing/ml_util/aggregation_framework/metrics/LastResetMetric.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

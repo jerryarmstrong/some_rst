@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.core.earlybird.index.inverted;</p>
+<p>import com.google.common.base.Preconditions;</p>
+<p>import org.apache.lucene.analysis.tokenattributes.PayloadAttribute;
+import org.apache.lucene.analysis.tokenattributes.TermToBytesRefAttribute;
+import org.apache.lucene.util.AttributeSource;
+import org.apache.lucene.util.BytesRef;</p>
+<p>import com.twitter.search.common.hashtable.HashTable;
+import com.twitter.search.common.util.analysis.TermPayloadAttribute;
+import com.twitter.search.core.earlybird.facets.FacetCountingArrayWriter;
+import com.twitter.search.core.earlybird.facets.FacetIDMap.FacetField;
+import com.twitter.search.core.earlybird.index.EarlybirdRealtimeIndexSegmentWriter;</p>
+<dl>
+<dt>public class InvertedRealtimeIndexWriter</dt><dd><blockquote>
+<div><p>implements EarlybirdRealtimeIndexSegmentWriter.InvertedDocConsumer {</p>
+</div></blockquote>
+<p>private final InvertedRealtimeIndex invertedIndex;
+private final FacetCountingArrayWriter facetArray;
+private final FacetField facetField;</p>
+<p>private TermToBytesRefAttribute termAtt;
+private TermPayloadAttribute termPayloadAtt;
+private PayloadAttribute payloadAtt;
+private boolean currentDocIsOffensive;</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Creates a new writer for writing to an inverted in-memory real-time index.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>public InvertedRealtimeIndexWriter(</dt><dd><blockquote>
+<div><p>InvertedRealtimeIndex index,
+FacetField facetField,
+FacetCountingArrayWriter facetArray) {</p>
+</div></blockquote>
+<p>super();
+this.invertedIndex = index;
+this.facetArray = facetArray;
+this.facetField = facetField;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;Override
+public void start(AttributeSource attributeSource, boolean docIsOffensive) {</p>
+<blockquote>
+<div><p>termAtt = attributeSource.addAttribute(TermToBytesRefAttribute.class);
+termPayloadAtt = attributeSource.addAttribute(TermPayloadAttribute.class);
+payloadAtt = attributeSource.addAttribute(PayloadAttribute.class);
+currentDocIsOffensive = docIsOffensive;</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Adds a posting to the provided inverted index.</p></li>
+<li></li>
+<li><p>&#64;param termBytesRef is a payload that is stored with the term. It is only stored once for each</p></li>
+<li><p>term.</p></li>
+<li><p>&#64;param postingPayload is a byte payload that will be stored separately for every posting.</p></li>
+<li><p>&#64;return term id of the added posting.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>public static int indexTerm(InvertedRealtimeIndex invertedIndex, BytesRef termBytesRef,</dt><dd><blockquote>
+<div><p>int docID, int position, BytesRef termPayload,
+BytesRef postingPayload, TermPointerEncoding termPointerEncoding) {</p>
+</div></blockquote>
+<p>InvertedRealtimeIndex.TermHashTable hashTable = invertedIndex.getHashTable();
+BaseByteBlockPool termPool = invertedIndex.getTermPool();</p>
+<p>TermsArray termsArray = invertedIndex.getTermsArray();</p>
+<p>long hashTableInfoForBytesRef = hashTable.lookupItem(termBytesRef);
+int termID = HashTable.decodeItemId(hashTableInfoForBytesRef);
+int hashTableSlot = HashTable.decodeHashPosition(hashTableInfoForBytesRef);</p>
+<p>invertedIndex.adjustMaxPosition(position);</p>
+<dl>
+<dt>if (termID == HashTable.EMPTY_SLOT) {</dt><dd><p>// First time we are seeing this token since we last flushed the hash.
+// the LSB in textStart denotes whether this term has a term payload
+int textStart = ByteTermUtils.copyToTermPool(termPool, termBytesRef);
+boolean hasTermPayload = termPayload != null;
+int termPointer = termPointerEncoding.encodeTermPointer(textStart, hasTermPayload);</p>
+<dl class="simple">
+<dt>if (hasTermPayload) {</dt><dd><p>ByteTermUtils.copyToTermPool(termPool, termPayload);</p>
+</dd>
+</dl>
+<p>}</p>
+<p>termID = invertedIndex.getNumTerms();
+invertedIndex.incrementNumTerms();
+if (termID &gt;= termsArray.getSize()) {</p>
+<blockquote>
+<div><p>termsArray = invertedIndex.growTermsArray();</p>
+</div></blockquote>
+<p>}</p>
+<p>termsArray.termPointers[termID] = termPointer;</p>
+<p>Preconditions.checkState(hashTable.slots()[hashTableSlot] == HashTable.EMPTY_SLOT);
+hashTable.setSlot(hashTableSlot, termID);</p>
+<dl class="simple">
+<dt>if (invertedIndex.getNumTerms() * 2 &gt;= hashTable.numSlots()) {</dt><dd><p>invertedIndex.rehashPostings(2 * hashTable.numSlots());</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// Insert termID into termsSkipList.
+invertedIndex.insertToTermsSkipList(termBytesRef, termID);</p>
+</dd>
+</dl>
+<p>}</p>
+<p>invertedIndex.incrementSumTotalTermFreq();
+invertedIndex.getPostingList()</p>
+<blockquote>
+<div><p>.appendPosting(termID, termsArray, docID, position, postingPayload);</p>
+</div></blockquote>
+<p>return termID;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Delete a posting that was inserted out of order.</p></li>
+<li></li>
+<li><p>This function needs work before it is used in production:</p></li>
+<li><ul>
+<li><p>It should take an isDocOffensive parameter so we can decrement the offensive</p></li>
+</ul>
+</li>
+<li><p>document count for the term.</p></li>
+<li><ul>
+<li><p>It doesn’t allow the same concurrency guarantees that the other posting methods do.</p></li>
+</ul>
+</li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>public static void deletePosting(</dt><dd><blockquote>
+<div><p>InvertedRealtimeIndex invertedIndex, BytesRef termBytesRef, int docID) {</p>
+</div></blockquote>
+<p>long hashTableInfoForBytesRef = invertedIndex.getHashTable().lookupItem(termBytesRef);
+int termID = HashTable.decodeItemId(hashTableInfoForBytesRef);</p>
+<dl class="simple">
+<dt>if (termID != HashTable.EMPTY_SLOT) {</dt><dd><p>// Have seen this term before, and the field that supports deletes.
+invertedIndex.getPostingList().deletePosting(termID, invertedIndex.getTermsArray(), docID);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;Override
+public void add(int docID, int position) {</p>
+<blockquote>
+<div><p>final BytesRef payload;
+if (payloadAtt == null) {</p>
+<blockquote>
+<div><p>payload = null;</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>payload = payloadAtt.getPayload();</p>
+</dd>
+</dl>
+<p>}</p>
+<p>BytesRef termPayload = termPayloadAtt.getTermPayload();</p>
+<dl class="simple">
+<dt>int termID = indexTerm(invertedIndex, termAtt.getBytesRef(),</dt><dd><p>docID, position, termPayload, payload,
+invertedIndex.getTermPointerEncoding());</p>
+</dd>
+<dt>if (termID == -1) {</dt><dd><p>return;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>TermsArray termsArray = invertedIndex.getTermsArray();</p>
+<dl class="simple">
+<dt>if (currentDocIsOffensive &amp;&amp; termsArray.offensiveCounters != null) {</dt><dd><p>termsArray.offensiveCounters[termID]++;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>if (facetField != null) {</dt><dd><p>facetArray.addFacet(docID, facetField.getFacetId(), termID);</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public void finish() {</p>
+<blockquote>
+<div><p>payloadAtt = null;
+termPayloadAtt = null;</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/src/java/com/twitter/search/core/earlybird/index/inverted/InvertedRealtimeIndexWriter.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

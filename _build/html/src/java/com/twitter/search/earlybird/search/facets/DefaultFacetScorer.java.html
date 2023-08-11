@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../" id="documentation_options" src="../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.earlybird.search.facets;</p>
+<p>import java.io.IOException;</p>
+<p>import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;</p>
+<p>import com.twitter.search.common.constants.thriftjava.ThriftLanguage;
+import com.twitter.search.common.ranking.thriftjava.ThriftFacetEarlybirdSortingMode;
+import com.twitter.search.common.ranking.thriftjava.ThriftFacetRankingOptions;
+import com.twitter.search.common.relevance.features.EarlybirdDocumentFeatures;
+import com.twitter.search.common.schema.earlybird.EarlybirdFieldConstants.EarlybirdFieldConstant;
+import com.twitter.search.common.util.lang.ThriftLanguageUtil;
+import com.twitter.search.core.earlybird.facets.FacetAccumulator;
+import com.twitter.search.core.earlybird.facets.FacetCountIterator;
+import com.twitter.search.core.earlybird.facets.FacetLabelProvider;
+import com.twitter.search.core.earlybird.index.EarlybirdIndexSegmentAtomicReader;
+import com.twitter.search.earlybird.search.AntiGamingFilter;
+import com.twitter.search.earlybird.search.facets.FacetResultsCollector.Accumulator;
+import com.twitter.search.earlybird.thrift.ThriftSearchQuery;</p>
+<dl>
+<dt>public class DefaultFacetScorer extends FacetScorer {</dt><dd><p>private static final Logger LOG = LoggerFactory.getLogger(FacetScorer.class.getName());
+private static final double DEFAULT_FEATURE_WEIGHT = 0.0;
+private static final byte DEFAULT_PENALTY = 1;</p>
+<p>private static final byte DEFAULT_REPUTATION_MIN = 45;</p>
+<p>private final AntiGamingFilter antiGamingFilter;</p>
+<p>// tweepcreds below this value will not be counted at all
+private final byte reputationMinFilterThresholdVal;</p>
+<p>// tweepcreds between reputationMinFilterThresholdVal and this value will be counted
+// with a score of 1
+private final byte reputationMinScoreVal;</p>
+<p>private final double userRepWeight;
+private final double favoritesWeight;
+private final double parusWeight;
+private final double parusBase;
+private final double queryIndependentPenaltyWeight;</p>
+<p>private final ThriftLanguage uiLang;
+private final double langEnglishUIBoost;
+private final double langEnglishFacetBoost;
+private final double langDefaultBoost;</p>
+<p>private final int antigamingPenalty;
+private final int offensiveTweetPenalty;
+private final int multipleHashtagsOrTrendsPenalty;</p>
+<p>private final int maxScorePerTweet;
+private final ThriftFacetEarlybirdSortingMode sortingMode;</p>
+<p>private EarlybirdIndexSegmentAtomicReader reader;
+private EarlybirdDocumentFeatures features;</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Creates a new facet scorer.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>public DefaultFacetScorer(ThriftSearchQuery searchQuery,</dt><dd><blockquote>
+<div><p>ThriftFacetRankingOptions rankingOptions,
+AntiGamingFilter antiGamingFilter,
+ThriftFacetEarlybirdSortingMode sortingMode) {</p>
+</div></blockquote>
+<p>this.sortingMode = sortingMode;
+this.antiGamingFilter = antiGamingFilter;</p>
+<dl class="simple">
+<dt>maxScorePerTweet =</dt><dd><p>rankingOptions.isSetMaxScorePerTweet()
+? rankingOptions.getMaxScorePerTweet()
+: Integer.MAX_VALUE;</p>
+</dd>
+</dl>
+<p>// filters
+reputationMinFilterThresholdVal =</p>
+<blockquote>
+<div><p>rankingOptions.isSetMinTweepcredFilterThreshold()
+? (byte) (rankingOptions.getMinTweepcredFilterThreshold() &amp; 0xFF)
+: DEFAULT_REPUTATION_MIN;</p>
+</div></blockquote>
+<p>// weights
+// reputationMinScoreVal must be &gt;= reputationMinFilterThresholdVal
+reputationMinScoreVal =</p>
+<blockquote>
+<div><p>(byte) Math.max(rankingOptions.isSetReputationParams()
+? (byte) rankingOptions.getReputationParams().getMin()
+: DEFAULT_REPUTATION_MIN, reputationMinFilterThresholdVal);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>parusWeight =</dt><dd><p>rankingOptions.isSetParusScoreParams() &amp;&amp; rankingOptions.getParusScoreParams().isSetWeight()
+? rankingOptions.getParusScoreParams().getWeight()
+: DEFAULT_FEATURE_WEIGHT;</p>
+</dd>
+</dl>
+<p>// compute this once so that base ** parusScore is backwards-compatible
+parusBase = Math.sqrt(1 + parusWeight);</p>
+<dl class="simple">
+<dt>userRepWeight =</dt><dd><p>rankingOptions.isSetReputationParams() &amp;&amp; rankingOptions.getReputationParams().isSetWeight()
+? rankingOptions.getReputationParams().getWeight()
+: DEFAULT_FEATURE_WEIGHT;</p>
+</dd>
+<dt>favoritesWeight =</dt><dd><p>rankingOptions.isSetFavoritesParams() &amp;&amp; rankingOptions.getFavoritesParams().isSetWeight()
+? rankingOptions.getFavoritesParams().getWeight()
+: DEFAULT_FEATURE_WEIGHT;</p>
+</dd>
+<dt>queryIndependentPenaltyWeight =</dt><dd><p>rankingOptions.isSetQueryIndependentPenaltyWeight()
+? rankingOptions.getQueryIndependentPenaltyWeight()
+: DEFAULT_FEATURE_WEIGHT;</p>
+</dd>
+</dl>
+<p>// penalty increment
+antigamingPenalty =</p>
+<blockquote>
+<div><p>rankingOptions.isSetAntigamingPenalty()
+? rankingOptions.getAntigamingPenalty()
+: DEFAULT_PENALTY;</p>
+</div></blockquote>
+<dl class="simple">
+<dt>offensiveTweetPenalty =</dt><dd><p>rankingOptions.isSetOffensiveTweetPenalty()
+? rankingOptions.getOffensiveTweetPenalty()
+: DEFAULT_PENALTY;</p>
+</dd>
+<dt>multipleHashtagsOrTrendsPenalty =</dt><dd><p>rankingOptions.isSetMultipleHashtagsOrTrendsPenalty()
+? rankingOptions.getMultipleHashtagsOrTrendsPenalty()
+: DEFAULT_PENALTY;</p>
+</dd>
+</dl>
+<p>// query information
+if (!searchQuery.isSetUiLang() || searchQuery.getUiLang().isEmpty()) {</p>
+<blockquote>
+<div><p>uiLang = ThriftLanguage.UNKNOWN;</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>uiLang = ThriftLanguageUtil.getThriftLanguageOf(searchQuery.getUiLang());</p>
+</dd>
+</dl>
+<p>}
+langEnglishUIBoost = rankingOptions.getLangEnglishUIBoost();
+langEnglishFacetBoost = rankingOptions.getLangEnglishFacetBoost();
+langDefaultBoost = rankingOptions.getLangDefaultBoost();</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;Override
+protected void startSegment(EarlybirdIndexSegmentAtomicReader segmentReader) throws IOException {</p>
+<blockquote>
+<div><p>reader = segmentReader;
+features = new EarlybirdDocumentFeatures(reader);
+if (antiGamingFilter != null) {</p>
+<blockquote>
+<div><p>antiGamingFilter.startSegment(reader);</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public void incrementCounts(Accumulator accumulator, int internalDocID) throws IOException {</p>
+<blockquote>
+<div><p>FacetCountIterator.IncrementData data = accumulator.accessor.incrementData;
+data.accumulators = accumulator.accumulators;
+features.advance(internalDocID);</p>
+<p>// Also keep track of the tweet language of tweet themselves.
+data.languageId = (int) features.getFeatureValue(EarlybirdFieldConstant.LANGUAGE);</p>
+<dl>
+<dt>if (antigamingPenalty &gt; 0</dt><dd><blockquote>
+<div><p>&amp;&amp; antiGamingFilter != null
+&amp;&amp; !antiGamingFilter.accept(internalDocID)) {</p>
+</div></blockquote>
+<p>data.weightedCountIncrement = 0;
+data.penaltyIncrement = antigamingPenalty;
+data.tweepCred = 0;
+accumulator.accessor.collect(internalDocID);
+return;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>if (offensiveTweetPenalty &gt; 0 &amp;&amp; features.isFlagSet(EarlybirdFieldConstant.IS_OFFENSIVE_FLAG)) {</dt><dd><p>data.weightedCountIncrement = 0;
+data.penaltyIncrement = offensiveTweetPenalty;
+data.tweepCred = 0;
+accumulator.accessor.collect(internalDocID);
+return;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>byte userRep = (byte) features.getFeatureValue(EarlybirdFieldConstant.USER_REPUTATION);</p>
+<dl class="simple">
+<dt>if (userRep &lt; reputationMinFilterThresholdVal) {</dt><dd><p>// don’t penalize
+data.weightedCountIncrement = 0;
+data.penaltyIncrement = 0;
+data.tweepCred = 0;
+accumulator.accessor.collect(internalDocID);
+return;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// Other non-terminating penalties
+int penalty = 0;
+if (multipleHashtagsOrTrendsPenalty &gt; 0</p>
+<blockquote>
+<div><blockquote>
+<div><p>&amp;&amp; features.isFlagSet(EarlybirdFieldConstant.HAS_MULTIPLE_HASHTAGS_OR_TRENDS_FLAG)) {</p>
+</div></blockquote>
+<p>penalty += multipleHashtagsOrTrendsPenalty;</p>
+</div></blockquote>
+<p>}</p>
+<p>double parus = 0xFF &amp; (byte) features.getFeatureValue(EarlybirdFieldConstant.PARUS_SCORE);</p>
+<p>double score = Math.pow(1 + userRepWeight, Math.max(0, userRep - reputationMinScoreVal));</p>
+<dl class="simple">
+<dt>if (parus &gt; 0) {</dt><dd><p>score += Math.pow(parusBase, parus);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>int favoriteCount =</dt><dd><p>(int) features.getUnnormalizedFeatureValue(EarlybirdFieldConstant.FAVORITE_COUNT);</p>
+</dd>
+<dt>if (favoriteCount &gt; 0) {</dt><dd><p>score += favoriteCount * favoritesWeight;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// Language preferences
+int tweetLinkLangId = (int) features.getFeatureValue(EarlybirdFieldConstant.LINK_LANGUAGE);
+if (tweetLinkLangId == ThriftLanguage.UNKNOWN.getValue()) {</p>
+<blockquote>
+<div><p>// fall back to use the tweet language itself.
+tweetLinkLangId = (int) features.getFeatureValue(EarlybirdFieldConstant.LANGUAGE);</p>
+</div></blockquote>
+<p>}
+if (uiLang != ThriftLanguage.UNKNOWN &amp;&amp; uiLang.getValue() != tweetLinkLangId) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (uiLang == ThriftLanguage.ENGLISH) {</dt><dd><p>score <a href="#id3"><span class="problematic" id="id4">*</span></a>= langEnglishUIBoost;</p>
+</dd>
+<dt>} else if (tweetLinkLangId == ThriftLanguage.ENGLISH.getValue()) {</dt><dd><p>score <a href="#id5"><span class="problematic" id="id6">*</span></a>= langEnglishFacetBoost;</p>
+</dd>
+<dt>} else {</dt><dd><p>score <a href="#id7"><span class="problematic" id="id8">*</span></a>= langDefaultBoost;</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>// make sure a single tweet can’t contribute too high a score
+if (score &gt; maxScorePerTweet) {</p>
+<blockquote>
+<div><p>score = maxScorePerTweet;</p>
+</div></blockquote>
+<p>}</p>
+<p>data.weightedCountIncrement = (int) score;
+data.penaltyIncrement = penalty;
+data.tweepCred = userRep &amp; 0xFF;
+accumulator.accessor.collect(internalDocID);</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public FacetAccumulator getFacetAccumulator(FacetLabelProvider labelProvider) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>return new HashingAndPruningFacetAccumulator(labelProvider, queryIndependentPenaltyWeight,</dt><dd><p>HashingAndPruningFacetAccumulator.getComparator(sortingMode));</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../_sources/src/java/com/twitter/search/earlybird/search/facets/DefaultFacetScorer.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

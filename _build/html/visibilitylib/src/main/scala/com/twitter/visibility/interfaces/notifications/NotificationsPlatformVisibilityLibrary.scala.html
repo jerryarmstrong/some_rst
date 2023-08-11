@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.visibility.interfaces.notifications</p>
+<p>import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.servo.util.Gate
+import com.twitter.stitch.Stitch
+import com.twitter.util.Throwables
+import com.twitter.visibility.VisibilityLibrary
+import com.twitter.visibility.builder.VisibilityResult
+import com.twitter.visibility.builder.tweets.CommunityNotificationFeatures
+import com.twitter.visibility.builder.tweets.UnmentionNotificationFeatures
+import com.twitter.visibility.builder.users.AuthorDeviceFeatures
+import com.twitter.visibility.builder.users.AuthorFeatures
+import com.twitter.visibility.builder.users.RelationshipFeatures
+import com.twitter.visibility.builder.users.ViewerAdvancedFilteringFeatures
+import com.twitter.visibility.builder.users.ViewerFeatures
+import com.twitter.visibility.common.UserDeviceSource
+import com.twitter.visibility.common.UserRelationshipSource
+import com.twitter.visibility.common.UserSource
+import com.twitter.visibility.features.AuthorUserLabels
+import com.twitter.visibility.features.Feature
+import com.twitter.visibility.features.FeatureMap
+import com.twitter.visibility.models.ViewerContext
+import com.twitter.visibility.rules.State.FeatureFailed
+import com.twitter.visibility.rules.State.MissingFeature
+import com.twitter.visibility.rules.Action
+import com.twitter.visibility.rules.RuleResult
+import com.twitter.visibility.rules.{Allow =&gt; AllowAction}</p>
+<dl>
+<dt>object NotificationsPlatformVisibilityLibrary {</dt><dd><dl>
+<dt>type NotificationsPlatformVFType =</dt><dd><p>NotificationVFRequest =&gt; Stitch[NotificationsPlatformFilteringResponse]</p>
+</dd>
+<dt>private val AllowResponse: Stitch[NotificationsPlatformFilteringResponse] =</dt><dd><p>Stitch.value(AllowVerdict)</p>
+</dd>
+<dt>def apply(</dt><dd><p>userSource: UserSource,
+userRelationshipSource: UserRelationshipSource,
+userDeviceSource: UserDeviceSource,
+visibilityLibrary: VisibilityLibrary,
+enableShimFeatureHydration: Gate[Unit] = Gate.False</p>
+</dd>
+<dt>): NotificationsPlatformVFType = {</dt><dd><p>val libraryStatsReceiver = visibilityLibrary.statsReceiver
+val vfEngineCounter = libraryStatsReceiver.counter(“vf_engine_requests”)</p>
+<p>val authorFeatures = new AuthorFeatures(userSource, libraryStatsReceiver)
+val authorDeviceFeatures = new AuthorDeviceFeatures(userDeviceSource, libraryStatsReceiver)
+val viewerFeatures = new ViewerFeatures(userSource, libraryStatsReceiver)</p>
+<dl class="simple">
+<dt>val viewerAdvancedFilteringFeatures =</dt><dd><p>new ViewerAdvancedFilteringFeatures(userSource, libraryStatsReceiver)</p>
+</dd>
+<dt>val relationshipFeatures =</dt><dd><p>new RelationshipFeatures(userRelationshipSource, libraryStatsReceiver)</p>
+</dd>
+</dl>
+<p>val isShimFeatureHydrationEnabled = enableShimFeatureHydration()</p>
+<dl>
+<dt>def runRuleEngine(candidate: NotificationVFRequest): Stitch[VisibilityResult] = {</dt><dd><dl>
+<dt>val featureMap =</dt><dd><dl>
+<dt>visibilityLibrary.featureMapBuilder(</dt><dd><dl class="simple">
+<dt>Seq(</dt><dd><p>viewerFeatures.forViewerId(Some(candidate.recipientId)),
+viewerAdvancedFilteringFeatures.forViewerId(Some(candidate.recipientId)),
+authorFeatures.forAuthorId(candidate.subject.id),
+authorDeviceFeatures.forAuthorId(candidate.subject.id),
+relationshipFeatures.forAuthorId(candidate.subject.id, Some(candidate.recipientId)),
+CommunityNotificationFeatures.ForNonCommunityTweetNotification,
+UnmentionNotificationFeatures.ForNonUnmentionNotificationFeatures</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>vfEngineCounter.incr()</p>
+<dl>
+<dt>if (isShimFeatureHydrationEnabled) {</dt><dd><dl>
+<dt>FeatureMap.resolve(featureMap, libraryStatsReceiver).flatMap { resolvedFeatureMap =&gt;</dt><dd><dl>
+<dt>visibilityLibrary.runRuleEngine(</dt><dd><p>contentId = candidate.subject,
+featureMap = resolvedFeatureMap,
+viewerContext =</p>
+<blockquote>
+<div><p>ViewerContext.fromContextWithViewerIdFallback(Some(candidate.recipientId)),</p>
+</div></blockquote>
+<p>safetyLevel = candidate.safetyLevel</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>} else {</dt><dd><dl>
+<dt>visibilityLibrary.runRuleEngine(</dt><dd><p>contentId = candidate.subject,
+featureMap = featureMap,
+viewerContext =</p>
+<blockquote>
+<div><p>ViewerContext.fromContextWithViewerIdFallback(Some(candidate.recipientId)),</p>
+</div></blockquote>
+<p>safetyLevel = candidate.safetyLevel</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>{</dt><dd><dl class="simple">
+<dt>case candidate: NotificationVFRequest =&gt;</dt><dd><p>runRuleEngine(candidate).flatMap(failCloseForFailures(_, libraryStatsReceiver))</p>
+</dd>
+<dt>case _ =&gt;</dt><dd><p>AllowResponse</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def failCloseForFailures(</dt><dd><p>visibilityResult: VisibilityResult,
+stats: StatsReceiver</p>
+</dd>
+<dt>): Stitch[NotificationsPlatformFilteringResponse] = {</dt><dd><p>lazy val vfEngineSuccess = stats.counter(“vf_engine_success”)
+lazy val vfEngineFailures = stats.counter(“vf_engine_failures”)
+lazy val vfEngineFailuresMissing = stats.scope(“vf_engine_failures”).counter(“missing”)
+lazy val vfEngineFailuresFailed = stats.scope(“vf_engine_failures”).counter(“failed”)
+lazy val vfEngineFiltered = stats.counter(“vf_engine_filtered”)</p>
+<dl>
+<dt>val isFailedOrMissingFeature: RuleResult =&gt; Boolean = {</dt><dd><dl class="simple">
+<dt>case RuleResult(_, FeatureFailed(features)) =&gt;</dt><dd><p>!(features.contains(AuthorUserLabels) &amp;&amp; features.size == 1)</p>
+</dd>
+</dl>
+<p>case RuleResult(_, MissingFeature(_)) =&gt; true
+case _ =&gt; false</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>val failedRuleResults =</dt><dd><p>visibilityResult.ruleResultMap.values.filter(isFailedOrMissingFeature(_))</p>
+</dd>
+<dt>val (failedFeatures, missingFeatures) = failedRuleResults.partition {</dt><dd><p>case RuleResult(_, FeatureFailed(_)) =&gt; true
+case RuleResult(_, MissingFeature(_)) =&gt; false
+case _ =&gt; false</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>val failedOrMissingFeatures: Map[Feature[_], String] = failedRuleResults</dt><dd><dl>
+<dt>.collect {</dt><dd><dl>
+<dt>case RuleResult(_, FeatureFailed(features)) =&gt;</dt><dd><dl class="simple">
+<dt>features.map {</dt><dd><dl class="simple">
+<dt>case (feature: Feature[_], throwable: Throwable) =&gt;</dt><dd><p>feature -&gt; Throwables.mkString(throwable).mkString(” -&gt; “)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}.toSet</p>
+</dd>
+</dl>
+<p>case RuleResult(_, MissingFeature(features)) =&gt; features.map(_ -&gt; “Feature missing.”)</p>
+</dd>
+</dl>
+<p>}.flatten.toMap</p>
+</dd>
+<dt>visibilityResult.verdict match {</dt><dd><dl>
+<dt>case AllowAction if failedOrMissingFeatures.isEmpty =&gt;</dt><dd><p>vfEngineSuccess.incr()
+AllowResponse</p>
+</dd>
+<dt>case AllowAction if failedOrMissingFeatures.nonEmpty =&gt;</dt><dd><p>vfEngineFailures.incr()
+if (missingFeatures.nonEmpty) {</p>
+<blockquote>
+<div><p>vfEngineFailuresMissing.incr()</p>
+</div></blockquote>
+<p>}
+if (failedFeatures.nonEmpty) {</p>
+<blockquote>
+<div><p>vfEngineFailuresFailed.incr()</p>
+</div></blockquote>
+<p>}</p>
+<p>Stitch.value(FailedVerdict(failedOrMissingFeatures))</p>
+</dd>
+<dt>case action: Action =&gt;</dt><dd><p>vfEngineFiltered.incr()
+Stitch.value(FilteredVerdict(action))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/visibilitylib/src/main/scala/com/twitter/visibility/interfaces/notifications/NotificationsPlatformVisibilityLibrary.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

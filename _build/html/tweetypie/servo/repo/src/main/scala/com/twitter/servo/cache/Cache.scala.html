@@ -1,0 +1,450 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../../" id="documentation_options" src="../../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.servo.cache</p>
+<p>import com.google.common.cache.CacheBuilder
+import com.twitter.finagle.memcached.util.NotFound
+import com.twitter.servo.util.ThreadLocalStringBuilder
+import com.twitter.util.{Duration, Future, Return}
+import java.util.concurrent.TimeUnit
+import scala.collection.mutable
+import scala.collection.JavaConverters._</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>opaque trait used for getWithChecksum calls.</p></li>
+<li><p>the implementation should be private to the cache,</p></li>
+<li><p>to inhibit peeking</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+</dl>
+<p>trait Checksum extends Any</p>
+<dl class="simple">
+<dt>object ScopedCacheKey {</dt><dd><p>private[ScopedCacheKey] val builder = new ThreadLocalStringBuilder(64)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>base class for cache keys needing scoping</p></li>
+<li></li>
+<li><p>&#64;param globalNamespace</p></li>
+<li><p>the project-level namespace</p></li>
+<li><p>&#64;param cacheNamespace</p></li>
+<li><p>the cache-level namespace</p></li>
+<li><p>&#64;param version</p></li>
+<li><p>the version of serialization for values</p></li>
+<li><p>&#64;param scopes</p></li>
+<li><p>additional key scopes</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>abstract class ScopedCacheKey(</dt><dd><p>globalNamespace: String,
+cacheNamespace: String,
+version: Int,
+scopes: String*) {
+import constants._</p>
+<dl>
+<dt>override lazy val toString = {</dt><dd><dl class="simple">
+<dt>val builder = ScopedCacheKey</dt><dd><p>.builder()
+.append(globalNamespace)
+.append(Colon)
+.append(cacheNamespace)
+.append(Colon)
+.append(version)</p>
+</dd>
+<dt>scopes foreach {</dt><dd><p>builder.append(Colon).append(_)</p>
+</dd>
+</dl>
+<p>}</p>
+<p>builder.toString</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Shared trait for reading from a cache</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>trait ReadCache[K, V] {</dt><dd><p>def get(keys: Seq[K]): Future[KeyValueResult[K, V]]</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>get the value with an opaque checksum that can be passed in</p></li>
+<li><p>a checkAndSet operation. If there is a deserialization error,</p></li>
+<li><p>the checksum is still returned</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+</dl>
+<p>def getWithChecksum(keys: Seq[K]): Future[CsKeyValueResult[K, V]]</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>release any underlying resources</p></li>
+</ul>
+<p><a href="#id9"><span class="problematic" id="id10">*</span></a>/</p>
+</dd>
+</dl>
+<p>def release(): Unit</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>allows one ReadCache to wrap another</p></li>
+</ul>
+<p><a href="#id11"><span class="problematic" id="id12">*</span></a>/</p>
+</dd>
+<dt>trait ReadCacheWrapper[K, V, This &lt;: ReadCache[K, V]] extends ReadCache[K, V] {</dt><dd><p>def underlyingCache: This</p>
+<p>override def get(keys: Seq[K]) = underlyingCache.get(keys)</p>
+<p>override def getWithChecksum(keys: Seq[K]) = underlyingCache.getWithChecksum(keys)</p>
+<p>override def release() = underlyingCache.release()</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Simple trait for a cache supporting multi-get and single set</p></li>
+</ul>
+<p><a href="#id13"><span class="problematic" id="id14">*</span></a>/</p>
+</dd>
+<dt>trait Cache[K, V] extends ReadCache[K, V] {</dt><dd><p>def add(key: K, value: V): Future[Boolean]</p>
+<p>def checkAndSet(key: K, value: V, checksum: Checksum): Future[Boolean]</p>
+<p>def set(key: K, value: V): Future[Unit]</p>
+<dl>
+<dt>def set(pairs: Seq[(K, V)]): Future[Unit] = {</dt><dd><dl>
+<dt>Future.join {</dt><dd><dl class="simple">
+<dt>pairs map {</dt><dd><p>case (key, value) =&gt; set(key, value)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Replaces the value for an existing key.  If the key doesn’t exist, this has no effect.</p></li>
+<li><p>&#64;return true if replaced, false if not found</p></li>
+</ul>
+<p><a href="#id15"><span class="problematic" id="id16">*</span></a>/</p>
+</dd>
+</dl>
+<p>def replace(key: K, value: V): Future[Boolean]</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Deletes a value from cache.</p></li>
+<li><p>&#64;return true if deleted, false if not found</p></li>
+</ul>
+<p><a href="#id17"><span class="problematic" id="id18">*</span></a>/</p>
+</dd>
+</dl>
+<p>def delete(key: K): Future[Boolean]</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>allows one cache to wrap another</p></li>
+</ul>
+<p><a href="#id19"><span class="problematic" id="id20">*</span></a>/</p>
+</dd>
+<dt>trait CacheWrapper[K, V] extends Cache[K, V] with ReadCacheWrapper[K, V, Cache[K, V]] {</dt><dd><p>override def add(key: K, value: V) = underlyingCache.add(key, value)</p>
+<dl class="simple">
+<dt>override def checkAndSet(key: K, value: V, checksum: Checksum) =</dt><dd><p>underlyingCache.checkAndSet(key, value, checksum)</p>
+</dd>
+</dl>
+<p>override def set(key: K, value: V) = underlyingCache.set(key, value)</p>
+<p>override def replace(key: K, value: V) = underlyingCache.replace(key, value)</p>
+<p>override def delete(key: K) = underlyingCache.delete(key)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Switch between two caches with a decider value</p></li>
+</ul>
+<p><a href="#id21"><span class="problematic" id="id22">*</span></a>/</p>
+</dd>
+<dt>class DeciderableCache[K, V](primary: Cache[K, V], secondary: Cache[K, V], isAvailable: =&gt; Boolean)</dt><dd><blockquote>
+<div><p>extends CacheWrapper[K, V] {</p>
+</div></blockquote>
+<p>override def underlyingCache = if (isAvailable) primary else secondary</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private object MutableMapCache {</dt><dd><p>case class IntChecksum(i: Int) extends AnyVal with Checksum</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>implementation of a Cache with a mutable.Map</p></li>
+</ul>
+<p><a href="#id23"><span class="problematic" id="id24">*</span></a>/</p>
+</dd>
+<dt>class MutableMapCache[K, V](underlying: mutable.Map[K, V]) extends Cache[K, V] {</dt><dd><p>import MutableMapCache.IntChecksum</p>
+<p>protected[this] def checksum(value: V): Checksum = IntChecksum(value.hashCode)</p>
+<dl>
+<dt>override def get(keys: Seq[K]): Future[KeyValueResult[K, V]] = Future {</dt><dd><p>val founds = Map.newBuilder[K, V]
+val iter = keys.iterator
+while (iter.hasNext) {</p>
+<blockquote>
+<div><p>val key = iter.next()
+synchronized {</p>
+<blockquote>
+<div><p>underlying.get(key)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} match {</dt><dd><p>case Some(v) =&gt; founds += key -&gt; v
+case None =&gt;</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}
+val found = founds.result()
+val notFound = NotFound(keys, found.keySet)
+KeyValueResult(found, notFound)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>override def getWithChecksum(keys: Seq[K]): Future[CsKeyValueResult[K, V]] = Future {</dt><dd><p>val founds = Map.newBuilder[K, (Return[V], Checksum)]
+val iter = keys.iterator
+while (iter.hasNext) {</p>
+<blockquote>
+<div><p>val key = iter.next()
+synchronized {</p>
+<blockquote>
+<div><p>underlying.get(key)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} match {</dt><dd><p>case Some(value) =&gt; founds += key -&gt; (Return(value), checksum(value))
+case None =&gt;</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}
+val found = founds.result()
+val notFound = NotFound(keys, found.keySet)
+KeyValueResult(found, notFound)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>override def add(key: K, value: V): Future[Boolean] =</dt><dd><dl>
+<dt>synchronized {</dt><dd><dl class="simple">
+<dt>underlying.get(key) match {</dt><dd><dl class="simple">
+<dt>case Some(_) =&gt;</dt><dd><p>Future.False</p>
+</dd>
+<dt>case None =&gt;</dt><dd><p>underlying += key -&gt; value
+Future.True</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>override def checkAndSet(key: K, value: V, cs: Checksum): Future[Boolean] =</dt><dd><dl>
+<dt>synchronized {</dt><dd><dl>
+<dt>underlying.get(key) match {</dt><dd><dl>
+<dt>case Some(current) =&gt;</dt><dd><dl class="simple">
+<dt>if (checksum(current) == cs) {</dt><dd><p>// checksums match, set value
+underlying += key -&gt; value
+Future.True</p>
+</dd>
+<dt>} else {</dt><dd><p>// checksums didn’t match, so no set
+Future.False</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>case None =&gt;</dt><dd><p>// if nothing there, the checksums can’t be compared
+Future.False</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>override def set(key: K, value: V): Future[Unit] = {</dt><dd><dl class="simple">
+<dt>synchronized {</dt><dd><p>underlying += key -&gt; value</p>
+</dd>
+</dl>
+<p>}
+Future.Done</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>override def replace(key: K, value: V): Future[Boolean] = synchronized {</dt><dd><dl class="simple">
+<dt>if (underlying.contains(key)) {</dt><dd><p>underlying(key) = value
+Future.True</p>
+</dd>
+<dt>} else {</dt><dd><p>Future.False</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>override def delete(key: K): Future[Boolean] = synchronized {</dt><dd><p>if (underlying.remove(key).nonEmpty) Future.True else Future.False</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>override def release(): Unit = synchronized {</dt><dd><p>underlying.clear()</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>In-memory implementation of a cache with LRU semantics and a TTL.</p></li>
+</ul>
+<p><a href="#id25"><span class="problematic" id="id26">*</span></a>/</p>
+</dd>
+<dt>class ExpiringLruCache[K, V](ttl: Duration, maximumSize: Int)</dt><dd><dl>
+<dt>extends MutableMapCache[K, V](</dt><dd><p>// TODO: consider wiring the Cache interface directly to the
+// Guava Cache, instead of introducing two layers of indirection
+CacheBuilder.newBuilder</p>
+<blockquote>
+<div><p>.asInstanceOf[CacheBuilder[K, V]]
+.expireAfterWrite(ttl.inMilliseconds, TimeUnit.MILLISECONDS)
+.initialCapacity(maximumSize)
+.maximumSize(maximumSize)
+.build[K, V]()
+.asMap
+.asScala</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>An empty cache that stays empty</p></li>
+</ul>
+<p><a href="#id27"><span class="problematic" id="id28">*</span></a>/</p>
+</dd>
+<dt>class NullCache[K, V] extends Cache[K, V] {</dt><dd><p>lazy val futureTrue = Future.value(true)
+override def get(keys: Seq[K]) = Future.value(KeyValueResult(notFound = keys.toSet))
+override def getWithChecksum(keys: Seq[K]) = Future.value(KeyValueResult(notFound = keys.toSet))
+override def add(key: K, value: V) = futureTrue
+override def checkAndSet(key: K, value: V, checksum: Checksum) = Future.value(true)
+override def set(key: K, value: V) = Future.Done
+override def replace(key: K, value: V) = futureTrue
+override def delete(key: K) = futureTrue
+override def release() = ()</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../../_sources/tweetypie/servo/repo/src/main/scala/com/twitter/servo/cache/Cache.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

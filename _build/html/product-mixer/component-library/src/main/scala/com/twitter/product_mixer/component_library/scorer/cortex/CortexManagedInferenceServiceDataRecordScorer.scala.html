@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../../../" id="documentation_options" src="../../../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.product_mixer.component_library.scorer.cortex</p>
+<p>import com.google.protobuf.ByteString
+import com.twitter.ml.prediction_service.BatchPredictionRequest
+import com.twitter.ml.prediction_service.BatchPredictionResponse
+import com.twitter.product_mixer.component_library.scorer.common.ManagedModelClient
+import com.twitter.product_mixer.component_library.scorer.common.ModelSelector
+import com.twitter.product_mixer.core.feature.Feature
+import com.twitter.product_mixer.core.feature.datarecord.BaseDataRecordFeature
+import com.twitter.product_mixer.core.feature.datarecord.TensorDataRecordCompatible
+import com.twitter.product_mixer.core.feature.featuremap.FeatureMap
+import com.twitter.product_mixer.core.feature.featuremap.datarecord.DataRecordConverter
+import com.twitter.product_mixer.core.feature.featuremap.datarecord.DataRecordExtractor
+import com.twitter.product_mixer.core.feature.featuremap.datarecord.FeaturesScope
+import com.twitter.product_mixer.core.functional_component.scorer.Scorer
+import com.twitter.product_mixer.core.model.common.CandidateWithFeatures
+import com.twitter.product_mixer.core.model.common.UniversalNoun
+import com.twitter.product_mixer.core.model.common.identifier.ScorerIdentifier
+import com.twitter.product_mixer.core.pipeline.PipelineQuery
+import com.twitter.product_mixer.core.pipeline.pipeline_failure.IllegalStateFailure
+import inference.GrpcService
+import inference.GrpcService.ModelInferRequest
+import inference.GrpcService.ModelInferResponse
+import com.twitter.product_mixer.core.pipeline.pipeline_failure.PipelineFailure
+import com.twitter.stitch.Stitch
+import org.apache.thrift.TDeserializer
+import org.apache.thrift.TSerializer
+import scala.collection.JavaConverters._</p>
+<dl>
+<dt>private[cortex] class CortexManagedDataRecordScorer[</dt><dd><p>Query &lt;: PipelineQuery,
+Candidate &lt;: UniversalNoun[Any],
+QueryFeatures &lt;: BaseDataRecordFeature[Query, _],
+CandidateFeatures &lt;: BaseDataRecordFeature[Candidate, _],
+ResultFeatures &lt;: BaseDataRecordFeature[Candidate, _] with TensorDataRecordCompatible[_]</p>
+</dd>
+<dt>](</dt><dd><p>override val identifier: ScorerIdentifier,
+modelSignature: String,
+modelSelector: ModelSelector[Query],
+modelClient: ManagedModelClient,
+queryFeatures: FeaturesScope[QueryFeatures],
+candidateFeatures: FeaturesScope[CandidateFeatures],
+resultFeatures: Set[ResultFeatures])</p>
+<blockquote>
+<div><p>extends Scorer[Query, Candidate] {</p>
+</div></blockquote>
+<p>require(resultFeatures.nonEmpty, “Result features cannot be empty”)
+override val features: Set[Feature[_, _]] = resultFeatures.asInstanceOf[Set[Feature[_, _]]]</p>
+<p>private val queryDataRecordAdapter = new DataRecordConverter(queryFeatures)
+private val candidatesDataRecordAdapter = new DataRecordConverter(candidateFeatures)
+private val resultDataRecordExtractor = new DataRecordExtractor(resultFeatures)</p>
+<dl class="simple">
+<dt>private val localTSerializer = new ThreadLocal[TSerializer] {</dt><dd><p>override protected def initialValue: TSerializer = new TSerializer()</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private val localTDeserializer = new ThreadLocal[TDeserializer] {</dt><dd><p>override protected def initialValue: TDeserializer = new TDeserializer()</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>override def apply(</dt><dd><p>query: Query,
+candidates: Seq[CandidateWithFeatures[Candidate]]</p>
+</dd>
+<dt>): Stitch[Seq[FeatureMap]] = {</dt><dd><p>modelClient.score(buildRequest(query, candidates)).map(buildResponse(candidates, _))</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Takes candidates to be scored and converts it to a ModelInferRequest that can be passed to the</p></li>
+<li><p>managed ML service</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>private def buildRequest(</dt><dd><p>query: Query,
+scorerCandidates: Seq[CandidateWithFeatures[Candidate]]</p>
+</dd>
+<dt>): ModelInferRequest = {</dt><dd><p>// Convert the feature maps to thrift data records and construct thrift request.
+val thriftDataRecords = scorerCandidates.map { candidate =&gt;</p>
+<blockquote>
+<div><p>candidatesDataRecordAdapter.toDataRecord(candidate.features)</p>
+</div></blockquote>
+<p>}
+val batchRequest = new BatchPredictionRequest(thriftDataRecords.asJava)
+query.features.foreach { featureMap =&gt;</p>
+<blockquote>
+<div><p>batchRequest.setCommonFeatures(queryDataRecordAdapter.toDataRecord(featureMap))</p>
+</div></blockquote>
+<p>}
+val serializedBatchRequest = localTSerializer.get().serialize(batchRequest)</p>
+<p>// Build Tensor Request
+val requestBuilder = ModelInferRequest</p>
+<blockquote>
+<div><p>.newBuilder()</p>
+</div></blockquote>
+<dl class="simple">
+<dt>modelSelector.apply(query).foreach { modelName =&gt;</dt><dd><p>requestBuilder.setModelName(modelName) // model name in the model config</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>val inputTensorBuilder = ModelInferRequest.InferInputTensor</dt><dd><p>.newBuilder()
+.setName(“request”)
+.setDatatype(“UINT8”)
+.addShape(serializedBatchRequest.length)</p>
+</dd>
+<dt>val inferParameter = GrpcService.InferParameter</dt><dd><p>.newBuilder()
+.setStringParam(modelSignature) // signature of exported tf function
+.build()</p>
+</dd>
+<dt>requestBuilder</dt><dd><p>.addInputs(inputTensorBuilder)
+.addRawInputContents(ByteString.copyFrom(serializedBatchRequest))
+.putParameters(“signature_name”, inferParameter)
+.build()</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private def buildResponse(</dt><dd><p>scorerCandidates: Seq[CandidateWithFeatures[Candidate]],
+response: ModelInferResponse</p>
+</dd>
+</dl>
+<p>): Seq[FeatureMap] = {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>val responseByteString = if (response.getRawOutputContentsList.isEmpty()) {</dt><dd><dl class="simple">
+<dt>throw PipelineFailure(</dt><dd><p>IllegalStateFailure,
+“Model inference response has empty raw outputContents”)</p>
+</dd>
+</dl>
+</dd>
+<dt>} else {</dt><dd><p>response.getRawOutputContents(0)</p>
+</dd>
+</dl>
+<p>}
+val batchPredictionResponse: BatchPredictionResponse = new BatchPredictionResponse()
+localTDeserializer.get().deserialize(batchPredictionResponse, responseByteString.toByteArray)</p>
+<p>// get the prediction values from the batch prediction response
+val resultScoreMaps =</p>
+<blockquote>
+<div><p>batchPredictionResponse.predictions.asScala.map(resultDataRecordExtractor.fromDataRecord)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>if (resultScoreMaps.size != scorerCandidates.size) {</dt><dd><p>throw PipelineFailure(IllegalStateFailure, “Result Size mismatched candidates size”)</p>
+</dd>
+</dl>
+<p>}</p>
+<p>resultScoreMaps</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../../../_sources/product-mixer/component-library/src/main/scala/com/twitter/product_mixer/component_library/scorer/cortex/CortexManagedInferenceServiceDataRecordScorer.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

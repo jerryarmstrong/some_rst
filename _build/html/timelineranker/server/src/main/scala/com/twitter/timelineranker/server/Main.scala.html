@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.timelineranker.server</p>
+<p>import com.twitter.conversions.DurationOps._
+import com.twitter.finagle.mtls.server.MtlsStackServer._
+import com.twitter.finagle.mux
+import com.twitter.finagle.param.Reporter
+import com.twitter.finagle.stats.DefaultStatsReceiver
+import com.twitter.finagle.util.NullReporterFactory
+import com.twitter.finagle.ListeningServer
+import com.twitter.finagle.ServiceFactory
+import com.twitter.finagle.ThriftMux
+import com.twitter.finagle.mtls.authorization.server.MtlsServerSessionTrackerFilter
+import com.twitter.finagle.ssl.OpportunisticTls
+import com.twitter.finatra.thrift.filters.LoggingMDCFilter
+import com.twitter.finatra.thrift.filters.ThriftMDCFilter
+import com.twitter.finatra.thrift.filters.TraceIdMDCFilter
+import com.twitter.logging.Logger
+import com.twitter.server.TwitterServer
+import com.twitter.servo.util.MemoizingStatsReceiver
+import com.twitter.thriftwebforms.MethodOptions
+import com.twitter.thriftwebforms.TwitterServerThriftWebForms
+import com.twitter.timelineranker.config.RuntimeConfigurationImpl
+import com.twitter.timelineranker.config.TimelineRankerFlags
+import com.twitter.timelineranker.thriftscala
+import com.twitter.timelines.config.DefaultDynamicConfigStoreFactory
+import com.twitter.timelines.config.EmptyDynamicConfigStoreFactory
+import com.twitter.timelines.config.Env
+import com.twitter.timelines.features.app.ForcibleFeatureValues
+import com.twitter.timelines.server.AdminMutableDeciders
+import com.twitter.timelines.warmup.NoWarmup
+import com.twitter.timelines.warmup.WarmupFlag
+import com.twitter.util.Await
+import java.net.SocketAddress
+import org.apache.thrift.protocol.TBinaryProtocol
+import org.apache.thrift.protocol.TCompactProtocol
+import org.apache.thrift.protocol.TProtocolFactory</p>
+<p>object Main extends TimelineRankerServer</p>
+<dl class="simple">
+<dt>class TimelineRankerServer extends {</dt><dd><dl class="simple">
+<dt>override val statsReceiver: MemoizingStatsReceiver = new MemoizingStatsReceiver(</dt><dd><p>DefaultStatsReceiver)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>} with TwitterServer with AdminMutableDeciders with ForcibleFeatureValues with WarmupFlag {</p>
+<blockquote>
+<div><p>val timelineRankerFlags: TimelineRankerFlags = new TimelineRankerFlags(flag)
+lazy val mainLogger: Logger = Logger.get(“Main”)</p>
+<dl class="simple">
+<dt>private[this] lazy val thriftWebFormsAccess = if (timelineRankerFlags.getEnv == Env.local) {</dt><dd><p>MethodOptions.Access.Default</p>
+</dd>
+<dt>} else {</dt><dd><p>MethodOptions.Access.ByLdapGroup(Seq(“timeline-team”, “timelineranker-twf-read”))</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private[this] def mkThriftWebFormsRoutes() =</dt><dd><dl class="simple">
+<dt>TwitterServerThriftWebForms[thriftscala.TimelineRanker.MethodPerEndpoint](</dt><dd><p>thriftServicePort = timelineRankerFlags.servicePort().getPort,
+defaultMethodAccess = thriftWebFormsAccess,
+methodOptions = TimelineRankerThriftWebForms.methodOptions,
+serviceIdentifier = timelineRankerFlags.serviceIdentifier(),
+opportunisticTlsLevel = OpportunisticTls.Required,</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>override protected def failfastOnFlagsNotParsed = true
+override val defaultCloseGracePeriod = 10.seconds</p>
+<dl>
+<dt>private[this] def mkServer(</dt><dd><p>labelSuffix: String,
+socketAddress: SocketAddress,
+protocolFactory: TProtocolFactory,
+serviceFactory: ServiceFactory[Array[Byte], Array[Byte]],
+opportunisticTlsLevel: OpportunisticTls.Level,</p>
+</dd>
+<dt>): ListeningServer = {</dt><dd><p>val compressor = Seq(mux.transport.Compression.lz4Compressor(highCompression = false))
+val decompressor = Seq(mux.transport.Compression.lz4Decompressor())
+val compressionLevel =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (timelineRankerFlags.enableThriftmuxCompression()) {</dt><dd><p>mux.transport.CompressionLevel.Desired</p>
+</dd>
+<dt>} else {</dt><dd><p>mux.transport.CompressionLevel.Off</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<dl class="simple">
+<dt>val mtlsSessionTrackerFilter =</dt><dd><p>new MtlsServerSessionTrackerFilter[mux.Request, mux.Response](statsReceiver)</p>
+</dd>
+</dl>
+<p>val loggingMDCFilter = { new LoggingMDCFilter }.toFilter[mux.Request, mux.Response]
+val traceIdMDCFilter = { new TraceIdMDCFilter }.toFilter[mux.Request, mux.Response]
+val thriftMDCFilter = { new ThriftMDCFilter }.toFilter[mux.Request, mux.Response]
+val filters = mtlsSessionTrackerFilter</p>
+<blockquote>
+<div><p>.andThen(loggingMDCFilter)
+.andThen(traceIdMDCFilter)
+.andThen(thriftMDCFilter)</p>
+</div></blockquote>
+<p>ThriftMux.server
+// By default, finagle logs exceptions to chickadee, which is deprecated and
+// basically unused. To avoid wasted overhead, we explicitly disable the reporter.</p>
+<blockquote>
+<div><p>.configured(Reporter(NullReporterFactory))
+.withLabel(“timelineranker.” + labelSuffix)
+.withMutualTls(timelineRankerFlags.getServiceIdentifier)
+.withOpportunisticTls(opportunisticTlsLevel)
+.withProtocolFactory(protocolFactory)
+.withCompressionPreferences.compression(compressionLevel, compressor)
+.withCompressionPreferences.decompression(compressionLevel, decompressor)
+.filtered(filters)
+.serve(socketAddress, serviceFactory)</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def main(): Unit = {</dt><dd><dl>
+<dt>try {</dt><dd><dl class="simple">
+<dt>val parsedOpportunisticTlsLevel = OpportunisticTls.Values</dt><dd><dl class="simple">
+<dt>.find(</dt><dd><p>_.value.toLowerCase == timelineRankerFlags.opportunisticTlsLevel().toLowerCase).getOrElse(
+OpportunisticTls.Desired)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>TwitterServerThriftWebForms.addAdminRoutes(this, mkThriftWebFormsRoutes())
+addAdminMutableDeciderRoutes(timelineRankerFlags.getEnv)</p>
+<dl class="simple">
+<dt>val configStoreFactory = if (timelineRankerFlags.getEnv == Env.local) {</dt><dd><p>EmptyDynamicConfigStoreFactory</p>
+</dd>
+<dt>} else {</dt><dd><p>new DefaultDynamicConfigStoreFactory</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>val runtimeConfiguration = new RuntimeConfigurationImpl(</dt><dd><p>timelineRankerFlags,
+configStoreFactory,
+decider,
+forcedFeatureValues = getFeatureSwitchOverrides,
+statsReceiver</p>
+</dd>
+</dl>
+<p>)</p>
+<p>val timelineRankerBuilder = new TimelineRankerBuilder(runtimeConfiguration)</p>
+<dl>
+<dt>val warmup = if (shouldWarmup) {</dt><dd><dl class="simple">
+<dt>new Warmup(</dt><dd><p>timelineRankerBuilder.timelineRanker,
+runtimeConfiguration.underlyingClients.timelineRankerForwardingClient,
+mainLogger</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>} else {</dt><dd><p>new NoWarmup()</p>
+</dd>
+</dl>
+<p>}</p>
+<p>warmup.prebindWarmup()</p>
+<p>// Create Thrift services that use the binary Thrift protocol, and the compact one.
+val server =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>mkServer(</dt><dd><p>“binary”,
+timelineRankerFlags.servicePort(),
+new TBinaryProtocol.Factory(),
+timelineRankerBuilder.serviceFactory,
+parsedOpportunisticTlsLevel,</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<dl>
+<dt>val compactServer =</dt><dd><dl class="simple">
+<dt>mkServer(</dt><dd><p>“compact”,
+timelineRankerFlags.serviceCompactPort(),
+new TCompactProtocol.Factory(),
+timelineRankerBuilder.compactProtocolServiceFactory,
+parsedOpportunisticTlsLevel,</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>mainLogger.info(</dt><dd><p>s”Thrift binary server bound to service port [${timelineRankerFlags.servicePort()}]”)</p>
+</dd>
+</dl>
+<p>closeOnExit(server)
+mainLogger.info(</p>
+<blockquote>
+<div><p>s”Thrift compact server bound to service port [${timelineRankerFlags.serviceCompactPort()}]”)</p>
+</div></blockquote>
+<p>closeOnExit(compactServer)</p>
+<p>warmup.warmupComplete()</p>
+<p>mainLogger.info(“ready: server”)
+Await.ready(server)
+Await.ready(compactServer)</p>
+</dd>
+<dt>} catch {</dt><dd><dl class="simple">
+<dt>case e: Throwable =&gt;</dt><dd><p>e.printStackTrace()
+mainLogger.error(e, s”failure in main”)
+System.exit(1)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/timelineranker/server/src/main/scala/com/twitter/timelineranker/server/Main.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

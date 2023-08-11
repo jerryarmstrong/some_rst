@@ -1,0 +1,461 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../../" id="documentation_options" src="../../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.servo.cache</p>
+<p>import com.twitter.finagle.stats.NullStatsReceiver
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.util.Duration
+import com.twitter.util.Future
+import com.twitter.util.Return
+import com.twitter.util.Throw</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>MigratingReadCache supports a gradual migration from one cache to another. Reads from the</p></li>
+<li><p>cache are compared to reads from the darkCache and new values are written to the darkCache</p></li>
+<li><p>if necessary.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>class MigratingReadCache[K, V](</dt><dd><p>cache: ReadCache[K, V],
+darkCache: Cache[K, V],
+statsReceiver: StatsReceiver = NullStatsReceiver)</p>
+<blockquote>
+<div><p>extends ReadCache[K, V] {</p>
+</div></blockquote>
+<p>private[this] val scopedStatsReceiver = statsReceiver.scope(“migrating_read_cache”)
+private[this] val getScope = scopedStatsReceiver.scope(“get”)
+private[this] val getMismatchedResultsCounter = getScope.counter(“mismatched_results”)
+private[this] val getMissingResultsCounter = getScope.counter(“missing_results”)
+private[this] val getUnexpectedResultsCounter = getScope.counter(“unexpected_results”)
+private[this] val getMatchingResultsCounter = getScope.counter(“matching_results”)</p>
+<p>private[this] val getWithChecksumScope = scopedStatsReceiver.scope(“get_with_cheksum”)
+private[this] val getWithChecksumMismatchedResultsCounter =</p>
+<blockquote>
+<div><p>getWithChecksumScope.counter(“mismatched_results”)</p>
+</div></blockquote>
+<dl>
+<dt>private[this] val getWithChecksumMissingResultsCounter =</dt><dd><p>getWithChecksumScope.counter(“missing_results”)</p>
+</dd>
+<dt>private[this] val getWithChecksumUnexpectedResultsCounter =</dt><dd><p>getWithChecksumScope.counter(“unexpected_results”)</p>
+</dd>
+<dt>private[this] val getWithChecksumMatchingResultsCounter =</dt><dd><p>getWithChecksumScope.counter(“matching_results”)</p>
+</dd>
+<dt>override def get(keys: Seq[K]): Future[KeyValueResult[K, V]] = {</dt><dd><dl>
+<dt>cache.get(keys) onSuccess { result =&gt;</dt><dd><dl>
+<dt>darkCache.get(keys) onSuccess { darkResult =&gt;</dt><dd><dl>
+<dt>keys foreach { k =&gt;</dt><dd><dl>
+<dt>(result(k), darkResult(k)) match {</dt><dd><p>// compare values, set if they differ
+case (Return(Some(v)), Return(Some(dv))) if (v != dv) =&gt;</p>
+<blockquote>
+<div><p>getMismatchedResultsCounter.incr()
+darkCache.set(k, v)</p>
+</div></blockquote>
+<p>// set a value if missing
+case (Return(Some(v)), Return.None | Throw(_)) =&gt;</p>
+<blockquote>
+<div><p>getMissingResultsCounter.incr()
+darkCache.set(k, v)</p>
+</div></blockquote>
+<p>// remove if necessary
+case (Return.None, Return(Some(_)) | Throw(_)) =&gt;</p>
+<blockquote>
+<div><p>getUnexpectedResultsCounter.incr()
+darkCache.delete(k)</p>
+</div></blockquote>
+<p>// do nothing otherwise
+case _ =&gt;</p>
+<blockquote>
+<div><p>getMatchingResultsCounter.incr()
+()</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>override def getWithChecksum(keys: Seq[K]): Future[CsKeyValueResult[K, V]] = {</dt><dd><dl>
+<dt>cache.getWithChecksum(keys) onSuccess { result =&gt;</dt><dd><p>// no point in the getWithChecksum from the darkCache
+darkCache.get(keys) onSuccess { darkResult =&gt;</p>
+<blockquote>
+<div><dl>
+<dt>keys foreach { k =&gt;</dt><dd><dl>
+<dt>(result(k), darkResult(k)) match {</dt><dd><p>// compare values, set if they differ
+case (Return(Some((Return(v), _))), Return(Some(dv))) if (v != dv) =&gt;</p>
+<blockquote>
+<div><p>getWithChecksumMismatchedResultsCounter.incr()
+darkCache.set(k, v)</p>
+</div></blockquote>
+<p>// set a value if missing
+case (Return(Some((Return(v), _))), Return.None | Throw(_)) =&gt;</p>
+<blockquote>
+<div><p>getWithChecksumMissingResultsCounter.incr()
+darkCache.set(k, v)</p>
+</div></blockquote>
+<p>// remove if necessary
+case (Return.None, Return(Some(_)) | Throw(_)) =&gt;</p>
+<blockquote>
+<div><p>getWithChecksumUnexpectedResultsCounter.incr()
+darkCache.delete(k)</p>
+</div></blockquote>
+<p>// do nothing otherwise
+case _ =&gt;</p>
+<blockquote>
+<div><p>getWithChecksumMatchingResultsCounter.incr()
+()</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>override def release(): Unit = {</dt><dd><p>cache.release()
+darkCache.release()</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>MigratingCache supports a gradual migration from one cache to another. Writes to the cache</p></li>
+<li><p>are propogated to the darkCache. Reads from the cache are compared to reads from the darkCache</p></li>
+<li><p>and new values are written to the darkCache if necessary.</p></li>
+<li></li>
+<li><p>Writes to the darkCache are not locking writes, so there is some risk of inconsistencies from</p></li>
+<li><p>race conditions. However, writes to the darkCache only occur if they succeed in the cache, so</p></li>
+<li><p>if a checkAndSet fails, for example, no write is issued to the darkCache.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>class MigratingCache[K, V](</dt><dd><p>cache: Cache[K, V],
+darkCache: Cache[K, V],
+statsReceiver: StatsReceiver = NullStatsReceiver)</p>
+<blockquote>
+<div><p>extends MigratingReadCache(cache, darkCache, statsReceiver)
+with Cache[K, V] {</p>
+</div></blockquote>
+<dl>
+<dt>override def add(key: K, value: V): Future[Boolean] = {</dt><dd><dl>
+<dt>cache.add(key, value) onSuccess { wasAdded =&gt;</dt><dd><dl class="simple">
+<dt>if (wasAdded) {</dt><dd><p>darkCache.set(key, value)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>override def checkAndSet(key: K, value: V, checksum: Checksum): Future[Boolean] = {</dt><dd><dl>
+<dt>cache.checkAndSet(key, value, checksum) onSuccess { wasSet =&gt;</dt><dd><dl class="simple">
+<dt>if (wasSet) {</dt><dd><p>darkCache.set(key, value)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>override def set(key: K, value: V): Future[Unit] = {</dt><dd><dl class="simple">
+<dt>cache.set(key, value) onSuccess { _ =&gt;</dt><dd><p>darkCache.set(key, value)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>override def replace(key: K, value: V): Future[Boolean] = {</dt><dd><dl>
+<dt>cache.replace(key, value) onSuccess { wasReplaced =&gt;</dt><dd><dl class="simple">
+<dt>if (wasReplaced) {</dt><dd><p>darkCache.set(key, value)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>override def delete(key: K): Future[Boolean] = {</dt><dd><dl>
+<dt>cache.delete(key) onSuccess { wasDeleted =&gt;</dt><dd><dl class="simple">
+<dt>if (wasDeleted) {</dt><dd><p>darkCache.delete(key)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Like MigratingCache but for TtlCaches</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>class MigratingTtlCache[K, V](</dt><dd><p>cache: TtlCache[K, V],
+darkCache: TtlCache[K, V],
+ttl: (K, V) =&gt; Duration)</p>
+<blockquote>
+<div><p>extends MigratingReadCache(cache, new TtlCacheToCache(darkCache, ttl))
+with TtlCache[K, V] {</p>
+</div></blockquote>
+<dl>
+<dt>override def add(key: K, value: V, ttl: Duration): Future[Boolean] = {</dt><dd><dl>
+<dt>cache.add(key, value, ttl) onSuccess { wasAdded =&gt;</dt><dd><dl class="simple">
+<dt>if (wasAdded) {</dt><dd><p>darkCache.set(key, value, ttl)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>override def checkAndSet(key: K, value: V, checksum: Checksum, ttl: Duration): Future[Boolean] = {</dt><dd><dl>
+<dt>cache.checkAndSet(key, value, checksum, ttl) onSuccess { wasSet =&gt;</dt><dd><dl class="simple">
+<dt>if (wasSet) {</dt><dd><p>darkCache.set(key, value, ttl)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>override def set(key: K, value: V, ttl: Duration): Future[Unit] = {</dt><dd><dl class="simple">
+<dt>cache.set(key, value, ttl) onSuccess { _ =&gt;</dt><dd><p>darkCache.set(key, value, ttl)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>override def replace(key: K, value: V, ttl: Duration): Future[Boolean] = {</dt><dd><dl>
+<dt>cache.replace(key, value, ttl) onSuccess { wasReplaced =&gt;</dt><dd><dl class="simple">
+<dt>if (wasReplaced) {</dt><dd><p>darkCache.set(key, value, ttl)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>override def delete(key: K): Future[Boolean] = {</dt><dd><dl>
+<dt>cache.delete(key) onSuccess { wasDeleted =&gt;</dt><dd><dl class="simple">
+<dt>if (wasDeleted) {</dt><dd><p>darkCache.delete(key)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>override def release(): Unit = {</dt><dd><p>cache.release()
+darkCache.release()</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>A MigratingTtlCache for Memcaches, implementing a migrating incr and decr.  Race conditions</p></li>
+<li><p>are possible and may prevent the counts from being perfectly synchronized.</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+<dt>class MigratingMemcache(</dt><dd><p>cache: Memcache,
+darkCache: Memcache,
+ttl: (String, Array[Byte]) =&gt; Duration)</p>
+<blockquote>
+<div><p>extends MigratingTtlCache[String, Array[Byte]](cache, darkCache, ttl)
+with Memcache {</p>
+</div></blockquote>
+<dl>
+<dt>def incr(key: String, delta: Long = 1): Future[Option[Long]] = {</dt><dd><dl>
+<dt>cache.incr(key, delta) onSuccess {</dt><dd><dl>
+<dt>case None =&gt;</dt><dd><p>darkCache.delete(key)</p>
+</dd>
+<dt>case Some(value) =&gt;</dt><dd><dl>
+<dt>darkCache.incr(key, delta) onSuccess {</dt><dd><p>case Some(<cite>value</cite>) =&gt; // same value!
+case _ =&gt;</p>
+<blockquote>
+<div><p>val b = value.toString.getBytes
+darkCache.set(key, b, ttl(key, b))</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def decr(key: String, delta: Long = 1): Future[Option[Long]] = {</dt><dd><dl>
+<dt>cache.decr(key, delta) onSuccess {</dt><dd><dl>
+<dt>case None =&gt;</dt><dd><p>darkCache.delete(key)</p>
+</dd>
+<dt>case Some(value) =&gt;</dt><dd><dl>
+<dt>darkCache.decr(key, delta) onSuccess {</dt><dd><p>case Some(<cite>value</cite>) =&gt; // same value!
+case _ =&gt;</p>
+<blockquote>
+<div><p>val b = value.toString.getBytes
+darkCache.set(key, b, ttl(key, b))</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../../_sources/tweetypie/servo/repo/src/main/scala/com/twitter/servo/cache/MigratingCache.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

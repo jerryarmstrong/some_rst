@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../" id="documentation_options" src="../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../_static/doctools.js?v=888ff710"></script>
+    <script src="../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+   
+  <link rel="stylesheet" href="../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>“””For logging model weights.”””
+import itertools
+from typing import Callable, Dict, List, Optional, Union</p>
+<p>from tml.ml_logging.torch_logging import logging  # type: ignore[attr-defined]
+import torch
+import torch.distributed as dist
+from torchrec.distributed.model_parallel import DistributedModelParallel</p>
+<dl>
+<dt>def weights_to_log(</dt><dd><p>model: torch.nn.Module,
+how_to_log: Optional[Union[Callable, Dict[str, Callable]]] = None,</p>
+</dd>
+<dt>):</dt><dd><p>“””Creates dict of reduced weights to log to give sense of training.</p>
+<dl>
+<dt>Args:</dt><dd><p>model: model to traverse.
+how_to_log: if a function, then applies this to every parameter, if a dict</p>
+<blockquote>
+<div><p>then only applies and logs specified parameters.</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>“””
+if not how_to_log:</p>
+<blockquote>
+<div><p>return</p>
+</div></blockquote>
+<p>to_log = dict()
+named_parameters = model.named_parameters()
+logging.info(f”Using DMP: {isinstance(model, DistributedModelParallel)}”)
+if isinstance(model, DistributedModelParallel):</p>
+<blockquote>
+<div><dl class="simple">
+<dt>named_parameters = itertools.chain(</dt><dd><p>named_parameters, model._dmp_wrapped_module.named_parameters()</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>logging.info(</dt><dd><p>f”Using dmp parameters: {list(name for name, _ in model._dmp_wrapped_module.named_parameters())}”</p>
+</dd>
+</dl>
+<p>)
+for param_name, params in named_parameters:</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if callable(how_to_log):</dt><dd><p>how = how_to_log</p>
+</dd>
+<dt>else:</dt><dd><p>how = how_to_log.get(param_name)  # type: ignore[assignment]</p>
+</dd>
+<dt>if not how:</dt><dd><p>continue  # type: ignore</p>
+</dd>
+</dl>
+<p>to_log[f”model/{how.__name__}/{param_name}”] = how(params.detach()).cpu().numpy()</p>
+</div></blockquote>
+<p>return to_log</p>
+</dd>
+<dt>def log_ebc_norms(</dt><dd><p>model_state_dict,
+ebc_keys: List[str],
+sample_size: int = 4_000_000,</p>
+</dd>
+<dt>) -&gt; Dict[str, torch.Tensor]:</dt><dd><p>“””Logs the norms of the embedding tables as specified by ebc_keys.
+As of now, log average norm per rank.</p>
+<dl class="simple">
+<dt>Args:</dt><dd><p>model_state_dict: model.state_dict()
+ebc_keys: list of embedding keys from state_dict to log. Must contain full name,
+i.e. model.embeddings.ebc.embedding_bags.meta__user_id.weight
+sample_size: Limits number of rows per rank to compute average on to avoid OOM.</p>
+</dd>
+</dl>
+<p>“””
+norm_logs = dict()
+for emb_key in ebc_keys:</p>
+<blockquote>
+<div><p>norms = (torch.ones(1, dtype=torch.float32) * -1).to(torch.device(f”cuda:{dist.get_rank()}”))
+if emb_key in model_state_dict:</p>
+<blockquote>
+<div><p>emb_weight = model_state_dict[emb_key]
+try:</p>
+<blockquote>
+<div><p>emb_weight_tensor = emb_weight.local_tensor()</p>
+</div></blockquote>
+<dl class="simple">
+<dt>except AttributeError as e:</dt><dd><p>logging.info(e)
+emb_weight_tensor = emb_weight</p>
+</dd>
+</dl>
+<p>logging.info(“Running Tensor.detach()”)
+emb_weight_tensor = emb_weight_tensor.detach()
+sample_mask = torch.randperm(emb_weight_tensor.shape[0])[</p>
+<blockquote>
+<div><p>: min(sample_size, emb_weight_tensor.shape[0])</p>
+</div></blockquote>
+<p>]
+# WARNING: .cpu() transfer executes malloc that may be the cause of memory leaks
+# Change sample_size if the you observe frequent OOM errors or remove weight logging.
+norms = emb_weight_tensor[sample_mask].cpu().norm(dim=1).to(torch.float32)
+logging.info(f”Norm shape before reduction: {norms.shape}”, rank=-1)
+norms = norms.mean().to(torch.device(f”cuda:{dist.get_rank()}”))</p>
+</div></blockquote>
+<dl class="simple">
+<dt>all_norms = [</dt><dd><p>torch.zeros(1, dtype=norms.dtype).to(norms.device) for _ in range(dist.get_world_size())</p>
+</dd>
+</dl>
+<p>]
+dist.all_gather(all_norms, norms)
+for idx, norm in enumerate(all_norms):</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if norm != -1.0:</dt><dd><p>norm_logs[f”{emb_key}-norm-{idx}”] = norm</p>
+</dd>
+</dl>
+</div></blockquote>
+</div></blockquote>
+<p>logging.info(f”Norm Logs are {norm_logs}”)
+return norm_logs</p>
+</dd>
+</dl>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../_sources/common/log_weights.py.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

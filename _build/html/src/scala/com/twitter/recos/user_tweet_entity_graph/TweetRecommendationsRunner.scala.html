@@ -1,0 +1,525 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../" id="documentation_options" src="../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.recos.user_tweet_entity_graph</p>
+<p>import java.util.Random
+import com.twitter.concurrent.AsyncQueue
+import com.twitter.conversions.DurationOps._
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.graphjet.algorithms._
+import com.twitter.graphjet.algorithms.filters._
+import com.twitter.graphjet.algorithms.counting.TopSecondDegreeByCountResponse
+import com.twitter.graphjet.algorithms.counting.tweet.TopSecondDegreeByCountForTweet
+import com.twitter.graphjet.algorithms.counting.tweet.TopSecondDegreeByCountRequestForTweet
+import com.twitter.graphjet.bipartite.NodeMetadataLeftIndexedMultiSegmentBipartiteGraph
+import com.twitter.logging.Logger
+import com.twitter.recos.graph_common.FinagleStatsReceiverWrapper
+import com.twitter.recos.model.SalsaQueryRunner.SalsaRunnerConfig
+import com.twitter.recos.recos_common.thriftscala.SocialProofType
+import com.twitter.recos.user_tweet_entity_graph.thriftscala.RecommendTweetEntityRequest
+import com.twitter.recos.user_tweet_entity_graph.thriftscala.TweetEntityDisplayLocation
+import com.twitter.recos.user_tweet_entity_graph.thriftscala.TweetType
+import com.twitter.recos.util.Stats.trackBlockStats
+import com.twitter.util.Future
+import com.twitter.util.JavaTimer
+import com.twitter.util.Try
+import it.unimi.dsi.fastutil.longs.Long2DoubleOpenHashMap
+import it.unimi.dsi.fastutil.longs.LongOpenHashSet
+import scala.collection.JavaConverters._</p>
+<p>import com.twitter.graphjet.algorithms.RecommendationType
+import com.twitter.recos.user_tweet_entity_graph.thriftscala.{</p>
+<blockquote>
+<div><p>RecommendationType =&gt; ThriftRecommendationType</p>
+</div></blockquote>
+<p>}
+import scala.collection.Map
+import scala.collection.Set</p>
+<dl>
+<dt>object TweetRecommendationsRunner {</dt><dd><dl class="simple">
+<dt>private val DefaultTweetTypes: Seq[TweetType] =</dt><dd><p>Seq(TweetType.Regular, TweetType.Summary, TweetType.Photo, TweetType.Player)</p>
+</dd>
+</dl>
+<p>private val DefaultF1ExactSocialProofSize = 1
+private val DefaultRareTweetRecencyMillis: Long = 7.days.inMillis</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Map valid social proof types specified by clients to an array of bytes. If clients do not</p></li>
+<li><p>specify any social proof type unions in thrift, it will return an empty set by default.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>private def getSocialProofTypeUnions(</dt><dd><p>socialProofTypeUnions: Option[Set[Seq[SocialProofType]]]</p>
+</dd>
+<dt>): Set[Array[Byte]] = {</dt><dd><dl>
+<dt>socialProofTypeUnions</dt><dd><dl>
+<dt>.map {</dt><dd><dl>
+<dt>_.map {</dt><dd><dl class="simple">
+<dt>_.map {</dt><dd><p>_.getValue.toByte</p>
+</dd>
+</dl>
+<p>}.toArray</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}
+.getOrElse(Set.empty)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def getRecommendationTypes(</dt><dd><p>recommendationTypes: Seq[ThriftRecommendationType]</p>
+</dd>
+<dt>): Set[RecommendationType] = {</dt><dd><dl>
+<dt>recommendationTypes.flatMap {</dt><dd><dl>
+<dt>_ match {</dt><dd><p>case ThriftRecommendationType.Tweet =&gt; Some(RecommendationType.TWEET)
+case ThriftRecommendationType.Hashtag =&gt; Some(RecommendationType.HASHTAG)
+case ThriftRecommendationType.Url =&gt; Some(RecommendationType.URL)
+case _ =&gt;</p>
+<blockquote>
+<div><p>throw new Exception(“Unmatched Recommendation Type in getRecommendationTypes”)</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}.toSet</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def convertThriftEnumsToJavaEnums(</dt><dd><p>maxResults: Option[Map[ThriftRecommendationType, Int]]</p>
+</dd>
+<dt>): Map[RecommendationType, Integer] = {</dt><dd><dl>
+<dt>maxResults</dt><dd><dl>
+<dt>.map {</dt><dd><dl>
+<dt>_.flatMap {</dt><dd><dl>
+<dt>_ match {</dt><dd><p>case (ThriftRecommendationType.Tweet, v) =&gt; Some((RecommendationType.TWEET, v: Integer))
+case (ThriftRecommendationType.Hashtag, v) =&gt;</p>
+<blockquote>
+<div><p>Some((RecommendationType.HASHTAG, v: Integer))</p>
+</div></blockquote>
+<p>case (ThriftRecommendationType.Url, v) =&gt; Some((RecommendationType.URL, v: Integer))
+case _ =&gt;</p>
+<blockquote>
+<div><p>throw new Exception(“Unmatched Recommendation Type in convertThriftEnumsToJavaEnums”)</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}
+.getOrElse(Map.empty)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>The MagicRecsRunner creates a queue of reader threads, MagicRecs, and each one reads from the</p></li>
+<li><p>graph and computes recommendations.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>class TweetRecommendationsRunner(</dt><dd><p>bipartiteGraph: NodeMetadataLeftIndexedMultiSegmentBipartiteGraph,
+salsaRunnerConfig: SalsaRunnerConfig,
+statsReceiverWrapper: FinagleStatsReceiverWrapper) {</p>
+<p>import TweetRecommendationsRunner._</p>
+<p>private val log: Logger = Logger()</p>
+<p>private val stats = statsReceiverWrapper.statsReceiver.scope(this.getClass.getSimpleName)
+private val magicRecsFailureCounter = stats.counter(“failure”)
+private val pollCounter = stats.counter(“poll”)
+private val pollTimeoutCounter = stats.counter(“pollTimeout”)
+private val offerCounter = stats.counter(“offer”)
+private val pollLatencyStat = stats.stat(“pollLatency”)</p>
+<p>private val magicRecsQueue = new AsyncQueue[TopSecondDegreeByCountForTweet]
+(0 until salsaRunnerConfig.numSalsaRunners).foreach { _ =&gt;</p>
+<blockquote>
+<div><dl>
+<dt>magicRecsQueue.offer(</dt><dd><dl class="simple">
+<dt>new TopSecondDegreeByCountForTweet(</dt><dd><p>bipartiteGraph,
+salsaRunnerConfig.expectedNodesToHitInSalsa,
+statsReceiverWrapper.scope(this.getClass.getSimpleName)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<p>}</p>
+<p>private implicit val timer: JavaTimer = new JavaTimer(true)</p>
+<dl>
+<dt>private def getBaseFilters(</dt><dd><p>staleTweetDuration: Long,
+tweetTypes: Seq[TweetType]</p>
+</dd>
+<dt>) = {</dt><dd><dl>
+<dt>List(</dt><dd><p>// Keep RecentTweetFilter first since it’s the cheapest
+new RecentTweetFilter(staleTweetDuration, statsReceiverWrapper),
+new TweetCardFilter(</p>
+<blockquote>
+<div><p>tweetTypes.contains(TweetType.Regular),
+tweetTypes.contains(TweetType.Summary),
+tweetTypes.contains(TweetType.Photo),
+tweetTypes.contains(TweetType.Player),
+false, // no promoted tweets
+statsReceiverWrapper</p>
+</div></blockquote>
+<p>),
+new DirectInteractionsFilter(bipartiteGraph, statsReceiverWrapper),
+new RequestedSetFilter(statsReceiverWrapper),
+new SocialProofTypesFilter(statsReceiverWrapper)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Helper method to interpret the output of MagicRecs graph</p></li>
+<li></li>
+<li><p>&#64;param magicRecsResponse is the response from running MagicRecs</p></li>
+<li><p>&#64;return a sequence of candidate ids, with score and list of social proofs</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>private def transformMagicRecsResponse(</dt><dd><p>magicRecsResponse: Option[TopSecondDegreeByCountResponse]</p>
+</dd>
+<dt>): Seq[RecommendationInfo] = {</dt><dd><dl class="simple">
+<dt>val responses = magicRecsResponse match {</dt><dd><p>case Some(response) =&gt; response.getRankedRecommendations.asScala.toSeq
+case _ =&gt; Nil</p>
+</dd>
+</dl>
+<p>}
+responses</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Helper function to determine different post-process filtering logic in GraphJet,</p></li>
+<li><p>based on display locations</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+<dt>private def getFiltersByDisplayLocations(</dt><dd><p>displayLocation: TweetEntityDisplayLocation,
+whitelistAuthors: LongOpenHashSet,
+blacklistAuthors: LongOpenHashSet,
+validSocialProofs: Array[Byte]</p>
+</dd>
+<dt>) = {</dt><dd><dl>
+<dt>displayLocation match {</dt><dd><dl>
+<dt>case TweetEntityDisplayLocation.MagicRecsF1 =&gt;</dt><dd><dl>
+<dt>Seq(</dt><dd><dl>
+<dt>new ANDFilters(</dt><dd><dl>
+<dt>List[ResultFilter](</dt><dd><dl class="simple">
+<dt>new TweetAuthorFilter(</dt><dd><p>bipartiteGraph,
+whitelistAuthors,
+new LongOpenHashSet(),
+statsReceiverWrapper),</p>
+</dd>
+<dt>new ExactUserSocialProofSizeFilter(</dt><dd><p>DefaultF1ExactSocialProofSize,
+validSocialProofs,
+statsReceiverWrapper</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>).asJava,
+statsReceiverWrapper</p>
+</dd>
+</dl>
+<p>),
+// Blacklist filter must be applied separately from F1’s AND filter chain
+new TweetAuthorFilter(</p>
+<blockquote>
+<div><p>bipartiteGraph,
+new LongOpenHashSet(),
+blacklistAuthors,
+statsReceiverWrapper)</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>case TweetEntityDisplayLocation.MagicRecsRareTweet =&gt;</dt><dd><dl>
+<dt>Seq(</dt><dd><dl class="simple">
+<dt>new TweetAuthorFilter(</dt><dd><p>bipartiteGraph,
+whitelistAuthors,
+blacklistAuthors,
+statsReceiverWrapper),</p>
+</dd>
+<dt>new RecentEdgeMetadataFilter(</dt><dd><p>DefaultRareTweetRecencyMillis,
+UserTweetEdgeTypeMask.Tweet.id.toByte,
+statsReceiverWrapper</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>case _ =&gt;</dt><dd><dl class="simple">
+<dt>Seq(</dt><dd><dl class="simple">
+<dt>new TweetAuthorFilter(</dt><dd><p>bipartiteGraph,
+whitelistAuthors,
+blacklistAuthors,
+statsReceiverWrapper))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Helper method to run salsa computation and convert the results to Option</p></li>
+<li></li>
+<li><p>&#64;param magicRecs is magicRecs reader on bipartite graph</p></li>
+<li><p>&#64;param magicRecsRequest is the magicRecs request</p></li>
+<li><p>&#64;return is an option of MagicRecsResponse</p></li>
+</ul>
+<p><a href="#id9"><span class="problematic" id="id10">*</span></a>/</p>
+</dd>
+<dt>private def getMagicRecsResponse(</dt><dd><p>magicRecs: TopSecondDegreeByCountForTweet,
+magicRecsRequest: TopSecondDegreeByCountRequestForTweet</p>
+</dd>
+<dt>)(</dt><dd><p>implicit statsReceiver: StatsReceiver</p>
+</dd>
+<dt>): Option[TopSecondDegreeByCountResponse] = {</dt><dd><dl>
+<dt>trackBlockStats(stats) {</dt><dd><p>val random = new Random()
+// compute recs – need to catch and print exceptions here otherwise they are swallowed
+val magicRecsAttempt =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>Try(magicRecs.computeRecommendations(magicRecsRequest, random)).onFailure { e =&gt;</dt><dd><p>magicRecsFailureCounter.incr()
+log.error(e, “MagicRecs computation failed”)</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>magicRecsAttempt.toOption</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def getMagicRecsRequest(</dt><dd><p>request: RecommendTweetEntityRequest</p>
+</dd>
+<dt>): TopSecondDegreeByCountRequestForTweet = {</dt><dd><p>val requesterId = request.requesterId
+val leftSeedNodes = new Long2DoubleOpenHashMap(</p>
+<blockquote>
+<div><p>request.seedsWithWeights.keys.toArray,
+request.seedsWithWeights.values.toArray</p>
+</div></blockquote>
+<p>)
+val tweetsToExcludeArray = new LongOpenHashSet(request.excludedTweetIds.getOrElse(Nil).toArray)
+val staleTweetDuration = request.maxTweetAgeInMillis.getOrElse(RecosConfig.maxTweetAgeInMillis)
+val staleEngagementDuration =</p>
+<blockquote>
+<div><p>request.maxEngagementAgeInMillis.getOrElse(RecosConfig.maxEngagementAgeInMillis)</p>
+</div></blockquote>
+<p>val tweetTypes = request.tweetTypes.getOrElse(DefaultTweetTypes)
+val tweetAuthors = new LongOpenHashSet(request.tweetAuthors.getOrElse(Nil).toArray)
+val excludedTweetAuthors = new LongOpenHashSet(</p>
+<blockquote>
+<div><p>request.excludedTweetAuthors.getOrElse(Nil).toArray)</p>
+</div></blockquote>
+<dl>
+<dt>val validSocialProofs =</dt><dd><p>UserTweetEdgeTypeMask.getUserTweetGraphSocialProofTypes(request.socialProofTypes)</p>
+</dd>
+<dt>val resultFilterChain = new ResultFilterChain(</dt><dd><dl>
+<dt>(</dt><dd><dl>
+<dt>getBaseFilters(staleTweetDuration, tweetTypes) ++</dt><dd><dl class="simple">
+<dt>getFiltersByDisplayLocations(</dt><dd><p>displayLocation = request.displayLocation,
+whitelistAuthors = tweetAuthors,
+blacklistAuthors = excludedTweetAuthors,
+validSocialProofs = validSocialProofs</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>).asJava</p>
+</dd>
+</dl>
+<p>)</p>
+<dl class="simple">
+<dt>new TopSecondDegreeByCountRequestForTweet(</dt><dd><p>requesterId,
+leftSeedNodes,
+tweetsToExcludeArray,
+getRecommendationTypes(request.recommendationTypes).asJava,
+convertThriftEnumsToJavaEnums(request.maxResultsByType).asJava,
+UserTweetEdgeTypeMask.SIZE,
+request.maxUserSocialProofSize.getOrElse(RecosConfig.maxUserSocialProofSize),
+request.maxTweetSocialProofSize.getOrElse(RecosConfig.maxTweetSocialProofSize),
+convertThriftEnumsToJavaEnums(request.minUserSocialProofSizes).asJava,
+validSocialProofs,
+staleTweetDuration,
+staleEngagementDuration,
+resultFilterChain,
+getSocialProofTypeUnions(request.socialProofTypeUnions).asJava</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def apply(request: RecommendTweetEntityRequest): Future[Seq[RecommendationInfo]] = {</dt><dd><p>pollCounter.incr()
+val t0 = System.currentTimeMillis
+magicRecsQueue.poll().map { magicRecs =&gt;</p>
+<blockquote>
+<div><p>val pollTime = System.currentTimeMillis - t0
+pollLatencyStat.add(pollTime)
+val magicRecsResponse = Try {</p>
+<blockquote>
+<div><dl>
+<dt>if (pollTime &lt; salsaRunnerConfig.timeoutSalsaRunner) {</dt><dd><p>val magicRecsRequest = getMagicRecsRequest(request)
+transformMagicRecsResponse(</p>
+<blockquote>
+<div><p>getMagicRecsResponse(magicRecs, magicRecsRequest)(statsReceiverWrapper.statsReceiver)</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+<dt>} else {</dt><dd><p>// if we did not get a magicRecs in time, then fail fast here and immediately put it back
+log.warning(“magicRecsQueue polling timeout”)
+pollTimeoutCounter.incr()
+throw new RuntimeException(“magicRecs poll timeout”)
+Nil</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} ensure {</dt><dd><p>magicRecsQueue.offer(magicRecs)
+offerCounter.incr()</p>
+</dd>
+</dl>
+<p>}
+magicRecsResponse.toOption getOrElse Nil</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../_sources/src/scala/com/twitter/recos/user_tweet_entity_graph/TweetRecommendationsRunner.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

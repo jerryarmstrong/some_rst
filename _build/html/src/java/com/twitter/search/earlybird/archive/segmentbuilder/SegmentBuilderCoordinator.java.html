@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../" id="documentation_options" src="../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.earlybird.archive.segmentbuilder;</p>
+<p>import java.io.IOException;
+import java.util.Date;
+import java.util.Optional;</p>
+<p>import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Preconditions;</p>
+<p>import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.Path;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;</p>
+<p>import com.twitter.common.quantity.Amount;
+import com.twitter.common.quantity.Time;
+import com.twitter.common.util.Clock;
+import com.twitter.search.common.database.DatabaseConfig;
+import com.twitter.search.common.util.zktrylock.TryLock;
+import com.twitter.search.common.util.zktrylock.ZooKeeperTryLockFactory;
+import com.twitter.search.earlybird.archive.DailyStatusBatches;
+import com.twitter.search.earlybird.common.config.EarlybirdProperty;
+import com.twitter.search.earlybird.util.ScrubGenUtil;
+import com.twitter.search.earlybird.partition.HdfsUtil;
+import com.twitter.search.earlybird.partition.SegmentSyncConfig;
+import com.twitter.util.Duration;</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Coordinate between segment builders for scrubbing pipeline.</p></li>
+<li><p>When segment builder is running, all of them will try to find a HDFS file indicating if data is</p></li>
+<li><p>ready. If the file does not exist, only one of them will go through the files and see if</p></li>
+<li><p>scrubbing pipeline has generated all data for this scrub gen.</p></li>
+<li></li>
+<li><p>If the instance that got the lock found all data, it still exists, because otherwise we will</p></li>
+<li><p>have one single segmentbuilder instance trying to build all segments, which is not what we want.</p></li>
+<li><p>But if it exists, then the next time all segmentbuilder instances are scheduled, they will all</p></li>
+<li><p>find the file, and will start building segments.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>class SegmentBuilderCoordinator {</dt><dd><p>private static final Logger LOG = LoggerFactory.getLogger(SegmentBuilderCoordinator.class);</p>
+<p>private static final Amount&lt;Long, Time&gt; ZK_LOCK_EXPIRATION_MIN = Amount.of(5L, Time.MINUTES);
+private static final String SEGMENT_BUILDER_SYNC_NODE = “scrub_gen_data_sync”;
+private static final String SEGMENT_BUILDER_SYNC_ZK_PATH =</p>
+<blockquote>
+<div><p>EarlybirdProperty.ZK_APP_ROOT.get() + “/segment_builder_sync”;</p>
+</div></blockquote>
+<p>private static final String DATA_FULLY_BUILT_FILE = “_data_fully_built”;
+static final int FIRST_INSTANCE = 0;</p>
+<dl class="simple">
+<dt>private static final long NON_FIRST_INSTANCE_SLEEP_BEFORE_RETRY_DURATION_MS =</dt><dd><p>Duration.fromHours(1).inMillis();</p>
+</dd>
+</dl>
+<p>private final ZooKeeperTryLockFactory zkTryLockFactory;
+private final SegmentSyncConfig syncConfig;
+private final Optional&lt;Date&gt; scrubGenDayOpt;
+private final Optional&lt;String&gt; scrubGenOpt;
+private final Clock clock;</p>
+<dl>
+<dt>SegmentBuilderCoordinator(</dt><dd><blockquote>
+<div><p>ZooKeeperTryLockFactory zkTryLockFactory, SegmentSyncConfig syncConfig, Clock clock) {</p>
+</div></blockquote>
+<p>this.zkTryLockFactory = zkTryLockFactory;
+this.syncConfig = syncConfig;
+this.scrubGenOpt = syncConfig.getScrubGen();
+this.scrubGenDayOpt = scrubGenOpt.map(ScrubGenUtil::parseScrubGenToDate);
+this.clock = clock;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>public boolean isScrubGenDataFullyBuilt(int instanceNumber) {</dt><dd><p>// Only segment builder that takes scrub gen should use isPartitioningOutputReady to coordinate
+Preconditions.checkArgument(scrubGenDayOpt.isPresent());</p>
+<p>final FileSystem hdfs;
+try {</p>
+<blockquote>
+<div><p>hdfs = HdfsUtil.getHdfsFileSystem();</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} catch (IOException e) {</dt><dd><p>LOG.error(“Could not create HDFS file system.”, e);
+return false;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>return isScrubGenDataFullyBuilt(</dt><dd><p>instanceNumber,
+scrubGenDayOpt.get(),
+NON_FIRST_INSTANCE_SLEEP_BEFORE_RETRY_DURATION_MS,
+hdfs</p>
+</dd>
+</dl>
+<p>);</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;VisibleForTesting
+boolean isScrubGenDataFullyBuilt(</p>
+<blockquote>
+<div><blockquote>
+<div><p>int instanceNumber,
+Date scrubGenDay,
+long nonFirstInstanceSleepBeforeRetryDuration,
+FileSystem hdfs) {</p>
+</div></blockquote>
+<p>// Check if the scrub gen has been fully built file exists.
+if (checkHaveScrubGenDataFullyBuiltFileOnHdfs(hdfs)) {</p>
+<blockquote>
+<div><p>return true;</p>
+</div></blockquote>
+<p>}</p>
+<p>// If it doesn’t exist, let first instance see if scrub gen has been fully built and create the
+// file.
+if (instanceNumber == FIRST_INSTANCE) {</p>
+<blockquote>
+<div><p>// We were missing some data on HDFS for this scrub gen in previous run,
+// but we might’ve gotten more data in the meantime, check again.
+// Only allow instance 0 to do this mainly for 2 reasons:
+// 1) Since instances are scheduled in batches, it’s possible that a instance from latter
+// batch find the fully built file in hdfs and start processing. We end up doing work with
+// only partial instances.
+// 2) If we sleep before we release lock, it’s hard to estimate how long a instance will
+// be scheduled.
+// For deterministic reason, we simplify a bit and only allow instance 0 to check and write
+// data is fully build file to hdfs.
+try {</p>
+<blockquote>
+<div><p>checkIfScrubGenDataIsFullyBuilt(hdfs, scrubGenDay);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} catch (IOException e) {</dt><dd><p>LOG.error(“Failed to grab lock and check scrub gen data.”, e);</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<dl>
+<dt>} else {</dt><dd><p>// for all other instances, sleep for a bit to give time for first instance to check if scrub
+// gen has been fully built and create the file, then check again.
+try {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>LOG.info(</dt><dd><p>“Sleeping for {} ms before re-checking if scrub gen has been fully built file exists”,
+nonFirstInstanceSleepBeforeRetryDuration);</p>
+</dd>
+</dl>
+<p>clock.waitFor(nonFirstInstanceSleepBeforeRetryDuration);
+return checkHaveScrubGenDataFullyBuiltFileOnHdfs(hdfs);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} catch (InterruptedException e) {</dt><dd><dl class="simple">
+<dt>LOG.warn(“Interrupted when sleeping before re-checking if scrub gen has been fully built “</dt><dd><ul class="simple">
+<li><p>“file exists”, e);</p></li>
+</ul>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// if hasSuccessFileToHdfs returns false, then should always return false in the end.
+// next run will find success file for this scrub gen and move forward.
+return false;</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>private void checkIfScrubGenDataIsFullyBuilt(</dt><dd><blockquote>
+<div><p>FileSystem hdfs, Date scrubGenDay) throws IOException {</p>
+</div></blockquote>
+<p>// Build the lock, try to acquire it, and check the data on HDFS
+TryLock lock = zkTryLockFactory.createTryLock(</p>
+<blockquote>
+<div><p>DatabaseConfig.getLocalHostname(),
+SEGMENT_BUILDER_SYNC_ZK_PATH,
+SEGMENT_BUILDER_SYNC_NODE,
+ZK_LOCK_EXPIRATION_MIN);</p>
+</div></blockquote>
+<p>Preconditions.checkState(scrubGenOpt.isPresent());
+String scrubGen = scrubGenOpt.get();</p>
+<dl>
+<dt>lock.tryWithLock(() -&gt; {</dt><dd><dl>
+<dt>LOG.info(String.format(</dt><dd><p>“Obtained ZK lock to check if data for scrub gen %s is ready.”, scrubGen));</p>
+</dd>
+<dt>final DailyStatusBatches directory =</dt><dd><p>new DailyStatusBatches(zkTryLockFactory, scrubGenDay);</p>
+</dd>
+<dt>if (directory.isScrubGenDataFullyBuilt(hdfs)</dt><dd><blockquote>
+<div><p>&amp;&amp; createScrubGenDataFullyBuiltFileOnHdfs(hdfs)) {</p>
+</div></blockquote>
+<p>LOG.info(String.format(“All data for scrub gen %s is ready.”, scrubGen));</p>
+</dd>
+<dt>} else {</dt><dd><p>LOG.info(String.format(“Data for scrub gen %s is not ready yet.”, scrubGen));</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>});</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private boolean createScrubGenDataFullyBuiltFileOnHdfs(FileSystem fs) {</dt><dd><p>Path path = getScrubGenDataFullyBuiltFilePath();
+try {</p>
+<blockquote>
+<div><p>fs.mkdirs(new Path(statusReadyHDFSPath()));
+if (fs.createNewFile(path)) {</p>
+<blockquote>
+<div><p>LOG.info(“Successfully created file “ + path + “ on HDFS.”);
+return true;</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>LOG.warn(“Failed to create file “ + path + “ on HDFS.”);</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} catch (IOException e) {</dt><dd><p>LOG.error(“Failed to create file on HDFS “ + path.toString(), e);</p>
+</dd>
+</dl>
+<p>}
+return false;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private boolean checkHaveScrubGenDataFullyBuiltFileOnHdfs(FileSystem fs) {</dt><dd><p>Path path = getScrubGenDataFullyBuiltFilePath();
+try {</p>
+<blockquote>
+<div><p>boolean ret = fs.exists(path);
+LOG.info(“Checking if file exists showing scrubgen is fully built.”);
+LOG.info(“Path checked: {}, Exist check: {}”, path, ret);
+return ret;</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} catch (IOException e) {</dt><dd><p>LOG.error(“Failed to check file on HDFS “ + path.toString(), e);
+return false;</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;VisibleForTesting
+Path getScrubGenDataFullyBuiltFilePath() {</p>
+<blockquote>
+<div><p>return new Path(statusReadyHDFSPath(), DATA_FULLY_BUILT_FILE);</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;VisibleForTesting
+String statusReadyHDFSPath() {</p>
+<blockquote>
+<div><p>return syncConfig.getHdfsSegmentSyncRootDir() + “/segment_builder_sync”;</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../_sources/src/java/com/twitter/search/earlybird/archive/segmentbuilder/SegmentBuilderCoordinator.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../" id="documentation_options" src="../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.simclusters_v2.scalding.offline_job</p>
+<p>import com.twitter.algebird.Aggregator.size
+import com.twitter.algebird.{Aggregator, QTreeAggregatorLowerBound}
+import com.twitter.scalding.{Execution, Stat, TypedPipe, UniqueID}
+import com.twitter.simclusters_v2.candidate_source._
+import com.twitter.simclusters_v2.common.TweetId
+import com.twitter.simclusters_v2.thriftscala.{</p>
+<blockquote>
+<div><p>ClusterTopKTweetsWithScores,
+ClustersUserIsInterestedIn</p>
+</div></blockquote>
+<p>}
+import java.nio.ByteBuffer</p>
+<dl>
+<dt>case class OfflineRecConfig(</dt><dd><p>maxTweetRecs: Int, // total number of tweet recs.
+maxTweetsPerUser: Int,
+maxClustersToQuery: Int,
+minTweetScoreThreshold: Double,
+rankClustersBy: ClusterRanker.Value)</p>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>An offline simulation of the tweet rec logic in [[InterestedInTweetCandidateStore]].</p></li>
+<li><p>The main difference is that instead of using Memcache, it uses an offline clusterTopK store as</p></li>
+<li><p>the tweet source.</p></li>
+<li><p>Also, instead of taking a single userId as input, it processes a pipe of users altogether.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+</dl>
+<p>object OfflineTweetRecommendation {</p>
+<blockquote>
+<div><p>case class ScoredTweet(tweetId: TweetId, score: Double) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>def toTuple: (TweetId, Double) = {</dt><dd><p>(tweetId, score)</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>object ScoredTweet {</dt><dd><p>def apply(tuple: (TweetId, Double)): ScoredTweet = new ScoredTweet(tuple._1, tuple._2)
+implicit val scoredOrdering: Ordering[ScoredTweet] = (x: ScoredTweet, y: ScoredTweet) =&gt; {</p>
+<blockquote>
+<div><p>Ordering.Double.compare(x.score, y.score)</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def getTopTweets(</dt><dd><p>config: OfflineRecConfig,
+targetUsersPipe: TypedPipe[Long],
+userIsInterestedInPipe: TypedPipe[(Long, ClustersUserIsInterestedIn)],
+clusterTopKTweetsPipe: TypedPipe[ClusterTopKTweetsWithScores]</p>
+</dd>
+<dt>)(</dt><dd><p>implicit uniqueID: UniqueID</p>
+</dd>
+<dt>): Execution[TypedPipe[(Long, Seq[ScoredTweet])]] = {</dt><dd><p>val tweetRecommendedCount = Stat(“NumTweetsRecomended”)
+val targetUserCount = Stat(“NumTargetUsers”)
+val userWithRecsCount = Stat(“NumUsersWithAtLeastTweetRec”)</p>
+<p>// For every user, read the user’s interested-in clusters and cluster’s weights
+val userClusterWeightPipe: TypedPipe[(Int, (Long, Double))] =</p>
+<blockquote>
+<div><dl>
+<dt>targetUsersPipe.asKeys</dt><dd><p>.join(userIsInterestedInPipe)
+.flatMap {</p>
+<blockquote>
+<div><dl>
+<dt>case (userId, (_, clustersWithScores)) =&gt;</dt><dd><p>targetUserCount.inc()
+val topClusters = ClusterRanker</p>
+<blockquote>
+<div><dl class="simple">
+<dt>.getTopKClustersByScore(</dt><dd><p>clustersWithScores.clusterIdToScores.toMap,
+ClusterRanker.RankByNormalizedFavScore,
+config.maxClustersToQuery</p>
+</dd>
+</dl>
+<p>).toList</p>
+</div></blockquote>
+<dl class="simple">
+<dt>topClusters.map {</dt><dd><dl class="simple">
+<dt>case (clusterId, clusterWeightForUser) =&gt;</dt><dd><p>(clusterId, (userId, clusterWeightForUser))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>// For every cluster, read the top tweets in the cluster, and their weights
+val clusterTweetWeightPipe: TypedPipe[(Int, List[(Long, Double)])] =</p>
+<blockquote>
+<div><dl>
+<dt>clusterTopKTweetsPipe</dt><dd><dl>
+<dt>.flatMap { cluster =&gt;</dt><dd><dl>
+<dt>val tweets =</dt><dd><dl>
+<dt>cluster.topKTweets.toList // Convert to a List, otherwise .flatMap dedups by clusterIds</dt><dd><dl>
+<dt>.flatMap {</dt><dd><dl>
+<dt>case (tid, persistedScores) =&gt;</dt><dd><p>val tweetWeight = persistedScores.score.map(_.value).getOrElse(0.0)
+if (tweetWeight &gt; 0) {</p>
+<blockquote>
+<div><p>Some((tid, tweetWeight))</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>None</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+<dt>if (tweets.nonEmpty) {</dt><dd><p>Some((cluster.clusterId, tweets))</p>
+</dd>
+<dt>} else {</dt><dd><p>None</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>// Collect all the tweets from clusters user is interested in
+val recommendedTweetsPipe = userClusterWeightPipe</p>
+<blockquote>
+<div><p>.sketch(4000)(cid =&gt; ByteBuffer.allocate(4).putInt(cid).array(), Ordering.Int)
+.join(clusterTweetWeightPipe)
+.flatMap {</p>
+<blockquote>
+<div><dl>
+<dt>case (_, ((userId, clusterWeight), tweetsPerCluster)) =&gt;</dt><dd><dl class="simple">
+<dt>tweetsPerCluster.map {</dt><dd><dl class="simple">
+<dt>case (tid, tweetWeight) =&gt;</dt><dd><p>val contribution = clusterWeight * tweetWeight
+((userId, tid), contribution)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+.sumByKey
+.withReducers(5000)</p>
+</div></blockquote>
+<p>// Filter by minimum score threshold
+val scoreFilteredTweetsPipe = recommendedTweetsPipe</p>
+<blockquote>
+<div><dl class="simple">
+<dt>.collect {</dt><dd><dl class="simple">
+<dt>case ((userId, tid), score) if score &gt;= config.minTweetScoreThreshold =&gt;</dt><dd><p>(userId, ScoredTweet(tid, score))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>// Rank top tweets for each user
+val topTweetsPerUserPipe = scoreFilteredTweetsPipe.group</p>
+<blockquote>
+<div><p>.sortedReverseTake(config.maxTweetsPerUser)(ScoredTweet.scoredOrdering)
+.flatMap {</p>
+<blockquote>
+<div><dl>
+<dt>case (userId, tweets) =&gt;</dt><dd><p>userWithRecsCount.inc()
+tweetRecommendedCount.incBy(tweets.size)</p>
+<p>tweets.map { t =&gt; (userId, t) }</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+.forceToDiskExecution</p>
+</div></blockquote>
+<dl>
+<dt>val topTweetsPipe = topTweetsPerUserPipe</dt><dd><dl>
+<dt>.flatMap { tweets =&gt;</dt><dd><dl>
+<dt>approximateScoreAtTopK(tweets.map(_._2.score), config.maxTweetRecs).map { threshold =&gt;</dt><dd><dl>
+<dt>tweets</dt><dd><dl class="simple">
+<dt>.collect {</dt><dd><dl class="simple">
+<dt>case (userId, tweet) if tweet.score &gt;= threshold =&gt;</dt><dd><p>(userId, List(tweet))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+.sumByKey
+.toTypedPipe</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>topTweetsPipe</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Returns the approximate score at the k’th top ranked record using sampling.</p></li>
+<li><p>This score can then be used to filter for the top K elements in a big pipe where</p></li>
+<li><p>K is too big to fit in memory.</p></li>
+<li></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>def approximateScoreAtTopK(pipe: TypedPipe[Double], topK: Int): Execution[Double] = {</dt><dd><p>val defaultScore = 0.0
+println(“approximateScoreAtTopK: topK=” + topK)
+pipe</p>
+<blockquote>
+<div><p>.aggregate(size)
+.getOrElseExecution(0L)
+.flatMap { len =&gt;</p>
+<blockquote>
+<div><p>println(“approximateScoreAtTopK: len=” + len)
+val topKPercentile = if (len == 0 || topK &gt; len) 0 else 1 - topK.toDouble / len.toDouble
+val randomSample = Aggregator.reservoirSample[Double](Math.max(100000, topK / 100))
+pipe</p>
+<blockquote>
+<div><p>.aggregate(randomSample)
+.getOrElseExecution(List.empty)
+.flatMap { sample =&gt;</p>
+<blockquote>
+<div><dl class="simple">
+<dt>TypedPipe</dt><dd><p>.from(sample)
+.aggregate(QTreeAggregatorLowerBound[Double](topKPercentile))
+.getOrElseExecution(defaultScore)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+</div></blockquote>
+<p>}
+.map { score =&gt;</p>
+<blockquote>
+<div><p>println(“approximateScoreAtTopK: topK percentile score=” + score)
+score</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../_sources/src/scala/com/twitter/simclusters_v2/scalding/offline_job/OfflineTweetRecommendation.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

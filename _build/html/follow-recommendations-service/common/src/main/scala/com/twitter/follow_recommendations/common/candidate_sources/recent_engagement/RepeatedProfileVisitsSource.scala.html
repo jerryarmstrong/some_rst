@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../../../" id="documentation_options" src="../../../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.follow_recommendations.common.candidate_sources.recent_engagement</p>
+<p>import com.google.inject.Inject
+import com.google.inject.Singleton
+import com.twitter.dds.jobs.repeated_profile_visits.thriftscala.ProfileVisitorInfo
+import com.twitter.experiments.general_metrics.thriftscala.IdType
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.follow_recommendations.common.clients.real_time_real_graph.Engagement
+import com.twitter.follow_recommendations.common.clients.real_time_real_graph.RealTimeRealGraphClient
+import com.twitter.follow_recommendations.common.models.CandidateUser
+import com.twitter.timelines.configapi.HasParams
+import com.twitter.timelines.configapi.Params
+import com.twitter.hermit.model.Algorithm
+import com.twitter.inject.Logging
+import com.twitter.product_mixer.core.functional_component.candidate_source.CandidateSource
+import com.twitter.product_mixer.core.model.common.identifier.CandidateSourceIdentifier
+import com.twitter.product_mixer.core.model.marshalling.request.HasClientContext
+import com.twitter.stitch.Stitch
+import com.twitter.strato.generated.client.rux.RepeatedProfileVisitsAggregateClientColumn</p>
+<p>&#64;Singleton
+class RepeatedProfileVisitsSource &#64;Inject() (</p>
+<blockquote>
+<div><p>repeatedProfileVisitsAggregateClientColumn: RepeatedProfileVisitsAggregateClientColumn,
+realTimeRealGraphClient: RealTimeRealGraphClient,
+statsReceiver: StatsReceiver)</p>
+<blockquote>
+<div><p>extends CandidateSource[HasParams with HasClientContext, CandidateUser]
+with Logging {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>val identifier: CandidateSourceIdentifier =</dt><dd><p>RepeatedProfileVisitsSource.Identifier</p>
+</dd>
+</dl>
+<p>val sourceStatsReceiver = statsReceiver.scope(“repeated_profile_visits_source”)
+val offlineFetchErrorCounter = sourceStatsReceiver.counter(“offline_fetch_error”)
+val offlineFetchSuccessCounter = sourceStatsReceiver.counter(“offline_fetch_success”)
+val onlineFetchErrorCounter = sourceStatsReceiver.counter(“online_fetch_error”)
+val onlineFetchSuccessCounter = sourceStatsReceiver.counter(“online_fetch_success”)
+val noRepeatedProfileVisitsAboveBucketingThresholdCounter =</p>
+<blockquote>
+<div><p>sourceStatsReceiver.counter(“no_repeated_profile_visits_above_bucketing_threshold”)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>val hasRepeatedProfileVisitsAboveBucketingThresholdCounter =</dt><dd><p>sourceStatsReceiver.counter(“has_repeated_profile_visits_above_bucketing_threshold”)</p>
+</dd>
+<dt>val noRepeatedProfileVisitsAboveRecommendationsThresholdCounter =</dt><dd><p>sourceStatsReceiver.counter(“no_repeated_profile_visits_above_recommendations_threshold”)</p>
+</dd>
+<dt>val hasRepeatedProfileVisitsAboveRecommendationsThresholdCounter =</dt><dd><p>sourceStatsReceiver.counter(“has_repeated_profile_visits_above_recommendations_threshold”)</p>
+</dd>
+</dl>
+<p>val includeCandidatesCounter = sourceStatsReceiver.counter(“include_candidates”)
+val noIncludeCandidatesCounter = sourceStatsReceiver.counter(“no_include_candidates”)</p>
+<p>// Returns visited user -&gt; visit count, via off dataset.
+def applyWithOfflineDataset(targetUserId: Long): Stitch[Map[Long, Int]] = {</p>
+<blockquote>
+<div><dl>
+<dt>repeatedProfileVisitsAggregateClientColumn.fetcher</dt><dd><p>.fetch(ProfileVisitorInfo(id = targetUserId, idType = IdType.User)).map(_.v)
+.handle {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case e: Throwable =&gt;</dt><dd><p>logger.error(“Strato fetch for RepeatedProfileVisitsAggregateClientColumn failed: “ + e)
+offlineFetchErrorCounter.incr()
+None</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl>
+<dt>}.onSuccess { result =&gt;</dt><dd><p>offlineFetchSuccessCounter.incr()</p>
+</dd>
+<dt>}.map { resultOption =&gt;</dt><dd><dl>
+<dt>resultOption</dt><dd><dl>
+<dt>.flatMap { result =&gt;</dt><dd><dl>
+<dt>result.profileVisitSet.map { profileVisitSet =&gt;</dt><dd><dl>
+<dt>profileVisitSet</dt><dd><p>.filter(profileVisit =&gt; profileVisit.totalTargetVisitsInLast14Days.getOrElse(0) &gt; 0)
+.filter(profileVisit =&gt; !profileVisit.doesSourceIdFollowTargetId.getOrElse(false))
+.flatMap { profileVisit =&gt;</p>
+<blockquote>
+<div><dl>
+<dt>(profileVisit.targetId, profileVisit.totalTargetVisitsInLast14Days) match {</dt><dd><dl class="simple">
+<dt>case (Some(targetId), Some(totalVisitsInLast14Days)) =&gt;</dt><dd><p>Some(targetId -&gt; totalVisitsInLast14Days)</p>
+</dd>
+</dl>
+<p>case _ =&gt; None</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}.toMap[Long, Int]</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}.getOrElse(Map.empty)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<p>// Returns visited user -&gt; visit count, via online dataset.
+def applyWithOnlineData(targetUserId: Long): Stitch[Map[Long, Int]] = {</p>
+<blockquote>
+<div><dl>
+<dt>val visitedUserToEngagementsStitch: Stitch[Map[Long, Seq[Engagement]]] =</dt><dd><p>realTimeRealGraphClient.getRecentProfileViewEngagements(targetUserId)</p>
+</dd>
+<dt>visitedUserToEngagementsStitch</dt><dd><dl class="simple">
+<dt>.onFailure { f =&gt;</dt><dd><p>onlineFetchErrorCounter.incr()</p>
+</dd>
+<dt>}.onSuccess { result =&gt;</dt><dd><p>onlineFetchSuccessCounter.incr()</p>
+</dd>
+<dt>}.map { visitedUserToEngagements =&gt;</dt><dd><dl class="simple">
+<dt>visitedUserToEngagements</dt><dd><p>.mapValues(engagements =&gt; engagements.size)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>def getRepeatedVisitedAccounts(params: Params, targetUserId: Long): Stitch[Map[Long, Int]] = {</dt><dd><p>var results: Stitch[Map[Long, Int]] = Stitch.value(Map.empty)
+if (params.getBoolean(RepeatedProfileVisitsParams.UseOnlineDataset)) {</p>
+<blockquote>
+<div><p>results = applyWithOnlineData(targetUserId)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>results = applyWithOfflineDataset(targetUserId)</p>
+</dd>
+</dl>
+<p>}
+// Only keep users that had non-zero engagement counts.
+results.map(_.filter(input =&gt; input._2 &gt; 0))</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def getRecommendations(params: Params, userId: Long): Stitch[Seq[CandidateUser]] = {</dt><dd><p>val recommendationThreshold = params.getInt(RepeatedProfileVisitsParams.RecommendationThreshold)
+val bucketingThreshold = params.getInt(RepeatedProfileVisitsParams.BucketingThreshold)</p>
+<p>// Get the list of repeatedly visited profilts. Only keep accounts with &gt;= bucketingThreshold visits.
+val repeatedVisitedAccountsStitch: Stitch[Map[Long, Int]] =</p>
+<blockquote>
+<div><p>getRepeatedVisitedAccounts(params, userId).map(_.filter(kv =&gt; kv._2 &gt;= bucketingThreshold))</p>
+</div></blockquote>
+<dl>
+<dt>repeatedVisitedAccountsStitch.map { candidates =&gt;</dt><dd><p>// Now check if we should includeCandidates (e.g. whether user is in control bucket or treatment buckets).
+if (candidates.isEmpty) {</p>
+<blockquote>
+<div><p>// User has not visited any accounts above bucketing threshold. We will not bucket user into experiment. Just
+// don’t return no candidates.
+noRepeatedProfileVisitsAboveBucketingThresholdCounter.incr()
+Seq.empty</p>
+</div></blockquote>
+<dl>
+<dt>} else {</dt><dd><p>hasRepeatedProfileVisitsAboveBucketingThresholdCounter.incr()
+if (!params.getBoolean(RepeatedProfileVisitsParams.IncludeCandidates)) {</p>
+<blockquote>
+<div><p>// User has reached bucketing criteria. We check whether to include candidates (e.g. checking which bucket
+// the user is in for the experiment). In this case the user is in a bucket to not include any candidates.
+noIncludeCandidatesCounter.incr()
+Seq.empty</p>
+</div></blockquote>
+<dl>
+<dt>} else {</dt><dd><p>includeCandidatesCounter.incr()
+// We should include candidates. Include any candidates above recommendation thresholds.
+val outputCandidatesSeq = candidates</p>
+<blockquote>
+<div><dl>
+<dt>.filter(kv =&gt; kv._2 &gt;= recommendationThreshold).map { kv =&gt;</dt><dd><p>val user = kv._1
+val visitCount = kv._2
+CandidateUser(user, Some(visitCount.toDouble))</p>
+<blockquote>
+<div><p>.withCandidateSource(RepeatedProfileVisitsSource.Identifier)</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}.toSeq</p>
+</div></blockquote>
+<dl class="simple">
+<dt>if (outputCandidatesSeq.isEmpty) {</dt><dd><p>noRepeatedProfileVisitsAboveRecommendationsThresholdCounter.incr()</p>
+</dd>
+<dt>} else {</dt><dd><p>hasRepeatedProfileVisitsAboveRecommendationsThresholdCounter.incr()</p>
+</dd>
+</dl>
+<p>}
+outputCandidatesSeq</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>override def apply(request: HasParams with HasClientContext): Stitch[Seq[CandidateUser]] = {</dt><dd><dl>
+<dt>request.getOptionalUserId</dt><dd><dl class="simple">
+<dt>.map { userId =&gt;</dt><dd><p>getRecommendations(request.params, userId)</p>
+</dd>
+</dl>
+<p>}.getOrElse(Stitch.Nil)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>object RepeatedProfileVisitsSource {</dt><dd><p>val Identifier = CandidateSourceIdentifier(Algorithm.RepeatedProfileVisits.toString)</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../../../_sources/follow-recommendations-service/common/src/main/scala/com/twitter/follow_recommendations/common/candidate_sources/recent_engagement/RepeatedProfileVisitsSource.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

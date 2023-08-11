@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../" id="documentation_options" src="../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.simclusters_v2.summingbird.storm</p>
+<p>import com.twitter.conversions.DurationOps._
+import com.twitter.heron.util.CommonMetric
+import com.twitter.scalding.Args
+import com.twitter.simclusters_v2.summingbird.common.SimClustersProfile
+import com.twitter.simclusters_v2.summingbird.common.SimClustersProfile.AltSetting
+import com.twitter.simclusters_v2.summingbird.common.SimClustersProfile.Environment
+import com.twitter.simclusters_v2.summingbird.stores.EntityClusterScoreReadableStore
+import com.twitter.simclusters_v2.summingbird.stores.TopKClustersForTweetReadableStore
+import com.twitter.simclusters_v2.summingbird.stores.TopKTweetsForClusterReadableStore
+import com.twitter.simclusters_v2.summingbird.stores.UserInterestedInReadableStore
+import com.twitter.simclusters_v2.thriftscala._
+import com.twitter.storage.client.manhattan.kv.ManhattanKVClientMtlsParams
+import com.twitter.summingbird.online.option._
+import com.twitter.summingbird.option._
+import com.twitter.summingbird.storm.option.FlatMapStormMetrics
+import com.twitter.summingbird.storm.option.SummerStormMetrics
+import com.twitter.summingbird.storm.Storm
+import com.twitter.summingbird.storm.StormMetric
+import com.twitter.summingbird.Options
+import com.twitter.summingbird.TailProducer
+import com.twitter.summingbird_internal.runner.common.JobName
+import com.twitter.summingbird_internal.runner.common.SBRunConfig
+import com.twitter.summingbird_internal.runner.storm.GenericRunner
+import com.twitter.summingbird_internal.runner.storm.StormConfig
+import com.twitter.tormenta_internal.spout.eventbus.SubscriberId
+import com.twitter.wtf.summingbird.sources.storm.TimelineEventSource
+import java.lang
+import org.apache.heron.api.{Config =&gt; HeronConfig}
+import org.apache.heron.common.basics.ByteAmount
+import org.apache.storm.{Config =&gt; BTConfig}
+import scala.collection.JavaConverters._</p>
+<dl>
+<dt>object TweetJobRunner {</dt><dd><dl class="simple">
+<dt>def main(args: Array[String]): Unit = {</dt><dd><p>GenericRunner(args, TweetStormJob(_))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>object TweetStormJob {</p>
+<blockquote>
+<div><p>import com.twitter.simclusters_v2.summingbird.common.Implicits._</p>
+<p>def jLong(num: Long): lang.Long = java.lang.Long.valueOf(num)
+def jInt(num: Int): Integer = java.lang.Integer.valueOf(num)
+def apply(args: Args): StormConfig = {</p>
+<blockquote>
+<div><p>lazy val env: String = args.getOrElse(“env”, “prod”)
+lazy val zone: String = args.getOrElse(“dc”, “atla”)</p>
+<p>// The only SimClusters ENV is Alt. Will clean up soon.
+lazy val profile = SimClustersProfile.fetchTweetJobProfile(Environment(env), AltSetting.Alt)</p>
+<dl class="simple">
+<dt>lazy val favoriteEventSource = TimelineEventSource(</dt><dd><p>// Note: do not share the same subsriberId with other jobs. Apply a new one if needed
+SubscriberId(profile.timelineEventSourceSubscriberId)</p>
+</dd>
+</dl>
+<p>).source</p>
+<dl class="simple">
+<dt>lazy val commonMetric =</dt><dd><p>StormMetric(new CommonMetric(), CommonMetric.NAME, CommonMetric.POLL_INTERVAL)</p>
+</dd>
+</dl>
+<p>lazy val flatMapMetrics = FlatMapStormMetrics(Iterable(commonMetric))
+lazy val summerMetrics = SummerStormMetrics(Iterable(commonMetric))</p>
+<dl class="simple">
+<dt>lazy val entityClusterScoreStore: Storm#Store[</dt><dd><p>(SimClusterEntity, FullClusterIdBucket),
+ClustersWithScores</p>
+</dd>
+<dt>] = {</dt><dd><dl class="simple">
+<dt>Storm.store(</dt><dd><dl class="simple">
+<dt>EntityClusterScoreReadableStore</dt><dd><p>.onlineMergeableStore(profile.entityClusterScorePath, profile.serviceIdentifier(zone)))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>lazy val tweetTopKStore: Storm#Store[EntityWithVersion, TopKClustersWithScores] = {</dt><dd><dl class="simple">
+<dt>Storm.store(</dt><dd><dl class="simple">
+<dt>TopKClustersForTweetReadableStore</dt><dd><p>.onlineMergeableStore(profile.tweetTopKClustersPath, profile.serviceIdentifier(zone)))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>lazy val clusterTopKTweetsStore: Storm#Store[FullClusterId, TopKTweetsWithScores] = {</dt><dd><dl class="simple">
+<dt>Storm.store(</dt><dd><dl class="simple">
+<dt>TopKTweetsForClusterReadableStore</dt><dd><p>.onlineMergeableStore(profile.clusterTopKTweetsPath, profile.serviceIdentifier(zone)))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>lazy val clusterTopKTweetsLightStore: Option[</dt><dd><p>Storm#Store[FullClusterId, TopKTweetsWithScores]</p>
+</dd>
+<dt>] = {</dt><dd><dl class="simple">
+<dt>profile.clusterTopKTweetsLightPath.map { lightPath =&gt;</dt><dd><dl class="simple">
+<dt>Storm.store(</dt><dd><dl class="simple">
+<dt>TopKTweetsForClusterReadableStore</dt><dd><p>.onlineMergeableStore(lightPath, profile.serviceIdentifier(zone)))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>lazy val userInterestedInService: Storm#Service[Long, ClustersUserIsInterestedIn] = {</dt><dd><dl>
+<dt>Storm.service(</dt><dd><dl class="simple">
+<dt>UserInterestedInReadableStore.defaultStoreWithMtls(</dt><dd><p>ManhattanKVClientMtlsParams(profile.serviceIdentifier(zone)),
+modelVersion = profile.modelVersionStr</p>
+</dd>
+</dl>
+<p>))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>new StormConfig {</p>
+<blockquote>
+<div><p>val jobName: JobName = JobName(profile.jobName)</p>
+<p>implicit val jobID: JobId = JobId(jobName.toString)</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Add registrars for chill serialization for user-defined types.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>override def registrars =</dt><dd><dl class="simple">
+<dt>List(</dt><dd><p>SBRunConfig.register[SimClusterEntity],
+SBRunConfig.register[FullClusterIdBucket],
+SBRunConfig.register[ClustersWithScores],
+SBRunConfig.register[EntityWithVersion],
+SBRunConfig.register[FullClusterId],
+SBRunConfig.register[EntityWithVersion],
+SBRunConfig.register[TopKEntitiesWithScores],
+SBRunConfig.register[TopKClustersWithScores],
+SBRunConfig.register[TopKTweetsWithScores]</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>/<strong>*</strong> Job configuration settings <strong>*</strong>/
+/**</p>
+<blockquote>
+<div><ul class="simple">
+<li><p>Use vmSettings to configure the VM</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</div></blockquote>
+<p>override def vmSettings: Seq[String] = Seq()</p>
+<p>private val SourcePerWorker = 1
+private val FlatMapPerWorker = 3
+private val SummerPerWorker = 3</p>
+<p>private val TotalWorker = 150</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Use transformConfig to set Heron options.</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>override def transformConfig(config: Map[String, AnyRef]): Map[String, AnyRef] = {</dt><dd><p>val heronConfig = new HeronConfig()</p>
+<p>/**
+Component names (subject to change if you add more components, make sure to update this)</p>
+<blockquote>
+<div><blockquote>
+<div><p>Source: Tail-FlatMap-FlatMap-Summer-FlatMap-Source
+FlatMap: Tail-FlatMap-FlatMap-Summer-FlatMap, Tail-FlatMap-FlatMap, Tail-FlatMap-FlatMap,
+Tail-FlatMap
+Summer: Tail-FlatMap-FlatMap-Summer * 2, Tail, Tail.2</p>
+</div></blockquote>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</div></blockquote>
+<p>val sourceName = “Tail-FlatMap-FlatMap-Summer-FlatMap-Source”
+val flatMapFlatMapSummerFlatMapName = “Tail-FlatMap-FlatMap-Summer-FlatMap”</p>
+<p>// 1 CPU per node, 1 for StreamMgr
+// By default, numCpus per component = totalCPUs / total number of components.
+// To add more CPUs for a specific component, use heronConfig.setComponentCpu(name, numCPUs)
+// add 20% more CPUs to address back pressure issue
+val TotalCPU = jLong(</p>
+<blockquote>
+<div><p>(1.2 * (SourcePerWorker * 1 + FlatMapPerWorker * 4 + SummerPerWorker * 6 + 1)).ceil.toInt)</p>
+</div></blockquote>
+<p>heronConfig.setContainerCpuRequested(TotalCPU.toDouble)</p>
+<p>// RAM settings
+val RamPerSourceGB = 8
+val RamPerSummerFlatMap = 8
+val RamDefaultPerComponent = 4</p>
+<p>// The extra 4GB is not explicitly assigned to the StreamMgr, so it gets 2GB by default, and
+// the remaining 2GB is shared among components. Keeping this configuration for now, since
+// it seems stable
+val TotalRamRB =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>RamPerSourceGB * SourcePerWorker * 1 +</dt><dd><p>RamDefaultPerComponent * FlatMapPerWorker * 4 +
+RamDefaultPerComponent * SummerPerWorker * 6 +
+4 // reserve 4GB for the StreamMgr</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>// By default, ramGB per component = totalRAM / total number of components.
+// To adjust RAMs for a specific component, use heronConfig.setComponentRam(name, ramGB)
+heronConfig.setComponentRam(sourceName, ByteAmount.fromGigabytes(RamPerSourceGB))
+heronConfig.setComponentRam(</p>
+<blockquote>
+<div><p>flatMapFlatMapSummerFlatMapName,
+ByteAmount.fromGigabytes(RamPerSummerFlatMap))</p>
+</div></blockquote>
+<p>heronConfig.setContainerRamRequested(ByteAmount.fromGigabytes(TotalRamRB))</p>
+<dl>
+<dt>super.transformConfig(config) ++ List(</dt><dd><p>BTConfig.TOPOLOGY_TEAM_NAME -&gt; “cassowary”,
+BTConfig.TOPOLOGY_TEAM_EMAIL -&gt; “<a class="reference external" href="mailto:no-reply&#37;&#52;&#48;twitter&#46;com">no-reply<span>&#64;</span>twitter<span>&#46;</span>com</a>”,
+BTConfig.TOPOLOGY_WORKERS -&gt; jInt(TotalWorker),
+BTConfig.TOPOLOGY_ACKER_EXECUTORS -&gt; jInt(0),
+BTConfig.TOPOLOGY_MESSAGE_TIMEOUT_SECS -&gt; jInt(30),
+BTConfig.TOPOLOGY_WORKER_CHILDOPTS -&gt; List(</p>
+<blockquote>
+<div><p>“-XX:MaxMetaspaceSize=256M”,
+“-Djava.security.auth.login.config=config/jaas.conf”,
+“-Dsun.security.krb5.debug=true”,
+“-Dcom.twitter.eventbus.client.EnableKafkaSaslTls=true”,
+“-Dcom.twitter.eventbus.client.zoneName=” + zone</p>
+</div></blockquote>
+<p>).mkString(” “),
+“storm.job.uniqueId” -&gt; jobID.get</p>
+</dd>
+</dl>
+<p>) ++ heronConfig.asScala.toMap</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Use getNamedOptions to set Summingbird runtime options</p></li>
+<li><p>The list of available options: com.twitter.summingbird.online.option</p></li>
+</ul>
+<p><a href="#id9"><span class="problematic" id="id10">*</span></a>/</p>
+</dd>
+<dt>override def getNamedOptions: Map[String, Options] = Map(</dt><dd><dl class="simple">
+<dt>“DEFAULT” -&gt; Options()</dt><dd><p>.set(FlatMapParallelism(TotalWorker * FlatMapPerWorker))
+.set(SourceParallelism(TotalWorker))
+.set(SummerBatchMultiplier(1000))
+.set(CacheSize(10000))
+.set(flatMapMetrics)
+.set(summerMetrics),</p>
+</dd>
+<dt>TweetJob.NodeName.TweetClusterUpdatedScoresFlatMapNodeName -&gt; Options()</dt><dd><p>.set(FlatMapParallelism(TotalWorker * FlatMapPerWorker)),</p>
+</dd>
+</dl>
+<p>TweetJob.NodeName.TweetClusterScoreSummerNodeName -&gt; Options()
+// Most expensive step. Double the capacity.</p>
+<blockquote>
+<div><p>.set(SummerParallelism(TotalWorker * SummerPerWorker * 4))
+.set(FlushFrequency(30.seconds)),</p>
+</div></blockquote>
+<dl class="simple">
+<dt>TweetJob.NodeName.ClusterTopKTweetsNodeName -&gt; Options()</dt><dd><p>.set(SummerParallelism(TotalWorker * SummerPerWorker))
+.set(FlushFrequency(30.seconds)),</p>
+</dd>
+<dt>TweetJob.NodeName.ClusterTopKTweetsLightNodeName -&gt; Options()</dt><dd><p>.set(SummerParallelism(TotalWorker * SummerPerWorker))
+.set(FlushFrequency(30.seconds)),</p>
+</dd>
+<dt>TweetJob.NodeName.TweetTopKNodeName -&gt; Options()</dt><dd><p>.set(SummerParallelism(TotalWorker * SummerPerWorker))
+.set(FlushFrequency(30.seconds))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>)</p>
+<p>/** Required job generation call for your job, defined in Job.scala <a href="#id11"><span class="problematic" id="id12">*</span></a>/
+override def graph: TailProducer[Storm, Any] = TweetJob.generate[Storm](</p>
+<blockquote>
+<div><p>profile,
+favoriteEventSource,
+userInterestedInService,
+entityClusterScoreStore,
+tweetTopKStore,
+clusterTopKTweetsStore,
+clusterTopKTweetsLightStore</p>
+</div></blockquote>
+<p>)</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../_sources/src/scala/com/twitter/simclusters_v2/summingbird/storm/TweetJobRunner.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

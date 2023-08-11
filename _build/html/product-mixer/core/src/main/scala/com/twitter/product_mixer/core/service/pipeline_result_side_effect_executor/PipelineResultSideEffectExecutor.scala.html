@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../../../" id="documentation_options" src="../../../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.product_mixer.core.service.pipeline_result_side_effect_executor</p>
+<p>import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.product_mixer.core.functional_component.side_effect.ExecuteSynchronously
+import com.twitter.product_mixer.core.functional_component.side_effect.FailOpen
+import com.twitter.product_mixer.core.functional_component.side_effect.PipelineResultSideEffect
+import com.twitter.product_mixer.core.functional_component.side_effect.PipelineResultSideEffect.Inputs
+import com.twitter.product_mixer.core.model.common.Conditionally
+import com.twitter.product_mixer.core.model.common.identifier.SideEffectIdentifier
+import com.twitter.product_mixer.core.model.marshalling.HasMarshalling
+import com.twitter.product_mixer.core.pipeline.PipelineQuery
+import com.twitter.product_mixer.core.service.Executor
+import com.twitter.product_mixer.core.service.ExecutorResult
+import com.twitter.product_mixer.core.service.pipeline_result_side_effect_executor.PipelineResultSideEffectExecutor._
+import com.twitter.stitch.Arrow
+import com.twitter.util.Return
+import com.twitter.util.Try
+import javax.inject.Inject
+import javax.inject.Singleton</p>
+<p>&#64;Singleton
+class PipelineResultSideEffectExecutor &#64;Inject() (override val statsReceiver: StatsReceiver)</p>
+<blockquote>
+<div><blockquote>
+<div><p>extends Executor {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>def arrow[Query &lt;: PipelineQuery, MixerDomainResultType &lt;: HasMarshalling](</dt><dd><p>sideEffects: Seq[PipelineResultSideEffect[Query, MixerDomainResultType]],
+context: Executor.Context</p>
+</dd>
+</dl>
+<p>): Arrow[Inputs[Query, MixerDomainResultType], PipelineResultSideEffectExecutor.Result] = {</p>
+<blockquote>
+<div><dl>
+<dt>val individualArrows: Seq[</dt><dd><p>Arrow[Inputs[Query, MixerDomainResultType], (SideEffectIdentifier, SideEffectResultType)]</p>
+</dd>
+<dt>] = sideEffects.map {</dt><dd><dl>
+<dt>case synchronousSideEffect: ExecuteSynchronously =&gt;</dt><dd><dl class="simple">
+<dt>val failsRequestIfThrows = {</dt><dd><dl class="simple">
+<dt>wrapComponentWithExecutorBookkeeping(context, synchronousSideEffect.identifier)(</dt><dd><p>Arrow.flatMap(synchronousSideEffect.apply))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+synchronousSideEffect match {</p>
+<blockquote>
+<div><dl>
+<dt>case failOpen: FailOpen =&gt;</dt><dd><p>// lift the failure
+failsRequestIfThrows.liftToTry.map(t =&gt;</p>
+<blockquote>
+<div><p>(failOpen.identifier, SynchronousSideEffectResult(t)))</p>
+</div></blockquote>
+</dd>
+<dt>case _ =&gt;</dt><dd><p>// don’t encapsulate the failure
+failsRequestIfThrows.map(_ =&gt;</p>
+<blockquote>
+<div><p>(synchronousSideEffect.identifier, SynchronousSideEffectResult(Return.Unit)))</p>
+</div></blockquote>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+<dt>case sideEffect =&gt;</dt><dd><dl>
+<dt>Arrow</dt><dd><dl class="simple">
+<dt>.async(</dt><dd><dl class="simple">
+<dt>wrapComponentWithExecutorBookkeeping(context, sideEffect.identifier)(</dt><dd><p>Arrow.flatMap(sideEffect.apply)))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>.andThen(Arrow.value((sideEffect.identifier, SideEffectResult)))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>val conditionallyRunArrows = sideEffects.zip(individualArrows).map {</dt><dd><dl>
+<dt>case (</dt><dd><blockquote>
+<div><dl class="simple">
+<dt>sideEffect: Conditionally[</dt><dd><p>PipelineResultSideEffect.Inputs[Query, MixerDomainResultType] &#64;unchecked</p>
+</dd>
+</dl>
+<p>],
+arrow) =&gt;</p>
+</div></blockquote>
+<dl class="simple">
+<dt>Arrow.ifelse[</dt><dd><p>Inputs[Query, MixerDomainResultType],
+(SideEffectIdentifier, SideEffectResultType)](
+input =&gt; sideEffect.onlyIf(input),
+arrow,
+Arrow.value((sideEffect.identifier, TurnedOffByConditionally)))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>case (_, arrow) =&gt; arrow</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>Arrow</dt><dd><p>.collect(conditionallyRunArrows)
+.map(results =&gt; Result(results))</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>object PipelineResultSideEffectExecutor {</dt><dd><dl class="simple">
+<dt>case class Result(sideEffects: Seq[(SideEffectIdentifier, SideEffectResultType)])</dt><dd><p>extends ExecutorResult</p>
+</dd>
+</dl>
+<p>sealed trait SideEffectResultType</p>
+<p>/** The [[PipelineResultSideEffect]] was executed asynchronously in a fire-and-forget way so no result will be available <a href="#id1"><span class="problematic" id="id2">*</span></a>/
+case object SideEffectResult extends SideEffectResultType</p>
+<p>/** The result of the [[PipelineResultSideEffect]] that was executed with [[ExecuteSynchronously]] <a href="#id3"><span class="problematic" id="id4">*</span></a>/
+case class SynchronousSideEffectResult(result: Try[Unit]) extends SideEffectResultType</p>
+<p>/** The result for when a [[PipelineResultSideEffect]] is turned off by [[Conditionally]]’s [[Conditionally.onlyIf]] <a href="#id5"><span class="problematic" id="id6">*</span></a>/
+case object TurnedOffByConditionally extends SideEffectResultType</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../../../_sources/product-mixer/core/src/main/scala/com/twitter/product_mixer/core/service/pipeline_result_side_effect_executor/PipelineResultSideEffectExecutor.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

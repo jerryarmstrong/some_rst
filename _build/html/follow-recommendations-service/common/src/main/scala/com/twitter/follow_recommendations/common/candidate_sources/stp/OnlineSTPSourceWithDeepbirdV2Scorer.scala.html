@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../../../" id="documentation_options" src="../../../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.follow_recommendations.common.candidate_sources.stp
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.follow_recommendations.common.models.AccountProof
+import com.twitter.follow_recommendations.common.models.CandidateUser
+import com.twitter.follow_recommendations.common.models.FollowProof
+import com.twitter.follow_recommendations.common.models.HasRecentFollowedUserIds
+import com.twitter.follow_recommendations.common.models.Reason
+import com.twitter.onboarding.relevance.features.strongtie.{</p>
+<blockquote>
+<div><p>StrongTieFeatures =&gt; StrongTieFeaturesWrapper</p>
+</div></blockquote>
+<p>}
+import com.twitter.product_mixer.core.model.marshalling.request.HasClientContext
+import com.twitter.stitch.Stitch
+import com.twitter.timelines.configapi.HasParams
+import com.twitter.wtf.scalding.jobs.strong_tie_prediction.STPRecord
+import javax.inject.Inject
+import javax.inject.Singleton</p>
+<p>&#64;Singleton
+class OnlineSTPSourceWithDeepbirdV2Scorer &#64;Inject() (</p>
+<blockquote>
+<div><p>dbv2StpScorer: Dbv2StpScorer,
+stpGraphBuilder: STPGraphBuilder,
+baseStatReceiver: StatsReceiver)</p>
+<blockquote>
+<div><p>extends BaseOnlineSTPSource(stpGraphBuilder, baseStatReceiver) {</p>
+</div></blockquote>
+<p>private val dbv2ScorerUsedCounter = statsReceiver.counter(“dbv2_scorer_used”)
+private val dbv2ScorerFailureCounter = statsReceiver.counter(“dbv2_scorer_failure”)
+private val dbv2ScorerSuccessCounter = statsReceiver.counter(“dbv2_scorer_success”)</p>
+<dl>
+<dt>override def getCandidates(</dt><dd><p>records: Seq[STPRecord],
+request: HasClientContext with HasParams with HasRecentFollowedUserIds,</p>
+</dd>
+<dt>): Stitch[Seq[CandidateUser]] = {</dt><dd><dl>
+<dt>val possibleCandidates: Seq[Stitch[Option[CandidateUser]]] = records.map { trainingRecord =&gt;</dt><dd><p>dbv2ScorerUsedCounter.incr()
+val score = dbv2StpScorer.getScoredResponse(trainingRecord)
+score.map {</p>
+<blockquote>
+<div><dl>
+<dt>case None =&gt;</dt><dd><p>dbv2ScorerFailureCounter.incr()
+None</p>
+</dd>
+<dt>case Some(scoreVal) =&gt;</dt><dd><p>dbv2ScorerSuccessCounter.incr()
+Some(</p>
+<blockquote>
+<div><dl>
+<dt>CandidateUser(</dt><dd><p>id = trainingRecord.destinationId,
+score = Some(OnlineSTPSourceWithDeepbirdV2Scorer.logitSubtraction(scoreVal)),
+reason = Some(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>Reason(Some(</dt><dd><dl class="simple">
+<dt>AccountProof(followProof =</dt><dd><p>Some(FollowProof(trainingRecord.socialProof, trainingRecord.socialProof.size)))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>)))</p>
+</div></blockquote>
+</dd>
+<dt>).withCandidateSourceAndFeatures(</dt><dd><p>identifier,
+Seq(StrongTieFeaturesWrapper(trainingRecord.features)))</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}
+Stitch.collect(possibleCandidates).map { _.flatten.sortBy(-_.score.getOrElse(0.0)) }</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>object OnlineSTPSourceWithDeepbirdV2Scorer {</dt><dd><p>// The following two variables are the means for the distribution of scores coming from the legacy
+// and DBv2 OnlineSTP models. We need this to calibrate the DBv2 scores and align the two means.
+// BQ Link: <a class="reference external" href="https://console.cloud.google.com/bigquery?sq=213005704923:e06ac27e4db74385a77a4b538c531f82">https://console.cloud.google.com/bigquery?sq=213005704923:e06ac27e4db74385a77a4b538c531f82</a>
+private val legacyMeanScore = 0.0478208871192468
+private val dbv2MeanScore = 0.238666097210261</p>
+<p>// In below are the necessary functions to calibrate the scores such that the means are aligned.
+private val EPS: Double = 1e-8
+private val e: Double = math.exp(1)
+private def sigmoid(x: Double): Double = math.pow(e, x) / (math.pow(e, x) + 1)
+// We add an EPS to the denominator to avoid division by 0.
+private def logit(x: Double): Double = math.log(x / (1 - x + EPS))
+def logitSubtraction(x: Double): Double = sigmoid(</p>
+<blockquote>
+<div><p>logit(x) - (logit(dbv2MeanScore) - logit(legacyMeanScore)))</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../../../_sources/follow-recommendations-service/common/src/main/scala/com/twitter/follow_recommendations/common/candidate_sources/stp/OnlineSTPSourceWithDeepbirdV2Scorer.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

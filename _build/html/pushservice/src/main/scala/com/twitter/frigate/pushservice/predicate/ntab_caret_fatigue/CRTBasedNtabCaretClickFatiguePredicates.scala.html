@@ -1,0 +1,1474 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../../" id="documentation_options" src="../../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.frigate.pushservice.predicate.ntab_caret_fatigue</p>
+<p>import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.notificationservice.thriftscala.GenericType
+import com.twitter.hermit.predicate.NamedPredicate
+import com.twitter.notificationservice.genericfeedbackstore.FeedbackPromptValue
+import com.twitter.hermit.predicate.Predicate
+import com.twitter.frigate.common.base.Candidate
+import com.twitter.frigate.common.base.RecommendationType
+import com.twitter.frigate.common.base.TargetInfo
+import com.twitter.frigate.thriftscala.CommonRecommendationType
+import com.twitter.frigate.thriftscala.SeeLessOftenType
+import com.twitter.frigate.common.history.History
+import com.twitter.frigate.common.predicate.FrigateHistoryFatiguePredicate.TimeSeries
+import com.twitter.frigate.common.rec_types.RecTypes
+import com.twitter.frigate.pushservice.params.PushFeatureSwitchParams
+import com.twitter.frigate.common.predicate.ntab_caret_fatigue.NtabCaretClickFatiguePredicateHelper
+import com.twitter.frigate.pushservice.predicate.CaretFeedbackHistoryFilter
+import com.twitter.notificationservice.thriftscala.CaretFeedbackDetails
+import com.twitter.util.Duration
+import com.twitter.util.Future
+import com.twitter.frigate.common.predicate.FatiguePredicate
+import com.twitter.frigate.pushservice.util.PushCapUtil
+import com.twitter.frigate.pushservice.model.PushTypes.Target
+import com.twitter.frigate.pushservice.util.PushDeviceUtil</p>
+<p>object CRTBasedNtabCaretClickFatiguePredicates {</p>
+<blockquote>
+<div><p>private val MagicRecsCategory = “MagicRecs”</p>
+<dl class="simple">
+<dt>private val HighQualityRefreshableTypes: Set[Option[String]] = Set(</dt><dd><p>Some(“MagicRecHighQualityTweet”),</p>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>private def getUserStateWeight(target: Target): Future[Double] = {</dt><dd><dl>
+<dt>PushDeviceUtil.isNtabOnlyEligible.map {</dt><dd><dl class="simple">
+<dt>case true =&gt;</dt><dd><p>target.params(PushFeatureSwitchParams.SeeLessOftenNtabOnlyNotifUserPushCapWeight)</p>
+</dd>
+</dl>
+<p>case _ =&gt; 1.0</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def crtToSeeLessOftenType(</dt><dd><p>crt: CommonRecommendationType,
+candidate: Candidate</p>
+<blockquote>
+<div><p>with RecommendationType
+with TargetInfo[</p>
+<blockquote>
+<div><p>Target</p>
+</div></blockquote>
+<p>],</p>
+</div></blockquote>
+</dd>
+<dt>): SeeLessOftenType = {</dt><dd><dl class="simple">
+<dt>val crtToSeeLessOftenTypeMap: Map[CommonRecommendationType, SeeLessOftenType] = {</dt><dd><p>RecTypes.f1FirstDegreeTypes.map((_, SeeLessOftenType.F1Type)).toMap</p>
+</dd>
+</dl>
+<p>}</p>
+<p>crtToSeeLessOftenTypeMap.getOrElse(crt, SeeLessOftenType.OtherTypes)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def genericTypeToSeeLessOftenType(</dt><dd><p>genericType: GenericType,
+candidate: Candidate</p>
+<blockquote>
+<div><p>with RecommendationType
+with TargetInfo[</p>
+<blockquote>
+<div><p>Target</p>
+</div></blockquote>
+<p>]</p>
+</div></blockquote>
+</dd>
+<dt>): SeeLessOftenType = {</dt><dd><dl class="simple">
+<dt>val genericTypeToSeeLessOftenTypeMap: Map[GenericType, SeeLessOftenType] = {</dt><dd><p>Map(GenericType.MagicRecFirstDegreeTweetRecent -&gt; SeeLessOftenType.F1Type)</p>
+</dd>
+</dl>
+<p>}</p>
+<p>genericTypeToSeeLessOftenTypeMap.getOrElse(genericType, SeeLessOftenType.OtherTypes)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def getWeightForCaretFeedback(</dt><dd><p>dislikedType: SeeLessOftenType,
+candidate: Candidate</p>
+<blockquote>
+<div><p>with RecommendationType
+with TargetInfo[</p>
+<blockquote>
+<div><p>Target</p>
+</div></blockquote>
+<p>]</p>
+</div></blockquote>
+</dd>
+<dt>): Double = {</dt><dd><dl>
+<dt>def getWeightFromDislikedAndCurrentType(</dt><dd><p>dislikedType: SeeLessOftenType,
+currentType: SeeLessOftenType</p>
+</dd>
+<dt>): Double = {</dt><dd><p>val weightMap: Map[(SeeLessOftenType, SeeLessOftenType), Double] = {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>Map(</dt><dd><dl class="simple">
+<dt>(SeeLessOftenType.F1Type, SeeLessOftenType.F1Type) -&gt; candidate.target.params(</dt><dd><p>PushFeatureSwitchParams.SeeLessOftenF1TriggerF1PushCapWeight),</p>
+</dd>
+<dt>(SeeLessOftenType.OtherTypes, SeeLessOftenType.OtherTypes) -&gt; candidate.target.params(</dt><dd><p>PushFeatureSwitchParams.SeeLessOftenNonF1TriggerNonF1PushCapWeight),</p>
+</dd>
+<dt>(SeeLessOftenType.F1Type, SeeLessOftenType.OtherTypes) -&gt; candidate.target.params(</dt><dd><p>PushFeatureSwitchParams.SeeLessOftenF1TriggerNonF1PushCapWeight),</p>
+</dd>
+<dt>(SeeLessOftenType.OtherTypes, SeeLessOftenType.F1Type) -&gt; candidate.target.params(</dt><dd><p>PushFeatureSwitchParams.SeeLessOftenNonF1TriggerF1PushCapWeight)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>weightMap</dt><dd><dl class="simple">
+<dt>.getOrElse(</dt><dd><p>(dislikedType, currentType),
+candidate.target.params(PushFeatureSwitchParams.SeeLessOftenDefaultPushCapWeight))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>getWeightFromDislikedAndCurrentType(</dt><dd><p>dislikedType,
+crtToSeeLessOftenType(candidate.commonRecType, candidate))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def isOutsideCrtBasedNtabCaretClickFatiguePeriodContFn(</dt><dd><dl>
+<dt>candidate: Candidate</dt><dd><p>with RecommendationType
+with TargetInfo[</p>
+<blockquote>
+<div><p>Target</p>
+</div></blockquote>
+<p>],</p>
+</dd>
+</dl>
+<p>history: History,
+feedbackDetails: Seq[CaretFeedbackDetails],
+filterHistory: TimeSeries =&gt; TimeSeries =</p>
+<blockquote>
+<div><p>FatiguePredicate.recTypesOnlyFilter(RecTypes.sharedNTabCaretFatigueTypes),</p>
+</div></blockquote>
+<dl class="simple">
+<dt>filterCaretFeedbackHistory: Target =&gt; Seq[</dt><dd><p>CaretFeedbackDetails</p>
+</dd>
+<dt>] =&gt; Seq[CaretFeedbackDetails] =</dt><dd><p>CaretFeedbackHistoryFilter.caretFeedbackHistoryFilter(Seq(MagicRecsCategory)),</p>
+</dd>
+</dl>
+<p>knobs: Seq[Double],
+pushCapKnobs: Seq[Double],
+powerKnobs: Seq[Double],
+f1Weight: Double,
+nonF1Weight: Double,
+defaultPushCap: Int,
+stats: StatsReceiver,
+tripHqTweetWeight: Double = 0.0,</p>
+</dd>
+<dt>): Boolean = {</dt><dd><p>val filteredFeedbackDetails = filterCaretFeedbackHistory(candidate.target)(feedbackDetails)
+val weight = {</p>
+<blockquote>
+<div><dl>
+<dt>if (RecTypes.HighQualityTweetTypes.contains(</dt><dd><blockquote>
+<div><p>candidate.commonRecType) &amp;&amp; (tripHqTweetWeight != 0)) {</p>
+</div></blockquote>
+<p>tripHqTweetWeight</p>
+</dd>
+<dt>} else if (RecTypes.isF1Type(candidate.commonRecType)) {</dt><dd><p>f1Weight</p>
+</dd>
+<dt>} else {</dt><dd><p>nonF1Weight</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}
+val filteredHistory = History(filterHistory(history.history.toSeq).toMap)
+isOutsideFatiguePeriod(</p>
+<blockquote>
+<div><p>filteredHistory,
+filteredFeedbackDetails,
+Seq(),
+ContinuousFunctionParam(</p>
+<blockquote>
+<div><p>knobs,
+pushCapKnobs,
+powerKnobs,
+weight,
+defaultPushCap</p>
+</div></blockquote>
+<p>),
+stats.scope(</p>
+<blockquote>
+<div><p>if (RecTypes.isF1Type(candidate.commonRecType)) “mr_ntab_dislike_f1_candidate_fn”
+else if (RecTypes.HighQualityTweetTypes.contains(candidate.commonRecType))</p>
+<blockquote>
+<div><p>“mr_ntab_dislike_high_quality_candidate_fn”</p>
+</div></blockquote>
+<p>else “mr_ntab_dislike_nonf1_candidate_fn”)</p>
+</div></blockquote>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def isOutsideFatiguePeriod(</dt><dd><p>history: History,
+feedbackDetails: Seq[CaretFeedbackDetails],
+feedbacks: Seq[FeedbackModel],
+param: ContinuousFunctionParam,
+stats: StatsReceiver</p>
+</dd>
+<dt>): Boolean = {</dt><dd><dl>
+<dt>val fatiguePeriod: Duration =</dt><dd><dl class="simple">
+<dt>NtabCaretClickFatigueUtils.durationToFilterForFeedback(</dt><dd><p>feedbackDetails,
+feedbacks,
+param,
+param.defaultValue,
+stats</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>val hasRecentSent =</dt><dd><p>NtabCaretClickFatiguePredicateHelper.hasRecentSend(history, fatiguePeriod)</p>
+</dd>
+</dl>
+<p>!hasRecentSent</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def genericCRTBasedNtabCaretClickFnFatiguePredicate[</dt><dd><dl class="simple">
+<dt>Cand &lt;: Candidate with RecommendationType with TargetInfo[</dt><dd><p>Target</p>
+</dd>
+</dl>
+<p>]</p>
+</dd>
+<dt>](</dt><dd><dl class="simple">
+<dt>filterHistory: TimeSeries =&gt; TimeSeries =</dt><dd><p>FatiguePredicate.recTypesOnlyFilter(RecTypes.sharedNTabCaretFatigueTypes),</p>
+</dd>
+<dt>filterCaretFeedbackHistory: Target =&gt; Seq[</dt><dd><p>CaretFeedbackDetails</p>
+</dd>
+<dt>] =&gt; Seq[CaretFeedbackDetails] = CaretFeedbackHistoryFilter</dt><dd><p>.caretFeedbackHistoryFilter(Seq(MagicRecsCategory)),</p>
+</dd>
+<dt>filterInlineFeedbackHistory: Seq[FeedbackModel] =&gt; Seq[FeedbackModel] =</dt><dd><p>NtabCaretClickFatigueUtils.feedbackModelFilterByCRT(RecTypes.sharedNTabCaretFatigueTypes)</p>
+</dd>
+</dl>
+</dd>
+<dt>)(</dt><dd><p>implicit stats: StatsReceiver</p>
+</dd>
+<dt>): NamedPredicate[Cand] = {</dt><dd><p>val predicateName = “generic_crt_based_ntab_dislike_fatigue_fn”
+Predicate</p>
+<blockquote>
+<div><dl>
+<dt>.fromAsync[Cand] { cand: Cand =&gt;</dt><dd><dl>
+<dt>{</dt><dd><dl>
+<dt>if (!cand.target.params(PushFeatureSwitchParams.EnableGenericCRTBasedFatiguePredicate)) {</dt><dd><p>Future.True</p>
+</dd>
+<dt>} else {</dt><dd><p>val scopedStats = stats.scope(predicateName)
+val totalRequests = scopedStats.counter(“mr_ntab_dislike_total”)
+val total90Day =</p>
+<blockquote>
+<div><p>scopedStats.counter(“mr_ntab_dislike_90day_dislike”)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>val totalDisabled =</dt><dd><p>scopedStats.counter(“mr_ntab_dislike_not_90day_dislike”)</p>
+</dd>
+</dl>
+<p>val totalSuccess = scopedStats.counter(“mr_ntab_dislike_success”)
+val totalFiltered = scopedStats.counter(“mr_ntab_dislike_filtered”)
+val totalWithHistory =</p>
+<blockquote>
+<div><p>scopedStats.counter(“mr_ntab_dislike_with_history”)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>val totalWithoutHistory =</dt><dd><p>scopedStats.counter(“mr_ntab_dislike_without_history”)</p>
+</dd>
+</dl>
+<p>totalRequests.incr()</p>
+<dl>
+<dt>Future</dt><dd><dl>
+<dt>.join(</dt><dd><p>cand.target.history,
+cand.target.caretFeedbacks,
+cand.target.dynamicPushcap,
+cand.target.optoutAdjustedPushcap,
+PushCapUtil.getDefaultPushCap(cand.target),
+getUserStateWeight(cand.target)</p>
+</dd>
+<dt>).map {</dt><dd><dl>
+<dt>case (</dt><dd><blockquote>
+<div><p>history,
+Some(feedbackDetails),
+dynamicPushcapOpt,
+optoutAdjustedPushcapOpt,
+defaultPushCap,
+userStateWeight) =&gt; {</p>
+</div></blockquote>
+<p>totalWithHistory.incr()</p>
+<dl>
+<dt>val feedbackDetailsDeduped =</dt><dd><dl class="simple">
+<dt>NtabCaretClickFatiguePredicateHelper.dedupFeedbackDetails(</dt><dd><p>filterCaretFeedbackHistory(cand.target)(feedbackDetails),
+stats</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>val pushCap: Int = (dynamicPushcapOpt, optoutAdjustedPushcapOpt) match {</dt><dd><p>case (_, Some(optoutAdjustedPushcap)) =&gt; optoutAdjustedPushcap
+case (Some(pushcapInfo), _) =&gt; pushcapInfo.pushcap
+case _ =&gt; defaultPushCap</p>
+</dd>
+</dl>
+<p>}
+val filteredHistory = History(filterHistory(history.history.toSeq).toMap)</p>
+<dl>
+<dt>val hasUserDislikeInLast90Days =</dt><dd><p>NtabCaretClickFatigueUtils.hasUserDislikeInLast90Days(feedbackDetailsDeduped)</p>
+</dd>
+<dt>val isF1TriggerFatigueEnabled = cand.target</dt><dd><p>.params(PushFeatureSwitchParams.EnableContFnF1TriggerSeeLessOftenFatigue)</p>
+</dd>
+<dt>val isNonF1TriggerFatigueEnabled = cand.target.params(</dt><dd><p>PushFeatureSwitchParams.EnableContFnNonF1TriggerSeeLessOftenFatigue)</p>
+</dd>
+<dt>val isOutisdeSeeLessOftenFatigue =</dt><dd><dl>
+<dt>if (hasUserDislikeInLast90Days &amp;&amp; (isF1TriggerFatigueEnabled || isNonF1TriggerFatigueEnabled)) {</dt><dd><p>total90Day.incr()</p>
+<dl>
+<dt>val feedbackDetailsGroupedBySeeLessOftenType: Map[Option[</dt><dd><p>SeeLessOftenType</p>
+</dd>
+<dt>], Seq[</dt><dd><p>CaretFeedbackDetails</p>
+</dd>
+<dt>]] = feedbackDetails.groupBy(feedbackDetail =&gt;</dt><dd><dl class="simple">
+<dt>feedbackDetail.genericNotificationMetadata.map(x =&gt;</dt><dd><p>genericTypeToSeeLessOftenType(x.genericType, cand)))</p>
+</dd>
+</dl>
+</dd>
+<dt>val isOutsideFatiguePeriodSeq =</dt><dd><dl>
+<dt>for (elem &lt;- feedbackDetailsGroupedBySeeLessOftenType if elem._1.isDefined)</dt><dd><dl>
+<dt>yield {</dt><dd><p>val dislikedSeeLessOftenType: SeeLessOftenType = elem._1.get
+val seqCaretFeedbackDetails: Seq[CaretFeedbackDetails] = elem._2</p>
+<dl>
+<dt>val weight = getWeightForCaretFeedback(</dt><dd><p>dislikedSeeLessOftenType,
+cand) * userStateWeight</p>
+</dd>
+<dt>if (isOutsideFatiguePeriod(</dt><dd><blockquote>
+<div><p>history = filteredHistory,
+feedbackDetails = seqCaretFeedbackDetails,
+feedbacks = Seq(),
+param = ContinuousFunctionParam(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>knobs = cand.target</dt><dd><p>.params(PushFeatureSwitchParams.SeeLessOftenListOfDayKnobs),</p>
+</dd>
+<dt>knobValues = cand.target</dt><dd><dl class="simple">
+<dt>.params(</dt><dd><p>PushFeatureSwitchParams.SeeLessOftenListOfPushCapWeightKnobs).map(
+_ * pushCap),</p>
+</dd>
+</dl>
+</dd>
+<dt>powers = cand.target</dt><dd><p>.params(PushFeatureSwitchParams.SeeLessOftenListOfPowerKnobs),</p>
+</dd>
+</dl>
+<p>weight = weight,
+defaultValue = pushCap</p>
+</div></blockquote>
+<p>),
+scopedStats</p>
+</div></blockquote>
+<p>)) {
+true</p>
+</dd>
+<dt>} else {</dt><dd><p>false</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>isOutsideFatiguePeriodSeq.forall(identity)</p>
+</dd>
+<dt>} else {</dt><dd><p>totalDisabled.incr()
+true</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>if (isOutisdeSeeLessOftenFatigue) {</dt><dd><p>totalSuccess.incr()</p>
+</dd>
+</dl>
+<p>} else totalFiltered.incr()</p>
+<p>isOutisdeSeeLessOftenFatigue</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>case _ =&gt;</dt><dd><p>totalSuccess.incr()
+totalWithoutHistory.incr()
+true</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}.withStats(stats.scope(predicateName))
+.withName(predicateName)</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def f1TriggeredCRTBasedNtabCaretClickFnFatiguePredicate[</dt><dd><dl class="simple">
+<dt>Cand &lt;: Candidate with RecommendationType with TargetInfo[</dt><dd><p>Target</p>
+</dd>
+</dl>
+<p>]</p>
+</dd>
+<dt>](</dt><dd><dl class="simple">
+<dt>filterHistory: TimeSeries =&gt; TimeSeries =</dt><dd><p>FatiguePredicate.recTypesOnlyFilter(RecTypes.sharedNTabCaretFatigueTypes),</p>
+</dd>
+<dt>filterCaretFeedbackHistory: Target =&gt; Seq[</dt><dd><p>CaretFeedbackDetails</p>
+</dd>
+<dt>] =&gt; Seq[CaretFeedbackDetails] = CaretFeedbackHistoryFilter</dt><dd><p>.caretFeedbackHistoryFilter(Seq(MagicRecsCategory)),</p>
+</dd>
+<dt>filterInlineFeedbackHistory: Seq[FeedbackModel] =&gt; Seq[FeedbackModel] =</dt><dd><p>NtabCaretClickFatigueUtils.feedbackModelFilterByCRT(RecTypes.sharedNTabCaretFatigueTypes)</p>
+</dd>
+</dl>
+</dd>
+<dt>)(</dt><dd><p>implicit stats: StatsReceiver</p>
+</dd>
+<dt>): NamedPredicate[Cand] = {</dt><dd><p>val predicateName = “f1_triggered_crt_based_ntab_dislike_fatigue_fn”
+Predicate</p>
+<blockquote>
+<div><dl>
+<dt>.fromAsync[Cand] { cand: Cand =&gt;</dt><dd><dl>
+<dt>{</dt><dd><p>val scopedStats = stats.scope(predicateName)
+val totalRequests = scopedStats.counter(“mr_ntab_dislike_total”)
+val total90Day =</p>
+<blockquote>
+<div><p>scopedStats.counter(“mr_ntab_dislike_90day_dislike”)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>val totalDisabled =</dt><dd><p>scopedStats.counter(“mr_ntab_dislike_not_90day_dislike”)</p>
+</dd>
+</dl>
+<p>val totalSuccess = scopedStats.counter(“mr_ntab_dislike_success”)
+val totalFiltered = scopedStats.counter(“mr_ntab_dislike_filtered”)
+val totalWithHistory =</p>
+<blockquote>
+<div><p>scopedStats.counter(“mr_ntab_dislike_with_history”)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>val totalWithoutHistory =</dt><dd><p>scopedStats.counter(“mr_ntab_dislike_without_history”)</p>
+</dd>
+</dl>
+<p>totalRequests.incr()</p>
+<dl>
+<dt>Future</dt><dd><dl>
+<dt>.join(</dt><dd><p>cand.target.history,
+cand.target.caretFeedbacks,
+cand.target.dynamicPushcap,
+cand.target.optoutAdjustedPushcap,
+cand.target.notificationFeedbacks,
+PushCapUtil.getDefaultPushCap(cand.target),
+getUserStateWeight(cand.target)</p>
+</dd>
+<dt>).map {</dt><dd><dl>
+<dt>case (</dt><dd><blockquote>
+<div><p>history,
+Some(feedbackDetails),
+dynamicPushcapOpt,
+optoutAdjustedPushcapOpt,
+Some(feedbacks),
+defaultPushCap,
+userStateWeight) =&gt;</p>
+</div></blockquote>
+<p>totalWithHistory.incr()</p>
+<dl>
+<dt>val feedbackDetailsDeduped =</dt><dd><dl class="simple">
+<dt>NtabCaretClickFatiguePredicateHelper.dedupFeedbackDetails(</dt><dd><p>filterCaretFeedbackHistory(cand.target)(feedbackDetails),
+stats</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>val pushCap: Int = (dynamicPushcapOpt, optoutAdjustedPushcapOpt) match {</dt><dd><p>case (_, Some(optoutAdjustedPushcap)) =&gt; optoutAdjustedPushcap
+case (Some(pushcapInfo), _) =&gt; pushcapInfo.pushcap
+case _ =&gt; defaultPushCap</p>
+</dd>
+</dl>
+<p>}
+val filteredHistory = History(filterHistory(history.history.toSeq).toMap)</p>
+<dl>
+<dt>val isOutsideInlineDislikeFatigue =</dt><dd><dl>
+<dt>if (cand.target</dt><dd><blockquote>
+<div><p>.params(PushFeatureSwitchParams.EnableContFnF1TriggerInlineFeedbackFatigue)) {</p>
+</div></blockquote>
+<dl>
+<dt>val weight =</dt><dd><dl class="simple">
+<dt>if (RecTypes.isF1Type(cand.commonRecType)) {</dt><dd><dl class="simple">
+<dt>cand.target</dt><dd><p>.params(PushFeatureSwitchParams.InlineFeedbackF1TriggerF1PushCapWeight)</p>
+</dd>
+</dl>
+</dd>
+<dt>} else {</dt><dd><dl class="simple">
+<dt>cand.target</dt><dd><p>.params(PushFeatureSwitchParams.InlineFeedbackF1TriggerNonF1PushCapWeight)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>val inlineFeedbackFatigueParam = ContinuousFunctionParam(</dt><dd><dl class="simple">
+<dt>cand.target</dt><dd><p>.params(PushFeatureSwitchParams.InlineFeedbackListOfDayKnobs),</p>
+</dd>
+<dt>cand.target</dt><dd><p>.params(PushFeatureSwitchParams.InlineFeedbackListOfPushCapWeightKnobs)
+.map(_ * pushCap),</p>
+</dd>
+<dt>cand.target</dt><dd><p>.params(PushFeatureSwitchParams.InlineFeedbackListOfPowerKnobs),</p>
+</dd>
+</dl>
+<p>weight,
+pushCap</p>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>isInlineDislikeOutsideFatiguePeriod(</dt><dd><p>cand,
+feedbacks</p>
+<blockquote>
+<div><dl class="simple">
+<dt>.collect {</dt><dd><dl class="simple">
+<dt>case feedbackPromptValue: FeedbackPromptValue =&gt;</dt><dd><p>InlineFeedbackModel(feedbackPromptValue, None)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>},</p>
+</div></blockquote>
+<p>filteredHistory,
+Seq(</p>
+<blockquote>
+<div><p>filterInlineFeedbackHistory,
+NtabCaretClickFatigueUtils.feedbackModelFilterByCRT(</p>
+<blockquote>
+<div><p>RecTypes.f1FirstDegreeTypes)),</p>
+</div></blockquote>
+</div></blockquote>
+<p>inlineFeedbackFatigueParam,
+scopedStats</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>} else true</p>
+</dd>
+<dt>lazy val isOutsidePromptDislikeFatigue =</dt><dd><dl>
+<dt>if (cand.target</dt><dd><blockquote>
+<div><p>.params(PushFeatureSwitchParams.EnableContFnF1TriggerPromptFeedbackFatigue)) {</p>
+</div></blockquote>
+<dl>
+<dt>val weight =</dt><dd><dl class="simple">
+<dt>if (RecTypes.isF1Type(cand.commonRecType)) {</dt><dd><dl class="simple">
+<dt>cand.target</dt><dd><p>.params(PushFeatureSwitchParams.PromptFeedbackF1TriggerF1PushCapWeight)</p>
+</dd>
+</dl>
+</dd>
+<dt>} else {</dt><dd><dl class="simple">
+<dt>cand.target</dt><dd><p>.params(PushFeatureSwitchParams.PromptFeedbackF1TriggerNonF1PushCapWeight)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>val promptFeedbackFatigueParam = ContinuousFunctionParam(</dt><dd><dl class="simple">
+<dt>cand.target</dt><dd><p>.params(PushFeatureSwitchParams.PromptFeedbackListOfDayKnobs),</p>
+</dd>
+<dt>cand.target</dt><dd><p>.params(PushFeatureSwitchParams.PromptFeedbackListOfPushCapWeightKnobs)
+.map(_ * pushCap),</p>
+</dd>
+<dt>cand.target</dt><dd><p>.params(PushFeatureSwitchParams.PromptFeedbackListOfPowerKnobs),</p>
+</dd>
+</dl>
+<p>weight,
+pushCap</p>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>isPromptDislikeOutsideFatiguePeriod(</dt><dd><dl>
+<dt>feedbacks</dt><dd><dl class="simple">
+<dt>.collect {</dt><dd><dl class="simple">
+<dt>case feedbackPromptValue: FeedbackPromptValue =&gt;</dt><dd><p>PromptFeedbackModel(feedbackPromptValue, None)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>},</p>
+</dd>
+</dl>
+<p>filteredHistory,
+Seq(</p>
+<blockquote>
+<div><p>filterInlineFeedbackHistory,
+NtabCaretClickFatigueUtils.feedbackModelFilterByCRT(</p>
+<blockquote>
+<div><p>RecTypes.f1FirstDegreeTypes)),</p>
+</div></blockquote>
+</div></blockquote>
+<p>promptFeedbackFatigueParam,
+scopedStats</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>} else true</p>
+</dd>
+</dl>
+<p>isOutsideInlineDislikeFatigue &amp;&amp; isOutsidePromptDislikeFatigue</p>
+</dd>
+<dt>case _ =&gt;</dt><dd><p>totalSuccess.incr()
+totalWithoutHistory.incr()
+true</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}.withStats(stats.scope(predicateName))
+.withName(predicateName)</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def nonF1TriggeredCRTBasedNtabCaretClickFnFatiguePredicate[</dt><dd><dl class="simple">
+<dt>Cand &lt;: Candidate with RecommendationType with TargetInfo[</dt><dd><p>Target</p>
+</dd>
+</dl>
+<p>]</p>
+</dd>
+<dt>](</dt><dd><dl class="simple">
+<dt>filterHistory: TimeSeries =&gt; TimeSeries =</dt><dd><p>FatiguePredicate.recTypesOnlyFilter(RecTypes.sharedNTabCaretFatigueTypes),</p>
+</dd>
+<dt>filterCaretFeedbackHistory: Target =&gt; Seq[</dt><dd><p>CaretFeedbackDetails</p>
+</dd>
+<dt>] =&gt; Seq[CaretFeedbackDetails] = CaretFeedbackHistoryFilter</dt><dd><p>.caretFeedbackHistoryFilter(Seq(MagicRecsCategory)),</p>
+</dd>
+<dt>filterInlineFeedbackHistory: Seq[FeedbackModel] =&gt; Seq[FeedbackModel] =</dt><dd><p>NtabCaretClickFatigueUtils.feedbackModelFilterByCRT(RecTypes.sharedNTabCaretFatigueTypes)</p>
+</dd>
+</dl>
+</dd>
+<dt>)(</dt><dd><p>implicit stats: StatsReceiver</p>
+</dd>
+<dt>): NamedPredicate[Cand] = {</dt><dd><p>val predicateName = “non_f1_triggered_crt_based_ntab_dislike_fatigue_fn”
+Predicate</p>
+<blockquote>
+<div><dl>
+<dt>.fromAsync[Cand] { cand: Cand =&gt;</dt><dd><dl>
+<dt>{</dt><dd><p>val scopedStats = stats.scope(predicateName)
+val totalRequests = scopedStats.counter(“mr_ntab_dislike_total”)
+val total90Day =</p>
+<blockquote>
+<div><p>scopedStats.counter(“mr_ntab_dislike_90day_dislike”)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>val totalDisabled =</dt><dd><p>scopedStats.counter(“mr_ntab_dislike_not_90day_dislike”)</p>
+</dd>
+</dl>
+<p>val totalSuccess = scopedStats.counter(“mr_ntab_dislike_success”)
+val totalFiltered = scopedStats.counter(“mr_ntab_dislike_filtered”)
+val totalWithHistory =</p>
+<blockquote>
+<div><p>scopedStats.counter(“mr_ntab_dislike_with_history”)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>val totalWithoutHistory =</dt><dd><p>scopedStats.counter(“mr_ntab_dislike_without_history”)</p>
+</dd>
+</dl>
+<p>val totalFeedbackSuccess = scopedStats.counter(“mr_total_feedback_success”)
+totalRequests.incr()</p>
+<dl>
+<dt>Future</dt><dd><dl>
+<dt>.join(</dt><dd><p>cand.target.history,
+cand.target.caretFeedbacks,
+cand.target.dynamicPushcap,
+cand.target.optoutAdjustedPushcap,
+cand.target.notificationFeedbacks,
+PushCapUtil.getDefaultPushCap(cand.target),
+getUserStateWeight(cand.target),</p>
+</dd>
+<dt>).map {</dt><dd><dl>
+<dt>case (</dt><dd><blockquote>
+<div><p>history,
+Some(feedbackDetails),
+dynamicPushcapOpt,
+optoutAdjustedPushcapOpt,
+Some(feedbacks),
+defaultPushCap,
+userStateWeight) =&gt;</p>
+</div></blockquote>
+<p>totalWithHistory.incr()</p>
+<dl>
+<dt>val filteredfeedbackDetails =</dt><dd><dl>
+<dt>if (cand.target.params(</dt><dd><blockquote>
+<div><p>PushFeatureSwitchParams.AdjustTripHqTweetTriggeredNtabCaretClickFatigue)) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>val refreshableTypeFilter = CaretFeedbackHistoryFilter</dt><dd><dl class="simple">
+<dt>.caretFeedbackHistoryFilterByRefreshableTypeDenyList(</dt><dd><p>HighQualityRefreshableTypes)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>refreshableTypeFilter(cand.target)(feedbackDetails)</p>
+</dd>
+<dt>} else {</dt><dd><p>feedbackDetails</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>val feedbackDetailsDeduped =</dt><dd><dl class="simple">
+<dt>NtabCaretClickFatiguePredicateHelper.dedupFeedbackDetails(</dt><dd><p>filterCaretFeedbackHistory(cand.target)(filteredfeedbackDetails),
+stats</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>val pushCap: Int = (dynamicPushcapOpt, optoutAdjustedPushcapOpt) match {</dt><dd><p>case (_, Some(optoutAdjustedPushcap)) =&gt; optoutAdjustedPushcap
+case (Some(pushcapInfo), _) =&gt; pushcapInfo.pushcap
+case _ =&gt; defaultPushCap</p>
+</dd>
+</dl>
+<p>}
+val filteredHistory = History(filterHistory(history.history.toSeq).toMap)</p>
+<dl>
+<dt>val isOutsideInlineDislikeFatigue =</dt><dd><dl>
+<dt>if (cand.target</dt><dd><blockquote>
+<div><dl class="simple">
+<dt>.params(</dt><dd><p>PushFeatureSwitchParams.EnableContFnNonF1TriggerInlineFeedbackFatigue)) {</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl>
+<dt>val weight =</dt><dd><dl class="simple">
+<dt>if (RecTypes.isF1Type(cand.commonRecType))</dt><dd><dl class="simple">
+<dt>cand.target</dt><dd><p>.params(PushFeatureSwitchParams.InlineFeedbackNonF1TriggerF1PushCapWeight)</p>
+</dd>
+</dl>
+</dd>
+<dt>else</dt><dd><dl class="simple">
+<dt>cand.target</dt><dd><dl class="simple">
+<dt>.params(</dt><dd><p>PushFeatureSwitchParams.InlineFeedbackNonF1TriggerNonF1PushCapWeight)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+<dt>val inlineFeedbackFatigueParam = ContinuousFunctionParam(</dt><dd><dl class="simple">
+<dt>cand.target</dt><dd><p>.params(PushFeatureSwitchParams.InlineFeedbackListOfDayKnobs),</p>
+</dd>
+<dt>cand.target</dt><dd><p>.params(PushFeatureSwitchParams.InlineFeedbackListOfPushCapWeightKnobs)
+.map(_ * pushCap),</p>
+</dd>
+<dt>cand.target</dt><dd><p>.params(PushFeatureSwitchParams.InlineFeedbackListOfPowerKnobs),</p>
+</dd>
+</dl>
+<p>weight,
+pushCap</p>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>val excludedCRTs: Set[CommonRecommendationType] =</dt><dd><dl>
+<dt>if (cand.target.params(</dt><dd><blockquote>
+<div><p>PushFeatureSwitchParams.AdjustTripHqTweetTriggeredNtabCaretClickFatigue)) {</p>
+</div></blockquote>
+<p>RecTypes.f1FirstDegreeTypes ++ RecTypes.HighQualityTweetTypes</p>
+</dd>
+<dt>} else {</dt><dd><p>RecTypes.f1FirstDegreeTypes</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>isInlineDislikeOutsideFatiguePeriod(</dt><dd><p>cand,
+feedbacks</p>
+<blockquote>
+<div><dl class="simple">
+<dt>.collect {</dt><dd><dl class="simple">
+<dt>case feedbackPromptValue: FeedbackPromptValue =&gt;</dt><dd><p>InlineFeedbackModel(feedbackPromptValue, None)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>},</p>
+</div></blockquote>
+<p>filteredHistory,
+Seq(</p>
+<blockquote>
+<div><p>filterInlineFeedbackHistory,
+NtabCaretClickFatigueUtils.feedbackModelExcludeCRT(excludedCRTs)),</p>
+</div></blockquote>
+<p>inlineFeedbackFatigueParam,
+scopedStats</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>} else true</p>
+</dd>
+<dt>lazy val isOutsidePromptDislikeFatigue =</dt><dd><dl>
+<dt>if (cand.target</dt><dd><blockquote>
+<div><dl class="simple">
+<dt>.params(</dt><dd><p>PushFeatureSwitchParams.EnableContFnNonF1TriggerPromptFeedbackFatigue)) {</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl>
+<dt>val weight =</dt><dd><dl class="simple">
+<dt>if (RecTypes.isF1Type(cand.commonRecType))</dt><dd><dl class="simple">
+<dt>cand.target</dt><dd><p>.params(PushFeatureSwitchParams.PromptFeedbackNonF1TriggerF1PushCapWeight)</p>
+</dd>
+</dl>
+</dd>
+<dt>else</dt><dd><dl class="simple">
+<dt>cand.target</dt><dd><dl class="simple">
+<dt>.params(</dt><dd><p>PushFeatureSwitchParams.PromptFeedbackNonF1TriggerNonF1PushCapWeight)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+<dt>val promptFeedbackFatigueParam = ContinuousFunctionParam(</dt><dd><dl class="simple">
+<dt>cand.target</dt><dd><p>.params(PushFeatureSwitchParams.PromptFeedbackListOfDayKnobs),</p>
+</dd>
+<dt>cand.target</dt><dd><p>.params(PushFeatureSwitchParams.PromptFeedbackListOfPushCapWeightKnobs)
+.map(_ * pushCap),</p>
+</dd>
+<dt>cand.target</dt><dd><p>.params(PushFeatureSwitchParams.PromptFeedbackListOfPowerKnobs),</p>
+</dd>
+</dl>
+<p>weight,
+pushCap</p>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>isPromptDislikeOutsideFatiguePeriod(</dt><dd><dl>
+<dt>feedbacks</dt><dd><dl class="simple">
+<dt>.collect {</dt><dd><dl class="simple">
+<dt>case feedbackPromptValue: FeedbackPromptValue =&gt;</dt><dd><p>PromptFeedbackModel(feedbackPromptValue, None)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>},</p>
+</dd>
+</dl>
+<p>filteredHistory,
+Seq(</p>
+<blockquote>
+<div><p>filterInlineFeedbackHistory,
+NtabCaretClickFatigueUtils.feedbackModelExcludeCRT(</p>
+<blockquote>
+<div><p>RecTypes.f1FirstDegreeTypes)),</p>
+</div></blockquote>
+</div></blockquote>
+<p>promptFeedbackFatigueParam,
+scopedStats</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>} else true</p>
+</dd>
+</dl>
+<p>isOutsideInlineDislikeFatigue &amp;&amp; isOutsidePromptDislikeFatigue</p>
+</dd>
+<dt>case _ =&gt;</dt><dd><p>totalFeedbackSuccess.incr()
+totalWithoutHistory.incr()
+true</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}.withStats(stats.scope(predicateName))
+.withName(predicateName)</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def tripHqTweetTriggeredCRTBasedNtabCaretClickFnFatiguePredicate[</dt><dd><dl class="simple">
+<dt>Cand &lt;: Candidate with RecommendationType with TargetInfo[</dt><dd><p>Target</p>
+</dd>
+</dl>
+<p>]</p>
+</dd>
+<dt>](</dt><dd><dl class="simple">
+<dt>filterHistory: TimeSeries =&gt; TimeSeries =</dt><dd><p>FatiguePredicate.recTypesOnlyFilter(RecTypes.sharedNTabCaretFatigueTypes),</p>
+</dd>
+<dt>filterCaretFeedbackHistory: Target =&gt; Seq[</dt><dd><p>CaretFeedbackDetails</p>
+</dd>
+<dt>] =&gt; Seq[CaretFeedbackDetails] = CaretFeedbackHistoryFilter</dt><dd><p>.caretFeedbackHistoryFilter(Seq(MagicRecsCategory)),</p>
+</dd>
+<dt>filterInlineFeedbackHistory: Seq[FeedbackModel] =&gt; Seq[FeedbackModel] =</dt><dd><p>NtabCaretClickFatigueUtils.feedbackModelFilterByCRT(RecTypes.sharedNTabCaretFatigueTypes)</p>
+</dd>
+</dl>
+</dd>
+<dt>)(</dt><dd><p>implicit stats: StatsReceiver</p>
+</dd>
+<dt>): NamedPredicate[Cand] = {</dt><dd><p>val predicateName = “trip_hq_tweet_triggered_crt_based_ntab_dislike_fatigue_fn”
+Predicate</p>
+<blockquote>
+<div><dl>
+<dt>.fromAsync[Cand] { cand: Cand =&gt;</dt><dd><dl>
+<dt>{</dt><dd><p>val scopedStats = stats.scope(predicateName)
+val totalRequests = scopedStats.counter(“mr_ntab_dislike_total”)
+val total90Day =</p>
+<blockquote>
+<div><p>scopedStats.counter(“mr_ntab_dislike_90day_dislike”)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>val totalDisabled =</dt><dd><p>scopedStats.counter(“mr_ntab_dislike_not_90day_dislike”)</p>
+</dd>
+</dl>
+<p>val totalSuccess = scopedStats.counter(“mr_ntab_dislike_success”)
+val totalFiltered = scopedStats.counter(“mr_ntab_dislike_filtered”)
+val totalWithHistory =</p>
+<blockquote>
+<div><p>scopedStats.counter(“mr_ntab_dislike_with_history”)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>val totalWithoutHistory =</dt><dd><p>scopedStats.counter(“mr_ntab_dislike_without_history”)</p>
+</dd>
+</dl>
+<p>val totalFeedbackSuccess = scopedStats.counter(“mr_total_feedback_success”)
+totalRequests.incr()</p>
+<dl>
+<dt>Future</dt><dd><dl>
+<dt>.join(</dt><dd><p>cand.target.history,
+cand.target.caretFeedbacks,
+cand.target.dynamicPushcap,
+cand.target.optoutAdjustedPushcap,
+cand.target.notificationFeedbacks,
+PushCapUtil.getDefaultPushCap(cand.target),
+getUserStateWeight(cand.target),</p>
+</dd>
+<dt>).map {</dt><dd><dl>
+<dt>case (</dt><dd><blockquote>
+<div><p>history,
+Some(feedbackDetails),
+dynamicPushcapOpt,
+optoutAdjustedPushcapOpt,
+Some(feedbacks),
+defaultPushCap,
+userStateWeight) =&gt;</p>
+</div></blockquote>
+<p>totalWithHistory.incr()
+if (cand.target.params(</p>
+<blockquote>
+<div><blockquote>
+<div><p>PushFeatureSwitchParams.AdjustTripHqTweetTriggeredNtabCaretClickFatigue)) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>val refreshableTypeFilter = CaretFeedbackHistoryFilter</dt><dd><p>.caretFeedbackHistoryFilterByRefreshableType(HighQualityRefreshableTypes)</p>
+</dd>
+</dl>
+<p>val filteredfeedbackDetails = refreshableTypeFilter(cand.target)(feedbackDetails)</p>
+<dl>
+<dt>val feedbackDetailsDeduped =</dt><dd><dl class="simple">
+<dt>NtabCaretClickFatiguePredicateHelper.dedupFeedbackDetails(</dt><dd><p>filterCaretFeedbackHistory(cand.target)(filteredfeedbackDetails),
+stats</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>val pushCap: Int = (dynamicPushcapOpt, optoutAdjustedPushcapOpt) match {</dt><dd><p>case (_, Some(optoutAdjustedPushcap)) =&gt; optoutAdjustedPushcap
+case (Some(pushcapInfo), _) =&gt; pushcapInfo.pushcap
+case _ =&gt; defaultPushCap</p>
+</dd>
+</dl>
+<p>}
+val filteredHistory = History(filterHistory(history.history.toSeq).toMap)</p>
+<dl>
+<dt>val isOutsideInlineDislikeFatigue =</dt><dd><dl>
+<dt>if (cand.target</dt><dd><blockquote>
+<div><dl class="simple">
+<dt>.params(</dt><dd><p>PushFeatureSwitchParams.EnableContFnNonF1TriggerInlineFeedbackFatigue)) {</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl>
+<dt>val weight = {</dt><dd><dl class="simple">
+<dt>if (RecTypes.HighQualityTweetTypes.contains(cand.commonRecType)) {</dt><dd><dl class="simple">
+<dt>cand.target</dt><dd><dl class="simple">
+<dt>.params(</dt><dd><p>PushFeatureSwitchParams.InlineFeedbackNonF1TriggerNonF1PushCapWeight)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+<dt>} else {</dt><dd><dl class="simple">
+<dt>cand.target</dt><dd><dl class="simple">
+<dt>.params(</dt><dd><p>PushFeatureSwitchParams.InlineFeedbackNonF1TriggerF1PushCapWeight)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>val inlineFeedbackFatigueParam = ContinuousFunctionParam(</dt><dd><dl class="simple">
+<dt>cand.target</dt><dd><p>.params(PushFeatureSwitchParams.InlineFeedbackListOfDayKnobs),</p>
+</dd>
+<dt>cand.target</dt><dd><p>.params(PushFeatureSwitchParams.InlineFeedbackListOfPushCapWeightKnobs)
+.map(_ * pushCap),</p>
+</dd>
+<dt>cand.target</dt><dd><p>.params(PushFeatureSwitchParams.InlineFeedbackListOfPowerKnobs),</p>
+</dd>
+</dl>
+<p>weight,
+pushCap</p>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>val includedCRTs: Set[CommonRecommendationType] =</dt><dd><p>RecTypes.HighQualityTweetTypes</p>
+</dd>
+<dt>isInlineDislikeOutsideFatiguePeriod(</dt><dd><p>cand,
+feedbacks</p>
+<blockquote>
+<div><dl class="simple">
+<dt>.collect {</dt><dd><dl class="simple">
+<dt>case feedbackPromptValue: FeedbackPromptValue =&gt;</dt><dd><p>InlineFeedbackModel(feedbackPromptValue, None)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>},</p>
+</div></blockquote>
+<p>filteredHistory,
+Seq(</p>
+<blockquote>
+<div><p>filterInlineFeedbackHistory,
+NtabCaretClickFatigueUtils.feedbackModelFilterByCRT(includedCRTs)),</p>
+</div></blockquote>
+<p>inlineFeedbackFatigueParam,
+scopedStats</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>} else true</p>
+</dd>
+<dt>lazy val isOutsidePromptDislikeFatigue =</dt><dd><dl>
+<dt>if (cand.target</dt><dd><blockquote>
+<div><dl class="simple">
+<dt>.params(</dt><dd><p>PushFeatureSwitchParams.EnableContFnNonF1TriggerPromptFeedbackFatigue)) {</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl>
+<dt>val weight =</dt><dd><dl class="simple">
+<dt>if (RecTypes.isF1Type(cand.commonRecType))</dt><dd><dl class="simple">
+<dt>cand.target</dt><dd><dl class="simple">
+<dt>.params(</dt><dd><p>PushFeatureSwitchParams.PromptFeedbackNonF1TriggerF1PushCapWeight)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+<dt>else</dt><dd><dl class="simple">
+<dt>cand.target</dt><dd><dl class="simple">
+<dt>.params(</dt><dd><p>PushFeatureSwitchParams.PromptFeedbackNonF1TriggerNonF1PushCapWeight)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+<dt>val promptFeedbackFatigueParam = ContinuousFunctionParam(</dt><dd><dl class="simple">
+<dt>cand.target</dt><dd><p>.params(PushFeatureSwitchParams.PromptFeedbackListOfDayKnobs),</p>
+</dd>
+<dt>cand.target</dt><dd><p>.params(PushFeatureSwitchParams.PromptFeedbackListOfPushCapWeightKnobs)
+.map(_ * pushCap),</p>
+</dd>
+<dt>cand.target</dt><dd><p>.params(PushFeatureSwitchParams.PromptFeedbackListOfPowerKnobs),</p>
+</dd>
+</dl>
+<p>weight,
+pushCap</p>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>isPromptDislikeOutsideFatiguePeriod(</dt><dd><dl>
+<dt>feedbacks</dt><dd><dl class="simple">
+<dt>.collect {</dt><dd><dl class="simple">
+<dt>case feedbackPromptValue: FeedbackPromptValue =&gt;</dt><dd><p>PromptFeedbackModel(feedbackPromptValue, None)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>},</p>
+</dd>
+</dl>
+<p>filteredHistory,
+Seq(</p>
+<blockquote>
+<div><p>filterInlineFeedbackHistory,
+NtabCaretClickFatigueUtils.feedbackModelExcludeCRT(</p>
+<blockquote>
+<div><p>RecTypes.f1FirstDegreeTypes)),</p>
+</div></blockquote>
+</div></blockquote>
+<p>promptFeedbackFatigueParam,
+scopedStats</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>} else true</p>
+</dd>
+</dl>
+<p>isOutsideInlineDislikeFatigue &amp;&amp; isOutsidePromptDislikeFatigue</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>true</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>case _ =&gt;</dt><dd><p>totalFeedbackSuccess.incr()
+totalWithoutHistory.incr()
+true</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}.withStats(stats.scope(predicateName))
+.withName(predicateName)</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def getDedupedInlineFeedbackByType(</dt><dd><p>inlineFeedbacks: Seq[FeedbackModel],
+feedbackType: FeedbackTypeEnum.Value,
+revertedFeedbackType: FeedbackTypeEnum.Value</p>
+</dd>
+<dt>): Seq[FeedbackModel] = {</dt><dd><dl>
+<dt>inlineFeedbacks</dt><dd><dl class="simple">
+<dt>.filter(feedback =&gt;</dt><dd><dl class="simple">
+<dt>feedback.feedbackTypeEnum == feedbackType ||</dt><dd><p>feedback.feedbackTypeEnum == revertedFeedbackType)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>.groupBy(feedback =&gt; feedback.notificationImpressionId.getOrElse(“”))
+.toSeq
+.collect {</p>
+<blockquote>
+<div><dl>
+<dt>case (impressionId, feedbacks: Seq[FeedbackModel]) if (feedbacks.nonEmpty) =&gt;</dt><dd><p>val latestFeedback = feedbacks.maxBy(feedback =&gt; feedback.timestampMs)
+if (latestFeedback.feedbackTypeEnum == feedbackType)</p>
+<blockquote>
+<div><p>Some(latestFeedback)</p>
+</div></blockquote>
+<p>else None</p>
+</dd>
+</dl>
+<p>case _ =&gt; None</p>
+</div></blockquote>
+<p>}
+.flatten</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def getDedupedInlineFeedback(</dt><dd><p>inlineFeedbacks: Seq[FeedbackModel],
+target: Target</p>
+</dd>
+<dt>): Seq[FeedbackModel] = {</dt><dd><dl>
+<dt>val inlineDislikeFeedback =</dt><dd><dl class="simple">
+<dt>if (target.params(PushFeatureSwitchParams.UseInlineDislikeForFatigue)) {</dt><dd><dl class="simple">
+<dt>getDedupedInlineFeedbackByType(</dt><dd><p>inlineFeedbacks,
+FeedbackTypeEnum.InlineDislike,
+FeedbackTypeEnum.InlineRevertedDislike)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>} else Seq()</p>
+</dd>
+<dt>val inlineDismissFeedback =</dt><dd><dl class="simple">
+<dt>if (target.params(PushFeatureSwitchParams.UseInlineDismissForFatigue)) {</dt><dd><dl class="simple">
+<dt>getDedupedInlineFeedbackByType(</dt><dd><p>inlineFeedbacks,
+FeedbackTypeEnum.InlineDismiss,
+FeedbackTypeEnum.InlineRevertedDismiss)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>} else Seq()</p>
+</dd>
+<dt>val inlineSeeLessFeedback =</dt><dd><dl class="simple">
+<dt>if (target.params(PushFeatureSwitchParams.UseInlineSeeLessForFatigue)) {</dt><dd><dl class="simple">
+<dt>getDedupedInlineFeedbackByType(</dt><dd><p>inlineFeedbacks,
+FeedbackTypeEnum.InlineSeeLess,
+FeedbackTypeEnum.InlineRevertedSeeLess)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>} else Seq()</p>
+</dd>
+<dt>val inlineNotRelevantFeedback =</dt><dd><dl class="simple">
+<dt>if (target.params(PushFeatureSwitchParams.UseInlineNotRelevantForFatigue)) {</dt><dd><dl class="simple">
+<dt>getDedupedInlineFeedbackByType(</dt><dd><p>inlineFeedbacks,
+FeedbackTypeEnum.InlineNotRelevant,
+FeedbackTypeEnum.InlineRevertedNotRelevant)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>} else Seq()</p>
+</dd>
+</dl>
+<p>inlineDislikeFeedback ++ inlineDismissFeedback ++ inlineSeeLessFeedback ++ inlineNotRelevantFeedback</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def isInlineDislikeOutsideFatiguePeriod(</dt><dd><dl>
+<dt>candidate: Candidate</dt><dd><p>with RecommendationType
+with TargetInfo[</p>
+<blockquote>
+<div><p>Target</p>
+</div></blockquote>
+<p>],</p>
+</dd>
+</dl>
+<p>inlineFeedbacks: Seq[FeedbackModel],
+filteredHistory: History,
+feedbackFilters: Seq[Seq[FeedbackModel] =&gt; Seq[FeedbackModel]],
+inlineFeedbackFatigueParam: ContinuousFunctionParam,
+stats: StatsReceiver</p>
+</dd>
+<dt>): Boolean = {</dt><dd><p>val scopedStats = stats.scope(“inline_dislike_fatigue”)</p>
+<dl>
+<dt>val inlineNegativeFeedback =</dt><dd><p>getDedupedInlineFeedback(inlineFeedbacks, candidate.target)</p>
+</dd>
+<dt>val hydratedInlineNegativeFeedback = FeedbackModelHydrator.HydrateNotification(</dt><dd><p>inlineNegativeFeedback,
+filteredHistory.history.toSeq.map(_._2))</p>
+</dd>
+<dt>if (isOutsideFatiguePeriod(</dt><dd><blockquote>
+<div><p>filteredHistory,
+Seq(),
+feedbackFilters.foldLeft(hydratedInlineNegativeFeedback)((feedbacks, feedbackFilter) =&gt;</p>
+<blockquote>
+<div><p>feedbackFilter(feedbacks)),</p>
+</div></blockquote>
+<p>inlineFeedbackFatigueParam,
+scopedStats</p>
+</div></blockquote>
+<p>)) {
+scopedStats.counter(“feedback_inline_dislike_success”).incr()
+true</p>
+</dd>
+<dt>} else {</dt><dd><p>scopedStats.counter(“feedback_inline_dislike_filtered”).incr()
+false</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def isPromptDislikeOutsideFatiguePeriod(</dt><dd><p>feedbacks: Seq[FeedbackModel],
+filteredHistory: History,
+feedbackFilters: Seq[Seq[FeedbackModel] =&gt; Seq[FeedbackModel]],
+inlineFeedbackFatigueParam: ContinuousFunctionParam,
+stats: StatsReceiver</p>
+</dd>
+<dt>): Boolean = {</dt><dd><p>val scopedStats = stats.scope(“prompt_dislike_fatigue”)</p>
+<dl>
+<dt>val promptDislikeFeedback = feedbacks</dt><dd><p>.filter(feedback =&gt; feedback.feedbackTypeEnum == FeedbackTypeEnum.PromptIrrelevant)</p>
+</dd>
+<dt>val hydratedPromptDislikeFeedback = FeedbackModelHydrator.HydrateNotification(</dt><dd><p>promptDislikeFeedback,
+filteredHistory.history.toSeq.map(_._2))</p>
+</dd>
+<dt>if (isOutsideFatiguePeriod(</dt><dd><blockquote>
+<div><p>filteredHistory,
+Seq(),
+feedbackFilters.foldLeft(hydratedPromptDislikeFeedback)((feedbacks, feedbackFilter) =&gt;</p>
+<blockquote>
+<div><p>feedbackFilter(feedbacks)),</p>
+</div></blockquote>
+<p>inlineFeedbackFatigueParam,
+scopedStats</p>
+</div></blockquote>
+<p>)) {
+scopedStats.counter(“feedback_prompt_dislike_success”).incr()
+true</p>
+</dd>
+<dt>} else {</dt><dd><p>scopedStats.counter(“feedback_prompt_dislike_filtered”).incr()
+false</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../../_sources/pushservice/src/main/scala/com/twitter/frigate/pushservice/predicate/ntab_caret_fatigue/CRTBasedNtabCaretClickFatiguePredicates.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

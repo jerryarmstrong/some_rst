@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../" id="documentation_options" src="../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p># pylint: disable=no-member, attribute-defined-outside-init, duplicate-code
+“””
+Contains the twml.layers.SparseMaxNorm layer.
+“””
+from .layer import Layer</p>
+<p>from libtwml import OPLIB
+import tensorflow.compat.v1 as tf
+import twml</p>
+<dl>
+<dt>class SparseMaxNorm(Layer):</dt><dd><p>“””
+Computes a max-normalization and adds bias to the sparse_input,
+forwards that through a sparse affine transform followed
+by an non-linear activation on the resulting dense representation.</p>
+<dl class="simple">
+<dt>This layer has two parameters, one of which learns through gradient descent:</dt><dd><dl class="simple">
+<dt>bias_x (optional):</dt><dd><p>vector of shape [input_size]. Learned through gradient descent.</p>
+</dd>
+<dt>max_x:</dt><dd><p>vector of shape [input_size]. Holds the maximas of input <code class="docutils literal notranslate"><span class="pre">x</span></code> for normalization.
+Either calibrated through SparseMaxNorm calibrator, or calibrated online, or both.</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>The pseudo-code for this layer looks like:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">abs_x</span> <span class="o">=</span> <span class="nb">abs</span><span class="p">(</span><span class="n">x</span><span class="p">)</span>
+<span class="n">normed_x</span> <span class="o">=</span> <span class="n">clip_by_value</span><span class="p">(</span><span class="n">x</span> <span class="o">/</span> <span class="n">max_x</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">)</span>
+<span class="n">biased_x</span> <span class="o">=</span> <span class="n">normed_x</span> <span class="o">+</span> <span class="n">bias_x</span>
+<span class="k">return</span> <span class="n">biased</span>
+</pre></div>
+</div>
+<dl>
+<dt>Args:</dt><dd><dl class="simple">
+<dt>max_x_initializer:</dt><dd><p>initializer vector of shape [input_size] used by variable <cite>max_x</cite></p>
+</dd>
+<dt>bias_x_initializer:</dt><dd><p>initializer vector of shape [input_size] used by parameter <cite>bias_x</cite></p>
+</dd>
+<dt>is_training:</dt><dd><p>Are we training the layer to learn the normalization maximas.
+If set to True, max_x will be able to learn. This is independent of bias_x</p>
+</dd>
+<dt>epsilon:</dt><dd><p>The minimum value used for max_x. Defaults to 1E-5.</p>
+</dd>
+<dt>use_bias:</dt><dd><p>Default True. Set to False to not use a bias term.</p>
+</dd>
+</dl>
+</dd>
+<dt>Returns:</dt><dd><blockquote>
+<div><p>A layer representing the output of the sparse_max_norm transformation.</p>
+</div></blockquote>
+<p>“””</p>
+</dd>
+<dt>def __init__(</dt><dd><blockquote>
+<div><p>self,
+input_size=None,
+max_x_initializer=None,
+bias_x_initializer=None,
+is_training=True,
+epsilon=1E-5,
+use_bias=True,
+<a href="#id1"><span class="problematic" id="id2">**</span></a>kwargs):</p>
+</div></blockquote>
+<p>super(SparseMaxNorm, self).__init__(<a href="#id3"><span class="problematic" id="id4">**</span></a>kwargs)
+if input_size:</p>
+<blockquote>
+<div><dl class="simple">
+<dt>raise ValueError(‘input_size is deprecated - it is now automatically </dt><dd><p>inferred from your input.’)</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl class="simple">
+<dt>if max_x_initializer is None:</dt><dd><p>max_x_initializer = tf.zeros_initializer()</p>
+</dd>
+</dl>
+<p>self.max_x_initializer = max_x_initializer</p>
+<p>self._use_bias = use_bias
+if use_bias:</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if bias_x_initializer is None:</dt><dd><p>bias_x_initializer = tf.zeros_initializer()</p>
+</dd>
+</dl>
+<p>self.bias_x_initializer = bias_x_initializer</p>
+</div></blockquote>
+<p>self.epsilon = epsilon
+self.is_training = is_training</p>
+</dd>
+<dt>def build(self, input_shape):  # pylint: disable=unused-argument</dt><dd><p>“””Creates the max_x and bias_x tf.Variables of the layer.”””</p>
+<dl class="simple">
+<dt>self.max_x = self.add_variable(</dt><dd><p>‘max_x’,
+initializer=self.max_x_initializer,
+shape=[input_shape[1]],
+dtype=tf.float32,
+trainable=False)</p>
+</dd>
+<dt>if self._use_bias:</dt><dd><dl class="simple">
+<dt>self.bias_x = self.add_variable(</dt><dd><p>‘bias_x’,
+initializer=self.bias_x_initializer,
+shape=[input_shape[1]],
+dtype=tf.float32,
+trainable=True)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>self.built = True</p>
+</dd>
+<dt>def compute_output_shape(self, input_shape):</dt><dd><p>“””Computes the output shape of the layer given the input shape.</p>
+<dl class="simple">
+<dt>Args:</dt><dd><dl class="simple">
+<dt>input_shape: A (possibly nested tuple of) <cite>TensorShape</cite>.  It need not</dt><dd><p>be fully defined (e.g. the batch size may be unknown).</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>Raises NotImplementedError.</p>
+<p>“””
+raise NotImplementedError</p>
+</dd>
+<dt>def _call(self, inputs, <a href="#id5"><span class="problematic" id="id6">**</span></a>kwargs):  # pylint: disable=unused-argument</dt><dd><p>“””
+The forward propagation logic of the layer lives here.</p>
+<dl class="simple">
+<dt>Arguments:</dt><dd><dl class="simple">
+<dt>sparse_input:</dt><dd><p>A 2D <code class="docutils literal notranslate"><span class="pre">tf.SparseTensor</span></code> of dense_shape <code class="docutils literal notranslate"><span class="pre">[batch_size,</span> <span class="pre">input_size]</span></code></p>
+</dd>
+</dl>
+</dd>
+<dt>Returns:</dt><dd><p>A <code class="docutils literal notranslate"><span class="pre">tf.SparseTensor</span></code> representing the output of the max_norm transformation, this can
+be fed into twml.layers.FullSparse in order to be transformed into a <code class="docutils literal notranslate"><span class="pre">tf.Tensor</span></code>.</p>
+</dd>
+</dl>
+<p>“””</p>
+<dl class="simple">
+<dt>if isinstance(inputs, twml.SparseTensor):</dt><dd><p>inputs = inputs.to_tf()</p>
+</dd>
+<dt>elif not isinstance(inputs, tf.SparseTensor):</dt><dd><p>raise TypeError(“The inputs must be of type tf.SparseTensor or twml.SparseTensor”)</p>
+</dd>
+</dl>
+<p>indices_x = inputs.indices[:, 1]
+values_x = inputs.values</p>
+<dl>
+<dt>if self.is_training is False:</dt><dd><dl class="simple">
+<dt>normalized_x = OPLIB.sparse_max_norm_inference(self.max_x,</dt><dd><p>indices_x,
+values_x,
+self.epsilon)</p>
+</dd>
+</dl>
+<p>update_op = tf.no_op()</p>
+</dd>
+<dt>else:</dt><dd><dl class="simple">
+<dt>max_x, normalized_x = OPLIB.sparse_max_norm_training(self.max_x,</dt><dd><p>indices_x,
+values_x,
+self.epsilon)</p>
+</dd>
+</dl>
+<p>update_op = tf.assign(self.max_x, max_x)</p>
+</dd>
+<dt>with tf.control_dependencies([update_op]):</dt><dd><p>normalized_x = tf.stop_gradient(normalized_x)</p>
+</dd>
+</dl>
+<p># add input bias
+if self._use_bias:</p>
+<blockquote>
+<div><p>normalized_x = normalized_x + tf.gather(self.bias_x, indices_x)</p>
+</div></blockquote>
+<p># convert back to sparse tensor
+return tf.SparseTensor(inputs.indices, normalized_x, inputs.dense_shape)</p>
+</dd>
+<dt>def call(self, inputs, <a href="#id7"><span class="problematic" id="id8">**</span></a>kwargs):  # pylint: disable=unused-argument</dt><dd><p>“””
+The forward propagation logic of the layer lives here.</p>
+<dl class="simple">
+<dt>Arguments:</dt><dd><dl class="simple">
+<dt>sparse_input:</dt><dd><p>A 2D <code class="docutils literal notranslate"><span class="pre">tf.SparseTensor</span></code> of dense_shape <code class="docutils literal notranslate"><span class="pre">[batch_size,</span> <span class="pre">input_size]</span></code></p>
+</dd>
+</dl>
+</dd>
+<dt>Returns:</dt><dd><p>A <code class="docutils literal notranslate"><span class="pre">tf.SparseTensor</span></code> representing the output of the max_norm transformation, this can
+be fed into twml.layers.FullSparse in order to be transformed into a <code class="docutils literal notranslate"><span class="pre">tf.Tensor</span></code>.</p>
+</dd>
+</dl>
+<p>“””
+with tf.device(self.max_x.device):</p>
+<blockquote>
+<div><p>return self._call(inputs, <a href="#id9"><span class="problematic" id="id10">**</span></a>kwargs)</p>
+</div></blockquote>
+</dd>
+</dl>
+</dd>
+</dl>
+<p># For backwards compatiblity and also because I don’t want to change all the tests.
+MaxNorm = SparseMaxNorm</p>
+<dl>
+<dt>def sparse_max_norm(inputs,</dt><dd><blockquote>
+<div><p>input_size=None,
+max_x_initializer=None,
+bias_x_initializer=None,
+is_training=True,
+epsilon=1E-5,
+use_bias=True,
+name=None,
+reuse=None):</p>
+</div></blockquote>
+<p>“””
+Functional inteface to SparseMaxNorm.</p>
+<dl>
+<dt>Args:</dt><dd><dl class="simple">
+<dt>inputs:</dt><dd><p>A sparse tensor (can be twml.SparseTensor or tf.SparseTensor)</p>
+</dd>
+<dt>input_size:</dt><dd><p>number of input units</p>
+</dd>
+<dt>max_x_initializer:</dt><dd><p>initializer vector of shape [input_size] used by variable <cite>max_x</cite></p>
+</dd>
+<dt>bias_x_initializer:</dt><dd><p>initializer vector of shape [input_size] used by parameter <cite>bias_x</cite></p>
+</dd>
+<dt>is_training:</dt><dd><p>Are we training the layer to learn the normalization maximas.
+If set to True, max_x will be able to learn. This is independent of bias_x</p>
+</dd>
+<dt>epsilon:</dt><dd><p>The minimum value used for max_x. Defaults to 1E-5.</p>
+</dd>
+<dt>use_bias:</dt><dd><p>Default True. Set to False to not use a bias term.</p>
+</dd>
+</dl>
+</dd>
+<dt>Returns:</dt><dd><blockquote>
+<div><p>Output after normalizing with the max value.</p>
+</div></blockquote>
+<p>“””</p>
+</dd>
+<dt>if input_size:</dt><dd><dl class="simple">
+<dt>raise ValueError(‘input_size is deprecated - it is now automatically </dt><dd><p>inferred from your input.’)</p>
+</dd>
+</dl>
+</dd>
+<dt>if isinstance(inputs, twml.SparseTensor):</dt><dd><p>inputs = inputs.to_tf()</p>
+</dd>
+<dt>layer = SparseMaxNorm(max_x_initializer=max_x_initializer,</dt><dd><p>bias_x_initializer=bias_x_initializer,
+is_training=is_training,
+epsilon=epsilon,
+use_bias=use_bias,
+name=name,
+_scope=name,
+_reuse=reuse)</p>
+</dd>
+</dl>
+<p>return layer(inputs)</p>
+</dd>
+</dl>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../_sources/twml/twml/layers/sparse_max_norm.py.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

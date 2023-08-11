@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../" id="documentation_options" src="../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.earlybird.util;</p>
+<p>import java.util.Calendar;
+import java.util.Collections;
+import java.util.Map;
+import java.util.TimeZone;
+import java.util.concurrent.atomic.AtomicInteger;</p>
+<p>import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Preconditions;
+import com.google.common.collect.Maps;</p>
+<p>import org.apache.commons.lang.mutable.MutableInt;
+import org.apache.commons.lang.mutable.MutableLong;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;</p>
+<p>import com.twitter.search.common.metrics.SearchLongGauge;</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>This class is used to count how many times a field happens in hourly and daily stats.</p></li>
+<li><p>It is used by TermCountMonitor for iterating all fields in the index.</p></li>
+<li></li>
+<li><p>There is one exception that this class is also used to count the number of tweets in the index.</p></li>
+<li><p>Under the situation, the passed in fieldName would be empty string (as TWEET_COUNT_KEY).</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>public class FieldTermCounter {</dt><dd><p>private static final Logger LOG = LoggerFactory.getLogger(FieldTermCounter.class);</p>
+<p>static final TimeZone TIME_ZONE = TimeZone.getTimeZone(“GMT”);
+static final String TWEET_COUNT_KEY = “”;</p>
+<p>private final String fieldName;
+private final int instanceCounter;</p>
+<p>// The first date in format “YYYYMMDDHH” that we want to check counts for.
+private final int startCheckHour;
+// The last date in format “YYYYMMDDHH” that we want to check counts for.
+private final int endCheckHour;
+// Smallest number of docs we expect to have for each hour.
+private final int hourlyMinCount;
+//Smallest number of docs we expect to have for each day.
+private final int dailyMinCount;</p>
+<p>// Count of tweets for each day, keyed of by the hour in the format “YYYYMMDD”.
+private final Map&lt;Integer, AtomicInteger&gt; exportedHourlyCounts;</p>
+<p>// Count of tweets for each day, keyed of by the day in the format “YYYYMMDD”.
+private final Map&lt;Integer, MutableLong&gt; dailyCounts;</p>
+<p>// Only export hourly stats that are below minimum threshold.
+private final Map&lt;String, SearchLongGauge&gt; exportedStats;</p>
+<p>private final SearchLongGauge hoursWithNoTweetsStat;
+private final SearchLongGauge daysWithNoTweetsStat;</p>
+<dl>
+<dt>public FieldTermCounter(</dt><dd><blockquote>
+<div><p>String fieldName,
+int instanceCounter,
+int startCheckHour,
+int endCheckHour,
+int hourlyMinCount,
+int dailyMinCount) {</p>
+</div></blockquote>
+<p>this.fieldName = fieldName;
+this.instanceCounter = instanceCounter;
+this.startCheckHour = startCheckHour;
+this.endCheckHour = endCheckHour;
+this.hourlyMinCount = hourlyMinCount;
+this.dailyMinCount = dailyMinCount;
+this.exportedHourlyCounts = Maps.newHashMap();
+this.dailyCounts = Maps.newHashMap();
+this.exportedStats = Maps.newHashMap();</p>
+<p>this.hoursWithNoTweetsStat = SearchLongGauge.export(getAggregatedNoTweetStatName(true));
+this.daysWithNoTweetsStat = SearchLongGauge.export(getAggregatedNoTweetStatName(false));</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Updates the stats exported by this class based on the new counts provided in the given map.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>public void runWithNewCounts(Map&lt;Integer, MutableInt&gt; newCounts) {</dt><dd><p>dailyCounts.clear();</p>
+<p>// See go/rb/813442/#comment2566569
+// 1. Update all existing hours
+updateExistingHourlyCounts(newCounts);</p>
+<p>// 2. Add and export all new hours
+addAndExportNewHourlyCounts(newCounts);</p>
+<p>// 3. fill in all the missing hours between know min and max days.
+fillMissingHourlyCounts();</p>
+<p>// 4. Export as a stat, how many hours don’t have any tweets (i.e. &lt;= 0)
+exportMissingTweetStats();</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// Input:
+// . the new hourly count map in the current iteration
+// . the existing hourly count map before the current iteration
+// If the hourly key matches from the new hourly map to the existing hourly count map, update
+// the value of the existing hourly count map to the value from the new hourly count map.
+private void updateExistingHourlyCounts(Map&lt;Integer, MutableInt&gt; newCounts) {</p>
+<blockquote>
+<div><dl>
+<dt>for (Map.Entry&lt;Integer, AtomicInteger&gt; exportedCount<span class="classifier">exportedHourlyCounts.entrySet()) {</span></dt><dd><p>Integer date = exportedCount.getKey();
+AtomicInteger exportedCountValue = exportedCount.getValue();</p>
+<p>MutableInt newCount = newCounts.get(date);
+if (newCount == null) {</p>
+<blockquote>
+<div><p>exportedCountValue.set(0);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>exportedCountValue.set(newCount.intValue());
+// clean up so that we don’t check this date again when we look for new hours
+newCounts.remove(date);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>// Input:
+// . the new hourly count map in the current iteration
+// . the existing hourly count map before the current iteration
+// This function is called after the above function of updateExistingHourlyCounts() so that all
+// matching key value pairs have been removed from the new hourly count map.
+// Move all remaining valid values from the new hourly count map to the existing hourly count
+// map.
+private void addAndExportNewHourlyCounts(Map&lt;Integer, MutableInt&gt; newCounts) {</p>
+<blockquote>
+<div><dl>
+<dt>for (Map.Entry&lt;Integer, MutableInt&gt; newCount<span class="classifier">newCounts.entrySet()) {</span></dt><dd><p>Integer hour = newCount.getKey();
+MutableInt newCountValue = newCount.getValue();
+Preconditions.checkState(!exportedHourlyCounts.containsKey(hour),</p>
+<blockquote>
+<div><p>“Should have already processed and removed existing hours: “ + hour);</p>
+</div></blockquote>
+<p>AtomicInteger newStat = new AtomicInteger(newCountValue.intValue());
+exportedHourlyCounts.put(hour, newStat);</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>// Find whether the existing hourly count map has hourly holes.  If such holes exist, fill 0
+// values so that they can be exported.
+private void fillMissingHourlyCounts() {</p>
+<blockquote>
+<div><p>// Figure out the time range for which we should have tweets in the index. At the very least,
+// this range should cover [startCheckHour, endCheckHour) if endCheckHour is set, or
+// [startCheckHour, latestHourInTheIndexWithTweets] if endCheckHour is not set (latest tier or
+// realtime cluster).
+int startHour = startCheckHour;
+int endHour = endCheckHour &lt; getHourValue(Calendar.getInstance(TIME_ZONE)) ? endCheckHour : -1;
+for (int next : exportedHourlyCounts.keySet()) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (next &lt; startHour) {</dt><dd><p>startHour = next;</p>
+</dd>
+</dl>
+<p>}
+if (next &gt; endHour) {</p>
+<blockquote>
+<div><p>endHour = next;</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>Calendar endHourCal = getCalendarValue(endHour);
+Calendar hour = getCalendarValue(startHour);
+for (; hour.before(endHourCal); hour.add(Calendar.HOUR_OF_DAY, 1)) {</p>
+<blockquote>
+<div><p>int hourValue = getHourValue(hour);
+if (!exportedHourlyCounts.containsKey(hourValue)) {</p>
+<blockquote>
+<div><p>exportedHourlyCounts.put(hourValue, new AtomicInteger(0));</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>private void exportMissingTweetStats() {</dt><dd><p>int hoursWithNoTweets = 0;
+int daysWithNoTweets = 0;</p>
+<dl>
+<dt>for (Map.Entry&lt;Integer, AtomicInteger&gt; hourlyCount<span class="classifier">exportedHourlyCounts.entrySet()) {</span></dt><dd><p>int hour = hourlyCount.getKey();
+if ((hour &lt; startCheckHour) || (hour &gt;= endCheckHour)) {</p>
+<blockquote>
+<div><p>continue;</p>
+</div></blockquote>
+<p>}</p>
+<p>// roll up the days
+int day = hour / 100;
+MutableLong dayCount = dailyCounts.get(day);
+if (dayCount == null) {</p>
+<blockquote>
+<div><p>dailyCounts.put(day, new MutableLong(hourlyCount.getValue().get()));</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>dayCount.setValue(dayCount.longValue() + hourlyCount.getValue().get());</p>
+</dd>
+</dl>
+<p>}
+AtomicInteger exportedCountValue = hourlyCount.getValue();
+if (exportedCountValue.get() &lt;= hourlyMinCount) {</p>
+<blockquote>
+<div><p>// We do not export hourly too few tweets for index fields as it can 10x the existing
+// exported stats.
+// We might consider whitelisting some high frequency fields later.
+if (isFieldForTweet()) {</p>
+<blockquote>
+<div><p>String statsName = getStatName(hourlyCount.getKey());
+SearchLongGauge stat = SearchLongGauge.export(statsName);
+stat.set(exportedCountValue.longValue());
+exportedStats.put(statsName, stat);</p>
+</div></blockquote>
+<p>}
+LOG.warn(“Found an hour with too few tweets. Field: &lt;{}&gt; Hour: {} count: {}”,</p>
+<blockquote>
+<div><p>fieldName, hour, exportedCountValue);</p>
+</div></blockquote>
+<p>hoursWithNoTweets++;</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>for (Map.Entry&lt;Integer, MutableLong&gt; dailyCount<span class="classifier">dailyCounts.entrySet()) {</span></dt><dd><dl>
+<dt>if (dailyCount.getValue().longValue() &lt;= dailyMinCount) {</dt><dd><dl class="simple">
+<dt>LOG.warn(“Found a day with too few tweets. Field: &lt;{}&gt; Day: {} count: {}”,</dt><dd><p>fieldName, dailyCount.getKey(), dailyCount.getValue());</p>
+</dd>
+</dl>
+<p>daysWithNoTweets++;</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>hoursWithNoTweetsStat.set(hoursWithNoTweets);
+daysWithNoTweetsStat.set(daysWithNoTweets);</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// When the fieldName is empty string (as TWEET_COUNT_KEY), it means that we are counting the
+// number of tweets for the index, not for some specific fields.
+private boolean isFieldForTweet() {</p>
+<blockquote>
+<div><p>return TWEET_COUNT_KEY.equals(fieldName);</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>private String getAggregatedNoTweetStatName(boolean hourly) {</dt><dd><dl>
+<dt>if (isFieldForTweet()) {</dt><dd><dl class="simple">
+<dt>if (hourly) {</dt><dd><p>return “<a href="#id7"><span class="problematic" id="id8">hours_with_no_indexed_tweets_v_</span></a>” + instanceCounter;</p>
+</dd>
+<dt>} else {</dt><dd><p>return “<a href="#id9"><span class="problematic" id="id10">days_with_no_indexed_tweets_v_</span></a>” + instanceCounter;</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>} else {</dt><dd><dl class="simple">
+<dt>if (hourly) {</dt><dd><p>return “<a href="#id11"><span class="problematic" id="id12">hours_with_no_indexed_fields_v_</span></a>” + fieldName + “_” + instanceCounter;</p>
+</dd>
+<dt>} else {</dt><dd><p>return “<a href="#id13"><span class="problematic" id="id14">days_with_no_indexed_fields_v_</span></a>” + fieldName + “_” + instanceCounter;</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;VisibleForTesting
+String getStatName(Integer date) {</p>
+<blockquote>
+<div><p>return getStatName(fieldName, instanceCounter, date);</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;VisibleForTesting
+static String getStatName(String field, int instance, Integer date) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (TWEET_COUNT_KEY.equals(field)) {</dt><dd><p>return “<a href="#id15"><span class="problematic" id="id16">tweets_indexed_on_hour_v_</span></a>” + instance + “_” + date;</p>
+</dd>
+<dt>} else {</dt><dd><p>return “<a href="#id17"><span class="problematic" id="id18">tweets_indexed_on_hour_v_</span></a>” + instance + “_” + field + “_” + date;</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;VisibleForTesting
+Map&lt;Integer, AtomicInteger&gt; getExportedCounts() {</p>
+<blockquote>
+<div><p>return Collections.unmodifiableMap(exportedHourlyCounts);</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;VisibleForTesting
+Map&lt;Integer, MutableLong&gt; getDailyCounts() {</p>
+<blockquote>
+<div><p>return Collections.unmodifiableMap(dailyCounts);</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;VisibleForTesting
+long getHoursWithNoTweets() {</p>
+<blockquote>
+<div><p>return hoursWithNoTweetsStat.get();</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;VisibleForTesting
+long getDaysWithNoTweets() {</p>
+<blockquote>
+<div><p>return daysWithNoTweetsStat.get();</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;VisibleForTesting
+Map&lt;String, SearchLongGauge&gt; getExportedHourlyCountStats() {</p>
+<blockquote>
+<div><p>return exportedStats;</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Given a unit time in seconds since epoch UTC, will return the day in format “YYYYMMDDHH”</p></li>
+<li><p>as an int.</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+</dl>
+<p>&#64;VisibleForTesting
+static int getHourValue(Calendar cal, int timeSecs) {</p>
+<blockquote>
+<div><p>cal.setTimeInMillis(timeSecs * 1000L);
+return getHourValue(cal);</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>static int getHourValue(Calendar cal) {</dt><dd><p>int year = cal.get(Calendar.YEAR) * 1000000;
+int month = (cal.get(Calendar.MONTH) + 1) * 10000; // month is 0-based
+int day = cal.get(Calendar.DAY_OF_MONTH) * 100;
+int hour = cal.get(Calendar.HOUR_OF_DAY);
+return year + month + day + hour;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;VisibleForTesting
+static Calendar getCalendarValue(int hour) {</p>
+<blockquote>
+<div><p>Calendar cal = Calendar.getInstance(TIME_ZONE);</p>
+<p>int year = hour / 1000000;
+int month = ((hour / 10000) % 100) - 1; // 0-based
+int day = (hour / 100) % 100;
+int hr = hour % 100;
+cal.setTimeInMillis(0);  // reset all time fields
+cal.set(year, month, day, hr, 0);
+return cal;</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../_sources/src/java/com/twitter/search/earlybird/util/FieldTermCounter.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

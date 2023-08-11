@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../" id="documentation_options" src="../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>“””
+Functions for exporting models for different modes.
+“””
+from collections import OrderedDict
+import os</p>
+<p>import tensorflow.compat.v1 as tf
+from tensorflow.python.estimator.export import export
+import twml
+import yaml</p>
+<dl>
+<dt>def get_sparse_batch_supervised_input_receiver_fn(feature_config, keep_fields=None):</dt><dd><p>“””Gets supervised_input_receiver_fn that decodes a BatchPredictionRequest as sparse tensors
+with labels and weights as defined in feature_config.
+This input_receiver_fn is required for exporting models with ‘train’ mode to be trained with
+Java API</p>
+<dl class="simple">
+<dt>Args:</dt><dd><p>feature_config (FeatureConfig): deepbird v2 feature config object
+keep_fields (list): list of fields to keep</p>
+</dd>
+<dt>Returns:</dt><dd><p>supervised_input_receiver_fn: input_receiver_fn used for train mode</p>
+</dd>
+</dl>
+<p>“””
+def supervised_input_receiver_fn():</p>
+<blockquote>
+<div><p>serialized_request = tf.placeholder(dtype=tf.uint8, name=’request’)
+receiver_tensors = {‘request’: serialized_request}</p>
+<p>bpr = twml.contrib.readers.HashedBatchPredictionRequest(serialized_request, feature_config)
+features = bpr.get_sparse_features() if keep_fields is None else bpr.get_features(keep_fields)
+features[‘weights’] = bpr.weights
+labels = bpr.labels
+features, labels = bpr.apply_filter(features, labels)</p>
+<p>return export.SupervisedInputReceiver(features, labels, receiver_tensors)</p>
+</div></blockquote>
+<p>return supervised_input_receiver_fn</p>
+</dd>
+<dt>def update_build_graph_fn_for_train(build_graph_fn):</dt><dd><p>“””Updates a build_graph_fn by inserting in graph output a serialized BatchPredictionResponse
+similar to the export_output_fns for serving.
+The key difference here is that
+1. We insert serialized BatchPredictionResponse in graph output with key ‘prediction’ instead of</p>
+<blockquote>
+<div><p>creating an export_output object. This is because of the way estimators export model in ‘train’
+mode doesn’t take custom export_output</p>
+</div></blockquote>
+<ol class="arabic simple" start="2">
+<li><p>We only do it when <cite>mode == ‘train’</cite> to avoid altering the graph when exporting
+for ‘infer’ mode</p></li>
+</ol>
+<dl class="simple">
+<dt>Args:</dt><dd><p>build_graph_fn (Callable): deepbird v2 build graph function</p>
+</dd>
+<dt>Returns:</dt><dd><dl class="simple">
+<dt>new_build_graph_fn: An updated build_graph_fn that inserts serialized BatchPredictResponse</dt><dd><p>to graph output when in ‘train’ mode</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>“””
+def new_build_graph_fn(features, label, mode, params, config=None):</p>
+<blockquote>
+<div><p>output = build_graph_fn(features, label, mode, params, config)
+if mode == tf.estimator.ModeKeys.TRAIN:</p>
+<blockquote>
+<div><dl class="simple">
+<dt>output.update(</dt><dd><dl class="simple">
+<dt>twml.export_output_fns.batch_prediction_continuous_output_fn(output)[</dt><dd><p>tf.saved_model.signature_constants.DEFAULT_SERVING_SIGNATURE_DEF_KEY].outputs</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<p>return output</p>
+</div></blockquote>
+<p>return new_build_graph_fn</p>
+</dd>
+<dt>def export_model_for_train_and_infer(</dt><dd><blockquote>
+<div><p>trainer, feature_config, keep_fields, export_dir, as_text=False):</p>
+</div></blockquote>
+<p>“””Function for exporting model with both ‘train’ and ‘infer’ mode.</p>
+<p>This means the exported saved_model.pb will contain two meta graphs, one with tag ‘train’
+and the other with tag ‘serve’, and it can be loaded in Java API with either tag depending on
+the use case</p>
+<dl>
+<dt>Args:</dt><dd><p>trainer (DataRecordTrainer): deepbird v2 DataRecordTrainer
+feature_config (FeatureConfig): deepbird v2 feature config
+keep_fields (list of string): list of field keys, e.g.</p>
+<blockquote>
+<div><p>(‘ids’, ‘keys’, ‘values’, ‘batch_size’, ‘total_size’, ‘codes’)</p>
+</div></blockquote>
+<p>export_dir (str): a directory (local or hdfs) to export model to
+as_text (bool): if True, write ‘saved_model.pb’ as binary file, else write</p>
+<blockquote>
+<div><p>‘saved_model.pbtxt’ as human readable text file. Default False</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>“””
+train_input_receiver_fn = get_sparse_batch_supervised_input_receiver_fn(</p>
+<blockquote>
+<div><p>feature_config, keep_fields)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>predict_input_receiver_fn = twml.parsers.get_sparse_serving_input_receiver_fn(</dt><dd><p>feature_config, keep_fields)</p>
+</dd>
+</dl>
+<p>trainer._export_output_fn = twml.export_output_fns.batch_prediction_continuous_output_fn
+trainer._build_graph_fn = update_build_graph_fn_for_train(trainer._build_graph_fn)
+trainer._estimator._export_all_saved_models(</p>
+<blockquote>
+<div><p>export_dir_base=export_dir,
+input_receiver_fn_map={</p>
+<blockquote>
+<div><p>tf.estimator.ModeKeys.TRAIN: train_input_receiver_fn,
+tf.estimator.ModeKeys.PREDICT: predict_input_receiver_fn</p>
+</div></blockquote>
+<p>},
+as_text=as_text,</p>
+</div></blockquote>
+<p>)</p>
+<p>trainer.export_model_effects(export_dir)</p>
+</dd>
+<dt>def export_all_models_with_receivers(estimator, export_dir,</dt><dd><blockquote>
+<div><p>train_input_receiver_fn,
+eval_input_receiver_fn,
+predict_input_receiver_fn,
+export_output_fn,
+export_modes=(‘train’, ‘eval’, ‘predict’),
+register_model_fn=None,
+feature_spec=None,
+checkpoint_path=None,
+log_features=True):</p>
+</div></blockquote>
+<p>“””
+Function for exporting a model with train, eval, and infer modes.</p>
+<dl class="simple">
+<dt>Args:</dt><dd><dl class="simple">
+<dt>estimator:</dt><dd><p>Should be of type tf.estimator.Estimator.
+You can get this from trainer using trainer.estimator</p>
+</dd>
+<dt>export_dir:</dt><dd><p>Directory to export the model.</p>
+</dd>
+<dt>train_input_receiver_fn:</dt><dd><p>Input receiver for train interface.</p>
+</dd>
+<dt>eval_input_receiver_fn:</dt><dd><p>Input receiver for eval interface.</p>
+</dd>
+<dt>predict_input_receiver_fn:</dt><dd><p>Input receiver for predict interface.</p>
+</dd>
+<dt>export_output_fn:</dt><dd><p>export_output_fn to be used for serving.</p>
+</dd>
+<dt>export_modes:</dt><dd><p>A list to Specify what modes to export. Can be “train”, “eval”, “predict”.
+Defaults to [“train”, “eval”, “predict”]</p>
+</dd>
+<dt>register_model_fn:</dt><dd><p>An optional function which is called with export_dir after models are exported.
+Defaults to None.</p>
+</dd>
+</dl>
+</dd>
+<dt>Returns:</dt><dd><p>The timestamped directory the models are exported to.</p>
+</dd>
+</dl>
+<p>“””
+# TODO: Fix for hogwild / distributed training.</p>
+<dl class="simple">
+<dt>if export_dir is None:</dt><dd><p>raise ValueError(“export_dir can not be None”)</p>
+</dd>
+</dl>
+<p>export_dir = twml.util.sanitize_hdfs_path(export_dir)
+input_receiver_fn_map = {}</p>
+<dl class="simple">
+<dt>if “train” in export_modes:</dt><dd><p>input_receiver_fn_map[tf.estimator.ModeKeys.TRAIN] = train_input_receiver_fn</p>
+</dd>
+<dt>if “eval” in export_modes:</dt><dd><p>input_receiver_fn_map[tf.estimator.ModeKeys.EVAL] = eval_input_receiver_fn</p>
+</dd>
+<dt>if “predict” in export_modes:</dt><dd><p>input_receiver_fn_map[tf.estimator.ModeKeys.PREDICT] = predict_input_receiver_fn</p>
+</dd>
+<dt>export_dir = estimator._export_all_saved_models(</dt><dd><p>export_dir_base=export_dir,
+input_receiver_fn_map=input_receiver_fn_map,
+checkpoint_path=checkpoint_path,</p>
+</dd>
+</dl>
+<p>)</p>
+<dl class="simple">
+<dt>if register_model_fn is not None:</dt><dd><p>register_model_fn(export_dir, feature_spec, log_features)</p>
+</dd>
+</dl>
+<p>return export_dir</p>
+</dd>
+<dt>def export_all_models(trainer,</dt><dd><blockquote>
+<div><p>export_dir,
+parse_fn,
+serving_input_receiver_fn,
+export_output_fn=None,
+export_modes=(‘train’, ‘eval’, ‘predict’),
+feature_spec=None,
+checkpoint=None,
+log_features=True):</p>
+</div></blockquote>
+<p>“””
+Function for exporting a model with train, eval, and infer modes.</p>
+<dl class="simple">
+<dt>Args:</dt><dd><dl class="simple">
+<dt>trainer:</dt><dd><p>An object of type twml.trainers.Trainer.</p>
+</dd>
+<dt>export_dir:</dt><dd><p>Directory to export the model.</p>
+</dd>
+<dt>parse_fn:</dt><dd><p>The parse function used parse the inputs for train and eval.</p>
+</dd>
+<dt>serving_input_receiver_fn:</dt><dd><p>The input receiver function used during serving.</p>
+</dd>
+<dt>export_output_fn:</dt><dd><p>export_output_fn to be used for serving.</p>
+</dd>
+<dt>export_modes:</dt><dd><p>A list to Specify what modes to export. Can be “train”, “eval”, “predict”.
+Defaults to [“train”, “eval”, “predict”]</p>
+</dd>
+<dt>feature_spec:</dt><dd><p>A dictionary obtained from FeatureConfig.get_feature_spec() to serialize
+as feature_spec.yaml in export_dir.
+Defaults to None</p>
+</dd>
+</dl>
+</dd>
+<dt>Returns:</dt><dd><p>The timestamped directory the models are exported to.</p>
+</dd>
+</dl>
+<p>“””
+# Only export from chief in hogwild or distributed modes.
+if trainer.params.get(‘distributed’, False) and not trainer.estimator.config.is_chief:</p>
+<blockquote>
+<div><p>tf.logging.info(“Trainer.export_model ignored due to instance not being chief.”)
+return</p>
+</div></blockquote>
+<dl class="simple">
+<dt>if feature_spec is None:</dt><dd><dl class="simple">
+<dt>if getattr(trainer, ‘_feature_config’) is None:</dt><dd><dl class="simple">
+<dt>raise ValueError(“feature_spec is set to None.”</dt><dd><p>“Please pass feature_spec=feature_config.get_feature_spec() to the export_all_model function”)</p>
+</dd>
+</dl>
+</dd>
+<dt>else:</dt><dd><p>feature_spec = trainer._feature_config.get_feature_spec()</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>export_dir = twml.util.sanitize_hdfs_path(export_dir)
+old_export_output_fn = trainer._export_output_fn
+trainer._export_output_fn = export_output_fn
+supervised_input_receiver_fn = twml.parsers.convert_to_supervised_input_receiver_fn(parse_fn)
+if not checkpoint:</p>
+<blockquote>
+<div><p>checkpoint = trainer.best_or_latest_checkpoint</p>
+</div></blockquote>
+<dl class="simple">
+<dt>export_dir = export_all_models_with_receivers(estimator=trainer.estimator,</dt><dd><p>export_dir=export_dir,
+train_input_receiver_fn=supervised_input_receiver_fn,
+eval_input_receiver_fn=supervised_input_receiver_fn,
+predict_input_receiver_fn=serving_input_receiver_fn,
+export_output_fn=export_output_fn,
+export_modes=export_modes,
+register_model_fn=trainer.export_model_effects,
+feature_spec=feature_spec,
+checkpoint_path=checkpoint,
+log_features=log_features)</p>
+</dd>
+</dl>
+<p>trainer._export_output_fn = old_export_output_fn
+return export_dir</p>
+</dd>
+<dt>def export_feature_spec(dir_path, feature_spec_dict):</dt><dd><p>“””
+Exports a FeatureConfig.get_feature_spec() dict to &lt;dir_path&gt;/feature_spec.yaml.
+“””
+def ordered_dict_representer(dumper, data):</p>
+<blockquote>
+<div><p>return dumper.represent_mapping(’<a class="reference external" href="tag:yaml.org,2002:map">tag:yaml.org,2002:map</a>’, data.items())</p>
+</div></blockquote>
+<dl class="simple">
+<dt>try:</dt><dd><p># needed for Python 2
+yaml.add_representer(str, yaml.representer.SafeRepresenter.represent_str)
+yaml.add_representer(unicode, yaml.representer.SafeRepresenter.represent_unicode)</p>
+</dd>
+<dt>except NameError:</dt><dd><p># ‘unicode’ type doesn’t exist on Python 3
+# PyYAML handles unicode correctly in Python 3
+pass</p>
+</dd>
+</dl>
+<p>yaml.add_representer(OrderedDict, ordered_dict_representer)</p>
+<p>fbase = “feature_spec.yaml”
+fname = fbase.encode(‘utf-8’) if type(dir_path) != str else fbase
+file_path = os.path.join(dir_path, fname)
+with tf.io.gfile.GFile(file_path, mode=’w’) as f:</p>
+<blockquote>
+<div><p>yaml.dump(feature_spec_dict, f, default_flow_style=False, allow_unicode=True)</p>
+</div></blockquote>
+<p>tf.logging.info(“Exported feature spec to %s” % file_path)</p>
+<p>return file_path</p>
+</dd>
+</dl>
+<p># Keep the alias for compatibility.
+get_supervised_input_receiver_fn = twml.parsers.convert_to_supervised_input_receiver_fn</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../_sources/twml/twml/contrib/export/export_fn.py.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

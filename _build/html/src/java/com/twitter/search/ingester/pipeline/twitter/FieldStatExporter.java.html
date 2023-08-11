@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../" id="documentation_options" src="../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.ingester.pipeline.twitter;</p>
+<p>import java.util.List;
+import java.util.Set;</p>
+<p>import com.google.common.base.Preconditions;
+import com.google.common.collect.HashBasedTable;
+import com.google.common.collect.Sets;
+import com.google.common.collect.Table;</p>
+<p>import com.twitter.common_internal.text.version.PenguinVersion;
+import com.twitter.search.common.indexing.thriftjava.ThriftVersionedEvents;
+import com.twitter.search.common.metrics.SearchRateCounter;
+import com.twitter.search.common.schema.SchemaBuilder;
+import com.twitter.search.common.schema.base.Schema;
+import com.twitter.search.common.schema.earlybird.EarlybirdEncodedFeatures;
+import com.twitter.search.common.schema.earlybird.EarlybirdEncodedFeaturesUtil;
+import com.twitter.search.common.schema.earlybird.EarlybirdFieldConstants;
+import com.twitter.search.common.schema.earlybird.EarlybirdFieldConstants.EarlybirdFieldConstant;
+import com.twitter.search.common.schema.thriftjava.ThriftField;
+import com.twitter.search.common.schema.thriftjava.ThriftIndexingEvent;</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>This class exports counts of fields that are present on processed tweets. It is used to ensure</p></li>
+<li><p>that we are not missing important fields. It is not threadsafe.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>public class FieldStatExporter {</dt><dd><p>private static final String STAT_FORMAT = “%s_penguin_%d_documents_with_field_%s”;
+private static final String UNKNOWN_FIELD = “%s_penguin_%d_documents_with_unknown_field_%d”;
+private final String statPrefix;
+private final Schema schema;
+private final Table&lt;PenguinVersion, Integer, SearchRateCounter&gt; fieldCounters</p>
+<blockquote>
+<div><p>= HashBasedTable.create();</p>
+</div></blockquote>
+<p>private final Set&lt;EarlybirdFieldConstant&gt; encodedTweetFeaturesFields;
+private final Set&lt;EarlybirdFieldConstant&gt; extendedEncodedTweetFeaturesFields;</p>
+<p>private List&lt;PenguinVersion&gt; penguinVersions;</p>
+<dl>
+<dt>FieldStatExporter(String statPrefix, Schema schema, List&lt;PenguinVersion&gt; penguinVersions) {</dt><dd><p>this.statPrefix = statPrefix;
+this.schema = schema;
+this.penguinVersions = penguinVersions;
+this.encodedTweetFeaturesFields =</p>
+<blockquote>
+<div><p>getEncodedTweetFeaturesFields(EarlybirdFieldConstant.ENCODED_TWEET_FEATURES_FIELD);</p>
+</div></blockquote>
+<dl>
+<dt>this.extendedEncodedTweetFeaturesFields =</dt><dd><p>getEncodedTweetFeaturesFields(EarlybirdFieldConstant.EXTENDED_ENCODED_TWEET_FEATURES_FIELD);</p>
+</dd>
+<dt>for (PenguinVersion version<span class="classifier">penguinVersions) {</span></dt><dd><dl>
+<dt>for (Schema.FieldInfo info<span class="classifier">schema.getFieldInfos()) {</span></dt><dd><dl class="simple">
+<dt>String name =</dt><dd><p>String.format(STAT_FORMAT, statPrefix, version.getByteValue(), info.getName());</p>
+</dd>
+</dl>
+<p>SearchRateCounter counter = SearchRateCounter.export(name);
+fieldCounters.put(version, info.getFieldId(), counter);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Exports stats counting the number of fields that are present on each document.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>public void addFieldStats(ThriftVersionedEvents event) {</dt><dd><dl>
+<dt>for (PenguinVersion penguinVersion<span class="classifier">penguinVersions) {</span></dt><dd><p>byte version = penguinVersion.getByteValue();
+ThriftIndexingEvent indexingEvent = event.getVersionedEvents().get(version);
+Preconditions.checkNotNull(indexingEvent);</p>
+<p>// We only want to count each field once per tweet.
+Set&lt;Integer&gt; seenFields = Sets.newHashSet();
+for (ThriftField field : indexingEvent.getDocument().getFields()) {</p>
+<blockquote>
+<div><p>int fieldId = field.getFieldConfigId();
+if (seenFields.add(fieldId)) {</p>
+<blockquote>
+<div><dl>
+<dt>if (fieldId == EarlybirdFieldConstant.ENCODED_TWEET_FEATURES_FIELD.getFieldId()) {</dt><dd><dl class="simple">
+<dt>exportEncodedFeaturesStats(EarlybirdFieldConstant.ENCODED_TWEET_FEATURES_FIELD,</dt><dd><p>encodedTweetFeaturesFields,
+penguinVersion,
+field);</p>
+</dd>
+</dl>
+</dd>
+<dt>} else if (fieldId</dt><dd><blockquote>
+<div><p>== EarlybirdFieldConstant.EXTENDED_ENCODED_TWEET_FEATURES_FIELD.getFieldId()) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>exportEncodedFeaturesStats(EarlybirdFieldConstant.EXTENDED_ENCODED_TWEET_FEATURES_FIELD,</dt><dd><p>extendedEncodedTweetFeaturesFields,
+penguinVersion,
+field);</p>
+</dd>
+</dl>
+</dd>
+<dt>} else if (isFeatureField(field)) {</dt><dd><dl class="simple">
+<dt>updateCounterForFeatureField(</dt><dd><p>field.getFieldConfigId(), field.getFieldData().getIntValue(), penguinVersion);</p>
+</dd>
+</dl>
+</dd>
+<dt>} else {</dt><dd><p>SearchRateCounter counter = fieldCounters.get(penguinVersion, fieldId);
+if (counter == null) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>counter = SearchRateCounter.export(</dt><dd><p>String.format(UNKNOWN_FIELD, statPrefix, version, fieldId));</p>
+</dd>
+</dl>
+<p>fieldCounters.put(penguinVersion, fieldId, counter);</p>
+</div></blockquote>
+<p>}
+counter.increment();</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private boolean isFeatureField(ThriftField field) {</dt><dd><dl>
+<dt>String fieldName =</dt><dd><p>EarlybirdFieldConstants.getFieldConstant(field.getFieldConfigId()).getFieldName();</p>
+</dd>
+<dt>return fieldName.startsWith(EarlybirdFieldConstants.ENCODED_TWEET_FEATURES_FIELD_NAME</dt><dd><blockquote>
+<div><ul class="simple">
+<li><p>SchemaBuilder.CSF_VIEW_NAME_SEPARATOR)</p></li>
+</ul>
+</div></blockquote>
+<dl class="simple">
+<dt>|| fieldName.startsWith(EarlybirdFieldConstants.EXTENDED_ENCODED_TWEET_FEATURES_FIELD_NAME</dt><dd><ul class="simple">
+<li><p>SchemaBuilder.CSF_VIEW_NAME_SEPARATOR);</p></li>
+</ul>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private Set&lt;EarlybirdFieldConstant&gt; getEncodedTweetFeaturesFields(</dt><dd><blockquote>
+<div><p>EarlybirdFieldConstant featuresField) {</p>
+</div></blockquote>
+<p>Set&lt;EarlybirdFieldConstant&gt; schemaFeatureFields = Sets.newHashSet();
+String baseFieldNamePrefix =</p>
+<blockquote>
+<div><p>featuresField.getFieldName() + SchemaBuilder.CSF_VIEW_NAME_SEPARATOR;</p>
+</div></blockquote>
+<dl>
+<dt>for (EarlybirdFieldConstant field<span class="classifier">EarlybirdFieldConstant.values()) {</span></dt><dd><dl class="simple">
+<dt>if (field.getFieldName().startsWith(baseFieldNamePrefix)) {</dt><dd><p>schemaFeatureFields.add(field);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}
+return schemaFeatureFields;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private void exportEncodedFeaturesStats(EarlybirdFieldConstant featuresField,</dt><dd><blockquote>
+<div><p>Set&lt;EarlybirdFieldConstant&gt; schemaFeatureFields,
+PenguinVersion penguinVersion,
+ThriftField thriftField) {</p>
+</div></blockquote>
+<p>byte[] encodedFeaturesBytes = thriftField.getFieldData().getBytesValue();
+EarlybirdEncodedFeatures encodedTweetFeatures = EarlybirdEncodedFeaturesUtil.fromBytes(</p>
+<blockquote>
+<div><p>schema.getSchemaSnapshot(), featuresField, encodedFeaturesBytes, 0);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>for (EarlybirdFieldConstant field<span class="classifier">schemaFeatureFields) {</span></dt><dd><dl class="simple">
+<dt>updateCounterForFeatureField(</dt><dd><p>field.getFieldId(), encodedTweetFeatures.getFeatureValue(field), penguinVersion);</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private void updateCounterForFeatureField(int fieldId, int value, PenguinVersion penguinVersion) {</dt><dd><dl>
+<dt>if (value != 0) {</dt><dd><p>SearchRateCounter counter = fieldCounters.get(penguinVersion, fieldId);
+if (counter == null) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>counter = SearchRateCounter.export(</dt><dd><p>String.format(UNKNOWN_FIELD, statPrefix, penguinVersion, fieldId));</p>
+</dd>
+</dl>
+<p>fieldCounters.put(penguinVersion, fieldId, counter);</p>
+</div></blockquote>
+<p>}
+counter.increment();</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public void updatePenguinVersions(List&lt;PenguinVersion&gt; updatedPenguinVersions) {</dt><dd><p>penguinVersions = updatedPenguinVersions;</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../_sources/src/java/com/twitter/search/ingester/pipeline/twitter/FieldStatExporter.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

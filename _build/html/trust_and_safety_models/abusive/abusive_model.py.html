@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>… &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../" id="documentation_options" src="../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" />
+   
+  <link rel="stylesheet" href="../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>import tensorflow as tf</p>
+<p>physical_devices = tf.config.list_physical_devices(‘GPU’)
+for device in physical_devices:</p>
+<blockquote>
+<div><p>tf.config.experimental.set_memory_growth(device, True)</p>
+</div></blockquote>
+<p>from twitter.hmli.nimbus.modeling.model_config import FeatureType, EncodingType, Feature, Model, LogType
+from twitter.hmli.nimbus.modeling.feature_loader import BigQueryFeatureLoader
+from twitter.cuad.representation.models.text_encoder import TextEncoder
+from twitter.cuad.representation.models.optimization import create_optimizer
+from twitter.hmli.nimbus.modeling.feature_encoder import FeatureEncoder</p>
+<p>import numpy as np
+import pandas as pd
+import utils</p>
+<p>cat_names = [
+…
+]</p>
+<p>category_features = [Feature(name=cat_name, ftype=FeatureType.CONTINUOUS) for cat_name in cat_names]
+features = [</p>
+<blockquote>
+<div><p>Feature(name=”tweet_text_with_media_annotations”, ftype=FeatureType.STRING, encoding=EncodingType.BERT),
+Feature(name=”precision_nsfw”, ftype=FeatureType.CONTINUOUS),
+Feature(name=”has_media”, ftype=FeatureType.BINARY),
+Feature(name=”num_media”, ftype=FeatureType.DISCRETE)</p>
+</div></blockquote>
+<p>] + category_features</p>
+<dl class="simple">
+<dt>ptos_prototype = Model(</dt><dd><p>name=’ptos_prototype’,
+export_path=”…”,
+features=features,</p>
+</dd>
+</dl>
+<p>)
+print(ptos_prototype)</p>
+<p>cq_loader = BigQueryFeatureLoader(gcp_project=COMPUTE_PROJECT)
+labels = [</p>
+<blockquote>
+<div><p>“has_non_punitive_action”,
+“has_punitive_action”,
+“has_punitive_action_contains_self_harm”,
+“has_punitive_action_encourage_self_harm”,
+“has_punitive_action_episodic”,
+“has_punitive_action_episodic_hateful_conduct”,
+“has_punitive_action_other_abuse_policy”,
+“has_punitive_action_without_self_harm”</p>
+</div></blockquote>
+<p>]</p>
+<p>train_query = f”””
+SELECT</p>
+<blockquote>
+<div><p>{{feature_names}},
+{“,”.join(labels)},</p>
+</div></blockquote>
+<section id="id1">
+<h1>…<a class="headerlink" href="#id1" title="Permalink to this heading">¶</a></h1>
+<p>val_query = f”””
+SELECT</p>
+<blockquote>
+<div><p>{{feature_names}},
+{“,”.join(labels)},</p>
+</div></blockquote>
+</section>
+<section id="id2">
+<h1>…<a class="headerlink" href="#id2" title="Permalink to this heading">¶</a></h1>
+<p>print(train_query)
+train = cq_loader.load_features(ptos_prototype, “”, “”, custom_query=train_query)
+val = cq_loader.load_features(ptos_prototype, “”, “”, custom_query=val_query)
+print(train.describe(model=ptos_prototype))</p>
+<dl class="simple">
+<dt>params = {</dt><dd><p>‘max_seq_lengths’: 128,
+‘batch_size’: 196,
+‘lr’: 1e-5,
+‘optimizer_type’: ‘adamw’,
+‘warmup_steps’: 0,
+‘cls_dropout_rate’: 0.1,
+‘epochs’: 30,
+‘steps_per_epoch’: 5000,
+‘model_type’: ‘twitter_multilingual_bert_base_cased_mlm’,
+‘mixed_precision’: True,</p>
+</dd>
+</dl>
+<p>}
+params</p>
+<dl class="simple">
+<dt>def parse_labeled_data(row_dict):</dt><dd><p>label = [row_dict.pop(l) for l in labels]
+return row_dict, label</p>
+</dd>
+</dl>
+<p>mirrored_strategy = tf.distribute.MirroredStrategy()
+BATCH_SIZE = params[‘batch_size’] * mirrored_strategy.num_replicas_in_sync</p>
+<p>train_ds = train.to_tf_dataset().map(parse_labeled_data).shuffle(BATCH_SIZE*100).batch(BATCH_SIZE).repeat()
+val_ds = val.to_tf_dataset().map(parse_labeled_data).batch(BATCH_SIZE)</p>
+<dl>
+<dt>for record in train_ds:</dt><dd><p>tf.print(record)
+break</p>
+</dd>
+<dt>def get_positive_weights():</dt><dd><p>“””Computes positive weights used for class imbalance from training data.”””
+label_weights_df = utils.get_label_weights(</p>
+<blockquote>
+<div><p>“tos-data-media-full”,
+project_id=”twttr-abusive-interact-prod”,
+dataset_id=”tos_policy”</p>
+</div></blockquote>
+<p>)
+pos_weight_tensor = tf.cast(</p>
+<blockquote>
+<div><p>label_weights_df.sort_values(by=’label’).positive_class_weight,
+dtype=tf.float32</p>
+</div></blockquote>
+<p>)
+return pos_weight_tensor</p>
+</dd>
+</dl>
+<p>pos_weight_tensor = get_positive_weights()
+print(pos_weight_tensor)</p>
+<dl>
+<dt>class TextEncoderPooledOutput(TextEncoder):</dt><dd><dl class="simple">
+<dt>def call(self, x):</dt><dd><p>return super().call([x])[“pooled_output”]</p>
+</dd>
+<dt>def get_config(self):</dt><dd><p>return super().get_config()</p>
+</dd>
+</dl>
+</dd>
+<dt>with mirrored_strategy.scope():</dt><dd><dl>
+<dt>text_encoder_pooled_output = TextEncoderPooledOutput(</dt><dd><blockquote>
+<div><p>params[‘max_seq_lengths’],
+model_type=params[‘model_type’],
+trainable=True</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>fe = FeatureEncoder(train)
+inputs, preprocessing_head = fe.build_model_head(model=ptos_prototype, text_encoder=text_encoder_pooled_output)</p>
+<p>cls_dropout = tf.keras.layers.Dropout(params[‘cls_dropout_rate’], name=”cls_dropout”)
+outputs = cls_dropout(preprocessing_head)
+outputs = tf.keras.layers.Dense(8, name=”output”, dtype=”float32”)(outputs)</p>
+<dl class="simple">
+<dt>model = tf.keras.Model(</dt><dd><p>inputs=inputs,
+outputs=outputs</p>
+</dd>
+</dl>
+<p>)
+pr_auc = tf.keras.metrics.AUC(curve=”PR”, num_thresholds=1000, multi_label=True, from_logits=True)</p>
+<p>custom_loss = lambda y_true, y_pred: utils.multilabel_weighted_loss(y_true, y_pred, weights=pos_weight_tensor)
+optimizer = create_optimizer(</p>
+<blockquote>
+<div><p>init_lr=params[“lr”],
+num_train_steps=(params[“epochs”] * params[“steps_per_epoch”]),
+num_warmup_steps=params[“warmup_steps”],
+optimizer_type=params[“optimizer_type”],</p>
+</div></blockquote>
+<p>)
+if params.get(“mixed_precision”):</p>
+<blockquote>
+<div><p>optimizer = tf.train.experimental.enable_mixed_precision_graph_rewrite(optimizer)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>model.compile(</dt><dd><p>optimizer=optimizer,
+loss=custom_loss,
+metrics=[pr_auc]</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>model.weights
+model.summary()
+pr_auc.name</p>
+<p>import getpass
+import wandb
+from wandb.keras import WandbCallback
+try:</p>
+<blockquote>
+<div><p>wandb_key = …
+wandb.login(…)
+run = wandb.init(project=’ptos_with_media’,</p>
+<blockquote>
+<div><p>group=’new-split-trains’,
+notes=’tweet text with only (num_media, precision_nsfw). on full train set, new split.’,
+entity=’absv’,
+config=params,
+name=’tweet-text-w-nsfw-1.1’,
+sync_tensorboard=True)</p>
+</div></blockquote>
+</div></blockquote>
+<dl class="simple">
+<dt>except FileNotFoundError:</dt><dd><p>print(‘Wandb key not found’)
+run = wandb.init(mode=’disabled’)</p>
+</dd>
+</dl>
+<p>import datetime
+import os</p>
+<p>start_train_time = datetime.datetime.now()
+print(start_train_time.strftime(“%m-%d-%Y (%H:%M:%S)”))
+checkpoint_path = os.path.join(”…”)
+print(“Saving model checkpoints here: “, checkpoint_path)</p>
+<dl class="simple">
+<dt>cp_callback = tf.keras.callbacks.ModelCheckpoint(</dt><dd><p>filepath=os.path.join(checkpoint_path, “model.{epoch:04d}.tf”),
+verbose=1,
+monitor=f’val_{pr_auc.name}’,
+mode=’max’,
+save_freq=’epoch’,
+save_best_only=True</p>
+</dd>
+</dl>
+<p>)</p>
+<dl class="simple">
+<dt>early_stopping_callback = tf.keras.callbacks.EarlyStopping(patience=7,</dt><dd><p>monitor=f”val_{pr_auc.name}”,
+mode=”max”)</p>
+</dd>
+<dt>model.fit(train_ds, epochs=params[“epochs”], validation_data=val_ds, callbacks=[cp_callback, early_stopping_callback],</dt><dd><p>steps_per_epoch=params[“steps_per_epoch”],
+verbose=2)</p>
+</dd>
+</dl>
+<p>import tensorflow_hub as hub</p>
+<p>gs_model_path = …
+reloaded_keras_layer = hub.KerasLayer(gs_model_path)
+inputs = tf.keras.layers.Input(name=”tweet__core__tweet__text”, shape=(1,), dtype=tf.string)
+output = reloaded_keras_layer(inputs)
+v7_model = tf.keras.models.Model(inputs=inputs, outputs=output)
+pr_auc = tf.keras.metrics.AUC(curve=”PR”, name=”pr_auc”)
+roc_auc = tf.keras.metrics.AUC(curve=”ROC”, name=”roc_auc”)
+v7_model.compile(metrics=[pr_auc, roc_auc])</p>
+<p>model.load_weights(”…”)
+candidate_model = model</p>
+<dl class="simple">
+<dt>with mirrored_strategy.scope():</dt><dd><p>candidate_eval = candidate_model.evaluate(val_ds)</p>
+</dd>
+</dl>
+<p>test_query = f”””
+SELECT</p>
+<blockquote>
+<div><p>{“,”.join(ptos_prototype.feature_names())},
+has_media,
+precision_nsfw,
+{“,”.join(labels)},</p>
+</div></blockquote>
+</section>
+<section id="id3">
+<h1>…<a class="headerlink" href="#id3" title="Permalink to this heading">¶</a></h1>
+<p>test = cq_loader.load_features(ptos_prototype, “”, “”, custom_query=test_query)
+test = test.to_tf_dataset().map(parse_labeled_data)</p>
+<p>print(test)</p>
+<p>test_only_media = test.filter(lambda x, y: tf.equal(x[“has_media”], True))
+test_only_nsfw = test.filter(lambda x, y: tf.greater_equal(x[“precision_nsfw”], 0.95))
+test_no_media = test.filter(lambda x, y: tf.equal(x[“has_media”], False))
+test_media_not_nsfw = test.filter(lambda x, y: tf.logical_and(tf.equal(x[“has_media”], True), tf.less(x[“precision_nsfw”], 0.95)))
+for d in [test, test_only_media, test_only_nsfw, test_no_media, test_media_not_nsfw]:</p>
+<blockquote>
+<div><p>print(d.reduce(0, lambda x, _: x + 1).numpy())</p>
+</div></blockquote>
+<p>from notebook_eval_utils import SparseMultilabelEvaluator, EvalConfig
+from dataclasses import asdict</p>
+<dl>
+<dt>def display_metrics(probs, targets, labels=labels):</dt><dd><p>eval_config = EvalConfig(prediction_threshold=0.5, precision_k=0.9)
+for eval_mode, y_mask in [(“implicit”, np.ones(targets.shape))]:</p>
+<blockquote>
+<div><p>print(“Evaluation mode”, eval_mode)
+metrics = SparseMultilabelEvaluator.evaluate(</p>
+<blockquote>
+<div><p>targets, np.array(probs), y_mask, classes=labels, eval_config=eval_config</p>
+</div></blockquote>
+<p>)
+metrics_df = pd.DataFrame.from_dict(asdict(metrics)[“per_topic_metrics”]).transpose()
+metrics_df[“pos_to_neg”] = metrics_df[“num_pos_samples”] / (metrics_df[“num_neg_samples”] + 1)
+display(metrics_df.median())
+display(metrics_df)
+return metrics_df</p>
+</div></blockquote>
+</dd>
+<dt>def eval_model(model, df):</dt><dd><dl class="simple">
+<dt>with mirrored_strategy.scope():</dt><dd><p>targets = np.stack(list(df.map(lambda x, y: y).as_numpy_iterator()), axis=0)
+df = df.padded_batch(BATCH_SIZE)
+preds = model.predict(df)
+return display_metrics(preds, targets)</p>
+</dd>
+</dl>
+</dd>
+<dt>subsets = {“test”: test,</dt><dd><p>“test_only_media”: test_only_media,
+“test_only_nsfw”: test_only_nsfw,
+“test_no_media”: test_no_media,
+“test_media_not_nsfw”: test_media_not_nsfw}</p>
+</dd>
+</dl>
+<p>metrics = {}
+for name, df in subsets.items():</p>
+<blockquote>
+<div><p>metrics[name] = eval_model(candidate_model, df)</p>
+</div></blockquote>
+<p>[(name, m.pr_auc) for name, m in metrics.items()]
+for name, x in [(name, m.pr_auc.to_string(index=False).strip().split(”n”)) for name, m in metrics.items()]:</p>
+<blockquote>
+<div><p>print(name)
+for y in x:</p>
+<blockquote>
+<div><p>print(y.strip(), end=”t”)</p>
+</div></blockquote>
+<p>print(“.”)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>for d in [test, test_only_media, test_only_nsfw, test_no_media, test_media_not_nsfw]:</dt><dd><p>print(d.reduce(0, lambda x, _: x + 1).numpy())</p>
+</dd>
+</dl>
+</section>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../_sources/trust_and_safety_models/abusive/abusive_model.py.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

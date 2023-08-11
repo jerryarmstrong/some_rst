@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../" id="documentation_options" src="../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.timelines.data_processing.ml_util.aggregation_framework.heron</p>
+<p>import com.twitter.bijection.Injection
+import com.twitter.bijection.thrift.CompactThriftCodec
+import com.twitter.cache.client._
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.ml.api.DataRecord
+import com.twitter.ml.api.constant.SharedFeatures
+import com.twitter.ml.api.util.SRichDataRecord
+import com.twitter.storehaus.WritableStore
+import com.twitter.storehaus_internal.nighthawk_kv.CacheClientNighthawkConfig
+import com.twitter.storehaus_internal.nighthawk_kv.NighthawkStore
+import com.twitter.summingbird.batch.BatchID
+import com.twitter.timelines.data_processing.ml_util.aggregation_framework.AggregationKey
+import com.twitter.timelines.data_processing.ml_util.aggregation_framework.TypedAggregateGroup
+import com.twitter.timelines.data_processing.ml_util.aggregation_framework.heron.UserReindexingNighthawkWritableDataRecordStore._
+import com.twitter.timelines.prediction.features.common.TimelinesSharedFeatures
+import com.twitter.util.Future
+import com.twitter.util.Time
+import com.twitter.util.Try
+import com.twitter.util.logging.Logger
+import java.nio.ByteBuffer
+import java.util
+import scala.util.Random</p>
+<dl>
+<dt>object UserReindexingNighthawkWritableDataRecordStore {</dt><dd><p>implicit val longInjection = Injection.long2BigEndian
+implicit val dataRecordInjection: Injection[DataRecord, Array[Byte]] =</p>
+<blockquote>
+<div><p>CompactThriftCodec[DataRecord]</p>
+</div></blockquote>
+<p>val arrayToByteBuffer = Injection.connect[Array[Byte], ByteBuffer]
+val longToByteBuffer = longInjection.andThen(arrayToByteBuffer)
+val dataRecordToByteBuffer = dataRecordInjection.andThen(arrayToByteBuffer)</p>
+<dl>
+<dt>def getBtreeStore(</dt><dd><p>nighthawkCacheConfig: CacheClientNighthawkConfig,
+targetSize: Int,
+statsReceiver: StatsReceiver,
+trimRate: Double</p>
+</dd>
+<dt>): UserReindexingNighthawkBtreeWritableDataRecordStore =</dt><dd><dl>
+<dt>new UserReindexingNighthawkBtreeWritableDataRecordStore(</dt><dd><dl class="simple">
+<dt>nighthawkStore = NighthawkStore[UserId, TimestampMs, DataRecord](nighthawkCacheConfig)</dt><dd><p>.asInstanceOf[NighthawkStore[UserId, TimestampMs, DataRecord]],</p>
+</dd>
+</dl>
+<p>tableName = nighthawkCacheConfig.table.toString,
+targetSize = targetSize,
+statsReceiver = statsReceiver,
+trimRate = trimRate</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>def getHashStore(</dt><dd><p>nighthawkCacheConfig: CacheClientNighthawkConfig,
+targetSize: Int,
+statsReceiver: StatsReceiver,
+trimRate: Double</p>
+</dd>
+<dt>): UserReindexingNighthawkHashWritableDataRecordStore =</dt><dd><dl>
+<dt>new UserReindexingNighthawkHashWritableDataRecordStore(</dt><dd><dl class="simple">
+<dt>nighthawkStore = NighthawkStore[UserId, AuthorId, DataRecord](nighthawkCacheConfig)</dt><dd><p>.asInstanceOf[NighthawkStore[UserId, AuthorId, DataRecord]],</p>
+</dd>
+</dl>
+<p>tableName = nighthawkCacheConfig.table.toString,
+targetSize = targetSize,
+statsReceiver = statsReceiver,
+trimRate = trimRate</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>def buildTimestampedByteBuffer(timestamp: Long, bb: ByteBuffer): ByteBuffer = {</dt><dd><p>val timestampedBb = ByteBuffer.allocate(getLength(bb) + java.lang.Long.SIZE)
+timestampedBb.putLong(timestamp)
+timestampedBb.put(bb)
+timestampedBb</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>def extractTimestampFromTimestampedByteBuffer(bb: ByteBuffer): Long = {</dt><dd><p>bb.getLong(0)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>def extractValueFromTimestampedByteBuffer(bb: ByteBuffer): ByteBuffer = {</dt><dd><p>val bytes = new Array[Byte](getLength(bb) - java.lang.Long.SIZE)
+util.Arrays.copyOfRange(bytes, java.lang.Long.SIZE, getLength(bb))
+ByteBuffer.wrap(bytes)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def transformAndBuildKeyValueMapping(</dt><dd><p>table: String,
+userId: UserId,
+authorIdsAndDataRecords: Seq[(AuthorId, DataRecord)]</p>
+</dd>
+<dt>): KeyValue = {</dt><dd><p>val timestamp = Time.now.inMillis
+val pkey = longToByteBuffer(userId)
+val lkeysAndTimestampedValues = authorIdsAndDataRecords.map {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case (authorId, dataRecord) =&gt;</dt><dd><p>val lkey = longToByteBuffer(authorId)
+// Create a byte buffer with a prepended timestamp to reduce deserialization cost
+// when parsing values. We only have to extract and deserialize the timestamp in the
+// ByteBuffer in order to sort the value, as opposed to deserializing the DataRecord
+// and having to get a timestamp feature value from the DataRecord.
+val dataRecordBb = dataRecordToByteBuffer(dataRecord)
+val timestampedValue = buildTimestampedByteBuffer(timestamp, dataRecordBb)
+(lkey, timestampedValue)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+buildKeyValueMapping(table, pkey, lkeysAndTimestampedValues)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def buildKeyValueMapping(</dt><dd><p>table: String,
+pkey: ByteBuffer,
+lkeysAndTimestampedValues: Seq[(ByteBuffer, ByteBuffer)]</p>
+</dd>
+<dt>): KeyValue = {</dt><dd><p>val lkeys = lkeysAndTimestampedValues.map { case (lkey, _) =&gt; lkey }
+val timestampedValues = lkeysAndTimestampedValues.map { case (_, value) =&gt; value }
+val kv = KeyValue(</p>
+<blockquote>
+<div><p>key = Key(table = table, pkey = pkey, lkeys = lkeys),
+value = Value(timestampedValues)</p>
+</div></blockquote>
+<p>)
+kv</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private def getLength(bb: ByteBuffer): Int = {</dt><dd><p>// capacity can be an over-estimate of the actual length (remaining - start position)
+// but it’s the safest to avoid overflows.
+bb.capacity()</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Implements a NH store that stores aggregate feature DataRecords using userId as the primary key.</p></li>
+<li></li>
+<li><p>This store re-indexes user-author keyed real-time aggregate (RTA) features on userId by</p></li>
+<li><p>writing to a userId primary key (pkey) and timestamp secondary key (lkey). To fetch user-author</p></li>
+<li><p>RTAs for a given user from cache, the caller just needs to make a single RPC for the userId pkey.</p></li>
+<li><p>The downside of a re-indexing store is that we cannot store arbitrarily many secondary keys</p></li>
+<li><p>under the primary key. This specific implementation using the NH btree backend also mandates</p></li>
+<li><p>mandates an ordering of secondary keys - we therefore use timestamp as the secondary key</p></li>
+<li><p>as opposed to say authorId.</p></li>
+<li></li>
+<li><p>Note that a caller of the btree backed NH re-indexing store receives back a response where the</p></li>
+<li><p>secondary key is a timestamp. The associated value is a DataRecord containing user-author related</p></li>
+<li><p>aggregate features which was last updated at the timestamp. The caller therefore needs to handle</p></li>
+<li><p>the response and dedupe on unique, most recent user-author pairs.</p></li>
+<li></li>
+<li><p>For a discussion on this and other implementations, please see:</p></li>
+<li><p><a class="reference external" href="https://docs.google.com/document/d/1yVzAbQ_ikLqwSf230URxCJmSKj5yZr5dYv6TwBlQw18/edit">https://docs.google.com/document/d/1yVzAbQ_ikLqwSf230URxCJmSKj5yZr5dYv6TwBlQw18/edit</a></p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>class UserReindexingNighthawkBtreeWritableDataRecordStore(</dt><dd><p>nighthawkStore: NighthawkStore[UserId, TimestampMs, DataRecord],
+tableName: String,
+targetSize: Int,
+statsReceiver: StatsReceiver,
+trimRate: Double = 0.1 // by default, trim on 10% of puts</p>
+</dd>
+</dl>
+<p>) extends WritableStore[(AggregationKey, BatchID), Option[DataRecord]] {</p>
+<blockquote>
+<div><p>private val scope = getClass.getSimpleName
+private val failures = statsReceiver.counter(scope, “failures”)
+private val log = Logger.getLogger(getClass)
+private val random: Random = new Random(1729L)</p>
+<dl>
+<dt>override def put(kv: ((AggregationKey, BatchID), Option[DataRecord])): Future[Unit] = {</dt><dd><p>val ((aggregationKey, _), dataRecordOpt) = kv
+// Fire-and-forget below because the store itself should just be a side effect
+// as it’s just making re-indexed writes based on the writes to the primary store.
+for {</p>
+<blockquote>
+<div><p>userId &lt;- aggregationKey.discreteFeaturesById.get(SharedFeatures.USER_ID.getFeatureId)
+dataRecord &lt;- dataRecordOpt</p>
+</div></blockquote>
+<dl>
+<dt>} yield {</dt><dd><dl>
+<dt>SRichDataRecord(dataRecord)</dt><dd><p>.getFeatureValueOpt(TypedAggregateGroup.timestampFeature)
+.map(_.toLong) // convert to Scala Long
+.map { timestamp =&gt;</p>
+<blockquote>
+<div><dl>
+<dt>val trim: Future[Unit] = if (random.nextDouble &lt;= trimRate) {</dt><dd><dl class="simple">
+<dt>val trimKey = TrimKey(</dt><dd><p>table = tableName,
+pkey = longToByteBuffer(userId),
+targetSize = targetSize,
+ascending = true</p>
+</dd>
+</dl>
+<p>)
+nighthawkStore.client.trim(Seq(trimKey)).unit</p>
+</dd>
+<dt>} else {</dt><dd><p>Future.Unit</p>
+</dd>
+</dl>
+<p>}
+// We should wait for trim to complete above
+val fireAndForget = trim.before {</p>
+<blockquote>
+<div><p>val kvTuple = ((userId, timestamp), Some(dataRecord))
+nighthawkStore.put(kvTuple)</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>fireAndForget.onFailure {</dt><dd><dl class="simple">
+<dt>case e =&gt;</dt><dd><p>failures.incr()
+log.error(“Failure in UserReindexingNighthawkHashWritableDataRecordStore”, e)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+// Ignore fire-and-forget result above and simply return
+Future.Unit</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Implements a NH store that stores aggregate feature DataRecords using userId as the primary key.</p></li>
+<li></li>
+<li><p>This store re-indexes user-author keyed real-time aggregate (RTA) features on userId by</p></li>
+<li><p>writing to a userId primary key (pkey) and authorId secondary key (lkey). To fetch user-author</p></li>
+<li><p>RTAs for a given user from cache, the caller just needs to make a single RPC for the userId pkey.</p></li>
+<li><p>The downside of a re-indexing store is that we cannot store arbitrarily</p></li>
+<li><p>many secondary keys under the primary key. We have to limit them in some way;</p></li>
+<li><p>here, we do so by randomly (based on trimRate) issuing an HGETALL command (via scan) to</p></li>
+<li><p>retrieve the whole hash, sort by oldest timestamp, and then remove the oldest authors to keep</p></li>
+<li><p>only targetSize authors (aka trim), where targetSize is configurable.</p></li>
+<li></li>
+<li><p>&#64;note The full hash returned from scan could be as large (or even larger) than targetSize,</p></li>
+<li><p>which could mean many DataRecords to deserialize, especially at high write qps.</p></li>
+<li><p>To reduce deserialization cost post-scan, we use timestamped values with a prepended timestamp</p></li>
+<li><p>in the value ByteBuffer; this allows us to only deserialize the timestamp and not the full</p></li>
+<li><p>DataRecord when sorting. This is necessary in order to identify the oldest values to trim.</p></li>
+<li><p>When we do a put for a new (user, author) pair, we also write out timestamped values.</p></li>
+<li></li>
+<li><p>For a discussion on this and other implementations, please see:</p></li>
+<li><p><a class="reference external" href="https://docs.google.com/document/d/1yVzAbQ_ikLqwSf230URxCJmSKj5yZr5dYv6TwBlQw18/edit">https://docs.google.com/document/d/1yVzAbQ_ikLqwSf230URxCJmSKj5yZr5dYv6TwBlQw18/edit</a></p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>class UserReindexingNighthawkHashWritableDataRecordStore(</dt><dd><p>nighthawkStore: NighthawkStore[UserId, AuthorId, DataRecord],
+tableName: String,
+targetSize: Int,
+statsReceiver: StatsReceiver,
+trimRate: Double = 0.1 // by default, trim on 10% of puts</p>
+</dd>
+</dl>
+<p>) extends WritableStore[(AggregationKey, BatchID), Option[DataRecord]] {</p>
+<blockquote>
+<div><p>private val scope = getClass.getSimpleName
+private val scanMismatchErrors = statsReceiver.counter(scope, “scanMismatchErrors”)
+private val failures = statsReceiver.counter(scope, “failures”)
+private val log = Logger.getLogger(getClass)
+private val random: Random = new Random(1729L)
+private val arrayToByteBuffer = Injection.connect[Array[Byte], ByteBuffer]
+private val longToByteBuffer = Injection.long2BigEndian.andThen(arrayToByteBuffer)</p>
+<dl>
+<dt>override def put(kv: ((AggregationKey, BatchID), Option[DataRecord])): Future[Unit] = {</dt><dd><p>val ((aggregationKey, _), dataRecordOpt) = kv
+// Fire-and-forget below because the store itself should just be a side effect
+// as it’s just making re-indexed writes based on the writes to the primary store.
+for {</p>
+<blockquote>
+<div><p>userId &lt;- aggregationKey.discreteFeaturesById.get(SharedFeatures.USER_ID.getFeatureId)
+authorId &lt;- aggregationKey.discreteFeaturesById.get(</p>
+<blockquote>
+<div><p>TimelinesSharedFeatures.SOURCE_AUTHOR_ID.getFeatureId)</p>
+</div></blockquote>
+<p>dataRecord &lt;- dataRecordOpt</p>
+</div></blockquote>
+<dl>
+<dt>} yield {</dt><dd><dl>
+<dt>val scanAndTrim: Future[Unit] = if (random.nextDouble &lt;= trimRate) {</dt><dd><dl class="simple">
+<dt>val scanKey = ScanKey(</dt><dd><p>table = tableName,
+pkey = longToByteBuffer(userId)</p>
+</dd>
+</dl>
+<p>)
+nighthawkStore.client.scan(Seq(scanKey)).flatMap { scanResults: Seq[Try[KeyValue]] =&gt;</p>
+<blockquote>
+<div><dl>
+<dt>scanResults.headOption</dt><dd><dl>
+<dt>.flatMap(_.toOption).map { keyValue: KeyValue =&gt;</dt><dd><p>val lkeys: Seq[ByteBuffer] = keyValue.key.lkeys
+// these are timestamped bytebuffers
+val timestampedValues: Seq[ByteBuffer] = keyValue.value.values
+// this should fail loudly if this is not true. it would indicate
+// there is a mistake in the scan.
+if (lkeys.size != timestampedValues.size) scanMismatchErrors.incr()
+assert(lkeys.size == timestampedValues.size)
+if (lkeys.size &gt; targetSize) {</p>
+<blockquote>
+<div><p>val numToRemove = targetSize - lkeys.size
+// sort by oldest and take top k oldest and remove - this is equivalent to a trim
+val oldestKeys: Seq[ByteBuffer] = lkeys</p>
+<blockquote>
+<div><p>.zip(timestampedValues)
+.map {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case (lkey, timestampedValue) =&gt;</dt><dd><p>val timestamp = extractTimestampFromTimestampedByteBuffer(timestampedValue)
+(timestamp, lkey)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+.sortBy { case (timestamp, _) =&gt; timestamp }
+.take(numToRemove)
+.map { case (_, k) =&gt; k }</p>
+</div></blockquote>
+<p>val pkey = longToByteBuffer(userId)
+val key = Key(table = tableName, pkey = pkey, lkeys = oldestKeys)
+// NOTE: <cite>remove</cite> is a batch API, and we group all lkeys into a single batch (batch
+// size = single group of lkeys = 1). Instead, we could separate lkeys into smaller
+// groups and have batch size = number of groups, but this is more complex.
+// Performance implications of batching vs non-batching need to be assessed.
+nighthawkStore.client</p>
+<blockquote>
+<div><p>.remove(Seq(key))
+.map { responses =&gt;</p>
+<blockquote>
+<div><p>responses.map(resp =&gt; nighthawkStore.processValue(resp))</p>
+</div></blockquote>
+<p>}.unit</p>
+</div></blockquote>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>Future.Unit</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}.getOrElse(Future.Unit)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+<dt>} else {</dt><dd><p>Future.Unit</p>
+</dd>
+</dl>
+<p>}
+// We should wait for scan and trim to complete above
+val fireAndForget = scanAndTrim.before {</p>
+<blockquote>
+<div><p>val kv = transformAndBuildKeyValueMapping(tableName, userId, Seq((authorId, dataRecord)))
+nighthawkStore.client</p>
+<blockquote>
+<div><p>.put(Seq(kv))
+.map { responses =&gt;</p>
+<blockquote>
+<div><p>responses.map(resp =&gt; nighthawkStore.processValue(resp))</p>
+</div></blockquote>
+<p>}.unit</p>
+</div></blockquote>
+</div></blockquote>
+<p>}
+fireAndForget.onFailure {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case e =&gt;</dt><dd><p>failures.incr()
+log.error(“Failure in UserReindexingNighthawkHashWritableDataRecordStore”, e)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}
+// Ignore fire-and-forget result above and simply return
+Future.Unit</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../_sources/timelines/data_processing/ml_util/aggregation_framework/heron/UserReindexingNighthawkStore.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

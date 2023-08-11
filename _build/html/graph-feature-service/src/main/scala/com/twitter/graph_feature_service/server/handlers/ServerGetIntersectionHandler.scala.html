@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.graph_feature_service.server.handlers</p>
+<p>import com.twitter.finagle.stats.Stat
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.graph_feature_service.server.handlers.ServerGetIntersectionHandler.GetIntersectionRequest
+import com.twitter.graph_feature_service.server.stores.FeatureTypesEncoder
+import com.twitter.graph_feature_service.server.stores.GetIntersectionStore.GetIntersectionQuery
+import com.twitter.graph_feature_service.thriftscala.PresetFeatureTypes
+import com.twitter.graph_feature_service.thriftscala._
+import com.twitter.graph_feature_service.util.FeatureTypesCalculator
+import com.twitter.servo.request.RequestHandler
+import com.twitter.storehaus.ReadableStore
+import com.twitter.util.Future
+import com.twitter.util.Memoize
+import javax.inject.Inject
+import javax.inject.Named
+import javax.inject.Singleton</p>
+<p>&#64;Singleton
+class ServerGetIntersectionHandler &#64;Inject() (</p>
+<blockquote>
+<div><p>&#64;Named(“ReadThroughGetIntersectionStore”)
+readThroughStore: ReadableStore[GetIntersectionQuery, CachedIntersectionResult],
+&#64;Named(“BypassCacheGetIntersectionStore”)
+readOnlyStore: ReadableStore[GetIntersectionQuery, CachedIntersectionResult]</p>
+</div></blockquote>
+<dl>
+<dt>)(</dt><dd><dl class="simple">
+<dt>implicit statsReceiver: StatsReceiver)</dt><dd><p>extends RequestHandler[GetIntersectionRequest, GfsIntersectionResponse] {</p>
+</dd>
+</dl>
+<p>import ServerGetIntersectionHandler._</p>
+<p>// TODO: Track all the stats based on PresetFeatureType and update the dashboard
+private val stats: StatsReceiver = statsReceiver.scope(“srv”).scope(“get_intersection”)
+private val numCandidatesCount = stats.counter(“total_num_candidates”)
+private val numCandidatesStat = stats.stat(“num_candidates”)
+private val numFeaturesStat = stats.stat(“num_features”)
+private val userEmptyCount = stats.counter(“user_empty_count”)
+private val candidateEmptyRateStat = stats.stat(“candidate_empty_rate”)
+private val candidateNumEmptyStat = stats.stat(“candidate_num_empty”)
+private val missedRateStat = stats.stat(“miss_rate”)
+private val numMissedStat = stats.stat(“num_missed”)</p>
+<p>// Assume the order from HTL doesn’t change. Only log the HTL query now.
+private val featureStatMap = FeatureTypesCalculator.presetFeatureTypes.map { feature =&gt;</p>
+<blockquote>
+<div><p>val featureString = s”${feature.leftEdgeType.name}_${feature.rightEdgeType.name}”
+feature -&gt; Array(</p>
+<blockquote>
+<div><p>stats.counter(s”feature_type_${featureString}_total”),
+stats.counter(s”feature_type_${featureString}_count_zero”),
+stats.counter(s”feature_type_${featureString}_left_zero”),
+stats.counter(s”feature_type_${featureString}_right_zero”)</p>
+</div></blockquote>
+<p>)</p>
+</div></blockquote>
+<p>}.toMap</p>
+<dl class="simple">
+<dt>private val sourceCandidateNumStats = Memoize[PresetFeatureTypes, Stat] { presetFeature =&gt;</dt><dd><p>stats.stat(s”source_candidate_num_${presetFeature.name}”)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>override def apply(request: GetIntersectionRequest): Future[GfsIntersectionResponse] = {</dt><dd><p>val featureTypes = request.calculatedFeatureTypes
+val numCandidates = request.candidateUserIds.length
+val numFeatures = featureTypes.length</p>
+<p>numCandidatesCount.incr(numCandidates)
+numCandidatesStat.add(numCandidates)
+numFeaturesStat.add(numFeatures)
+sourceCandidateNumStats(request.presetFeatureTypes).add(numCandidates)</p>
+<p>// Note: do not change the orders of features and candidates.
+val candidateIds = request.candidateUserIds</p>
+<dl>
+<dt>if (featureTypes.isEmpty || candidateIds.isEmpty) {</dt><dd><p>Future.value(DefaultGfsIntersectionResponse)</p>
+</dd>
+<dt>} else {</dt><dd><dl>
+<dt>Future</dt><dd><dl>
+<dt>.collect {</dt><dd><p>val getIntersectionStore = if (request.cacheable) readThroughStore else readOnlyStore
+getIntersectionStore.multiGet(GetIntersectionQuery.buildQueries(request))</p>
+</dd>
+<dt>}.map { responses =&gt;</dt><dd><dl>
+<dt>val results = responses.collect {</dt><dd><dl>
+<dt>case (query, Some(result)) =&gt;</dt><dd><dl>
+<dt>query.candidateId -&gt; GfsIntersectionResult(</dt><dd><p>query.candidateId,
+query.calculatedFeatureTypes.zip(result.values).map {</p>
+<blockquote>
+<div><dl>
+<dt>case (featureType, value) =&gt;</dt><dd><dl class="simple">
+<dt>IntersectionValue(</dt><dd><p>featureType,
+Some(value.count),
+if (value.intersectionIds.isEmpty) None else Some(value.intersectionIds),
+Some(value.leftNodeDegree),
+Some(value.rightNodeDegree)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>// Keep the response order same as input
+val processedResults = candidateIds.map { candidateId =&gt;</p>
+<blockquote>
+<div><p>results.getOrElse(candidateId, GfsIntersectionResult(candidateId, List.empty))</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>val candidateEmptyNum =</dt><dd><dl class="simple">
+<dt>processedResults.count(</dt><dd><p>_.intersectionValues.exists(value =&gt; isZero(value.rightNodeDegree)))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>val numMissed = processedResults.count(_.intersectionValues.size != numFeatures)</p>
+<dl>
+<dt>if (processedResults.exists(</dt><dd><blockquote>
+<div><p>_.intersectionValues.forall(value =&gt; isZero(value.leftNodeDegree)))) {</p>
+</div></blockquote>
+<p>userEmptyCount.incr()</p>
+</dd>
+</dl>
+<p>}</p>
+<p>candidateNumEmptyStat.add(candidateEmptyNum)
+candidateEmptyRateStat.add(candidateEmptyNum.toFloat / numCandidates)
+numMissedStat.add(numMissed)
+missedRateStat.add(numMissed.toFloat / numCandidates)</p>
+<dl>
+<dt>processedResults.foreach { result =&gt;</dt><dd><dl>
+<dt>result.intersectionValues.zip(featureTypes).foreach {</dt><dd><dl>
+<dt>case (value, featureType) =&gt;</dt><dd><dl>
+<dt>featureStatMap.get(featureType).foreach { statsArray =&gt;</dt><dd><p>statsArray(TotalIndex).incr()
+if (isZero(value.count)) {</p>
+<blockquote>
+<div><p>statsArray(CountIndex).incr()</p>
+</div></blockquote>
+<p>}
+if (isZero(value.leftNodeDegree)) {</p>
+<blockquote>
+<div><p>statsArray(LeftIndex).incr()</p>
+</div></blockquote>
+<p>}
+if (isZero(value.rightNodeDegree)) {</p>
+<blockquote>
+<div><p>statsArray(RightIndex).incr()</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>GfsIntersectionResponse(processedResults)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>private[graph_feature_service] object ServerGetIntersectionHandler {</p>
+<blockquote>
+<div><dl>
+<dt>case class GetIntersectionRequest(</dt><dd><p>userId: Long,
+candidateUserIds: Seq[Long],
+featureTypes: Seq[FeatureType],
+presetFeatureTypes: PresetFeatureTypes,
+intersectionIdLimit: Option[Int],
+cacheable: Boolean) {</p>
+<dl class="simple">
+<dt>lazy val calculatedFeatureTypes: Seq[FeatureType] =</dt><dd><p>FeatureTypesCalculator.getFeatureTypes(presetFeatureTypes, featureTypes)</p>
+</dd>
+<dt>lazy val calculatedFeatureTypesString: String =</dt><dd><p>FeatureTypesEncoder(calculatedFeatureTypes)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>object GetIntersectionRequest {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>def fromGfsIntersectionRequest(</dt><dd><p>request: GfsIntersectionRequest,
+cacheable: Boolean</p>
+</dd>
+<dt>): GetIntersectionRequest = {</dt><dd><dl class="simple">
+<dt>GetIntersectionRequest(</dt><dd><p>request.userId,
+request.candidateUserIds,
+request.featureTypes,
+PresetFeatureTypes.Empty,
+request.intersectionIdLimit,
+cacheable)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>def fromGfsPresetIntersectionRequest(</dt><dd><p>request: GfsPresetIntersectionRequest,
+cacheable: Boolean</p>
+</dd>
+<dt>): GetIntersectionRequest = {</dt><dd><dl class="simple">
+<dt>GetIntersectionRequest(</dt><dd><p>request.userId,
+request.candidateUserIds,
+List.empty,
+request.presetFeatureTypes,
+request.intersectionIdLimit,
+cacheable)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>private val DefaultGfsIntersectionResponse = GfsIntersectionResponse()</p>
+<p>private val TotalIndex = 0
+private val CountIndex = 1
+private val LeftIndex = 2
+private val RightIndex = 3</p>
+<dl class="simple">
+<dt>def isZero(opt: Option[Int]): Boolean = {</dt><dd><p>!opt.exists(_ != 0)</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/graph-feature-service/src/main/scala/com/twitter/graph_feature_service/server/handlers/ServerGetIntersectionHandler.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

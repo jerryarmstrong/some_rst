@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../" id="documentation_options" src="../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.simclusters_v2.stores</p>
+<p>import com.twitter.decider.Decider
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.hermit.store.common.DeciderableReadableStore
+import com.twitter.servo.decider.DeciderKeyEnum
+import com.twitter.simclusters_v2.common.DeciderGateBuilderWithIdHashing
+import com.twitter.simclusters_v2.common.SimClustersEmbedding
+import com.twitter.simclusters_v2.thriftscala.EmbeddingType
+import com.twitter.simclusters_v2.thriftscala.ModelVersion
+import com.twitter.simclusters_v2.thriftscala.SimClustersEmbeddingId
+import com.twitter.storehaus.ReadableStore
+import com.twitter.util.Future</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Facade of all SimClusters Embedding Store.</p></li>
+<li><p>Provide a uniform access layer for all kind of SimClusters Embedding.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>case class SimClustersEmbeddingStore(</dt><dd><dl class="simple">
+<dt>stores: Map[</dt><dd><p>(EmbeddingType, ModelVersion),
+ReadableStore[SimClustersEmbeddingId, SimClustersEmbedding]</p>
+</dd>
+</dl>
+<p>]) extends ReadableStore[SimClustersEmbeddingId, SimClustersEmbedding] {</p>
+<dl>
+<dt>private val lookupStores =</dt><dd><dl>
+<dt>stores</dt><dd><dl class="simple">
+<dt>.groupBy(_._1._1).mapValues(_.map {</dt><dd><dl class="simple">
+<dt>case ((_, modelVersion), store) =&gt;</dt><dd><p>modelVersion -&gt; store</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>})</p>
+</dd>
+</dl>
+</dd>
+<dt>override def get(k: SimClustersEmbeddingId): Future[Option[SimClustersEmbedding]] = {</dt><dd><dl class="simple">
+<dt>findStore(k) match {</dt><dd><p>case Some(store) =&gt; store.get(k)
+case None =&gt; Future.None</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// Override the multiGet for better batch performance.
+override def multiGet[K1 &lt;: SimClustersEmbeddingId](</p>
+<blockquote>
+<div><p>ks: Set[K1]</p>
+</div></blockquote>
+<dl>
+<dt>): Map[K1, Future[Option[SimClustersEmbedding]]] = {</dt><dd><dl>
+<dt>if (ks.isEmpty) {</dt><dd><p>Map.empty</p>
+</dd>
+<dt>} else {</dt><dd><p>val head = ks.head
+val notSameType =</p>
+<blockquote>
+<div><p>ks.exists(k =&gt; k.embeddingType != head.embeddingType || k.modelVersion != head.modelVersion)</p>
+</div></blockquote>
+<dl>
+<dt>if (!notSameType) {</dt><dd><dl class="simple">
+<dt>findStore(head) match {</dt><dd><p>case Some(store) =&gt; store.multiGet(ks)
+case None =&gt; ks.map(_ -&gt; Future.None).toMap</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>} else {</dt><dd><p>// Generate a large amount temp objects.
+// For better performance, avoid querying the multiGet with more than one kind of embedding
+ks.groupBy(id =&gt; (id.embeddingType, id.modelVersion)).flatMap {</p>
+<blockquote>
+<div><dl>
+<dt>case ((_, _), ks) =&gt;</dt><dd><dl class="simple">
+<dt>findStore(ks.head) match {</dt><dd><p>case Some(store) =&gt; store.multiGet(ks)
+case None =&gt; ks.map(_ -&gt; Future.None).toMap</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private def findStore(</dt><dd><p>id: SimClustersEmbeddingId</p>
+</dd>
+<dt>): Option[ReadableStore[SimClustersEmbeddingId, SimClustersEmbedding]] = {</dt><dd><p>lookupStores.get(id.embeddingType).flatMap(_.get(id.modelVersion))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>object SimClustersEmbeddingStore {</dt><dd><p>/*
+Build a SimClustersEmbeddingStore which wraps all stores in DeciderableReadableStore</p>
+<blockquote>
+<div><p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</div></blockquote>
+<dl>
+<dt>def buildWithDecider(</dt><dd><dl class="simple">
+<dt>underlyingStores: Map[</dt><dd><p>(EmbeddingType, ModelVersion),
+ReadableStore[SimClustersEmbeddingId, SimClustersEmbedding]</p>
+</dd>
+</dl>
+<p>],
+decider: Decider,
+statsReceiver: StatsReceiver</p>
+</dd>
+<dt>): ReadableStore[SimClustersEmbeddingId, SimClustersEmbedding] = {</dt><dd><p>// To allow for lazy adding of decider config to enable / disable stores, if a value is not found
+// fall back on returning true (equivalent to availability of 10000)
+// This overrides default availability of 0 when not decider value is not found
+val deciderGateBuilder = new DeciderGateBuilderWithIdHashing(decider.orElse(Decider.True))</p>
+<dl class="simple">
+<dt>val deciderKeyEnum = new DeciderKeyEnum {</dt><dd><p>underlyingStores.keySet.map(key =&gt; Value(s”enable_${key._1.name}_${key._2.name}”))</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def wrapStore(</dt><dd><p>embeddingType: EmbeddingType,
+modelVersion: ModelVersion,
+store: ReadableStore[SimClustersEmbeddingId, SimClustersEmbedding]</p>
+</dd>
+<dt>): ReadableStore[SimClustersEmbeddingId, SimClustersEmbedding] = {</dt><dd><dl class="simple">
+<dt>val gate = deciderGateBuilder.idGateWithHashing[SimClustersEmbeddingId](</dt><dd><p>deciderKeyEnum.withName(s”enable_${embeddingType.name}_${modelVersion.name}”))</p>
+</dd>
+<dt>DeciderableReadableStore(</dt><dd><p>underlying = store,
+gate = gate,
+statsReceiver = statsReceiver.scope(embeddingType.name, modelVersion.name)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>val stores = underlyingStores.map {</dt><dd><dl class="simple">
+<dt>case ((embeddingType, modelVersion), store) =&gt;</dt><dd><p>(embeddingType, modelVersion) -&gt; wrapStore(embeddingType, modelVersion, store)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>new SimClustersEmbeddingStore(stores = stores)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../_sources/src/scala/com/twitter/simclusters_v2/stores/SimClustersEmbeddingStore.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

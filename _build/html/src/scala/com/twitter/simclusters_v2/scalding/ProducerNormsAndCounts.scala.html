@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../" id="documentation_options" src="../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.simclusters_v2.scalding</p>
+<p>import com.twitter.logging.Logger
+import com.twitter.scalding._
+import com.twitter.scalding_internal.dalv2.DAL
+import com.twitter.scalding_internal.dalv2.DALWrite._
+import com.twitter.scalding_internal.dalv2.remote_access.{ExplicitLocation, ProcAtla}
+import com.twitter.scalding_internal.job.TwitterExecutionApp
+import com.twitter.scalding_internal.job.analytics_batch._
+import com.twitter.simclusters_v2.hdfs_sources.{</p>
+<blockquote>
+<div><p>NormsAndCountsFixedPathSource,
+ProducerNormsAndCountsScalaDataset</p>
+</div></blockquote>
+<p>}
+import com.twitter.simclusters_v2.scalding.common.TypedRichPipe._
+import com.twitter.simclusters_v2.scalding.common.Util
+import com.twitter.simclusters_v2.thriftscala.NormsAndCounts</p>
+<p>object ProducerNormsAndCounts {</p>
+<blockquote>
+<div><dl>
+<dt>def getNormsAndCounts(</dt><dd><p>input: TypedPipe[Edge]</p>
+</dd>
+<dt>)(</dt><dd><p>implicit uniqueID: UniqueID</p>
+</dd>
+<dt>): TypedPipe[NormsAndCounts] = {</dt><dd><p>val numRecordsInNormsAndCounts = Stat(“num_records_in_norms_and_counts”)
+input</p>
+<blockquote>
+<div><dl class="simple">
+<dt>.map {</dt><dd><dl class="simple">
+<dt>case Edge(srcId, destId, isFollowEdge, favWt) =&gt;</dt><dd><p>val followOrNot = if (isFollowEdge) 1 else 0
+((srcId, destId), (followOrNot, favWt))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+.sumByKey
+// Uncomment for adhoc job
+//.withReducers(2500)
+.map {</p>
+<blockquote>
+<div><dl>
+<dt>case ((srcId, destId), (followOrNot, favWt)) =&gt;</dt><dd><p>val favOrNot = if (favWt &gt; 0) 1 else 0
+val logFavScore = if (favWt &gt; 0) UserUserNormalizedGraph.logTransformation(favWt) else 0.0
+(</p>
+<blockquote>
+<div><p>destId,
+(</p>
+<blockquote>
+<div><p>followOrNot,
+favWt * favWt,
+favOrNot,
+favWt,
+favWt * followOrNot.toDouble,
+logFavScore * logFavScore,
+logFavScore,
+logFavScore * followOrNot.toDouble))</p>
+</div></blockquote>
+</div></blockquote>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+.sumByKey
+// Uncomment for adhoc job
+//.withReducers(500)
+.map {</p>
+<blockquote>
+<div><dl>
+<dt>case (</dt><dd><blockquote>
+<div><p>id,
+(</p>
+<blockquote>
+<div><p>followCount,
+favSumSquare,
+favCount,
+favSumOnFavEdges,
+favSumOnFollowEdges,
+logFavSumSquare,
+logFavSumOnFavEdges,
+logFavSumOnFollowEdges)) =&gt;</p>
+</div></blockquote>
+</div></blockquote>
+<p>val followerNorm = math.sqrt(followCount)
+val faverNorm = math.sqrt(favSumSquare)
+numRecordsInNormsAndCounts.inc()
+NormsAndCounts(</p>
+<blockquote>
+<div><p>userId = id,
+followerL2Norm = Some(followerNorm),
+faverL2Norm = Some(faverNorm),
+followerCount = Some(followCount),
+faverCount = Some(favCount),
+favWeightsOnFavEdgesSum = Some(favSumOnFavEdges),
+favWeightsOnFollowEdgesSum = Some(favSumOnFollowEdges),
+logFavL2Norm = Some(math.sqrt(logFavSumSquare)),
+logFavWeightsOnFavEdgesSum = Some(logFavSumOnFavEdges),
+logFavWeightsOnFollowEdgesSum = Some(logFavSumOnFollowEdges)</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def run(</dt><dd><p>halfLifeInDaysForFavScore: Int</p>
+</dd>
+<dt>)(</dt><dd><p>implicit uniqueID: UniqueID,
+date: DateRange</p>
+</dd>
+<dt>): TypedPipe[NormsAndCounts] = {</dt><dd><dl>
+<dt>val input =</dt><dd><dl class="simple">
+<dt>UserUserNormalizedGraph.getFollowEdges.map {</dt><dd><dl class="simple">
+<dt>case (src, dest) =&gt;</dt><dd><p>Edge(src, dest, isFollowEdge = true, 0.0)</p>
+</dd>
+</dl>
+</dd>
+<dt>} ++ UserUserNormalizedGraph.getFavEdges(halfLifeInDaysForFavScore).map {</dt><dd><dl class="simple">
+<dt>case (src, dest, wt) =&gt;</dt><dd><p>Edge(src, dest, isFollowEdge = false, wt)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>getNormsAndCounts(input)</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>object ProducerNormsAndCountsBatch extends TwitterScheduledExecutionApp {</dt><dd><p>private val firstTime: String = “2018-06-16”
+implicit val tz = DateOps.UTC
+implicit val parser = DateParser.default
+private val batchIncrement: Duration = Days(7)
+private val firstStartDate = DateRange.parse(firstTime).start
+private val halfLifeInDaysForFavScore = 100</p>
+<p>private val outputPath: String = “/user/cassowary/processed/producer_norms_and_counts”
+private val log = Logger()</p>
+<dl class="simple">
+<dt>private val execArgs = AnalyticsBatchExecutionArgs(</dt><dd><p>batchDesc = BatchDescription(this.getClass.getName.replace(“$”, “”)),
+firstTime = BatchFirstTime(RichDate(firstTime)),
+lastTime = None,
+batchIncrement = BatchIncrement(batchIncrement)</p>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>override def scheduledJob: Execution[Unit] = AnalyticsBatchExecution(execArgs) {</dt><dd><dl>
+<dt>implicit dateRange =&gt;</dt><dd><dl>
+<dt>Execution.withId { implicit uniqueId =&gt;</dt><dd><dl>
+<dt>Execution.withArgs { args =&gt;</dt><dd><dl>
+<dt>Util.printCounters(</dt><dd><dl>
+<dt>ProducerNormsAndCounts</dt><dd><p>.run(halfLifeInDaysForFavScore)
+.writeDALSnapshotExecution(</p>
+<blockquote>
+<div><p>ProducerNormsAndCountsScalaDataset,
+D.Daily,
+D.Suffix(outputPath),
+D.EBLzo(),
+dateRange.end)</p>
+</div></blockquote>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>object ProducerNormsAndCountsAdhoc extends TwitterExecutionApp {</dt><dd><p>implicit val tz: java.util.TimeZone = DateOps.UTC
+implicit val dp = DateParser.default</p>
+<dl>
+<dt>def job: Execution[Unit] =</dt><dd><dl>
+<dt>Execution.getConfigMode.flatMap {</dt><dd><dl>
+<dt>case (config, mode) =&gt;</dt><dd><dl>
+<dt>Execution.withId { implicit uniqueId =&gt;</dt><dd><p>val args = config.getArgs
+implicit val date = DateRange.parse(args.list(“date”))</p>
+<dl>
+<dt>Util.printCounters(</dt><dd><dl>
+<dt>ProducerNormsAndCounts</dt><dd><p>.run(halfLifeInDaysForFavScore = 100)
+.forceToDiskExecution.flatMap { result =&gt;</p>
+<blockquote>
+<div><dl class="simple">
+<dt>Execution.zip(</dt><dd><p>result.writeExecution(NormsAndCountsFixedPathSource(args(“outputDir”))),
+result.printSummary(“Producer norms and counts”)</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>object DumpNormsAndCountsAdhoc extends TwitterExecutionApp {</dt><dd><p>implicit val tz: java.util.TimeZone = DateOps.UTC
+def job: Execution[Unit] =</p>
+<blockquote>
+<div><dl>
+<dt>Execution.getConfigMode.flatMap {</dt><dd><dl>
+<dt>case (config, mode) =&gt;</dt><dd><dl>
+<dt>Execution.withId { implicit uniqueId =&gt;</dt><dd><p>val args = config.getArgs</p>
+<p>val users = args.list(“users”).map(_.toLong).toSet
+val input = args.optional(“inputDir”) match {</p>
+<blockquote>
+<div><p>case Some(inputDir) =&gt; TypedPipe.from(NormsAndCountsFixedPathSource(inputDir))
+case None =&gt;</p>
+<blockquote>
+<div><dl class="simple">
+<dt>DAL</dt><dd><p>.readMostRecentSnapshotNoOlderThan(ProducerNormsAndCountsScalaDataset, Days(30))
+.withRemoteReadPolicy(ExplicitLocation(ProcAtla))
+.toTypedPipe</p>
+</dd>
+</dl>
+</div></blockquote>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>if (users.isEmpty) {</dt><dd><p>input.printSummary(“Producer norms and counts”)</p>
+</dd>
+<dt>} else {</dt><dd><dl>
+<dt>input</dt><dd><dl class="simple">
+<dt>.collect {</dt><dd><dl class="simple">
+<dt>case rec if users.contains(rec.userId) =&gt;</dt><dd><p>Util.prettyJsonMapper.writeValueAsString(rec).replaceAll(”n”, “ “)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+.toIterableExecution
+.map { strings =&gt; println(strings.mkString(”n”)) }</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../_sources/src/scala/com/twitter/simclusters_v2/scalding/ProducerNormsAndCounts.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

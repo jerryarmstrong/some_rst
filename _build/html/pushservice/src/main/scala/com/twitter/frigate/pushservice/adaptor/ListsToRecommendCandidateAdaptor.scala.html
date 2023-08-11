@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.frigate.pushservice.adaptor</p>
+<p>import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.frigate.common.base.CandidateSource
+import com.twitter.frigate.common.base.CandidateSourceEligible
+import com.twitter.frigate.common.base.ListPushCandidate
+import com.twitter.frigate.pushservice.model.PushTypes.RawCandidate
+import com.twitter.frigate.pushservice.model.PushTypes.Target
+import com.twitter.frigate.pushservice.params.PushFeatureSwitchParams
+import com.twitter.frigate.pushservice.predicate.TargetPredicates
+import com.twitter.frigate.pushservice.util.PushDeviceUtil
+import com.twitter.frigate.thriftscala.CommonRecommendationType
+import com.twitter.geoduck.service.thriftscala.LocationResponse
+import com.twitter.interests_discovery.thriftscala.DisplayLocation
+import com.twitter.interests_discovery.thriftscala.NonPersonalizedRecommendedLists
+import com.twitter.interests_discovery.thriftscala.RecommendedListsRequest
+import com.twitter.interests_discovery.thriftscala.RecommendedListsResponse
+import com.twitter.storehaus.ReadableStore
+import com.twitter.util.Future</p>
+<dl>
+<dt>case class ListsToRecommendCandidateAdaptor(</dt><dd><p>listRecommendationsStore: ReadableStore[String, NonPersonalizedRecommendedLists],
+geoDuckV2Store: ReadableStore[Long, LocationResponse],
+idsStore: ReadableStore[RecommendedListsRequest, RecommendedListsResponse],
+globalStats: StatsReceiver)</p>
+<blockquote>
+<div><p>extends CandidateSource[Target, RawCandidate]
+with CandidateSourceEligible[Target, RawCandidate] {</p>
+</div></blockquote>
+<p>override val name: String = this.getClass.getSimpleName</p>
+<p>private[this] val stats = globalStats.scope(name)
+private[this] val noLocationCodeCounter = stats.counter(“no_location_code”)
+private[this] val noCandidatesCounter = stats.counter(“no_candidates_for_geo”)
+private[this] val disablePopGeoListsCounter = stats.counter(“disable_pop_geo_lists”)
+private[this] val disableIDSListsCounter = stats.counter(“disable_ids_lists”)</p>
+<dl>
+<dt>private def getListCandidate(</dt><dd><p>targetUser: Target,
+_listId: Long</p>
+</dd>
+<dt>): RawCandidate with ListPushCandidate = {</dt><dd><dl>
+<dt>new RawCandidate with ListPushCandidate {</dt><dd><p>override val listId: Long = _listId</p>
+<p>override val commonRecType: CommonRecommendationType = CommonRecommendationType.List</p>
+<p>override val target: Target = targetUser</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def getListsRecommendedFromHistory(</dt><dd><p>target: Target</p>
+</dd>
+<dt>): Future[Seq[Long]] = {</dt><dd><dl>
+<dt>target.history.map { history =&gt;</dt><dd><dl>
+<dt>history.sortedHistory.flatMap {</dt><dd><dl class="simple">
+<dt>case (_, notif) if notif.commonRecommendationType == List =&gt;</dt><dd><p>notif.listNotification.map(_.listId)</p>
+</dd>
+</dl>
+<p>case _ =&gt; None</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def getIDSListRecs(</dt><dd><p>target: Target,
+historicalListIds: Seq[Long]</p>
+</dd>
+<dt>): Future[Seq[Long]] = {</dt><dd><dl class="simple">
+<dt>val request = RecommendedListsRequest(</dt><dd><p>target.targetId,
+DisplayLocation.ListDiscoveryPage,
+Some(historicalListIds)</p>
+</dd>
+</dl>
+<p>)
+if (target.params(PushFeatureSwitchParams.EnableIDSListRecommendations)) {</p>
+<blockquote>
+<div><dl>
+<dt>idsStore.get(request).map {</dt><dd><dl class="simple">
+<dt>case Some(response) =&gt;</dt><dd><p>response.channels.map(_.id)</p>
+</dd>
+</dl>
+<p>case _ =&gt; Nil</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>disableIDSListsCounter.incr()
+Future.Nil</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def getPopGeoLists(</dt><dd><p>target: Target,
+historicalListIds: Seq[Long]</p>
+</dd>
+<dt>): Future[Seq[Long]] = {</dt><dd><dl>
+<dt>if (target.params(PushFeatureSwitchParams.EnablePopGeoListRecommendations)) {</dt><dd><dl>
+<dt>geoDuckV2Store.get(target.targetId).flatMap {</dt><dd><dl>
+<dt>case Some(locationResponse) if locationResponse.geohash.isDefined =&gt;</dt><dd><dl class="simple">
+<dt>val geoHashLength =</dt><dd><p>target.params(PushFeatureSwitchParams.ListRecommendationsGeoHashLength)</p>
+</dd>
+</dl>
+<p>val geoHash = locationResponse.geohash.get.take(geoHashLength)
+listRecommendationsStore</p>
+<blockquote>
+<div><p>.get(s”geohash_$geoHash”)
+.map {</p>
+<blockquote>
+<div><dl>
+<dt>case Some(recommendedLists) =&gt;</dt><dd><dl>
+<dt>recommendedLists.recommendedListsByAlgo.flatMap { topLists =&gt;</dt><dd><dl class="simple">
+<dt>topLists.lists.collect {</dt><dd><p>case list if !historicalListIds.contains(list.listId) =&gt; list.listId</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>case _ =&gt; Nil</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+</dd>
+<dt>case _ =&gt;</dt><dd><p>noLocationCodeCounter.incr()
+Future.Nil</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>} else {</dt><dd><p>disablePopGeoListsCounter.incr()
+Future.Nil</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>override def get(target: Target): Future[Option[Seq[RawCandidate]]] = {</dt><dd><dl>
+<dt>getListsRecommendedFromHistory(target).flatMap { historicalListIds =&gt;</dt><dd><dl>
+<dt>Future</dt><dd><dl class="simple">
+<dt>.join(</dt><dd><p>getPopGeoLists(target, historicalListIds),
+getIDSListRecs(target, historicalListIds)</p>
+</dd>
+</dl>
+<p>)
+.map {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case (popGeoListsIds, idsListIds) =&gt;</dt><dd><p>val candidates = (idsListIds ++ popGeoListsIds).map(getListCandidate(target, _))
+Some(candidates)</p>
+</dd>
+<dt>case _ =&gt;</dt><dd><p>noCandidatesCounter.incr()
+None</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private val pushCapFatiguePredicate = TargetPredicates.pushRecTypeFatiguePredicate(</dt><dd><p>CommonRecommendationType.List,
+PushFeatureSwitchParams.ListRecommendationsPushInterval,
+PushFeatureSwitchParams.MaxListRecommendationsPushGivenInterval,
+stats,</p>
+</dd>
+</dl>
+<p>)
+override def isCandidateSourceAvailable(target: Target): Future[Boolean] = {</p>
+<blockquote>
+<div><p>val isNotFatigued = pushCapFatiguePredicate.apply(Seq(target)).map(_.head)</p>
+<dl>
+<dt>Future</dt><dd><dl class="simple">
+<dt>.join(</dt><dd><p>PushDeviceUtil.isRecommendationsEligible(target),
+isNotFatigued</p>
+</dd>
+<dt>).map {</dt><dd><dl class="simple">
+<dt>case (userRecommendationsEligible, isUnderCAP) =&gt;</dt><dd><dl class="simple">
+<dt>userRecommendationsEligible &amp;&amp; isUnderCAP &amp;&amp; target.params(</dt><dd><p>PushFeatureSwitchParams.EnableListRecommendations)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/pushservice/src/main/scala/com/twitter/frigate/pushservice/adaptor/ListsToRecommendCandidateAdaptor.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

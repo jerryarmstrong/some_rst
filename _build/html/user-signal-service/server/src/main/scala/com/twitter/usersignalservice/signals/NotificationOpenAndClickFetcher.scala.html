@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.usersignalservice.signals</p>
+<p>import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.frigate.common.store.strato.StratoFetchableStore
+import com.twitter.frigate.data_pipeline.candidate_generation.thriftscala.ClientEngagementEvent
+import com.twitter.frigate.data_pipeline.candidate_generation.thriftscala.LatestEvents
+import com.twitter.frigate.data_pipeline.candidate_generation.thriftscala.LatestNegativeEngagementEvents
+import com.twitter.simclusters_v2.thriftscala.InternalId
+import com.twitter.storehaus.ReadableStore
+import com.twitter.strato.client.Client
+import com.twitter.twistly.common.TweetId
+import com.twitter.twistly.common.UserId
+import com.twitter.usersignalservice.base.BaseSignalFetcher
+import com.twitter.usersignalservice.base.Query
+import com.twitter.usersignalservice.thriftscala.Signal
+import com.twitter.usersignalservice.thriftscala.SignalType
+import com.twitter.util.Future
+import com.twitter.util.Timer
+import javax.inject.Inject
+import javax.inject.Singleton</p>
+<p>&#64;Singleton
+case class NotificationOpenAndClickFetcher &#64;Inject() (</p>
+<blockquote>
+<div><p>stratoClient: Client,
+timer: Timer,
+stats: StatsReceiver)</p>
+<blockquote>
+<div><p>extends BaseSignalFetcher {</p>
+</div></blockquote>
+<p>import NotificationOpenAndClickFetcher._</p>
+<p>override type RawSignalType = ClientEngagementEvent
+override val name: String = this.getClass.getCanonicalName
+override val statsReceiver: StatsReceiver = stats.scope(this.name)</p>
+<dl class="simple">
+<dt>private val latestEventsStore: ReadableStore[UserId, LatestEvents] = {</dt><dd><dl class="simple">
+<dt>StratoFetchableStore</dt><dd><p>.withUnitView[UserId, LatestEvents](stratoClient, latestEventStoreColumn)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private val notificationNegativeEngagementStore: ReadableStore[UserId, Seq[</dt><dd><p>NotificationNegativeEngagement</p>
+</dd>
+<dt>]] = {</dt><dd><dl class="simple">
+<dt>StratoFetchableStore</dt><dd><dl class="simple">
+<dt>.withUnitView[UserId, LatestNegativeEngagementEvents](</dt><dd><p>stratoClient,
+labeledPushRecsNegativeEngagementsColumn).mapValues(fromLatestNegativeEngagementEvents)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>override def getRawSignals(</dt><dd><p>userId: UserId</p>
+</dd>
+<dt>): Future[Option[Seq[RawSignalType]]] = {</dt><dd><dl class="simple">
+<dt>val notificationNegativeEngagementEventsFut =</dt><dd><p>notificationNegativeEngagementStore.get(userId)</p>
+</dd>
+</dl>
+<p>val latestEventsFut = latestEventsStore.get(userId)</p>
+<dl>
+<dt>Future</dt><dd><dl>
+<dt>.join(latestEventsFut, notificationNegativeEngagementEventsFut).map {</dt><dd><dl>
+<dt>case (latestEventsOpt, latestNegativeEngagementEventsOpt) =&gt;</dt><dd><dl>
+<dt>latestEventsOpt.map { latestEvents =&gt;</dt><dd><p>// Negative Engagement Events Filter
+filterNegativeEngagementEvents(</p>
+<blockquote>
+<div><p>latestEvents.engagementEvents,
+latestNegativeEngagementEventsOpt.getOrElse(Seq.empty),
+statsReceiver.scope(“filterNegativeEngagementEvents”))</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>override def process(</dt><dd><p>query: Query,
+rawSignals: Future[Option[Seq[RawSignalType]]]</p>
+</dd>
+<dt>): Future[Option[Seq[Signal]]] = {</dt><dd><dl>
+<dt>rawSignals.map {</dt><dd><dl>
+<dt>_.map {</dt><dd><dl>
+<dt>_.take(query.maxResults.getOrElse(Int.MaxValue)).map { clientEngagementEvent =&gt;</dt><dd><dl class="simple">
+<dt>Signal(</dt><dd><p>SignalType.NotificationOpenAndClickV1,
+timestamp = clientEngagementEvent.timestampMillis,
+targetInternalId = Some(InternalId.TweetId(clientEngagementEvent.tweetId))</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>object NotificationOpenAndClickFetcher {</dt><dd><p>private val latestEventStoreColumn = “frigate/magicrecs/labeledPushRecsAggregated.User”
+private val labeledPushRecsNegativeEngagementsColumn =</p>
+<blockquote>
+<div><p>“frigate/magicrecs/labeledPushRecsNegativeEngagements.User”</p>
+</div></blockquote>
+<dl>
+<dt>case class NotificationNegativeEngagement(</dt><dd><p>tweetId: TweetId,
+timestampMillis: Long,
+isNtabDisliked: Boolean,
+isReportTweetClicked: Boolean,
+isReportTweetDone: Boolean,
+isReportUserClicked: Boolean,
+isReportUserDone: Boolean)</p>
+</dd>
+<dt>def fromLatestNegativeEngagementEvents(</dt><dd><p>latestNegativeEngagementEvents: LatestNegativeEngagementEvents</p>
+</dd>
+<dt>): Seq[NotificationNegativeEngagement] = {</dt><dd><dl>
+<dt>latestNegativeEngagementEvents.negativeEngagementEvents.map { event =&gt;</dt><dd><dl class="simple">
+<dt>NotificationNegativeEngagement(</dt><dd><p>event.tweetId,
+event.timestampMillis,
+event.isNtabDisliked.getOrElse(false),
+event.isReportTweetClicked.getOrElse(false),
+event.isReportTweetDone.getOrElse(false),
+event.isReportUserClicked.getOrElse(false),
+event.isReportUserDone.getOrElse(false)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def filterNegativeEngagementEvents(</dt><dd><p>engagementEvents: Seq[ClientEngagementEvent],
+negativeEvents: Seq[NotificationNegativeEngagement],
+statsReceiver: StatsReceiver</p>
+</dd>
+<dt>): Seq[ClientEngagementEvent] = {</dt><dd><dl>
+<dt>if (negativeEvents.nonEmpty) {</dt><dd><p>statsReceiver.counter(“filterNegativeEngagementEvents”).incr()
+statsReceiver.stat(“eventSizeBeforeFilter”).add(engagementEvents.size)</p>
+<dl>
+<dt>val negativeEngagementIdSet =</dt><dd><dl>
+<dt>negativeEvents.collect {</dt><dd><dl>
+<dt>case event</dt><dd><blockquote>
+<div><p>if event.isNtabDisliked || event.isReportTweetClicked || event.isReportTweetDone || event.isReportUserClicked || event.isReportUserDone =&gt;</p>
+</div></blockquote>
+<p>event.tweetId</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}.toSet</p>
+</dd>
+</dl>
+<p>// negative event size
+statsReceiver.stat(“negativeEventsSize”).add(negativeEngagementIdSet.size)</p>
+<p>// filter out negative engagement sources
+val result = engagementEvents.filterNot { event =&gt;</p>
+<blockquote>
+<div><p>negativeEngagementIdSet.contains(event.tweetId)</p>
+</div></blockquote>
+<p>}</p>
+<p>statsReceiver.stat(“eventSizeAfterFilter”).add(result.size)</p>
+<p>result</p>
+</dd>
+</dl>
+<p>} else engagementEvents</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/user-signal-service/server/src/main/scala/com/twitter/usersignalservice/signals/NotificationOpenAndClickFetcher.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

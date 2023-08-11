@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../../" id="documentation_options" src="../../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.ann.service.query_server.common</p>
+<p>import com.twitter.ann.common.IndexOutputFile
+import com.twitter.ann.hnsw.HnswCommon._
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.logging.Logger
+import com.twitter.search.common.file.AbstractFile
+import com.twitter.search.common.file.AbstractFile.Filter
+import com.twitter.search.common.file.PathUtils
+import com.twitter.util.Try
+import java.io.IOException
+import java.util.concurrent.atomic.AtomicReference
+import scala.collection.JavaConverters._
+import scala.math.Ordering.comparatorToOrdering</p>
+<dl class="simple">
+<dt>abstract class IndexPathProvider {</dt><dd><p>def provideIndexPath(rootPath: AbstractFile, group: Boolean = false): Try[AbstractFile]
+def provideIndexPathWithGroups(rootPath: AbstractFile): Try[Seq[AbstractFile]]</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>abstract class BaseIndexPathProvider extends IndexPathProvider {</dt><dd><p>protected val minIndexSizeBytes: Long
+protected val maxIndexSizeBytes: Long
+protected val statsReceiver: StatsReceiver
+protected val log: Logger
+private val invalidPathCounter = statsReceiver.counter(“invalid_index”)
+private val failToLocateDirectoryCounter = statsReceiver.counter(“find_latest_path_fail”)
+private val successProvidePathCounter = statsReceiver.counter(“provide_path_success”)</p>
+<p>private val latestGroupCount = new AtomicReference(0f)
+private val latestIndexTimestamp = new AtomicReference(0f)
+private val latestValidIndexTimestamp = new AtomicReference(0f)</p>
+<p>private val INDEX_METADATA_FILE = “ANN_INDEX_METADATA”</p>
+<dl class="simple">
+<dt>private val latestIndexGauge = statsReceiver.addGauge(“latest_index_timestamp”)(</dt><dd><p>latestIndexTimestamp.get()</p>
+</dd>
+</dl>
+<p>)
+private val latestValidIndexGauge = statsReceiver.addGauge(“latest_valid_index_timestamp”)(</p>
+<blockquote>
+<div><p>latestValidIndexTimestamp.get()</p>
+</div></blockquote>
+<p>)
+private val latestGroupCountGauge = statsReceiver.addGauge(“latest_group_count”)(</p>
+<blockquote>
+<div><p>latestGroupCount.get()</p>
+</div></blockquote>
+<p>)</p>
+<p>private val latestTimeStampDirectoryFilter = new AbstractFile.Filter {</p>
+<blockquote>
+<div><p>/** Determines which files should be accepted when listing a directory. <a href="#id1"><span class="problematic" id="id2">*</span></a>/
+override def accept(file: AbstractFile): Boolean = {</p>
+<blockquote>
+<div><p>val name = file.getName
+PathUtils.TIMESTAMP_PATTERN.matcher(name).matches()</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>private def findLatestTimeStampValidSuccessDirectory(</dt><dd><p>path: AbstractFile,
+group: Boolean</p>
+</dd>
+<dt>): AbstractFile = {</dt><dd><p>log.info(s”Calling findLatestTimeStampValidSuccessDirectory with ${path.getPath}”)
+// Get all the timestamp directories
+val dateDirs = path.listFiles(latestTimeStampDirectoryFilter).asScala.toSeq</p>
+<dl>
+<dt>if (dateDirs.nonEmpty) {</dt><dd><p>// Validate the indexes
+val latestValidPath = {</p>
+<blockquote>
+<div><dl>
+<dt>if (group) {</dt><dd><p>// For grouped, check all the individual group indexes and stop as soon as a valid index
+// is found.
+dateDirs</p>
+<blockquote>
+<div><dl>
+<dt>.sorted(comparatorToOrdering(PathUtils.NEWEST_FIRST_COMPARATOR)).find(file =&gt; {</dt><dd><p>val indexMetadataFile = file.getChild(INDEX_METADATA_FILE)
+val indexes = file.listFiles().asScala.filter(_.isDirectory)
+val isValid = if (indexMetadataFile.exists()) {</p>
+<blockquote>
+<div><p>// Metadata file exists. Check the number of groups and verify the index is
+// complete
+val indexMetadata = new IndexOutputFile(indexMetadataFile).loadIndexMetadata()
+if (indexMetadata.numGroups.get != indexes.size) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>log.info(</dt><dd><p>s”Grouped index ${file.getPath} should have ${indexMetadata.numGroups.get} groups but had ${indexes.size}”)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+indexMetadata.numGroups.get == indexes.size</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>// True if the file doesn’t exist. This is to make this change backwards
+// compatible for clients using the old version of the dataflow job
+true</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>isValid &amp;&amp; indexes.forall(index =&gt; {</dt><dd><dl class="simple">
+<dt>index.hasSuccessFile &amp;&amp; isValidIndex(index) &amp;&amp; QueryServerUtil</dt><dd><p>.isValidIndexDirSize(index, minIndexSizeBytes, maxIndexSizeBytes)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>})</p>
+</dd>
+</dl>
+<p>})</p>
+</div></blockquote>
+</dd>
+<dt>} else {</dt><dd><p>// For non-grouped, find the first valid index.
+dateDirs</p>
+<blockquote>
+<div><dl class="simple">
+<dt>.sorted(comparatorToOrdering(PathUtils.NEWEST_FIRST_COMPARATOR)).find(file =&gt; {</dt><dd><dl class="simple">
+<dt>file.hasSuccessFile &amp;&amp; QueryServerUtil</dt><dd><p>.isValidIndexDirSize(file, minIndexSizeBytes, maxIndexSizeBytes)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>})</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>if (latestValidPath.nonEmpty) {</dt><dd><p>// Log the results
+successProvidePathCounter.incr()
+if (group) {</p>
+<blockquote>
+<div><p>latestGroupCount.set(latestValidPath.get.listFiles().asScala.count(_.isDirectory))
+log.info(</p>
+<blockquote>
+<div><p>s”findLatestTimeStampValidSuccessDirectory latestValidPath ${latestValidPath.get.getPath} and number of groups $latestGroupCount”)</p>
+</div></blockquote>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><dl class="simple">
+<dt>val latestValidPathSize =</dt><dd><p>latestValidPath.get.listFiles(true).asScala.map(_.getSizeInBytes).sum</p>
+</dd>
+<dt>log.info(</dt><dd><p>s”findLatestTimeStampValidSuccessDirectory latestValidPath ${latestValidPath.get.getPath} and size $latestValidPathSize”)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+return latestValidPath.get</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// Fail if no index or no valid index.
+failToLocateDirectoryCounter.incr()
+throw new IOException(s”Cannot find any valid directory with SUCCESS file at ${path.getName}”)</p>
+</dd>
+</dl>
+<p>}</p>
+<p>def isValidIndex(index: AbstractFile): Boolean</p>
+<dl>
+<dt>override def provideIndexPath(</dt><dd><p>rootPath: AbstractFile,
+group: Boolean = false</p>
+</dd>
+<dt>): Try[AbstractFile] = {</dt><dd><dl>
+<dt>Try {</dt><dd><p>val latestValidPath = findLatestTimeStampValidSuccessDirectory(rootPath, group)
+if (!group) {</p>
+<blockquote>
+<div><p>val latestPath = PathUtils.findLatestTimeStampSuccessDirectory(rootPath)
+// since latestValidPath does not throw exception, latestPath must exist
+assert(latestPath.isPresent)
+val latestPathSize = latestPath.get.listFiles(true).asScala.map(_.getSizeInBytes).sum
+log.info(s”provideIndexPath latestPath ${latestPath</p>
+<blockquote>
+<div><p>.get()
+.getPath} and size $latestPathSize”)</p>
+</div></blockquote>
+<p>latestIndexTimestamp.set(latestPath.get().getName.toFloat)
+// latest directory is not valid, update counter for alerts
+if (latestPath.get() != latestValidPath) {</p>
+<blockquote>
+<div><p>invalidPathCounter.incr()</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>latestIndexTimestamp.set(latestValidPath.getName.toFloat)</p>
+</dd>
+</dl>
+<p>}
+latestValidIndexTimestamp.set(latestValidPath.getName.toFloat)
+latestValidPath</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>override def provideIndexPathWithGroups(</dt><dd><p>rootPath: AbstractFile</p>
+</dd>
+<dt>): Try[Seq[AbstractFile]] = {</dt><dd><p>val latestValidPath = provideIndexPath(rootPath, true)
+latestValidPath.map { path =&gt;</p>
+<blockquote>
+<div><dl>
+<dt>path</dt><dd><dl class="simple">
+<dt>.listFiles(new Filter {</dt><dd><dl class="simple">
+<dt>override def accept(file: AbstractFile): Boolean =</dt><dd><p>file.isDirectory &amp;&amp; file.hasSuccessFile</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}).asScala.toSeq</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>case class ValidatedIndexPathProvider(</dt><dd><p>override val minIndexSizeBytes: Long,
+override val maxIndexSizeBytes: Long,
+override val statsReceiver: StatsReceiver)</p>
+<blockquote>
+<div><p>extends BaseIndexPathProvider {</p>
+</div></blockquote>
+<p>override val log = Logger.get(“ValidatedIndexPathProvider”)</p>
+<dl class="simple">
+<dt>override def isValidIndex(dir: AbstractFile): Boolean = {</dt><dd><p>isValidHnswIndex(dir)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../../_sources/ann/src/main/scala/com/twitter/ann/service/query_server/common/IndexPathProvider.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

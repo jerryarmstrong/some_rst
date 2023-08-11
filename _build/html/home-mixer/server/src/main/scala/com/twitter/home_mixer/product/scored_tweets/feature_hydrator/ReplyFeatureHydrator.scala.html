@@ -1,0 +1,436 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../../../" id="documentation_options" src="../../../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.home_mixer.product.scored_tweets.feature_hydrator</p>
+<p>import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.home_mixer.model.ContentFeatures
+import com.twitter.home_mixer.model.HomeFeatures._
+import com.twitter.home_mixer.product.scored_tweets.feature_hydrator.adapters.content.InReplyToContentFeatureAdapter
+import com.twitter.home_mixer.product.scored_tweets.feature_hydrator.adapters.earlybird.InReplyToEarlybirdAdapter
+import com.twitter.home_mixer.util.ReplyRetweetUtil
+import com.twitter.ml.api.DataRecord
+import com.twitter.product_mixer.component_library.model.candidate.TweetCandidate
+import com.twitter.product_mixer.core.feature.Feature
+import com.twitter.product_mixer.core.feature.FeatureWithDefaultOnFailure
+import com.twitter.product_mixer.core.feature.datarecord.DataRecordInAFeature
+import com.twitter.product_mixer.core.feature.featuremap.FeatureMap
+import com.twitter.product_mixer.core.feature.featuremap.FeatureMapBuilder
+import com.twitter.product_mixer.core.functional_component.feature_hydrator.BulkCandidateFeatureHydrator
+import com.twitter.product_mixer.core.model.common.CandidateWithFeatures
+import com.twitter.product_mixer.core.model.common.identifier.FeatureHydratorIdentifier
+import com.twitter.product_mixer.core.pipeline.PipelineQuery
+import com.twitter.product_mixer.core.util.OffloadFuturePools
+import com.twitter.search.common.features.thriftscala.ThriftTweetFeatures
+import com.twitter.snowflake.id.SnowflakeId
+import com.twitter.stitch.Stitch
+import com.twitter.timelines.conversation_features.v1.thriftscala.ConversationFeatures
+import com.twitter.timelines.conversation_features.{thriftscala =&gt; cf}
+import com.twitter.timelines.prediction.adapters.conversation_features.ConversationFeaturesAdapter
+import com.twitter.util.Duration
+import com.twitter.util.Time
+import javax.inject.Inject
+import javax.inject.Singleton
+import scala.collection.JavaConverters._</p>
+<dl>
+<dt>object InReplyToTweetHydratedEarlybirdFeature</dt><dd><p>extends Feature[TweetCandidate, Option[ThriftTweetFeatures]]</p>
+</dd>
+<dt>object ConversationDataRecordFeature</dt><dd><blockquote>
+<div><p>extends DataRecordInAFeature[TweetCandidate]
+with FeatureWithDefaultOnFailure[TweetCandidate, DataRecord] {</p>
+</div></blockquote>
+<p>override def defaultValue: DataRecord = new DataRecord()</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>object InReplyToEarlybirdDataRecordFeature</dt><dd><blockquote>
+<div><p>extends DataRecordInAFeature[TweetCandidate]
+with FeatureWithDefaultOnFailure[TweetCandidate, DataRecord] {</p>
+</div></blockquote>
+<p>override def defaultValue: DataRecord = new DataRecord()</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>object InReplyToTweetypieContentDataRecordFeature</dt><dd><blockquote>
+<div><p>extends DataRecordInAFeature[TweetCandidate]
+with FeatureWithDefaultOnFailure[TweetCandidate, DataRecord] {</p>
+</div></blockquote>
+<p>override def defaultValue: DataRecord = new DataRecord()</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>The purpose of this hydrator is to</p></li>
+<li><ol class="arabic simple">
+<li><p>hydrate simple features into replies and their ancestor tweets</p></li>
+</ol>
+</li>
+<li><ol class="arabic simple" start="2">
+<li><p>keep both the normal replies and ancestor source candidates, but hydrate into the candidates</p></li>
+</ol>
+</li>
+<li><p>features useful for predicting the quality of the replies and source ancestor tweets.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+</dl>
+<p>&#64;Singleton
+class ReplyFeatureHydrator &#64;Inject() (statsReceiver: StatsReceiver)</p>
+<blockquote>
+<div><blockquote>
+<div><p>extends BulkCandidateFeatureHydrator[PipelineQuery, TweetCandidate] {</p>
+</div></blockquote>
+<p>override val identifier: FeatureHydratorIdentifier = FeatureHydratorIdentifier(“ReplyTweet”)</p>
+<dl class="simple">
+<dt>override val features: Set[Feature[_, _]] = Set(</dt><dd><p>ConversationDataRecordFeature,
+InReplyToTweetHydratedEarlybirdFeature,
+InReplyToEarlybirdDataRecordFeature,
+InReplyToTweetypieContentDataRecordFeature</p>
+</dd>
+</dl>
+<p>)</p>
+<p>private val defaulDataRecord: DataRecord = new DataRecord()</p>
+<dl class="simple">
+<dt>private val DefaultFeatureMap = FeatureMapBuilder()</dt><dd><p>.add(ConversationDataRecordFeature, defaulDataRecord)
+.add(InReplyToTweetHydratedEarlybirdFeature, None)
+.add(InReplyToEarlybirdDataRecordFeature, defaulDataRecord)
+.add(InReplyToTweetypieContentDataRecordFeature, defaulDataRecord)
+.build()</p>
+</dd>
+</dl>
+<p>private val scopedStatsReceiver = statsReceiver.scope(getClass.getSimpleName)
+private val hydratedReplyCounter = scopedStatsReceiver.counter(“hydratedReply”)
+private val hydratedAncestorCounter = scopedStatsReceiver.counter(“hydratedAncestor”)</p>
+<dl>
+<dt>override def apply(</dt><dd><p>query: PipelineQuery,
+candidates: Seq[CandidateWithFeatures[TweetCandidate]]</p>
+</dd>
+<dt>): Stitch[Seq[FeatureMap]] = OffloadFuturePools.offload {</dt><dd><dl>
+<dt>val replyToInReplyToTweetMap =</dt><dd><p>ReplyRetweetUtil.replyTweetIdToInReplyToTweetMap(candidates)</p>
+</dd>
+<dt>val candidatesWithRepliesHydrated = candidates.map { candidate =&gt;</dt><dd><dl>
+<dt>replyToInReplyToTweetMap</dt><dd><dl class="simple">
+<dt>.get(candidate.candidate.id).map { inReplyToTweet =&gt;</dt><dd><p>hydratedReplyCounter.incr()
+hydratedReplyCandidate(candidate, inReplyToTweet)</p>
+</dd>
+</dl>
+<p>}.getOrElse((candidate, None, None))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Update ancestor tweets with descendant replies and hydrate simple features from one of</p></li>
+<li><p>the descendants.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>val ancestorTweetToDescendantRepliesMap =</dt><dd><p>ReplyRetweetUtil.ancestorTweetIdToDescendantRepliesMap(candidates)</p>
+</dd>
+<dt>val candidatesWithRepliesAndAncestorTweetsHydrated = candidatesWithRepliesHydrated.map {</dt><dd><dl>
+<dt>case (</dt><dd><blockquote>
+<div><p>maybeAncestorTweetCandidate,
+updatedReplyConversationFeatures,
+inReplyToTweetEarlyBirdFeature) =&gt;</p>
+</div></blockquote>
+<dl>
+<dt>ancestorTweetToDescendantRepliesMap</dt><dd><p>.get(maybeAncestorTweetCandidate.candidate.id)
+.map { descendantReplies =&gt;</p>
+<blockquote>
+<div><p>hydratedAncestorCounter.incr()
+val (ancestorTweetCandidate, updatedConversationFeatures): (</p>
+<blockquote>
+<div><p>CandidateWithFeatures[TweetCandidate],
+Option[ConversationFeatures]</p>
+</div></blockquote>
+<dl class="simple">
+<dt>) =</dt><dd><dl class="simple">
+<dt>hydrateAncestorTweetCandidate(</dt><dd><p>maybeAncestorTweetCandidate,
+descendantReplies,
+updatedReplyConversationFeatures)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>(ancestorTweetCandidate, inReplyToTweetEarlyBirdFeature, updatedConversationFeatures)</p>
+</div></blockquote>
+<p>}
+.getOrElse(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>(</dt><dd><p>maybeAncestorTweetCandidate,
+inReplyToTweetEarlyBirdFeature,
+updatedReplyConversationFeatures))</p>
+</dd>
+</dl>
+</div></blockquote>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>candidatesWithRepliesAndAncestorTweetsHydrated.map {</dt><dd><dl class="simple">
+<dt>case (candidate, inReplyToTweetEarlyBirdFeature, updatedConversationFeatures) =&gt;</dt><dd><dl class="simple">
+<dt>val conversationDataRecordFeature = updatedConversationFeatures</dt><dd><p>.map(f =&gt; ConversationFeaturesAdapter.adaptToDataRecord(cf.ConversationFeatures.V1(f)))
+.getOrElse(defaulDataRecord)</p>
+</dd>
+<dt>val inReplyToEarlybirdDataRecord =</dt><dd><dl class="simple">
+<dt>InReplyToEarlybirdAdapter</dt><dd><p>.adaptToDataRecords(inReplyToTweetEarlyBirdFeature).asScala.head</p>
+</dd>
+</dl>
+</dd>
+<dt>val inReplyToContentDataRecord = InReplyToContentFeatureAdapter</dt><dd><dl class="simple">
+<dt>.adaptToDataRecords(</dt><dd><p>inReplyToTweetEarlyBirdFeature.map(ContentFeatures.fromThrift)).asScala.head</p>
+</dd>
+</dl>
+</dd>
+<dt>FeatureMapBuilder()</dt><dd><p>.add(ConversationDataRecordFeature, conversationDataRecordFeature)
+.add(InReplyToTweetHydratedEarlybirdFeature, inReplyToTweetEarlyBirdFeature)
+.add(InReplyToEarlybirdDataRecordFeature, inReplyToEarlybirdDataRecord)
+.add(InReplyToTweetypieContentDataRecordFeature, inReplyToContentDataRecord)
+.build()</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>case _ =&gt; DefaultFeatureMap</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def hydratedReplyCandidate(</dt><dd><p>replyCandidate: CandidateWithFeatures[TweetCandidate],
+inReplyToTweetCandidate: CandidateWithFeatures[TweetCandidate]</p>
+</dd>
+<dt>): (</dt><dd><p>CandidateWithFeatures[TweetCandidate],
+Option[ConversationFeatures],
+Option[ThriftTweetFeatures]</p>
+</dd>
+<dt>) = {</dt><dd><dl>
+<dt>val tweetedAfterInReplyToTweetInSecs =</dt><dd><dl>
+<dt>(</dt><dd><p>originalTweetAgeFromSnowflake(inReplyToTweetCandidate),
+originalTweetAgeFromSnowflake(replyCandidate)) match {
+case (Some(inReplyToTweetAge), Some(replyTweetAge)) =&gt;</p>
+<blockquote>
+<div><p>Some((inReplyToTweetAge - replyTweetAge).inSeconds.toLong)</p>
+</div></blockquote>
+<p>case _ =&gt; None</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>val existingConversationFeatures = Some(</dt><dd><dl class="simple">
+<dt>replyCandidate.features</dt><dd><p>.getOrElse(ConversationFeature, None).getOrElse(ConversationFeatures()))</p>
+</dd>
+</dl>
+</dd>
+<dt>val updatedConversationFeatures = existingConversationFeatures match {</dt><dd><dl>
+<dt>case Some(v1) =&gt;</dt><dd><dl>
+<dt>Some(</dt><dd><dl>
+<dt>v1.copy(</dt><dd><p>tweetedAfterInReplyToTweetInSecs = tweetedAfterInReplyToTweetInSecs,
+isSelfReply = Some(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>replyCandidate.features.getOrElse(</dt><dd><p>AuthorIdFeature,
+None) == inReplyToTweetCandidate.features.getOrElse(AuthorIdFeature, None))</p>
+</dd>
+</dl>
+</div></blockquote>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>case _ =&gt; None</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// Note: if inReplyToTweet is a retweet, we need to read early bird feature from the merged
+// early bird feature field from RetweetSourceTweetFeatureHydrator class.
+// But if inReplyToTweet is a reply, we return its early bird feature directly
+val inReplyToTweetThriftTweetFeaturesOpt = {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (inReplyToTweetCandidate.features.getOrElse(IsRetweetFeature, false)) {</dt><dd><p>inReplyToTweetCandidate.features.getOrElse(SourceTweetEarlybirdFeature, None)</p>
+</dd>
+<dt>} else {</dt><dd><p>inReplyToTweetCandidate.features.getOrElse(EarlybirdFeature, None)</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>(replyCandidate, updatedConversationFeatures, inReplyToTweetThriftTweetFeaturesOpt)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def hydrateAncestorTweetCandidate(</dt><dd><p>ancestorTweetCandidate: CandidateWithFeatures[TweetCandidate],
+descendantReplies: Seq[CandidateWithFeatures[TweetCandidate]],
+updatedReplyConversationFeatures: Option[ConversationFeatures]</p>
+</dd>
+<dt>): (CandidateWithFeatures[TweetCandidate], Option[ConversationFeatures]) = {</dt><dd><p>// Ancestor could be a reply. For example, in thread: tweetA -&gt; tweetB -&gt; tweetC,
+// tweetB is a reply and ancestor at the same time. Hence, tweetB’s conversation feature
+// will be updated by hydratedReplyCandidate and hydrateAncestorTweetCandidate functions.
+val existingConversationFeatures =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (updatedReplyConversationFeatures.nonEmpty)</dt><dd><p>updatedReplyConversationFeatures</p>
+</dd>
+<dt>else</dt><dd><dl class="simple">
+<dt>Some(</dt><dd><dl class="simple">
+<dt>ancestorTweetCandidate.features</dt><dd><p>.getOrElse(ConversationFeature, None).getOrElse(ConversationFeatures()))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+</div></blockquote>
+<dl>
+<dt>val updatedConversationFeatures = existingConversationFeatures match {</dt><dd><dl>
+<dt>case Some(v1) =&gt;</dt><dd><dl>
+<dt>Some(</dt><dd><dl>
+<dt>v1.copy(</dt><dd><p>hasDescendantReplyCandidate = Some(true),
+hasInNetworkDescendantReply =</p>
+<blockquote>
+<div><p>Some(descendantReplies.exists(_.features.getOrElse(InNetworkFeature, false)))</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>case _ =&gt; None</p>
+</dd>
+</dl>
+<p>}
+(ancestorTweetCandidate, updatedConversationFeatures)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def originalTweetAgeFromSnowflake(</dt><dd><p>candidate: CandidateWithFeatures[TweetCandidate]</p>
+</dd>
+<dt>): Option[Duration] = {</dt><dd><dl>
+<dt>SnowflakeId</dt><dd><dl class="simple">
+<dt>.timeFromIdOpt(</dt><dd><dl class="simple">
+<dt>candidate.features</dt><dd><p>.getOrElse(SourceTweetIdFeature, None).getOrElse(candidate.candidate.id))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>.map(Time.now - _)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../../../_sources/home-mixer/server/src/main/scala/com/twitter/home_mixer/product/scored_tweets/feature_hydrator/ReplyFeatureHydrator.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

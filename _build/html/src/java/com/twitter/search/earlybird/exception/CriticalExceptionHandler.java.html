@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../" id="documentation_options" src="../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.earlybird.exception;</p>
+<p>import com.google.common.annotations.VisibleForTesting;</p>
+<p>import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.slf4j.Marker;
+import org.slf4j.MarkerFactory;</p>
+<p>import com.twitter.search.common.config.Config;
+import com.twitter.search.common.metrics.SearchCounter;
+import com.twitter.search.earlybird.EarlybirdStatus;</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Used for handling exceptions considered critical.</p></li>
+<li></li>
+<li><p>When you handle an exception with this class, two things might happen.</p></li>
+<li><ol class="arabic simple">
+<li><p>If earlybirds are still starting, we’ll shut them down.</p></li>
+</ol>
+</li>
+<li><ol class="arabic simple" start="2">
+<li><p>If earlybirds have started, we’ll increment a counter that will cause alerts.</p></li>
+</ol>
+</li>
+<li></li>
+<li><p>If you want to verify that your code handles exceptions as you expect, you can use the</p></li>
+<li><p>helper class ExceptionCauser.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>public class CriticalExceptionHandler {</dt><dd><p>private static final Logger LOG = LoggerFactory.getLogger(CriticalExceptionHandler.class);
+private static final Marker FATAL = MarkerFactory.getMarker(“FATAL”);</p>
+<p>// This stat should remain at 0 during normal operations.
+// This stat being non-zero should trigger alerts.
+public static final SearchCounter CRITICAL_EXCEPTION_COUNT =</p>
+<blockquote>
+<div><p>SearchCounter.export(“fatal_exception_count”);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>public static final SearchCounter UNSAFE_MEMORY_ACCESS =</dt><dd><p>SearchCounter.export(“unsafe_memory_access”);</p>
+</dd>
+</dl>
+<p>private Runnable shutdownHook;</p>
+<dl class="simple">
+<dt>public void setShutdownHook(Runnable shutdownHook) {</dt><dd><p>this.shutdownHook = shutdownHook;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Handle a critical exception.</p></li>
+<li></li>
+<li><p>&#64;param thrower Instance of the class where the exception was thrown.</p></li>
+<li><p>&#64;param thrown The exception.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>public void handle(Object thrower, Throwable thrown) {</dt><dd><dl class="simple">
+<dt>if (thrown == null) {</dt><dd><p>return;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>try {</dt><dd><p>handleFatalException(thrower, thrown);</p>
+</dd>
+<dt>} catch (Throwable e) {</dt><dd><dl class="simple">
+<dt>LOG.error(“Unexpected exception in EarlybirdExceptionHandler.handle() while handling an “</dt><dd><ul class="simple">
+<li><p>“unexpected exception from “ + thrower.getClass(), e);</p></li>
+</ul>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;VisibleForTesting
+boolean shouldIncrementFatalExceptionCounter(Throwable thrown) {</p>
+<blockquote>
+<div><p>// See D212952
+// We don’t want to get pages when this happens.
+for (Throwable t = thrown; t != null; t = t.getCause()) {</p>
+<blockquote>
+<div><dl>
+<dt>if (t instanceof InternalError &amp;&amp; t.getMessage() != null</dt><dd><blockquote>
+<div><p>&amp;&amp; t.getMessage().contains(“unsafe memory access operation”)) {</p>
+</div></blockquote>
+<p>// Don’t treat InternalError caused by unsafe memory access operation which is usually
+// triggered by SIGBUS for accessing a corrupted memory block.
+UNSAFE_MEMORY_ACCESS.increment();
+return false;</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>return true;</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Handle an exception that’s considered fatal.</p></li>
+<li></li>
+<li><p>&#64;param thrower instance of the class where the exception was thrown.</p></li>
+<li><p>&#64;param thrown The Error or Exception.</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>private void handleFatalException(Object thrower, Throwable thrown) {</dt><dd><p>LOG.error(FATAL, “Fatal exception in “ + thrower.getClass() + “:”, thrown);</p>
+<dl class="simple">
+<dt>if (shouldIncrementFatalExceptionCounter(thrown)) {</dt><dd><p>CRITICAL_EXCEPTION_COUNT.increment();</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>if (EarlybirdStatus.isStarting()) {</dt><dd><p>LOG.error(FATAL, “Got fatal exception while starting up, exiting …”);
+if (this.shutdownHook != null) {</p>
+<blockquote>
+<div><p>this.shutdownHook.run();</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>LOG.error(“earlybirdServer not set, can’t shut down.”);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>if (!Config.environmentIsTest()) {</dt><dd><p>// Sleep for 3 minutes to allow the fatal exception to be caught by observability.
+try {</p>
+<blockquote>
+<div><p>Thread.sleep(3 * 60 * 1000);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} catch (InterruptedException e) {</dt><dd><p>LOG.error(FATAL, “interupted sleep while shutting down.”);</p>
+</dd>
+</dl>
+<p>}
+LOG.info(“Terminate JVM.”);
+//CHECKSTYLE:OFF RegexpSinglelineJava
+// See SEARCH-15256
+System.exit(-1);
+//CHECKSTYLE:ON RegexpSinglelineJava</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../_sources/src/java/com/twitter/search/earlybird/exception/CriticalExceptionHandler.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

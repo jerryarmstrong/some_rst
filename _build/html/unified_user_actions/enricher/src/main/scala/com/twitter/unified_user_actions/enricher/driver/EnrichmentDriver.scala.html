@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../../" id="documentation_options" src="../../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.unified_user_actions.enricher.driver</p>
+<p>import com.twitter.unified_user_actions.enricher.internal.thriftscala.EnrichmentEnvelop
+import com.twitter.unified_user_actions.enricher.internal.thriftscala.EnrichmentKey
+import com.twitter.unified_user_actions.enricher.internal.thriftscala.EnrichmentStageType.Hydration
+import com.twitter.unified_user_actions.enricher.internal.thriftscala.EnrichmentStageType.Repartition
+import com.twitter.util.Future
+import EnrichmentPlanUtils._
+import com.twitter.unified_user_actions.enricher.Exceptions
+import com.twitter.unified_user_actions.enricher.ImplementationException
+import com.twitter.unified_user_actions.enricher.hydrator.Hydrator
+import com.twitter.unified_user_actions.enricher.partitioner.Partitioner</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>A driver that will execute on a key, value tuple and produce an output to a Kafka topic.</p></li>
+<li></li>
+<li><p>The output Kafka topic will depend on the current enrichment plan. In one scenario, the driver</p></li>
+<li><p>will output to a partitioned Kafka topic if the output needs to be repartitioned (after it has</p></li>
+<li><p>been hydrated 0 or more times as necessary). In another scenario, the driver will output to</p></li>
+<li><p>the final topic if there’s no more work to be done.</p></li>
+<li></li>
+<li><p>&#64;param finalOutputTopic The final output Kafka topic</p></li>
+<li><p>&#64;param partitionedTopic The intermediate Kafka topic used for repartitioning based on [[EnrichmentKey]]</p></li>
+<li><p>&#64;param hydrator A hydrator that knows how to populate the metadata based on the current plan / instruction.</p></li>
+<li><p>&#64;param partitioner A partitioner that knows how to transform the current uua event into an [[EnrichmentKey]].</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>class EnrichmentDriver(</dt><dd><p>finalOutputTopic: Option[String],
+partitionedTopic: String,
+hydrator: Hydrator,
+partitioner: Partitioner) {</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>A driver that does the following when being executed.</p></li>
+<li><p>It checks if we are done with enrichment plan, if not:</p></li>
+<li><ul>
+<li><p>is the current stage repartitioning?</p></li>
+</ul>
+</li>
+<li><p>-&gt; remap the output key, update plan accordingly then return with the new partition key</p></li>
+<li><ul>
+<li><p>is the current stage hydration?</p></li>
+</ul>
+</li>
+<li><p>-&gt; use the hydrator to hydrate the envelop, update the plan accordingly, then proceed</p></li>
+<li><p>recursively unless the next stage is repartitioning or this is the last stage.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>def execute(</dt><dd><p>key: Option[EnrichmentKey],
+envelop: Future[EnrichmentEnvelop]</p>
+</dd>
+<dt>): Future[(Option[EnrichmentKey], EnrichmentEnvelop)] = {</dt><dd><dl>
+<dt>envelop.flatMap { envelop =&gt;</dt><dd><p>val plan = envelop.plan
+if (plan.isEnrichmentComplete) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>val topic = finalOutputTopic.getOrElse(</dt><dd><dl class="simple">
+<dt>throw new ImplementationException(</dt><dd><dl class="simple">
+<dt>“A final output Kafka topic is supposed to be used but “ +</dt><dd><p>“no final output topic was provided.”))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>Future.value((key, envelop.copy(plan = plan.markLastStageCompletedWithOutputTopic(topic))))</p>
+</div></blockquote>
+<dl>
+<dt>} else {</dt><dd><p>val currentStage = plan.getCurrentStage</p>
+<dl>
+<dt>currentStage.stageType match {</dt><dd><dl>
+<dt>case Repartition =&gt;</dt><dd><dl class="simple">
+<dt>Exceptions.require(</dt><dd><p>currentStage.instructions.size == 1,
+s”re-partitioning needs exactly 1 instruction but ${currentStage.instructions.size} was provided”)</p>
+</dd>
+</dl>
+<p>val instruction = currentStage.instructions.head
+val outputKey = partitioner.repartition(instruction, envelop)
+val outputValue = envelop.copy(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>plan = plan.markStageCompletedWithOutputTopic(</dt><dd><p>stage = currentStage,
+outputTopic = partitionedTopic)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>)
+Future.value((outputKey, outputValue))</p>
+</dd>
+<dt>case Hydration =&gt;</dt><dd><dl class="simple">
+<dt>Exceptions.require(</dt><dd><p>currentStage.instructions.nonEmpty,
+“hydration needs at least one instruction”)</p>
+</dd>
+</dl>
+<p>// Hydration is either initialized or completed after this, failure state
+// will have to be handled upstream. Any unhandled exception will abort the entire
+// stage.
+// This is so that if the error in unrecoverable, the hydrator can choose to return an
+// un-hydrated envelop to tolerate the error.
+val finalEnvelop = currentStage.instructions.foldLeft(Future.value(envelop)) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>(curEnvelop, instruction) =&gt;</dt><dd><p>curEnvelop.flatMap(e =&gt; hydrator.hydrate(instruction, key, e))</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>val outputValue = finalEnvelop.map(e =&gt;</dt><dd><dl class="simple">
+<dt>e.copy(</dt><dd><p>plan = plan.markStageCompleted(stage = currentStage)</p>
+</dd>
+</dl>
+<p>))</p>
+</dd>
+</dl>
+<p>// continue executing other stages if it can (locally) until a terminal state
+execute(key, outputValue)</p>
+</dd>
+<dt>case _ =&gt;</dt><dd><p>throw new ImplementationException(s”Invalid / unsupported stage type $currentStage”)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../../_sources/unified_user_actions/enricher/src/main/scala/com/twitter/unified_user_actions/enricher/driver/EnrichmentDriver.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

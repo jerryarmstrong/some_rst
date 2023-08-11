@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.representationscorer.scorestore</p>
+<p>import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.frigate.common.util.StatsUtil
+import com.twitter.representationscorer.scorestore.TopicTweetsCosineSimilarityAggregateStore.ScoreKey
+import com.twitter.simclusters_v2.common.TweetId
+import com.twitter.simclusters_v2.score.AggregatedScoreStore
+import com.twitter.simclusters_v2.thriftscala.ScoreInternalId.GenericPairScoreId
+import com.twitter.simclusters_v2.thriftscala.ScoringAlgorithm.CortexTopicTweetLabel
+import com.twitter.simclusters_v2.thriftscala.{</p>
+<blockquote>
+<div><p>EmbeddingType,
+InternalId,
+ModelVersion,
+ScoreInternalId,
+ScoringAlgorithm,
+SimClustersEmbeddingId,
+TopicId,
+Score =&gt; ThriftScore,
+ScoreId =&gt; ThriftScoreId,
+SimClustersEmbeddingPairScoreId =&gt; ThriftSimClustersEmbeddingPairScoreId</p>
+</div></blockquote>
+<p>}
+import com.twitter.storehaus.ReadableStore
+import com.twitter.topic_recos.common.Configs.{DefaultModelVersion, MinCosineSimilarityScore}
+import com.twitter.topic_recos.common._
+import com.twitter.util.Future</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Calculates the cosine similarity scores of arbitrary combinations of TopicEmbeddings and</p></li>
+<li><p>TweetEmbeddings.</p></li>
+<li><p>The class has 2 uses:</p></li>
+<li><ol class="arabic simple">
+<li><p>For internal uses. TSP will call this store to fetch the raw scores for (topic, tweet) with</p></li>
+</ol>
+</li>
+<li><p>all available embedding types. We calculate all the scores here, so the caller can do filtering</p></li>
+<li><p>&amp; score caching on their side. This will make it possible to DDG different embedding scores.</p></li>
+<li></li>
+<li><ol class="arabic simple" start="2">
+<li><p>For external calls from Cortex. We return true (or 1.0) for any given (topic, tweet) if their</p></li>
+</ol>
+</li>
+<li><p>cosine similarity passes the threshold for any of the embedding types.</p></li>
+<li><p>The expected input type is</p></li>
+<li><p>ScoreId(</p></li>
+<li><p>PairEmbeddingCosineSimilarity,</p></li>
+<li><p>GenericPairScoreId(TopicId, TweetId)</p></li>
+<li><p>)</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>case class TopicTweetsCosineSimilarityAggregateStore(</dt><dd><p>scoreKeys: Seq[ScoreKey],
+statsReceiver: StatsReceiver)</p>
+<blockquote>
+<div><p>extends AggregatedScoreStore {</p>
+</div></blockquote>
+<dl>
+<dt>def toCortexScore(scoresMap: Map[ScoreKey, Double]): Double = {</dt><dd><dl class="simple">
+<dt>val passThreshold = scoresMap.exists {</dt><dd><p>case (_, score) =&gt; score &gt;= MinCosineSimilarityScore</p>
+</dd>
+</dl>
+<p>}
+if (passThreshold) 1.0 else 0.0</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>To be called by Cortex through Unified Score API ONLY. Calculates all possible (topic, tweet),</p></li>
+<li><p>return 1.0 if any of the embedding scores passes the minimum threshold.</p></li>
+<li></li>
+<li><p>Expect a GenericPairScoreId(PairEmbeddingCosineSimilarity, (TopicId, TweetId)) as input</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>override def get(k: ThriftScoreId): Future[Option[ThriftScore]] = {</dt><dd><dl>
+<dt>StatsUtil.trackOptionStats(statsReceiver) {</dt><dd><dl>
+<dt>(k.algorithm, k.internalId) match {</dt><dd><dl>
+<dt>case (CortexTopicTweetLabel, GenericPairScoreId(genericPairScoreId)) =&gt;</dt><dd><dl>
+<dt>(genericPairScoreId.id1, genericPairScoreId.id2) match {</dt><dd><dl class="simple">
+<dt>case (InternalId.TopicId(topicId), InternalId.TweetId(tweetId)) =&gt;</dt><dd><dl class="simple">
+<dt>TopicTweetsCosineSimilarityAggregateStore</dt><dd><p>.getRawScoresMap(topicId, tweetId, scoreKeys, scoreFacadeStore)
+.map { scoresMap =&gt; Some(ThriftScore(toCortexScore(scoresMap))) }</p>
+</dd>
+</dl>
+</dd>
+<dt>case (InternalId.TweetId(tweetId), InternalId.TopicId(topicId)) =&gt;</dt><dd><dl class="simple">
+<dt>TopicTweetsCosineSimilarityAggregateStore</dt><dd><p>.getRawScoresMap(topicId, tweetId, scoreKeys, scoreFacadeStore)
+.map { scoresMap =&gt; Some(ThriftScore(toCortexScore(scoresMap))) }</p>
+</dd>
+</dl>
+</dd>
+<dt>case _ =&gt;</dt><dd><p>Future.None</p>
+</dd>
+</dl>
+<p>// Do not accept other InternalId combinations</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>case _ =&gt;</dt><dd><p>// Do not accept other Id types for now
+Future.None</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>object TopicTweetsCosineSimilarityAggregateStore {</p>
+<blockquote>
+<div><dl>
+<dt>val TopicEmbeddingTypes: Seq[EmbeddingType] =</dt><dd><dl class="simple">
+<dt>Seq(</dt><dd><p>EmbeddingType.FavTfgTopic,
+EmbeddingType.LogFavBasedKgoApeTopic</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>// Add the new embedding types if want to test the new Tweet embedding performance.
+val TweetEmbeddingTypes: Seq[EmbeddingType] = Seq(EmbeddingType.LogFavBasedTweet)</p>
+<dl>
+<dt>val ModelVersions: Seq[ModelVersion] =</dt><dd><p>Seq(DefaultModelVersion)</p>
+</dd>
+<dt>val DefaultScoreKeys: Seq[ScoreKey] = {</dt><dd><dl>
+<dt>for {</dt><dd><p>modelVersion &lt;- ModelVersions
+topicEmbeddingType &lt;- TopicEmbeddingTypes
+tweetEmbeddingType &lt;- TweetEmbeddingTypes</p>
+</dd>
+<dt>} yield {</dt><dd><dl class="simple">
+<dt>ScoreKey(</dt><dd><p>topicEmbeddingType = topicEmbeddingType,
+tweetEmbeddingType = tweetEmbeddingType,
+modelVersion = modelVersion</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}
+case class ScoreKey(</p>
+<blockquote>
+<div><p>topicEmbeddingType: EmbeddingType,
+tweetEmbeddingType: EmbeddingType,
+modelVersion: ModelVersion)</p>
+</div></blockquote>
+<dl>
+<dt>def getRawScoresMap(</dt><dd><p>topicId: TopicId,
+tweetId: TweetId,
+scoreKeys: Seq[ScoreKey],
+uniformScoringStore: ReadableStore[ThriftScoreId, ThriftScore]</p>
+</dd>
+<dt>): Future[Map[ScoreKey, Double]] = {</dt><dd><dl>
+<dt>val scoresMapFut = scoreKeys.map { key =&gt;</dt><dd><dl>
+<dt>val scoreInternalId = ScoreInternalId.SimClustersEmbeddingPairScoreId(</dt><dd><dl>
+<dt>ThriftSimClustersEmbeddingPairScoreId(</dt><dd><p>buildTopicEmbedding(topicId, key.topicEmbeddingType, key.modelVersion),
+SimClustersEmbeddingId(</p>
+<blockquote>
+<div><p>key.tweetEmbeddingType,
+key.modelVersion,
+InternalId.TweetId(tweetId))</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>))</p>
+</dd>
+<dt>val scoreFut = uniformScoringStore</dt><dd><dl>
+<dt>.get(</dt><dd><dl class="simple">
+<dt>ThriftScoreId(</dt><dd><p>algorithm = ScoringAlgorithm.PairEmbeddingCosineSimilarity, // Hard code as cosine sim
+internalId = scoreInternalId</p>
+</dd>
+</dl>
+<p>))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>key -&gt; scoreFut</p>
+</dd>
+</dl>
+<p>}.toMap</p>
+<dl>
+<dt>Future</dt><dd><dl class="simple">
+<dt>.collect(scoresMapFut).map(_.collect {</dt><dd><dl class="simple">
+<dt>case (key, Some(ThriftScore(score))) =&gt;</dt><dd><p>(key, score)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>})</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/representation-scorer/server/src/main/scala/com/twitter/representationscorer/scorestore/TopicTweetsCosineSimilarityAggregateStore.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.follow_recommendations.services</p>
+<p>import com.twitter.finagle.stats.Counter
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.follow_recommendations.common.base.StatsUtil.profileStitchSeqResults
+import com.twitter.follow_recommendations.common.clients.impression_store.WtfImpressionStore
+import com.twitter.follow_recommendations.common.clients.socialgraph.SocialGraphClient
+import com.twitter.follow_recommendations.common.rankers.ml_ranker.ranking.HydrateFeaturesTransform
+import com.twitter.follow_recommendations.common.rankers.ml_ranker.ranking.MlRanker
+import com.twitter.follow_recommendations.common.utils.RescueWithStatsUtils.rescueWithStats
+import com.twitter.follow_recommendations.configapi.deciders.DeciderParams
+import com.twitter.follow_recommendations.logging.FrsLogger
+import com.twitter.follow_recommendations.models.ScoringUserRequest
+import com.twitter.follow_recommendations.models.ScoringUserResponse
+import com.twitter.stitch.Stitch
+import javax.inject.Inject
+import javax.inject.Singleton</p>
+<p>&#64;Singleton
+class UserScoringService &#64;Inject() (</p>
+<blockquote>
+<div><p>socialGraph: SocialGraphClient,
+wtfImpressionStore: WtfImpressionStore,
+hydrateFeaturesTransform: HydrateFeaturesTransform[ScoringUserRequest],
+mlRanker: MlRanker[ScoringUserRequest],
+resultLogger: FrsLogger,
+stats: StatsReceiver) {</p>
+<p>private val scopedStats: StatsReceiver = stats.scope(this.getClass.getSimpleName)
+private val disabledCounter: Counter = scopedStats.counter(“disabled”)</p>
+<dl>
+<dt>def get(request: ScoringUserRequest): Stitch[ScoringUserResponse] = {</dt><dd><dl>
+<dt>if (request.params(DeciderParams.EnableScoreUserCandidates)) {</dt><dd><p>val hydratedRequest = hydrate(request)
+val candidatesStitch = hydratedRequest.flatMap { req =&gt;</p>
+<blockquote>
+<div><dl class="simple">
+<dt>hydrateFeaturesTransform.transform(req, request.candidates).flatMap {</dt><dd><dl class="simple">
+<dt>candidateWithFeatures =&gt;</dt><dd><p>mlRanker.rank(req, candidateWithFeatures)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}
+profileStitchSeqResults(candidatesStitch, scopedStats)</p>
+<blockquote>
+<div><p>.map(ScoringUserResponse)
+.onSuccess { response =&gt;</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (resultLogger.shouldLog(request.debugParams)) {</dt><dd><p>resultLogger.logScoringResult(request, response)</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+</dd>
+<dt>} else {</dt><dd><p>disabledCounter.incr()
+Stitch.value(ScoringUserResponse(Nil))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def hydrate(request: ScoringUserRequest): Stitch[ScoringUserRequest] = {</dt><dd><dl>
+<dt>val allStitches = Stitch.collect(request.clientContext.userId.map { userId =&gt;</dt><dd><dl class="simple">
+<dt>val recentFollowedUserIdsStitch =</dt><dd><dl class="simple">
+<dt>rescueWithStats(</dt><dd><p>socialGraph.getRecentFollowedUserIds(userId),
+stats,
+“recentFollowedUserIds”)</p>
+</dd>
+</dl>
+</dd>
+<dt>val recentFollowedByUserIdsStitch =</dt><dd><dl class="simple">
+<dt>rescueWithStats(</dt><dd><p>socialGraph.getRecentFollowedByUserIds(userId),
+stats,
+“recentFollowedByUserIds”)</p>
+</dd>
+</dl>
+</dd>
+<dt>val wtfImpressionsStitch =</dt><dd><dl class="simple">
+<dt>rescueWithStats(</dt><dd><p>wtfImpressionStore.get(userId, request.displayLocation),
+stats,
+“wtfImpressions”)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>Stitch.join(recentFollowedUserIdsStitch, recentFollowedByUserIdsStitch, wtfImpressionsStitch)</p>
+</dd>
+</dl>
+<p>})
+allStitches.map {</p>
+<blockquote>
+<div><dl>
+<dt>case Some((recentFollowedUserIds, recentFollowedByUserIds, wtfImpressions)) =&gt;</dt><dd><dl>
+<dt>request.copy(</dt><dd><dl class="simple">
+<dt>recentFollowedUserIds =</dt><dd><p>if (recentFollowedUserIds.isEmpty) None else Some(recentFollowedUserIds),</p>
+</dd>
+<dt>recentFollowedByUserIds =</dt><dd><p>if (recentFollowedByUserIds.isEmpty) None else Some(recentFollowedByUserIds),</p>
+</dd>
+</dl>
+<p>wtfImpressions = if (wtfImpressions.isEmpty) None else Some(wtfImpressions)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>case _ =&gt; request</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/follow-recommendations-service/server/src/main/scala/com/twitter/follow_recommendations/services/UserScoringService.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

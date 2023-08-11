@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../../" id="documentation_options" src="../../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.servo.cache</p>
+<p>import com.twitter.util.{Future, Return}
+import scala.collection.mutable</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>uses a forwarding cache to lookup a value by a secondary index.</p></li>
+<li><p>filters out values for which the requested secondary index does not</p></li>
+<li><p>match the actual secondary index (these are treated as a miss)</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>class ForwardingCache[K, F, V](</dt><dd><p>forwardingCache: Cache[K, Cached[F]],
+underlyingCache: SecondaryIndexingCache[F, _, V],
+primaryKey: V =&gt; F,
+secondaryKey: SecondaryIndexingCache.IndexMapping[K, V],
+lockingCacheFactory: LockingCacheFactory)</p>
+<blockquote>
+<div><p>extends LockingCache[K, Cached[V]] {</p>
+</div></blockquote>
+<dl>
+<dt>protected[this] case class ForwardingChecksum(</dt><dd><p>forwardingChecksum: Checksum,
+underlyingChecksum: Option[Checksum])</p>
+<blockquote>
+<div><p>extends Checksum</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>protected[this] val lockingUnderlying = lockingCacheFactory(underlyingCache)
+protected[this] val lockingForwarding = lockingCacheFactory(forwardingCache)</p>
+<dl>
+<dt>override def get(keys: Seq[K]): Future[KeyValueResult[K, Cached[V]]] = {</dt><dd><dl>
+<dt>forwardingCache.get(keys) flatMap { flr =&gt;</dt><dd><dl>
+<dt>val (tombstones, notTombstones) = {</dt><dd><p>val tombstones = mutable.Map.empty[K, Cached[F]]
+val notTombstones = mutable.Map.empty[F, K]
+// split results into tombstoned keys and non-tombstoned key/pKeys
+// while we’re at it, produce a reverse-keymap of non-tombstones
+flr.found foreach {</p>
+<blockquote>
+<div><dl>
+<dt>case (key, cachedPKey) =&gt;</dt><dd><dl class="simple">
+<dt>cachedPKey.value match {</dt><dd><p>case Some(pKey) =&gt; notTombstones += pKey -&gt; key
+case None =&gt; tombstones += key -&gt; cachedPKey</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+(tombstones.toMap, notTombstones.toMap)</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// only make call to underlyingCache if there are keys to lookup
+val fromUnderlying = if (notTombstones.isEmpty) {</p>
+<blockquote>
+<div><p>KeyValueResult.emptyFuture</p>
+</div></blockquote>
+<dl>
+<dt>} else {</dt><dd><p>// get non-tombstoned values from underlying cache
+underlyingCache.get(notTombstones.keys.toSeq) map { lr =&gt;</p>
+<blockquote>
+<div><dl>
+<dt>val (goodValues, badValues) = lr.found partition {</dt><dd><dl>
+<dt>case (pKey, cachedValue) =&gt;</dt><dd><p>// filter out values that somehow don’t match the primary key and secondary key
+cachedValue.value match {</p>
+<blockquote>
+<div><dl>
+<dt>case Some(value) =&gt;</dt><dd><dl>
+<dt>secondaryKey(value) match {</dt><dd><dl class="simple">
+<dt>case Return(Some(sKey)) =&gt;</dt><dd><p>pKey == primaryKey(value) &amp;&amp; sKey == notTombstones(pKey)</p>
+</dd>
+</dl>
+<p>case _ =&gt; false</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>case None =&gt; true</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+val found = goodValues map { case (k, v) =&gt; notTombstones(k) -&gt; v }
+val notFound = (lr.notFound ++ badValues.keySet) map { notTombstones(_) }
+val failed = lr.failed map { case (k, t) =&gt; notTombstones(k) -&gt; t }
+KeyValueResult(found, notFound, failed)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} handle {</dt><dd><dl class="simple">
+<dt>case t =&gt;</dt><dd><p>KeyValueResult(failed = notTombstones.values map { _ -&gt; t } toMap)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>fromUnderlying map { lr =&gt;</dt><dd><p>// fill in tombstone values, copying the metadata from the Cached[F]
+val withTombstones = tombstones map {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case (key, cachedPKey) =&gt;</dt><dd><p>key -&gt; cachedPKey.copy[V](value = None)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+val found = lr.found ++ withTombstones
+val notFound = flr.notFound ++ lr.notFound
+val failed = flr.failed ++ lr.failed
+KeyValueResult(found, notFound, failed)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// since we implement lockAndSet directly, we don’t support getWithChecksum and checkAndSet.
+// we should consider changing the class hierarchy of Cache/LockingCache so that this can
+// be checked at compile time.</p>
+<dl>
+<dt>override def getWithChecksum(keys: Seq[K]): Future[CsKeyValueResult[K, Cached[V]]] =</dt><dd><p>Future.exception(new UnsupportedOperationException(“Use lockAndSet directly”))</p>
+</dd>
+<dt>override def checkAndSet(key: K, cachedValue: Cached[V], checksum: Checksum): Future[Boolean] =</dt><dd><p>Future.exception(new UnsupportedOperationException(“Use lockAndSet directly”))</p>
+</dd>
+<dt>protected[this] def maybeAddForwardingIndex(</dt><dd><p>key: K,
+cachedPrimaryKey: Cached[F],
+wasAdded: Boolean</p>
+</dd>
+<dt>): Future[Boolean] = {</dt><dd><dl>
+<dt>if (wasAdded)</dt><dd><dl class="simple">
+<dt>forwardingCache.set(key, cachedPrimaryKey) map { _ =&gt;</dt><dd><p>true</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>else</dt><dd><p>Future.value(false)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>override def add(key: K, cachedValue: Cached[V]): Future[Boolean] = {</dt><dd><p>// copy the cache metadata to the primaryKey
+val cachedPrimaryKey = cachedValue map { primaryKey(_) }
+cachedPrimaryKey.value match {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case Some(pKey) =&gt;</dt><dd><p>// if a value can be derived from the key, use the underlying cache to add it
+// the underlying cache will create the secondary index as a side-effect
+underlyingCache.add(pKey, cachedValue)</p>
+</dd>
+<dt>case None =&gt;</dt><dd><p>// otherwise, we’re just writing a tombstone, so we need to check if it exists
+forwardingCache.add(key, cachedPrimaryKey)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>override def lockAndSet(</dt><dd><p>key: K,
+handler: LockingCache.Handler[Cached[V]]</p>
+</dd>
+<dt>): Future[Option[Cached[V]]] = {</dt><dd><dl>
+<dt>handler(None) match {</dt><dd><dl>
+<dt>case Some(cachedValue) =&gt;</dt><dd><dl>
+<dt>cachedValue.value match {</dt><dd><dl>
+<dt>case Some(value) =&gt;</dt><dd><p>// set on the underlying cache, and let it take care of adding
+// the secondary index
+val pKey = primaryKey(value)
+lockingUnderlying.lockAndSet(pKey, handler)</p>
+</dd>
+<dt>case None =&gt;</dt><dd><p>// no underlying value to set, so just write the forwarding entry.
+// secondaryIndexingCache doesn’t lock for this set, so there’s
+// no point in our doing it. There’s a slight risk of writing an
+// errant tombstone in a race, but the only way to get around this
+// would be to lock around <em>all</em> primary and secondary indexes,
+// which could produce deadlocks, which is probably worse.
+val cachedEmptyPKey = cachedValue.copy[F](value = None)
+forwardingCache.set(key, cachedEmptyPKey) map { _ =&gt;</p>
+<blockquote>
+<div><p>Some(cachedValue)</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>case None =&gt;</dt><dd><p>// nothing to do here
+Future.value(None)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>override def set(key: K, cachedValue: Cached[V]): Future[Unit] = {</dt><dd><dl class="simple">
+<dt>cachedValue.value match {</dt><dd><dl class="simple">
+<dt>case Some(value) =&gt;</dt><dd><p>// set on the underlying cache, and let it take care of adding
+// the secondary index
+val pKey = primaryKey(value)
+underlyingCache.set(pKey, cachedValue)</p>
+</dd>
+<dt>case None =&gt;</dt><dd><p>// no underlying value to set, so just write the forwarding entry
+forwardingCache.set(key, cachedValue.copy[F](value = None))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>override def replace(key: K, cachedValue: Cached[V]): Future[Boolean] = {</dt><dd><dl class="simple">
+<dt>cachedValue.value match {</dt><dd><dl class="simple">
+<dt>case Some(value) =&gt;</dt><dd><p>// replace in the underlying cache, and let it take care of adding the secondary index
+val pKey = primaryKey(value)
+underlyingCache.replace(pKey, cachedValue)</p>
+</dd>
+<dt>case None =&gt;</dt><dd><p>// no underlying value to set, so just write the forwarding entry
+forwardingCache.replace(key, cachedValue.copy[F](value = None))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>override def delete(key: K): Future[Boolean] = {</dt><dd><p>forwardingCache.delete(key)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>override def release(): Unit = {</dt><dd><p>forwardingCache.release()
+underlyingCache.release()</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../../_sources/tweetypie/servo/repo/src/main/scala/com/twitter/servo/cache/ForwardingCache.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

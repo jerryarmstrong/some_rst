@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.frigate.pushservice.take</p>
+<p>import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.frigate.common.base.Invalid
+import com.twitter.frigate.common.base.OK
+import com.twitter.frigate.common.base.Response
+import com.twitter.frigate.common.base.Result
+import com.twitter.frigate.common.util.NotificationScribeUtil
+import com.twitter.frigate.common.util.PushServiceUtil
+import com.twitter.frigate.pushservice.model.PushTypes.PushCandidate
+import com.twitter.frigate.pushservice.thriftscala.PushResponse
+import com.twitter.frigate.pushservice.thriftscala.PushStatus
+import com.twitter.util.Future</p>
+<dl>
+<dt>class SendHandlerNotifier(</dt><dd><p>candidateNotifier: CandidateNotifier,
+private val statsReceiver: StatsReceiver) {</p>
+<p>val missingResponseCounter = statsReceiver.counter(“missing_response”)
+val filteredResponseCounter = statsReceiver.counter(“filtered”)</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li></li>
+<li><p>&#64;param isScribeInfoRequired: [[Boolean]] to indicate if scribe info is required</p></li>
+<li><p>&#64;param candidate: [[PushCandidate]] to build the scribe data from</p></li>
+<li><p>&#64;return: scribe response string</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>private def scribeInfoForResponse(</dt><dd><p>isScribeInfoRequired: Boolean,
+candidate: PushCandidate</p>
+</dd>
+<dt>): Future[Option[String]] = {</dt><dd><dl>
+<dt>if (isScribeInfoRequired) {</dt><dd><dl class="simple">
+<dt>candidate.scribeData().map { scribedInfo =&gt;</dt><dd><p>Some(NotificationScribeUtil.convertToJsonString(scribedInfo))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>} else Future.None</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li></li>
+<li><p>&#64;param response: Candidate validation response</p></li>
+<li><p>&#64;param responseWithScribedInfo: boolean indicating if scribe data is expected in push response</p></li>
+<li><p>&#64;return: [[PushResponse]] containing final result of send request for [[com.twitter.frigate.pushservice.thriftscala.PushRequest]]</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>final def checkResponseAndNotify(</dt><dd><p>response: Response[PushCandidate, Result],
+responseWithScribedInfo: Boolean</p>
+</dd>
+</dl>
+<p>): Future[PushResponse] = {</p>
+<blockquote>
+<div><dl>
+<dt>response match {</dt><dd><dl>
+<dt>case Response(OK, processedCandidates) =&gt;</dt><dd><p>val (validCandidates, invalidCandidates) = processedCandidates.partition(_.result == OK)
+validCandidates.headOption match {</p>
+<blockquote>
+<div><dl>
+<dt>case Some(candidateResult) =&gt;</dt><dd><dl>
+<dt>val scribeInfo =</dt><dd><p>scribeInfoForResponse(responseWithScribedInfo, candidateResult.candidate)</p>
+</dd>
+<dt>scribeInfo.flatMap { scribedData =&gt;</dt><dd><dl class="simple">
+<dt>val response: Future[PushResponse] =</dt><dd><p>candidateNotifier.notify(candidateResult.candidate)</p>
+</dd>
+</dl>
+<p>response.map(_.copy(notifScribe = scribedData))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>case None =&gt;</dt><dd><dl>
+<dt>invalidCandidates.headOption match {</dt><dd><dl>
+<dt>case Some(candidateResult) =&gt;</dt><dd><p>filteredResponseCounter.incr()
+val response = candidateResult.result match {</p>
+<blockquote>
+<div><p>case Invalid(reason) =&gt; PushResponse(PushStatus.Filtered, filteredBy = reason)
+case _ =&gt; PushResponse(PushStatus.Filtered, filteredBy = Some(“unknown”))</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>val scribeInfo =</dt><dd><p>scribeInfoForResponse(responseWithScribedInfo, candidateResult.candidate)</p>
+</dd>
+</dl>
+<p>scribeInfo.map(scribeData =&gt; response.copy(notifScribe = scribeData))</p>
+</dd>
+<dt>case None =&gt;</dt><dd><p>missingResponseCounter.incr()
+PushServiceUtil.FilteredPushResponseFut</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+<dt>case Response(Invalid(reason), _) =&gt;</dt><dd><p>throw new IllegalStateException(s”Unexpected target filtering in SendHandler: $reason”)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/pushservice/src/main/scala/com/twitter/frigate/pushservice/take/SendHandlerNotifier.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

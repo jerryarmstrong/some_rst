@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../" id="documentation_options" src="../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>from copy import deepcopy
+import random
+import types</p>
+<dl class="simple">
+<dt>from twitter.deepbird.util.thrift.simple_converters import (</dt><dd><p>bytes_to_thrift_object, thrift_object_to_bytes)</p>
+</dd>
+</dl>
+<p>from tensorflow.compat.v1 import logging
+from com.twitter.ml.api.ttypes import DataRecord  # pylint: disable=import-error
+import tensorflow.compat.v1 as tf
+import twml</p>
+<p>class PermutedInputFnFactory(object):</p>
+<blockquote>
+<div><dl>
+<dt>def __init__(self, data_dir, record_count, file_list=None, datarecord_filter_fn=None):</dt><dd><p>“””
+Args:</p>
+<blockquote>
+<div><p>data_dir (str): The location of the records on hdfs
+record_count (int): The number of records to process
+file_list (list&lt;str&gt;, default=None): The list of data files on HDFS. If provided, use this instead</p>
+<blockquote>
+<div><p>of data_dir</p>
+</div></blockquote>
+<dl class="simple">
+<dt>datarecord_filter_fn (function): a function takes a single data sample in com.twitter.ml.api.ttypes.DataRecord format</dt><dd><p>and return a boolean value, to indicate if this data record should be kept in feature importance module or not.</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>“””
+if not (data_dir is None) ^ (file_list is None):</p>
+<blockquote>
+<div><dl class="simple">
+<dt>raise ValueError(“Exactly one of data_dir and file_list can be provided. Got {} for data_dir and {} for file_list”.format(</dt><dd><p>data_dir, file_list))</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>file_list = file_list if file_list is not None else twml.util.list_files(twml.util.preprocess_path(data_dir))
+_next_batch = twml.input_fns.default_input_fn(file_list, 1, lambda x: x,</p>
+<blockquote>
+<div><p>num_threads=2, shuffle=True, shuffle_files=True)</p>
+</div></blockquote>
+<p>self.records = []
+# Validate datarecord_filter_fn
+if datarecord_filter_fn is not None and not isinstance(datarecord_filter_fn, types.FunctionType):</p>
+<blockquote>
+<div><p>raise TypeError(“datarecord_filter_fn is not function type”)</p>
+</div></blockquote>
+<dl>
+<dt>with tf.Session() as sess:</dt><dd><dl>
+<dt>for i in range(record_count):</dt><dd><dl>
+<dt>try:</dt><dd><p>record = bytes_to_thrift_object(sess.run(_next_batch)[0], DataRecord)
+if datarecord_filter_fn is None or datarecord_filter_fn(record):</p>
+<blockquote>
+<div><p>self.records.append(record)</p>
+</div></blockquote>
+</dd>
+<dt>except tf.errors.OutOfRangeError:</dt><dd><p>logging.info(“Stopping after reading {} records out of {}”.format(i, record_count))
+break</p>
+</dd>
+</dl>
+</dd>
+<dt>if datarecord_filter_fn:</dt><dd><p>logging.info(“datarecord_filter_fn has been applied; keeping {} records out of {}”.format(len(self.records), record_count))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+<dt>def _get_record_generator(self):</dt><dd><p>return (thrift_object_to_bytes(r) for r in self.records)</p>
+</dd>
+<dt>def get_permuted_input_fn(self, batch_size, parse_fn, fname_ftypes):</dt><dd><p>“””Get an input function that passes in a preset number of records that have been feature permuted
+Args:</p>
+<blockquote>
+<div><p>parse_fn (function): The function to parse inputs
+fname_ftypes: (list&lt;(str, str)&gt;): The names and types of the features to permute</p>
+</div></blockquote>
+<p>“””
+def permuted_parse_pyfn(bytes_array):</p>
+<blockquote>
+<div><p>out = []
+for b in bytes_array:</p>
+<blockquote>
+<div><p>rec = bytes_to_thrift_object(b, DataRecord)
+if fname_ftypes:</p>
+<blockquote>
+<div><p>rec = _permutate_features(rec, fname_ftypes=fname_ftypes, records=self.records)</p>
+</div></blockquote>
+<p>out.append(thrift_object_to_bytes(rec))</p>
+</div></blockquote>
+<p>return [out]</p>
+</div></blockquote>
+<dl class="simple">
+<dt>def permuted_parse_fn(bytes_tensor):</dt><dd><p>parsed_bytes_tensor = parse_fn(tf.py_func(permuted_parse_pyfn, [bytes_tensor], tf.string))
+return parsed_bytes_tensor</p>
+</dd>
+<dt>def input_fn(batch_size=batch_size, parse_fn=parse_fn, factory=self):</dt><dd><dl class="simple">
+<dt>return (tf.data.Dataset</dt><dd><p>.from_generator(self._get_record_generator, tf.string)
+.batch(batch_size)
+.map(permuted_parse_fn, 4)
+.make_one_shot_iterator()
+.get_next())</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>return input_fn</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl>
+<dt>def _permutate_features(rec, fname_ftypes, records):</dt><dd><p>“””Replace a feature value with a value from random selected record
+Args:</p>
+<blockquote>
+<div><p>rec: (datarecord): A datarecord returned from DataRecordGenerator
+fname_ftypes: (list&lt;(str, str)&gt;): The names and types of the features to permute
+records: (list&lt;datarecord&gt;): The records to sample from</p>
+</div></blockquote>
+<dl class="simple">
+<dt>Returns:</dt><dd><p>The record with the feature permuted</p>
+</dd>
+</dl>
+<p>“””
+rec_new = deepcopy(rec)
+rec_replace = random.choice(records)</p>
+<p># If the replacement datarecord does not have the feature type entirely, add it in
+#   to make the logic a bit simpler
+for fname, feature_type in fname_ftypes:</p>
+<blockquote>
+<div><p>fid = twml.feature_id(fname)[0]
+if rec_replace.__dict__.get(feature_type, None) is None:</p>
+<blockquote>
+<div><dl class="simple">
+<dt>rec_replace.__dict__[feature_type] = (</dt><dd><p>dict() if feature_type != ‘binaryFeatures’ else set())</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl>
+<dt>if rec_new.__dict__.get(feature_type, None) is None:</dt><dd><dl class="simple">
+<dt>rec_new.__dict__[feature_type] = (</dt><dd><p>dict() if feature_type != ‘binaryFeatures’ else set())</p>
+</dd>
+</dl>
+</dd>
+<dt>if feature_type != ‘binaryFeatures’:</dt><dd><dl>
+<dt>if fid not in rec_replace.__dict__[feature_type] and fid in rec_new.__dict__.get(feature_type, dict()):</dt><dd><p># If the replacement datarecord does not contain the feature but the original does
+del rec_new.__dict__[feature_type][fid]</p>
+</dd>
+<dt>elif fid in rec_replace.__dict__[feature_type]:</dt><dd><p># If the replacement datarecord does contain the feature
+if rec_new.__dict__[feature_type] is None:</p>
+<blockquote>
+<div><p>rec_new.__dict__[feature_type] = dict()</p>
+</div></blockquote>
+<p>rec_new.__dict__[feature_type][fid] = rec_replace.__dict__[feature_type][fid]</p>
+</dd>
+<dt>else:</dt><dd><p># If neither datarecord contains this feature
+pass</p>
+</dd>
+</dl>
+</dd>
+<dt>else:</dt><dd><dl>
+<dt>if fid not in rec_replace.__dict__[feature_type] and fid in rec_new.__dict__.get(feature_type, set()):</dt><dd><p># If the replacement datarecord does not contain the feature but the original does
+rec_new.__dict__[feature_type].remove(fid)</p>
+</dd>
+<dt>elif fid in rec_replace.__dict__[feature_type]:</dt><dd><p># If the replacement datarecord does contain the feature
+if rec_new.__dict__[feature_type] is None:</p>
+<blockquote>
+<div><p>rec_new.__dict__[feature_type] = set()</p>
+</div></blockquote>
+<p>rec_new.__dict__[feature_type].add(fid)
+# If neither datarecord contains this feature</p>
+</dd>
+<dt>else:</dt><dd><p># If neither datarecord contains this feature
+pass</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</div></blockquote>
+<p>return rec_new</p>
+</dd>
+</dl>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../_sources/twml/twml/contrib/feature_importances/feature_permutation.py.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

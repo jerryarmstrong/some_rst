@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../" id="documentation_options" src="../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.timelines.prediction.features.engagement_features</p>
+<p>import com.twitter.dal.personal_data.thriftjava.PersonalDataType._
+import com.twitter.logging.Logger
+import com.twitter.ml.api.DataRecord
+import com.twitter.ml.api.Feature
+import com.twitter.ml.api.Feature.Continuous
+import com.twitter.ml.api.Feature.SparseBinary
+import com.twitter.timelines.data_processing.ml_util.transforms.OneToSomeTransform
+import com.twitter.timelines.data_processing.ml_util.transforms.RichITransform
+import com.twitter.timelines.data_processing.ml_util.transforms.SparseBinaryUnion
+import com.twitter.timelines.data_processing.ml_util.aggregation_framework.TypedAggregateGroup
+import com.twitter.timelineservice.suggests.features.engagement_features.thriftscala.{</p>
+<blockquote>
+<div><p>EngagementFeatures =&gt; ThriftEngagementFeatures</p>
+</div></blockquote>
+<p>}
+import com.twitter.timelineservice.suggests.features.engagement_features.v1.thriftscala.{</p>
+<blockquote>
+<div><p>EngagementFeatures =&gt; ThriftEngagementFeaturesV1</p>
+</div></blockquote>
+<p>}
+import scala.collection.JavaConverters._</p>
+<dl>
+<dt>object EngagementFeatures {</dt><dd><p>private[this] val logger = Logger.get(getClass.getSimpleName)</p>
+<p>sealed trait EngagementFeature
+case object Count extends EngagementFeature
+case object RealGraphWeightAverage extends EngagementFeature
+case object RealGraphWeightMax extends EngagementFeature
+case object RealGraphWeightMin extends EngagementFeature
+case object RealGraphWeightMissing extends EngagementFeature
+case object RealGraphWeightVariance extends EngagementFeature
+case object UserIds extends EngagementFeature</p>
+<dl>
+<dt>def fromThrift(thriftEngagementFeatures: ThriftEngagementFeatures): Option[EngagementFeatures] = {</dt><dd><dl>
+<dt>thriftEngagementFeatures match {</dt><dd><dl>
+<dt>case thriftEngagementFeaturesV1: ThriftEngagementFeatures.V1 =&gt;</dt><dd><dl>
+<dt>Some(</dt><dd><dl class="simple">
+<dt>EngagementFeatures(</dt><dd><p>favoritedBy = thriftEngagementFeaturesV1.v1.favoritedBy,
+retweetedBy = thriftEngagementFeaturesV1.v1.retweetedBy,
+repliedBy = thriftEngagementFeaturesV1.v1.repliedBy,</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>case _ =&gt; {</dt><dd><p>logger.error(“Unexpected EngagementFeatures version found.”)
+None</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>val empty: EngagementFeatures = EngagementFeatures()</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Contains user IDs who have engaged with a target entity, such as a Tweet,</p></li>
+<li><p>and any additional data needed for derived features.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>case class EngagementFeatures(</dt><dd><p>favoritedBy: Seq[Long] = Nil,
+retweetedBy: Seq[Long] = Nil,
+repliedBy: Seq[Long] = Nil,
+realGraphWeightByUser: Map[Long, Double] = Map.empty) {
+def isEmpty: Boolean = favoritedBy.isEmpty &amp;&amp; retweetedBy.isEmpty &amp;&amp; repliedBy.isEmpty
+def nonEmpty: Boolean = !isEmpty
+def toLogThrift: ThriftEngagementFeatures.V1 =</p>
+<blockquote>
+<div><dl>
+<dt>ThriftEngagementFeatures.V1(</dt><dd><dl class="simple">
+<dt>ThriftEngagementFeaturesV1(</dt><dd><p>favoritedBy = favoritedBy,
+retweetedBy = retweetedBy,
+repliedBy = repliedBy</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Represents engagement features derived from the Real Graph weight.</p></li>
+<li></li>
+<li><p>These features are from the perspective of the source user, who is viewing their</p></li>
+<li><p>timeline, to the destination users (or user), who created engagements.</p></li>
+<li></li>
+<li><p>&#64;param count number of engagements present</p></li>
+<li><p>&#64;param max max score of the engaging users</p></li>
+<li><p>&#64;param mean average score of the engaging users</p></li>
+<li><p>&#64;param min minimum score of the engaging users</p></li>
+<li><p>&#64;param missing for engagements present, how many Real Graph scores were missing</p></li>
+<li><p>&#64;param variance variance of scores of the engaging users</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>case class RealGraphDerivedEngagementFeatures(</dt><dd><p>count: Int,
+max: Double,
+mean: Double,
+min: Double,
+missing: Int,
+variance: Double)</p>
+</dd>
+<dt>object EngagementDataRecordFeatures {</dt><dd><p>import EngagementFeatures._</p>
+<dl class="simple">
+<dt>val FavoritedByUserIds = new SparseBinary(</dt><dd><p>“engagement_features.user_ids.favorited_by”,
+Set(UserId, PrivateLikes, PublicLikes).asJava)</p>
+</dd>
+<dt>val RetweetedByUserIds = new SparseBinary(</dt><dd><p>“engagement_features.user_ids.retweeted_by”,
+Set(UserId, PrivateRetweets, PublicRetweets).asJava)</p>
+</dd>
+<dt>val RepliedByUserIds = new SparseBinary(</dt><dd><p>“engagement_features.user_ids.replied_by”,
+Set(UserId, PrivateReplies, PublicReplies).asJava)</p>
+</dd>
+<dt>val InNetworkFavoritesCount = new Continuous(</dt><dd><p>“engagement_features.in_network.favorites.count”,
+Set(CountOfPrivateLikes, CountOfPublicLikes).asJava)</p>
+</dd>
+<dt>val InNetworkRetweetsCount = new Continuous(</dt><dd><p>“engagement_features.in_network.retweets.count”,
+Set(CountOfPrivateRetweets, CountOfPublicRetweets).asJava)</p>
+</dd>
+<dt>val InNetworkRepliesCount = new Continuous(</dt><dd><p>“engagement_features.in_network.replies.count”,
+Set(CountOfPrivateReplies, CountOfPublicReplies).asJava)</p>
+</dd>
+</dl>
+<p>// real graph derived features
+val InNetworkFavoritesAvgRealGraphWeight = new Continuous(</p>
+<blockquote>
+<div><p>“engagement_features.real_graph.favorites.avg_weight”,
+Set(CountOfPrivateLikes, CountOfPublicLikes).asJava</p>
+</div></blockquote>
+<p>)
+val InNetworkFavoritesMaxRealGraphWeight = new Continuous(</p>
+<blockquote>
+<div><p>“engagement_features.real_graph.favorites.max_weight”,
+Set(CountOfPrivateLikes, CountOfPublicLikes).asJava</p>
+</div></blockquote>
+<p>)
+val InNetworkFavoritesMinRealGraphWeight = new Continuous(</p>
+<blockquote>
+<div><p>“engagement_features.real_graph.favorites.min_weight”,
+Set(CountOfPrivateLikes, CountOfPublicLikes).asJava</p>
+</div></blockquote>
+<p>)
+val InNetworkFavoritesRealGraphWeightMissing = new Continuous(</p>
+<blockquote>
+<div><p>“engagement_features.real_graph.favorites.missing”</p>
+</div></blockquote>
+<p>)
+val InNetworkFavoritesRealGraphWeightVariance = new Continuous(</p>
+<blockquote>
+<div><p>“engagement_features.real_graph.favorites.weight_variance”</p>
+</div></blockquote>
+<p>)</p>
+<dl class="simple">
+<dt>val InNetworkRetweetsMaxRealGraphWeight = new Continuous(</dt><dd><p>“engagement_features.real_graph.retweets.max_weight”,
+Set(CountOfPrivateRetweets, CountOfPublicRetweets).asJava</p>
+</dd>
+</dl>
+<p>)
+val InNetworkRetweetsMinRealGraphWeight = new Continuous(</p>
+<blockquote>
+<div><p>“engagement_features.real_graph.retweets.min_weight”,
+Set(CountOfPrivateRetweets, CountOfPublicRetweets).asJava</p>
+</div></blockquote>
+<p>)
+val InNetworkRetweetsAvgRealGraphWeight = new Continuous(</p>
+<blockquote>
+<div><p>“engagement_features.real_graph.retweets.avg_weight”,
+Set(CountOfPrivateRetweets, CountOfPublicRetweets).asJava</p>
+</div></blockquote>
+<p>)
+val InNetworkRetweetsRealGraphWeightMissing = new Continuous(</p>
+<blockquote>
+<div><p>“engagement_features.real_graph.retweets.missing”</p>
+</div></blockquote>
+<p>)
+val InNetworkRetweetsRealGraphWeightVariance = new Continuous(</p>
+<blockquote>
+<div><p>“engagement_features.real_graph.retweets.weight_variance”</p>
+</div></blockquote>
+<p>)</p>
+<dl class="simple">
+<dt>val InNetworkRepliesMaxRealGraphWeight = new Continuous(</dt><dd><p>“engagement_features.real_graph.replies.max_weight”,
+Set(CountOfPrivateReplies, CountOfPublicReplies).asJava</p>
+</dd>
+</dl>
+<p>)
+val InNetworkRepliesMinRealGraphWeight = new Continuous(</p>
+<blockquote>
+<div><p>“engagement_features.real_graph.replies.min_weight”,
+Set(CountOfPrivateReplies, CountOfPublicReplies).asJava</p>
+</div></blockquote>
+<p>)
+val InNetworkRepliesAvgRealGraphWeight = new Continuous(</p>
+<blockquote>
+<div><p>“engagement_features.real_graph.replies.avg_weight”,
+Set(CountOfPrivateReplies, CountOfPublicReplies).asJava</p>
+</div></blockquote>
+<p>)
+val InNetworkRepliesRealGraphWeightMissing = new Continuous(</p>
+<blockquote>
+<div><p>“engagement_features.real_graph.replies.missing”</p>
+</div></blockquote>
+<p>)
+val InNetworkRepliesRealGraphWeightVariance = new Continuous(</p>
+<blockquote>
+<div><p>“engagement_features.real_graph.replies.weight_variance”</p>
+</div></blockquote>
+<p>)</p>
+<dl>
+<dt>sealed trait FeatureGroup {</dt><dd><p>def continuousFeatures: Map[EngagementFeature, Continuous]
+def sparseBinaryFeatures: Map[EngagementFeature, SparseBinary]
+def allFeatures: Seq[Feature[_]] =</p>
+<blockquote>
+<div><p>(continuousFeatures.values ++ sparseBinaryFeatures.values).toSeq</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>case object Favorites extends FeatureGroup {</dt><dd><dl>
+<dt>override val continuousFeatures: Map[EngagementFeature, Continuous] =</dt><dd><dl class="simple">
+<dt>Map(</dt><dd><p>Count -&gt; InNetworkFavoritesCount,
+RealGraphWeightAverage -&gt; InNetworkFavoritesAvgRealGraphWeight,
+RealGraphWeightMax -&gt; InNetworkFavoritesMaxRealGraphWeight,
+RealGraphWeightMin -&gt; InNetworkFavoritesMinRealGraphWeight,
+RealGraphWeightMissing -&gt; InNetworkFavoritesRealGraphWeightMissing,
+RealGraphWeightVariance -&gt; InNetworkFavoritesRealGraphWeightVariance</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>override val sparseBinaryFeatures: Map[EngagementFeature, SparseBinary] =</dt><dd><p>Map(UserIds -&gt; FavoritedByUserIds)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>case object Retweets extends FeatureGroup {</dt><dd><dl>
+<dt>override val continuousFeatures: Map[EngagementFeature, Continuous] =</dt><dd><dl class="simple">
+<dt>Map(</dt><dd><p>Count -&gt; InNetworkRetweetsCount,
+RealGraphWeightAverage -&gt; InNetworkRetweetsAvgRealGraphWeight,
+RealGraphWeightMax -&gt; InNetworkRetweetsMaxRealGraphWeight,
+RealGraphWeightMin -&gt; InNetworkRetweetsMinRealGraphWeight,
+RealGraphWeightMissing -&gt; InNetworkRetweetsRealGraphWeightMissing,
+RealGraphWeightVariance -&gt; InNetworkRetweetsRealGraphWeightVariance</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>override val sparseBinaryFeatures: Map[EngagementFeature, SparseBinary] =</dt><dd><p>Map(UserIds -&gt; RetweetedByUserIds)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>case object Replies extends FeatureGroup {</dt><dd><dl>
+<dt>override val continuousFeatures: Map[EngagementFeature, Continuous] =</dt><dd><dl class="simple">
+<dt>Map(</dt><dd><p>Count -&gt; InNetworkRepliesCount,
+RealGraphWeightAverage -&gt; InNetworkRepliesAvgRealGraphWeight,
+RealGraphWeightMax -&gt; InNetworkRepliesMaxRealGraphWeight,
+RealGraphWeightMin -&gt; InNetworkRepliesMinRealGraphWeight,
+RealGraphWeightMissing -&gt; InNetworkRepliesRealGraphWeightMissing,
+RealGraphWeightVariance -&gt; InNetworkRepliesRealGraphWeightVariance</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>override val sparseBinaryFeatures: Map[EngagementFeature, SparseBinary] =</dt><dd><p>Map(UserIds -&gt; RepliedByUserIds)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>val PublicEngagerSets = Set(FavoritedByUserIds, RetweetedByUserIds, RepliedByUserIds)
+val PublicEngagementUserIds = new SparseBinary(</p>
+<blockquote>
+<div><p>“engagement_features.user_ids.public”,
+Set(UserId, EngagementsPublic).asJava</p>
+</div></blockquote>
+<p>)
+val ENGAGER_ID = TypedAggregateGroup.sparseFeature(PublicEngagementUserIds)</p>
+<dl class="simple">
+<dt>val UnifyPublicEngagersTransform = SparseBinaryUnion(</dt><dd><p>featuresToUnify = PublicEngagerSets,
+outputFeature = PublicEngagementUserIds</p>
+</dd>
+</dl>
+<p>)</p>
+<dl class="simple">
+<dt>object RichUnifyPublicEngagersTransform extends OneToSomeTransform {</dt><dd><dl class="simple">
+<dt>override def apply(dataRecord: DataRecord): Option[DataRecord] =</dt><dd><p>RichITransform(EngagementDataRecordFeatures.UnifyPublicEngagersTransform)(dataRecord)</p>
+</dd>
+<dt>override def featuresToTransform: Set[Feature[_]] =</dt><dd><p>EngagementDataRecordFeatures.UnifyPublicEngagersTransform.featuresToUnify.toSet</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../_sources/src/scala/com/twitter/timelines/prediction/features/engagement_features/EngagementFeatures.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

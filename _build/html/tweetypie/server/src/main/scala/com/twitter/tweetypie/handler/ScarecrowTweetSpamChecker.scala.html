@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.tweetypie
+package handler</p>
+<p>import com.twitter.finagle.tracing.Trace
+import com.twitter.relevance.feature_store.thriftscala.FeatureData
+import com.twitter.relevance.feature_store.thriftscala.FeatureValue
+import com.twitter.service.gen.scarecrow.thriftscala.TieredAction
+import com.twitter.service.gen.scarecrow.thriftscala.TieredActionResult
+import com.twitter.service.gen.scarecrow.thriftscala.TweetContext
+import com.twitter.service.gen.scarecrow.thriftscala.TweetNew
+import com.twitter.spam.features.thriftscala.SafetyMetaData
+import com.twitter.stitch.Stitch
+import com.twitter.tweetypie.core.TweetCreateFailure
+import com.twitter.tweetypie.handler.Spam.Checker
+import com.twitter.tweetypie.repository.TweetSpamCheckRepository
+import com.twitter.tweetypie.thriftscala.TweetCreateState
+import com.twitter.tweetypie.thriftscala.TweetMediaTags</p>
+<dl>
+<dt>case class TweetSpamRequest(</dt><dd><p>tweetId: TweetId,
+userId: UserId,
+text: String,
+mediaTags: Option[TweetMediaTags],
+safetyMetaData: Option[SafetyMetaData],
+inReplyToTweetId: Option[TweetId],
+quotedTweetId: Option[TweetId],
+quotedTweetUserId: Option[UserId])</p>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Use the Scarecrow service as the spam checker for tweets.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>object ScarecrowTweetSpamChecker {</dt><dd><p>val log: Logger = Logger(getClass)</p>
+<dl>
+<dt>private def requestToScarecrowTweet(req: TweetSpamRequest): TweetNew = {</dt><dd><p>// compile additional input features for the spam check
+val mediaTaggedUserIds = {</p>
+<blockquote>
+<div><p>val mediaTags = req.mediaTags.getOrElse(TweetMediaTags())
+mediaTags.tagMap.values.flatten.flatMap(_.userId).toSet</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>val additionalInputFeatures = {</dt><dd><dl>
+<dt>val mediaTaggedUserFeatures = if (mediaTaggedUserIds.nonEmpty) {</dt><dd><dl class="simple">
+<dt>Seq(</dt><dd><p>“mediaTaggedUsers” -&gt; FeatureData(Some(FeatureValue.LongSetValue(mediaTaggedUserIds))),
+“victimIds” -&gt; FeatureData(Some(FeatureValue.LongSetValue(mediaTaggedUserIds)))</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>} else {</dt><dd><p>Seq.empty</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>val quotedTweetIdFeature = req.quotedTweetId.map { quotedTweetId =&gt;</dt><dd><p>“quotedTweetId” -&gt; FeatureData(Some(FeatureValue.LongValue(quotedTweetId)))</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>val quotedTweetUserIdFeature = req.quotedTweetUserId.map { quotedTweetUserId =&gt;</dt><dd><p>“quotedTweetUserId” -&gt; FeatureData(Some(FeatureValue.LongValue(quotedTweetUserId)))</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>val featureMap =</dt><dd><p>(mediaTaggedUserFeatures ++ quotedTweetIdFeature ++ quotedTweetUserIdFeature).toMap</p>
+</dd>
+</dl>
+<p>if (featureMap.nonEmpty) Some(featureMap) else None</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>TweetNew(</dt><dd><p>id = req.tweetId,
+userId = req.userId,
+text = req.text,
+additionalInputFeatures = additionalInputFeatures,
+safetyMetaData = req.safetyMetaData,
+inReplyToStatusId = req.inReplyToTweetId</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def tieredActionHandler(stats: StatsReceiver): Checker[TieredAction] =</dt><dd><dl>
+<dt>Spam.handleScarecrowResult(stats) {</dt><dd><p>case (TieredActionResult.NotSpam, _, _) =&gt; Spam.AllowFuture
+case (TieredActionResult.SilentFail, _, _) =&gt; Spam.SilentFailFuture
+case (TieredActionResult.DenyByIpiPolicy, _, _) =&gt; Spam.DisabledByIpiPolicyFuture
+case (TieredActionResult.UrlSpam, _, denyMessage) =&gt;</p>
+<blockquote>
+<div><p>Future.exception(TweetCreateFailure.State(TweetCreateState.UrlSpam, denyMessage))</p>
+</div></blockquote>
+<dl class="simple">
+<dt>case (TieredActionResult.Deny, _, denyMessage) =&gt;</dt><dd><p>Future.exception(TweetCreateFailure.State(TweetCreateState.Spam, denyMessage))</p>
+</dd>
+<dt>case (TieredActionResult.Captcha, _, denyMessage) =&gt;</dt><dd><p>Future.exception(TweetCreateFailure.State(TweetCreateState.SpamCaptcha, denyMessage))</p>
+</dd>
+<dt>case (TieredActionResult.RateLimit, _, denyMessage) =&gt;</dt><dd><dl class="simple">
+<dt>Future.exception(</dt><dd><p>TweetCreateFailure.State(TweetCreateState.SafetyRateLimitExceeded, denyMessage))</p>
+</dd>
+</dl>
+</dd>
+<dt>case (TieredActionResult.Bounce, Some(b), _) =&gt;</dt><dd><p>Future.exception(TweetCreateFailure.Bounced(b))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>def fromSpamCheckRepository(</dt><dd><p>stats: StatsReceiver,
+repo: TweetSpamCheckRepository.Type</p>
+</dd>
+<dt>): Spam.Checker[TweetSpamRequest] = {</dt><dd><p>val handler = tieredActionHandler(stats)
+req =&gt; {</p>
+<blockquote>
+<div><p>Trace.record(“com.twitter.tweetypie.ScarecrowTweetSpamChecker.userId=” + req.userId)
+Stitch.run(repo(requestToScarecrowTweet(req), TweetContext.Creation)).flatMap { resp =&gt;</p>
+<blockquote>
+<div><p>handler(resp.tieredAction)</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/tweetypie/server/src/main/scala/com/twitter/tweetypie/handler/ScarecrowTweetSpamChecker.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.cr_mixer.candidate_generation</p>
+<p>import com.twitter.cr_mixer.blender.AdsBlender
+import com.twitter.cr_mixer.logging.AdsRecommendationsScribeLogger
+import com.twitter.cr_mixer.model.AdsCandidateGeneratorQuery
+import com.twitter.cr_mixer.model.BlendedAdsCandidate
+import com.twitter.cr_mixer.model.InitialAdsCandidate
+import com.twitter.cr_mixer.model.RankedAdsCandidate
+import com.twitter.cr_mixer.model.SourceInfo
+import com.twitter.cr_mixer.param.AdsParams
+import com.twitter.cr_mixer.param.ConsumersBasedUserAdGraphParams
+import com.twitter.cr_mixer.source_signal.RealGraphInSourceGraphFetcher
+import com.twitter.cr_mixer.source_signal.SourceFetcher.FetcherQuery
+import com.twitter.cr_mixer.source_signal.UssSourceSignalFetcher
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.frigate.common.util.StatsUtil
+import com.twitter.simclusters_v2.common.UserId
+import com.twitter.util.Future</p>
+<p>import javax.inject.Inject
+import javax.inject.Singleton</p>
+<p>&#64;Singleton
+class AdsCandidateGenerator &#64;Inject() (</p>
+<blockquote>
+<div><p>ussSourceSignalFetcher: UssSourceSignalFetcher,
+realGraphInSourceGraphFetcher: RealGraphInSourceGraphFetcher,
+adsCandidateSourceRouter: AdsCandidateSourcesRouter,
+adsBlender: AdsBlender,
+scribeLogger: AdsRecommendationsScribeLogger,
+globalStats: StatsReceiver) {</p>
+<p>private val stats: StatsReceiver = globalStats.scope(this.getClass.getCanonicalName)
+private val fetchSourcesStats = stats.scope(“fetchSources”)
+private val fetchRealGraphSeedsStats = stats.scope(“fetchRealGraphSeeds”)
+private val fetchCandidatesStats = stats.scope(“fetchCandidates”)
+private val interleaveStats = stats.scope(“interleave”)
+private val rankStats = stats.scope(“rank”)</p>
+<dl>
+<dt>def get(query: AdsCandidateGeneratorQuery): Future[Seq[RankedAdsCandidate]] = {</dt><dd><p>val allStats = stats.scope(“all”)
+val perProductStats = stats.scope(“perProduct”, query.product.toString)</p>
+<dl>
+<dt>StatsUtil.trackItemsStats(allStats) {</dt><dd><dl>
+<dt>StatsUtil.trackItemsStats(perProductStats) {</dt><dd><dl>
+<dt>for {</dt><dd><p>// fetch source signals
+sourceSignals &lt;- StatsUtil.trackBlockStats(fetchSourcesStats) {</p>
+<blockquote>
+<div><p>fetchSources(query)</p>
+</div></blockquote>
+<p>}
+realGraphSeeds &lt;- StatsUtil.trackItemMapStats(fetchRealGraphSeedsStats) {</p>
+<blockquote>
+<div><p>fetchSeeds(query)</p>
+</div></blockquote>
+<p>}
+// get initial candidates from similarity engines
+// hydrate lineItemInfo and filter out non active ads
+initialCandidates &lt;- StatsUtil.trackBlockStats(fetchCandidatesStats) {</p>
+<blockquote>
+<div><p>fetchCandidates(query, sourceSignals, realGraphSeeds)</p>
+</div></blockquote>
+<p>}</p>
+<p>// blend candidates
+blendedCandidates &lt;- StatsUtil.trackItemsStats(interleaveStats) {</p>
+<blockquote>
+<div><p>interleave(initialCandidates)</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>rankedCandidates &lt;- StatsUtil.trackItemsStats(rankStats) {</dt><dd><dl class="simple">
+<dt>rank(</dt><dd><p>blendedCandidates,
+query.params(AdsParams.EnableScoreBoost),
+query.params(AdsParams.AdsCandidateGenerationScoreBoostFactor),
+rankStats)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>} yield {</dt><dd><p>rankedCandidates.take(query.maxNumResults)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def fetchSources(</dt><dd><p>query: AdsCandidateGeneratorQuery</p>
+</dd>
+<dt>): Future[Set[SourceInfo]] = {</dt><dd><dl class="simple">
+<dt>val fetcherQuery =</dt><dd><p>FetcherQuery(query.userId, query.product, query.userState, query.params)</p>
+</dd>
+</dl>
+<p>ussSourceSignalFetcher.get(fetcherQuery).map(_.getOrElse(Seq.empty).toSet)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def fetchCandidates(</dt><dd><p>query: AdsCandidateGeneratorQuery,
+sourceSignals: Set[SourceInfo],
+realGraphSeeds: Map[UserId, Double]</p>
+</dd>
+<dt>): Future[Seq[Seq[InitialAdsCandidate]]] = {</dt><dd><dl>
+<dt>scribeLogger.scribeInitialAdsCandidates(</dt><dd><p>query,
+adsCandidateSourceRouter</p>
+<blockquote>
+<div><p>.fetchCandidates(query.userId, sourceSignals, realGraphSeeds, query.params),</p>
+</div></blockquote>
+<p>query.params(AdsParams.EnableScribe)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def fetchSeeds(</dt><dd><p>query: AdsCandidateGeneratorQuery</p>
+</dd>
+<dt>): Future[Map[UserId, Double]] = {</dt><dd><dl class="simple">
+<dt>if (query.params(ConsumersBasedUserAdGraphParams.EnableSourceParam)) {</dt><dd><dl class="simple">
+<dt>realGraphInSourceGraphFetcher</dt><dd><p>.get(FetcherQuery(query.userId, query.product, query.userState, query.params))
+.map(_.map(_.seedWithScores).getOrElse(Map.empty))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>} else Future.value(Map.empty[UserId, Double])</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private def interleave(</dt><dd><p>candidates: Seq[Seq[InitialAdsCandidate]]</p>
+</dd>
+<dt>): Future[Seq[BlendedAdsCandidate]] = {</dt><dd><dl class="simple">
+<dt>adsBlender</dt><dd><p>.blend(candidates)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private def rank(</dt><dd><p>candidates: Seq[BlendedAdsCandidate],
+enableScoreBoost: Boolean,
+scoreBoostFactor: Double,
+statsReceiver: StatsReceiver,</p>
+</dd>
+</dl>
+<p>): Future[Seq[RankedAdsCandidate]] = {</p>
+<blockquote>
+<div><p>val candidateSize = candidates.size
+val rankedCandidates = candidates.zipWithIndex.map {</p>
+<blockquote>
+<div><dl>
+<dt>case (candidate, index) =&gt;</dt><dd><p>val score = 0.5 + 0.5 * ((candidateSize - index).toDouble / candidateSize)
+val boostedScore = if (enableScoreBoost) {</p>
+<blockquote>
+<div><p>statsReceiver.stat(“boostedScore”).add((100.0 * score * scoreBoostFactor).toFloat)
+score * scoreBoostFactor</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>statsReceiver.stat(“score”).add((100.0 * score).toFloat)
+score</p>
+</dd>
+</dl>
+<p>}
+candidate.toRankedAdsCandidate(boostedScore)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+Future.value(rankedCandidates)</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/cr-mixer/server/src/main/scala/com/twitter/cr_mixer/candidate_generation/AdsCandidateGenerator.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

@@ -1,0 +1,509 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../" id="documentation_options" src="../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.earlybird.util;</p>
+<p>import java.util.Collections;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Function;
+import java.util.stream.Collectors;</p>
+<p>import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Preconditions;</p>
+<p>import org.apache.commons.lang.mutable.MutableLong;
+import org.apache.lucene.index.IndexOptions;
+import org.apache.lucene.index.Terms;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;</p>
+<p>import com.twitter.search.common.concurrent.ScheduledExecutorServiceFactory;
+import com.twitter.search.common.metrics.SearchLongGauge;
+import com.twitter.search.common.metrics.SearchStatsReceiver;
+import com.twitter.search.common.metrics.SearchTimer;
+import com.twitter.search.common.metrics.SearchTimerStats;
+import com.twitter.search.common.schema.base.ImmutableSchemaInterface;
+import com.twitter.search.common.schema.base.Schema;
+import com.twitter.search.core.earlybird.index.EarlybirdIndexSegmentAtomicReader;
+import com.twitter.search.earlybird.common.config.EarlybirdConfig;
+import com.twitter.search.earlybird.exception.CriticalExceptionHandler;
+import com.twitter.search.earlybird.index.EarlybirdSingleSegmentSearcher;
+import com.twitter.search.earlybird.partition.SegmentInfo;
+import com.twitter.search.earlybird.partition.SegmentManager;</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>A background task that periodically gets and exports the number of terms per field that are</p></li>
+<li><p>indexed on this earlybird, averaged over all segments.</p></li>
+<li><p>Specifically used for making sure that we are not missing terms for any fields in the search</p></li>
+<li><p>archives.</p></li>
+<li><p>The task loops though all the segments that are indexed by this earlybird, and for each segment</p></li>
+<li><p>looks at the term counts for all fields in that segment.</p></li>
+<li></li>
+<li><p>Also keeps track of the number of fields that do not have any term counts (or below the specified</p></li>
+<li><p>threshold) in the data that is indexed on this earlybird.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>public class TermCountMonitor extends OneTaskScheduledExecutorManager {</dt><dd><p>private static final Logger LOG = LoggerFactory.getLogger(TermCountMonitor.class);</p>
+<p>private static final String THREAD_NAME_FORMAT = “TermCountMonitor-%d”;
+private static final boolean THREAD_IS_DAEMON = true;</p>
+<dl class="simple">
+<dt>public static final String RUN_INTERVAL_MINUTES_CONFIG_NAME =</dt><dd><p>“term_count_monitor_run_interval_minutes”;</p>
+</dd>
+<dt>private static Function&lt;String, String&gt; termStatNameFunc =</dt><dd><p>field -&gt; “<a href="#id7"><span class="problematic" id="id8">term_count_on_field_</span></a>” + field;</p>
+</dd>
+<dt>private static Function&lt;String, String&gt; tokenStatNameFunc =</dt><dd><p>field -&gt; “<a href="#id9"><span class="problematic" id="id10">token_count_on_field_</span></a>” + field;</p>
+</dd>
+<dt>private static Function&lt;String, String&gt; missingFieldStatNameFunc =</dt><dd><p>field -&gt; “<a href="#id11"><span class="problematic" id="id12">term_count_monitor_missing_field_</span></a>” + field;</p>
+</dd>
+<dt>private static class RawFieldCounter {</dt><dd><p>private MutableLong numTerms = new MutableLong(0L);
+private MutableLong numTokens = new MutableLong(0L);</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;VisibleForTesting
+static class ExportedFieldCounter {</p>
+<blockquote>
+<div><p>private final AtomicLong numTerms;
+private final AtomicLong numTokens;</p>
+<dl class="simple">
+<dt>ExportedFieldCounter(RawFieldCounter rawCounter) {</dt><dd><p>this.numTerms = new AtomicLong(rawCounter.numTerms.longValue());
+this.numTokens = new AtomicLong(rawCounter.numTokens.longValue());</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>ExportedFieldCounter(long numInitialTerms, long numInitialTokens) {</dt><dd><p>this.numTerms = new AtomicLong(numInitialTerms);
+this.numTokens = new AtomicLong(numInitialTokens);</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;VisibleForTesting
+long getNumTerms() {</p>
+<blockquote>
+<div><p>return numTerms.longValue();</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;VisibleForTesting
+long getNumTokens() {</p>
+<blockquote>
+<div><p>return numTokens.longValue();</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>private final int fieldMinTermCount =</dt><dd><p>EarlybirdConfig.getInt(“term_count_monitor_min_count”, 0);</p>
+</dd>
+</dl>
+<p>private final SegmentManager segmentManager;
+private final Map&lt;String, SearchLongGauge&gt; missingFields;
+private final Map&lt;String, SearchLongGauge&gt; termStats;
+private final Map&lt;String, SearchLongGauge&gt; tokenStats;
+private final Map&lt;String, ExportedFieldCounter&gt; exportedCounts;
+private final SearchLongGauge termCountOnAllFields;
+private final SearchLongGauge tokenCountOnAllFields;
+private final SearchLongGauge fieldsWithNoTermCountStat;
+private final SearchLongGauge isRunningStat;
+private final SearchTimerStats checkTimeStat;</p>
+<p>&#64;Override
+protected void runOneIteration() {</p>
+<blockquote>
+<div><p>LOG.info(“Starting to get per-field term counts”);
+isRunningStat.set(1);
+final SearchTimer timer = checkTimeStat.startNewTimer();
+try {</p>
+<blockquote>
+<div><p>updateFieldTermCounts();</p>
+</div></blockquote>
+<dl>
+<dt>} catch (Exception ex) {</dt><dd><p>LOG.error(“Unexpected exception while getting per-field term counts”, ex);</p>
+</dd>
+<dt>} finally {</dt><dd><dl class="simple">
+<dt>LOG.info(</dt><dd><p>“Done getting per-field term counts. Fields with low term counts: {}”,
+getFieldsWithLowTermCount());</p>
+</dd>
+</dl>
+<p>isRunningStat.set(0);
+checkTimeStat.stopTimerAndIncrement(timer);</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Create a term count monitor which monitors the number of terms in segments</p></li>
+<li><p>managed by the given segment manager.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>public TermCountMonitor(</dt><dd><blockquote>
+<div><p>SegmentManager segmentManager,
+ScheduledExecutorServiceFactory executorServiceFactory,
+long shutdownWaitDuration,
+TimeUnit shutdownWaitUnit,
+SearchStatsReceiver searchStatsReceiver,
+CriticalExceptionHandler criticalExceptionHandler) {</p>
+</div></blockquote>
+<dl>
+<dt>super(</dt><dd><p>executorServiceFactory,
+THREAD_NAME_FORMAT,
+THREAD_IS_DAEMON,
+PeriodicActionParams.atFixedRate(</p>
+<blockquote>
+<div><p>EarlybirdConfig.getInt(RUN_INTERVAL_MINUTES_CONFIG_NAME, -1),
+TimeUnit.MINUTES),</p>
+</div></blockquote>
+<dl class="simple">
+<dt>new ShutdownWaitTimeParams(</dt><dd><p>shutdownWaitDuration,
+shutdownWaitUnit</p>
+</dd>
+</dl>
+<p>),
+searchStatsReceiver,</p>
+<blockquote>
+<div><p>criticalExceptionHandler);</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>this.segmentManager = segmentManager;
+this.missingFields = new HashMap&lt;&gt;();
+this.termStats = new HashMap&lt;&gt;();
+this.tokenStats = new HashMap&lt;&gt;();
+this.exportedCounts = new HashMap&lt;&gt;();
+this.termCountOnAllFields = getSearchStatsReceiver().getLongGauge(“term_count_on_all_fields”);
+this.tokenCountOnAllFields = getSearchStatsReceiver().getLongGauge(“token_count_on_all_fields”);
+this.fieldsWithNoTermCountStat =</p>
+<blockquote>
+<div><p>getSearchStatsReceiver().getLongGauge(“fields_with_low_term_counts”);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>this.isRunningStat =</dt><dd><p>getSearchStatsReceiver().getLongGauge(“term_count_monitor_is_running”);</p>
+</dd>
+<dt>this.checkTimeStat =</dt><dd><dl class="simple">
+<dt>getSearchStatsReceiver().getTimerStats(</dt><dd><p>“term_count_monitor_check_time”, TimeUnit.MILLISECONDS, true, true, false);</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private SearchLongGauge getOrCreateLongGauge(</dt><dd><blockquote>
+<div><p>Map&lt;String, SearchLongGauge&gt; gauges, String field, Function&lt;String, String&gt; nameSupplier) {</p>
+</div></blockquote>
+<p>SearchLongGauge stat = gauges.get(field);</p>
+<dl class="simple">
+<dt>if (stat == null) {</dt><dd><p>stat = getSearchStatsReceiver().getLongGauge(nameSupplier.apply(field));
+gauges.put(field, stat);</p>
+</dd>
+</dl>
+<p>}</p>
+<p>return stat;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private void updateFieldTermCounts() {</dt><dd><p>// 0. Get the current per-field term counts
+Map&lt;String, RawFieldCounter&gt; newCounts = getFieldStats();
+LOG.info(“Computed field stats for all segments”);</p>
+<p>// 1. Update all existing keys
+for (Map.Entry&lt;String, ExportedFieldCounter&gt; exportedCount : exportedCounts.entrySet()) {</p>
+<blockquote>
+<div><p>String field = exportedCount.getKey();
+ExportedFieldCounter exportedCountValue = exportedCount.getValue();</p>
+<p>RawFieldCounter newCount = newCounts.get(field);
+if (newCount == null) {</p>
+<blockquote>
+<div><p>exportedCountValue.numTerms.set(0L);
+exportedCountValue.numTokens.set(0L);</p>
+</div></blockquote>
+<dl>
+<dt>} else {</dt><dd><p>exportedCountValue.numTerms.set(newCount.numTerms.longValue());
+exportedCountValue.numTokens.set(newCount.numTokens.longValue());</p>
+<p>// clean up so that we don’t check this field again when we look for new field
+newCounts.remove(field);</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>// 2. Add and export all new fields’ term counts
+for (Map.Entry&lt;String, RawFieldCounter&gt; newCount: newCounts.entrySet()) {</p>
+<blockquote>
+<div><p>String field = newCount.getKey();
+Preconditions.checkState(!exportedCounts.containsKey(field),</p>
+<blockquote>
+<div><p>“Should have already processed and removed existing fields: “ + field);</p>
+</div></blockquote>
+<p>ExportedFieldCounter newStat = new ExportedFieldCounter(newCount.getValue());
+exportedCounts.put(field, newStat);</p>
+</div></blockquote>
+<p>}</p>
+<p>// 3. Export as a stat the term counts for all the known fields.
+for (Map.Entry&lt;String, ExportedFieldCounter&gt; exportedCount : exportedCounts.entrySet()) {</p>
+<blockquote>
+<div><p>String field = exportedCount.getKey();
+ExportedFieldCounter counter = exportedCount.getValue();</p>
+<p>getOrCreateLongGauge(termStats, field, termStatNameFunc).set(counter.numTerms.get());
+getOrCreateLongGauge(tokenStats, field, tokenStatNameFunc).set(counter.numTokens.get());</p>
+</div></blockquote>
+<p>}</p>
+<p>// 4. Export as a stat, number of fields not having enough term counts (i.e. &lt;= 0)
+int fieldsWithNoTermCounts = 0;
+for (Map.Entry&lt;String, ExportedFieldCounter&gt; fieldTermCount : exportedCounts.entrySet()) {</p>
+<blockquote>
+<div><p>String field = fieldTermCount.getKey();
+AtomicLong exportedCountValue = fieldTermCount.getValue().numTerms;
+if (exportedCountValue.get() &lt;= fieldMinTermCount) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>LOG.warn(</dt><dd><p>“Found a field with too few term counts. Field: {} count: {}”,
+field, exportedCountValue);</p>
+</dd>
+</dl>
+<p>fieldsWithNoTermCounts++;</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}
+this.fieldsWithNoTermCountStat.set(fieldsWithNoTermCounts);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Loops through all segments, and for each field gets the average term/token count.</p></li>
+<li><p>Based on that, returns a map from each field to its term/token count (average per segment).</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>private Map&lt;String, RawFieldCounter&gt; getFieldStats() {</dt><dd><dl class="simple">
+<dt>Iterable&lt;SegmentInfo&gt; segmentInfos = segmentManager.getSegmentInfos(</dt><dd><p>SegmentManager.Filter.Enabled, SegmentManager.Order.NEW_TO_OLD);</p>
+</dd>
+</dl>
+<p>Map&lt;String, RawFieldCounter&gt; rawCounts = new HashMap&lt;&gt;();</p>
+<dl class="simple">
+<dt>ImmutableSchemaInterface schemaSnapshot =</dt><dd><p>segmentManager.getEarlybirdIndexConfig().getSchema().getSchemaSnapshot();</p>
+</dd>
+<dt>Set&lt;String&gt; missingFieldsCandidates = schemaSnapshot</dt><dd><p>.getFieldInfos()
+.stream()
+.filter(fieldInfo -&gt; fieldInfo.getFieldType().indexOptions() != IndexOptions.NONE)
+.map(Schema.FieldInfo::getName)
+.collect(Collectors.toSet());</p>
+</dd>
+</dl>
+<p>int segmentCount = 0;
+for (SegmentInfo segmentInfo : segmentInfos) {</p>
+<blockquote>
+<div><p>segmentCount++;
+try {</p>
+<blockquote>
+<div><dl>
+<dt>EarlybirdSingleSegmentSearcher searcher = segmentManager.getSearcher(</dt><dd><p>segmentInfo.getTimeSliceID(), schemaSnapshot);</p>
+</dd>
+<dt>if (searcher != null) {</dt><dd><p>EarlybirdIndexSegmentAtomicReader reader = searcher.getTwitterIndexReader();
+for (Schema.FieldInfo fieldInfo : schemaSnapshot.getFieldInfos()) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (fieldInfo.getFieldType().indexOptions() == IndexOptions.NONE) {</dt><dd><p>continue;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>String fieldName = fieldInfo.getName();
+RawFieldCounter count = rawCounts.get(fieldName);
+if (count == null) {</p>
+<blockquote>
+<div><p>count = new RawFieldCounter();
+rawCounts.put(fieldName, count);</p>
+</div></blockquote>
+<p>}
+Terms terms = reader.terms(fieldName);
+if (terms != null) {</p>
+<blockquote>
+<div><p>missingFieldsCandidates.remove(fieldName);
+count.numTerms.add(terms.size());
+long sumTotalTermFreq = terms.getSumTotalTermFreq();
+if (sumTotalTermFreq != -1) {</p>
+<blockquote>
+<div><p>count.numTokens.add(sumTotalTermFreq);</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} catch (Exception e) {</dt><dd><p>LOG.error(“Exception getting average term count per field: “ + segmentInfo, e);</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>// Update missing fields stats.
+missingFieldsCandidates.forEach(</p>
+<blockquote>
+<div><p>field -&gt; getOrCreateLongGauge(missingFields, field, missingFieldStatNameFunc).set(1));</p>
+</div></blockquote>
+<dl class="simple">
+<dt>missingFields.keySet().stream()</dt><dd><dl class="simple">
+<dt>.filter(</dt><dd><p>field -&gt; !missingFieldsCandidates.contains(field))</p>
+</dd>
+<dt>.forEach(</dt><dd><p>field -&gt; getOrCreateLongGauge(missingFields, field, missingFieldStatNameFunc).set(0));</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>long totalTermCount = 0;
+long totalTokenCount = 0;
+if (segmentCount == 0) {</p>
+<blockquote>
+<div><p>LOG.error(“No segments are found to calculate per-field term counts.”);</p>
+</div></blockquote>
+<dl>
+<dt>} else {</dt><dd><p>LOG.debug(“TermCountMonitor.getPerFieldTermCount.segmentCount = {}”, segmentCount);
+LOG.debug(”  field: term count (average per segment)”);
+for (Map.Entry&lt;String, RawFieldCounter&gt; entry : rawCounts.entrySet()) {</p>
+<blockquote>
+<div><p>String field = entry.getKey();
+final long averageTermCount = entry.getValue().numTerms.longValue() / segmentCount;
+final long averageTokenCount = entry.getValue().numTokens.longValue() / segmentCount;
+totalTermCount += entry.getValue().numTerms.longValue();
+totalTokenCount += entry.getValue().numTokens.longValue();</p>
+<p>LOG.debug(”  ‘{} term’: {}”, field, averageTermCount);
+LOG.debug(”  ‘{} token’: {}”, field, averageTokenCount);</p>
+<p>entry.getValue().numTerms.setValue(averageTermCount);
+entry.getValue().numTokens.setValue(averageTokenCount);</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}
+LOG.info(“Total term count: {}”, totalTermCount);
+LOG.info(“Total token count: {}”, totalTokenCount);
+this.termCountOnAllFields.set(totalTermCount);
+this.tokenCountOnAllFields.set(totalTokenCount);</p>
+<p>return rawCounts;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;VisibleForTesting
+Map&lt;String, ExportedFieldCounter&gt; getExportedCounts() {</p>
+<blockquote>
+<div><p>return Collections.unmodifiableMap(this.exportedCounts);</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;VisibleForTesting
+long getFieldsWithLowTermCount() {</p>
+<blockquote>
+<div><p>return fieldsWithNoTermCountStat.get();</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;VisibleForTesting
+Map&lt;String, SearchLongGauge&gt; getMissingFields() {</p>
+<blockquote>
+<div><p>return missingFields;</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../_sources/src/java/com/twitter/search/earlybird/util/TermCountMonitor.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

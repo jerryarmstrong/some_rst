@@ -1,0 +1,879 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../" id="documentation_options" src="../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.earlybird.search;</p>
+<p>import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;</p>
+<p>import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Optional;
+import com.google.common.base.Preconditions;
+import com.google.common.collect.Maps;
+import com.google.common.collect.Sets;</p>
+<p>import org.apache.commons.collections.CollectionUtils;
+import org.apache.lucene.index.LeafReader;
+import org.apache.lucene.index.LeafReaderContext;
+import org.apache.lucene.search.DocIdSetIterator;
+import org.apache.lucene.search.ScoreMode;</p>
+<p>import com.twitter.common.util.Clock;
+import com.twitter.search.common.constants.thriftjava.ThriftLanguage;
+import com.twitter.search.common.partitioning.snowflakeparser.SnowflakeIdParser;
+import com.twitter.search.common.relevance.features.EarlybirdDocumentFeatures;
+import com.twitter.search.common.results.thriftjava.FieldHitAttribution;
+import com.twitter.search.common.results.thriftjava.FieldHitList;
+import com.twitter.search.common.schema.base.ImmutableSchemaInterface;
+import com.twitter.search.common.schema.base.Schema;
+import com.twitter.search.common.schema.earlybird.EarlybirdCluster;
+import com.twitter.search.common.schema.earlybird.EarlybirdFieldConstants.EarlybirdFieldConstant;
+import com.twitter.search.common.search.TwitterEarlyTerminationCollector;
+import com.twitter.search.common.util.spatial.GeoUtil;
+import com.twitter.search.core.earlybird.facets.AbstractFacetCountingArray;
+import com.twitter.search.core.earlybird.index.EarlybirdIndexSegmentAtomicReader;
+import com.twitter.search.core.earlybird.index.EarlybirdIndexSegmentData;
+import com.twitter.search.core.earlybird.index.TimeMapper;
+import com.twitter.search.core.earlybird.index.inverted.QueryCostTracker;
+import com.twitter.search.earlybird.common.config.EarlybirdConfig;
+import com.twitter.search.earlybird.common.userupdates.UserTable;
+import com.twitter.search.earlybird.index.EarlybirdSingleSegmentSearcher;
+import com.twitter.search.earlybird.index.TweetIDMapper;
+import com.twitter.search.earlybird.search.facets.FacetLabelCollector;
+import com.twitter.search.earlybird.stats.EarlybirdSearcherStats;
+import com.twitter.search.earlybird.thrift.ThriftFacetLabel;
+import com.twitter.search.earlybird.thrift.ThriftSearchQuery;
+import com.twitter.search.earlybird.thrift.ThriftSearchResultExtraMetadata;
+import com.twitter.search.earlybird.thrift.ThriftSearchResultGeoLocation;
+import com.twitter.search.earlybird.thrift.ThriftSearchResultMetadata;
+import com.twitter.search.queryparser.util.IdTimeRanges;</p>
+<p>import geo.google.datamodel.GeoCoordinate;</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Abstract parent class for all results collectors in earlybird.</p></li>
+<li><p>This collector should be able to handle both single-segment and</p></li>
+<li><p>multi-segment collection.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>public abstract class AbstractResultsCollector&lt;R extends SearchRequestInfo,</dt><dd><blockquote>
+<div><p>S extends SearchResultsInfo&gt;
+extends TwitterEarlyTerminationCollector {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>enum IdAndRangeUpdateType {</dt><dd><p>BEGIN_SEGMENT,
+END_SEGMENT,
+HIT</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// Earlybird used to have a special early termination logic: at segment boundaries
+// the collector estimates how much time it’ll take to search the next segment.
+// If this estimate * 1.5 will cause the request to timeout, the search early terminates.
+// That logic is removed in favor of more fine grained checks—now we check timeout
+// within a segment, every 2,000,000 docs processed.
+private static final int EXPENSIVE_TERMINATION_CHECK_INTERVAL =</p>
+<blockquote>
+<div><p>EarlybirdConfig.getInt(“expensive_termination_check_interval”, 2000000);</p>
+</div></blockquote>
+<p>private static final long NO_TIME_SLICE_ID = -1;</p>
+<p>protected final R searchRequestInfo;</p>
+<p>// Sometimes maxHitsToProcess can also come from places other than collector params.
+// E.g. from searchQuery.getRelevanceOptions(). This provides a way to allow
+// subclasses to override the maxHitsToProcess on collector params.
+private final long maxHitsToProcessOverride;</p>
+<p>// min and max status id actually considered in the search (may not be a hit)
+private long minSearchedStatusID = Long.MAX_VALUE;
+private long maxSearchedStatusID = Long.MIN_VALUE;</p>
+<p>private int minSearchedTime = Integer.MAX_VALUE;
+private int maxSearchedTime = Integer.MIN_VALUE;</p>
+<p>// per-segment start time. Will be re-started in setNextReader().
+private long segmentStartTime;</p>
+<p>// Current segment being searched.
+protected EarlybirdIndexSegmentAtomicReader currTwitterReader;
+protected TweetIDMapper tweetIdMapper;
+protected TimeMapper timeMapper;
+protected long currTimeSliceID = NO_TIME_SLICE_ID;</p>
+<p>private final long queryTime;</p>
+<p>// Time periods, in milliseconds, for which hits are counted.
+private final List&lt;Long&gt; hitCountsThresholdsMsec;</p>
+<p>// hitCounts[i] is the number of hits that are more recent than hitCountsThresholdsMsec[i]
+private final int[] hitCounts;</p>
+<p>private final ImmutableSchemaInterface schema;</p>
+<p>private final EarlybirdSearcherStats searcherStats;
+// For collectors that fill in the results’ geo locations, this will be used to retrieve the
+// documents’ lat/lon coordinates.
+private GeoCoordinate resultGeoCoordinate;
+protected final boolean fillInLatLonForHits;</p>
+<p>protected EarlybirdDocumentFeatures documentFeatures;
+protected boolean featuresRequested = false;</p>
+<p>private final FacetLabelCollector facetCollector;</p>
+<p>// debugMode set in request to determine debugging level.
+private int requestDebugMode;</p>
+<p>// debug info to be returned in earlybird response
+protected List&lt;String&gt; debugInfo;</p>
+<p>private int numHitsCollectedPerSegment;</p>
+<dl>
+<dt>public AbstractResultsCollector(</dt><dd><blockquote>
+<div><p>ImmutableSchemaInterface schema,
+R searchRequestInfo,
+Clock clock,
+EarlybirdSearcherStats searcherStats,
+int requestDebugMode) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>super(searchRequestInfo.getSearchQuery().getCollectorParams(),</dt><dd><p>searchRequestInfo.getTerminationTracker(),
+QueryCostTracker.getTracker(),
+EXPENSIVE_TERMINATION_CHECK_INTERVAL,
+clock);</p>
+</dd>
+</dl>
+<p>this.schema = schema;
+this.searchRequestInfo = searchRequestInfo;
+ThriftSearchQuery thriftSearchQuery = searchRequestInfo.getSearchQuery();
+this.maxHitsToProcessOverride = searchRequestInfo.getMaxHitsToProcess();
+this.facetCollector = buildFacetCollector(searchRequestInfo, schema);</p>
+<dl class="simple">
+<dt>if (searchRequestInfo.getTimestamp() &gt; 0) {</dt><dd><p>queryTime = searchRequestInfo.getTimestamp();</p>
+</dd>
+<dt>} else {</dt><dd><p>queryTime = System.currentTimeMillis();</p>
+</dd>
+</dl>
+<p>}
+hitCountsThresholdsMsec = thriftSearchQuery.getHitCountBuckets();
+hitCounts = hitCountsThresholdsMsec == null || hitCountsThresholdsMsec.size() == 0</p>
+<blockquote>
+<div><p>? null
+: new int[hitCountsThresholdsMsec.size()];</p>
+</div></blockquote>
+<p>this.searcherStats = searcherStats;</p>
+<dl class="simple">
+<dt>Schema.FieldInfo latLonCSFField =</dt><dd><dl class="simple">
+<dt>schema.hasField(EarlybirdFieldConstant.LAT_LON_CSF_FIELD.getFieldName())</dt><dd><p>? schema.getFieldInfo(EarlybirdFieldConstant.LAT_LON_CSF_FIELD.getFieldName())
+: null;</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>boolean loadLatLonMapperIntoRam = true;
+if (latLonCSFField != null) {</p>
+<blockquote>
+<div><p>// If the latlon_csf field is explicitly defined, then take the config from the schema.
+// If it’s not defined, we assume that the latlon mapper is stored in memory.
+loadLatLonMapperIntoRam = latLonCSFField.getFieldType().isCsfLoadIntoRam();</p>
+</div></blockquote>
+<p>}
+// Default to not fill in lat/lon if the lat/lon CSF field is not loaded into RAM
+this.fillInLatLonForHits = EarlybirdConfig.getBool(“fill_in_lat_lon_for_hits”,</p>
+<blockquote>
+<div><p>loadLatLonMapperIntoRam);</p>
+</div></blockquote>
+<p>this.requestDebugMode = requestDebugMode;</p>
+<dl class="simple">
+<dt>if (shouldCollectDetailedDebugInfo()) {</dt><dd><p>this.debugInfo = new ArrayList&lt;&gt;();
+debugInfo.add(“Starting Search”);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private static FacetLabelCollector buildFacetCollector(</dt><dd><blockquote>
+<div><p>SearchRequestInfo request,
+ImmutableSchemaInterface schema) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>if (CollectionUtils.isEmpty(request.getFacetFieldNames())) {</dt><dd><p>return null;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// Get all facet field ids requested.
+Set&lt;String&gt; requiredFields = Sets.newHashSet();
+for (String fieldName : request.getFacetFieldNames()) {</p>
+<blockquote>
+<div><p>Schema.FieldInfo field = schema.getFacetFieldByFacetName(fieldName);
+if (field != null) {</p>
+<blockquote>
+<div><p>requiredFields.add(field.getFieldType().getFacetName());</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>if (requiredFields.size() &gt; 0) {</dt><dd><p>return new FacetLabelCollector(requiredFields);</p>
+</dd>
+<dt>} else {</dt><dd><p>return null;</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Subclasses should implement the following methods.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+</dl>
+<p>// Subclasses should process collected hits and construct a final
+// AbstractSearchResults object.
+protected abstract S doGetResults() throws IOException;</p>
+<p>// Subclasses can override this method to add more collection logic.
+protected abstract void doCollect(long tweetID) throws IOException;</p>
+<dl class="simple">
+<dt>public final ImmutableSchemaInterface getSchema() {</dt><dd><p>return schema;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// Updates the hit count array - each result only increments the first qualifying bucket.
+protected final void updateHitCounts(long statusId) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (hitCounts == null) {</dt><dd><p>return;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>long delta = queryTime - SnowflakeIdParser.getTimestampFromTweetId(statusId);
+for (int i = 0; i &lt; hitCountsThresholdsMsec.size(); ++i) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (delta &gt;= 0 &amp;&amp; delta &lt; hitCountsThresholdsMsec.get(i)) {</dt><dd><p>hitCounts[i]++;
+// Increments to the rest of the count array are implied, and aggregated later, since the
+// array is sorted.
+break;</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>private boolean searchedStatusIDsAndTimesInitialized() {</dt><dd><p>return maxSearchedStatusID != Long.MIN_VALUE;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// Updates the first searched status ID when starting to search a new segment.
+private void updateFirstSearchedStatusID() {</p>
+<blockquote>
+<div><p>// Only try to update the min/max searched ids, if this segment/reader actually has documents
+// See SEARCH-4535
+int minDocID = currTwitterReader.getSmallestDocID();
+if (currTwitterReader.hasDocs() &amp;&amp; minDocID &gt;= 0 &amp;&amp; !searchedStatusIDsAndTimesInitialized()) {</p>
+<blockquote>
+<div><p>final long firstStatusID = tweetIdMapper.getTweetID(minDocID);
+final int firstStatusTime = timeMapper.getTime(minDocID);
+if (shouldCollectDetailedDebugInfo()) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>debugInfo.add(</dt><dd><dl class="simple">
+<dt>“updateFirstSearchedStatusID. minDocId=” + minDocID + “, firstStatusID=”</dt><dd><ul class="simple">
+<li><p>firstStatusID + “, firstStatusTime=” + firstStatusTime);</p></li>
+</ul>
+</dd>
+</dl>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+updateIDandTimeRanges(firstStatusID, firstStatusTime, IdAndRangeUpdateType.BEGIN_SEGMENT);</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>public final R getSearchRequestInfo() {</dt><dd><p>return searchRequestInfo;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public final long getMinSearchedStatusID() {</dt><dd><p>return minSearchedStatusID;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public final long getMaxSearchedStatusID() {</dt><dd><p>return maxSearchedStatusID;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public final int getMinSearchedTime() {</dt><dd><p>return minSearchedTime;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public boolean isSetMinSearchedTime() {</dt><dd><p>return minSearchedTime != Integer.MAX_VALUE;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public final int getMaxSearchedTime() {</dt><dd><p>return maxSearchedTime;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;Override
+public final long getMaxHitsToProcess() {</p>
+<blockquote>
+<div><p>return maxHitsToProcessOverride;</p>
+</div></blockquote>
+<p>}</p>
+<p>// Notifies classes that a new index segment is about to be searched.
+&#64;Override
+public final void setNextReader(LeafReaderContext context) throws IOException {</p>
+<blockquote>
+<div><p>super.setNextReader(context);
+setNextReader(context.reader());</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Notifies the collector that a new segment is about to be searched.</p></li>
+<li></li>
+<li><p>It’s easier to use this method from tests, because LeafReader is not a final class, so it can</p></li>
+<li><p>be mocked (unlike LeafReaderContext).</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+</dl>
+<p>&#64;VisibleForTesting
+public final void setNextReader(LeafReader reader) throws IOException {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (!(reader instanceof EarlybirdIndexSegmentAtomicReader)) {</dt><dd><p>throw new RuntimeException(“IndexReader type not supported: “ + reader.getClass());</p>
+</dd>
+</dl>
+<p>}</p>
+<p>currTwitterReader = (EarlybirdIndexSegmentAtomicReader) reader;
+documentFeatures = new EarlybirdDocumentFeatures(currTwitterReader);
+tweetIdMapper = (TweetIDMapper) currTwitterReader.getSegmentData().getDocIDToTweetIDMapper();
+timeMapper = currTwitterReader.getSegmentData().getTimeMapper();
+currTimeSliceID = currTwitterReader.getSegmentData().getTimeSliceID();
+updateFirstSearchedStatusID();
+if (shouldCollectDetailedDebugInfo()) {</p>
+<blockquote>
+<div><p>debugInfo.add(“Starting search in segment with timeslice ID: “ + currTimeSliceID);</p>
+</div></blockquote>
+<p>}</p>
+<p>segmentStartTime = getClock().nowMillis();
+startSegment();</p>
+</div></blockquote>
+<p>}</p>
+<p>protected abstract void startSegment() throws IOException;</p>
+<p>&#64;Override
+protected final void doCollect() throws IOException {</p>
+<blockquote>
+<div><p>documentFeatures.advance(curDocId);
+long tweetID = tweetIdMapper.getTweetID(curDocId);
+updateIDandTimeRanges(tweetID, timeMapper.getTime(curDocId), IdAndRangeUpdateType.HIT);
+doCollect(tweetID);
+numHitsCollectedPerSegment++;</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>protected void collectFeatures(ThriftSearchResultMetadata metadata) throws IOException {</dt><dd><dl>
+<dt>if (featuresRequested) {</dt><dd><p>ensureExtraMetadataIsSet(metadata);</p>
+<dl class="simple">
+<dt>metadata.getExtraMetadata().setDirectedAtUserId(</dt><dd><p>documentFeatures.getFeatureValue(EarlybirdFieldConstant.DIRECTED_AT_USER_ID_CSF));</p>
+</dd>
+<dt>metadata.getExtraMetadata().setQuotedTweetId(</dt><dd><p>documentFeatures.getFeatureValue(EarlybirdFieldConstant.QUOTED_TWEET_ID_CSF));</p>
+</dd>
+<dt>metadata.getExtraMetadata().setQuotedUserId(</dt><dd><p>documentFeatures.getFeatureValue(EarlybirdFieldConstant.QUOTED_USER_ID_CSF));</p>
+</dd>
+<dt>int cardLangValue =</dt><dd><p>(int) documentFeatures.getFeatureValue(EarlybirdFieldConstant.CARD_LANG_CSF);</p>
+</dd>
+</dl>
+<p>ThriftLanguage thriftLanguage = ThriftLanguage.findByValue(cardLangValue);
+metadata.getExtraMetadata().setCardLang(thriftLanguage);</p>
+<dl class="simple">
+<dt>long cardNumericUri =</dt><dd><p>(long) documentFeatures.getFeatureValue(EarlybirdFieldConstant.CARD_URI_CSF);</p>
+</dd>
+<dt>if (cardNumericUri &gt; 0) {</dt><dd><p>metadata.getExtraMetadata().setCardUri(String.format(“card://%s”, cardNumericUri));</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>protected void collectIsProtected(</dt><dd><blockquote>
+<div><p>ThriftSearchResultMetadata metadata, EarlybirdCluster cluster, UserTable userTable)
+throws IOException {</p>
+</div></blockquote>
+<p>// ‘isUserProtected’ field is only set for archive cluster because only archive cluster user
+// table has IS_PROTECTED_BIT populated.
+// Since this bit is checked after UserFlagsExcludeFilter checked this bit, there is a slight
+// chance that this bit is updated in-between. When that happens, it is possible that we will
+// see a small number of protected Tweets in the response when we meant to exclude them.
+if (cluster == EarlybirdCluster.FULL_ARCHIVE) {</p>
+<blockquote>
+<div><p>ensureExtraMetadataIsSet(metadata);
+long userId = documentFeatures.getFeatureValue(EarlybirdFieldConstant.FROM_USER_ID_CSF);
+boolean isProtected = userTable.isSet(userId, UserTable.IS_PROTECTED_BIT);
+metadata.getExtraMetadata().setIsUserProtected(isProtected);</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>protected void collectExclusiveConversationAuthorId(ThriftSearchResultMetadata metadata)</dt><dd><blockquote>
+<div><p>throws IOException {</p>
+</div></blockquote>
+<dl>
+<dt>if (searchRequestInfo.isCollectExclusiveConversationAuthorId()) {</dt><dd><dl class="simple">
+<dt>long exclusiveConversationAuthorId = documentFeatures.getFeatureValue(</dt><dd><p>EarlybirdFieldConstant.EXCLUSIVE_CONVERSATION_AUTHOR_ID_CSF);</p>
+</dd>
+<dt>if (exclusiveConversationAuthorId != 0L) {</dt><dd><p>ensureExtraMetadataIsSet(metadata);
+metadata.getExtraMetadata().setExclusiveConversationAuthorId(exclusiveConversationAuthorId);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// It only makes sense to collectFacets for search types that return individual results (recency,
+// relevance and top_tweets), which use the AbstractRelevanceCollector and SearchResultsCollector,
+// so this method should only be called from these classes.
+protected void collectFacets(ThriftSearchResultMetadata metadata) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (currTwitterReader == null) {</dt><dd><p>return;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>AbstractFacetCountingArray facetCountingArray = currTwitterReader.getFacetCountingArray();
+EarlybirdIndexSegmentData segmentData = currTwitterReader.getSegmentData();</p>
+<dl class="simple">
+<dt>if (facetCountingArray == null || facetCollector == null) {</dt><dd><p>return;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>facetCollector.resetFacetLabelProviders(</dt><dd><p>segmentData.getFacetLabelProviders(),
+segmentData.getFacetIDMap());</p>
+</dd>
+</dl>
+<p>facetCountingArray.collectForDocId(curDocId, facetCollector);</p>
+<p>List&lt;ThriftFacetLabel&gt; labels = facetCollector.getLabels();
+if (labels.size() &gt; 0) {</p>
+<blockquote>
+<div><p>metadata.setFacetLabels(labels);</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>protected void ensureExtraMetadataIsSet(ThriftSearchResultMetadata metadata) {</dt><dd><dl class="simple">
+<dt>if (!metadata.isSetExtraMetadata()) {</dt><dd><p>metadata.setExtraMetadata(new ThriftSearchResultExtraMetadata());</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;Override
+protected final void doFinishSegment(int lastSearchedDocID) {</p>
+<blockquote>
+<div><dl>
+<dt>if (shouldCollectDetailedDebugInfo()) {</dt><dd><p>long timeSpentSearchingSegmentInMillis = getClock().nowMillis() - segmentStartTime;
+debugInfo.add(“Finished segment at doc id: “ + lastSearchedDocID);
+debugInfo.add(“Time spent searching “ + currTimeSliceID</p>
+<blockquote>
+<div><ul class="simple">
+<li><p>“: “ + timeSpentSearchingSegmentInMillis + “ms”);</p></li>
+</ul>
+</div></blockquote>
+<dl class="simple">
+<dt>debugInfo.add(“Number of hits collected in segment “ + currTimeSliceID + “: “</dt><dd><ul class="simple">
+<li><p>numHitsCollectedPerSegment);</p></li>
+</ul>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>if (!currTwitterReader.hasDocs()) {</dt><dd><p>// Due to race between the reader and the indexing thread, a seemingly empty segment that
+// does not have document committed in the posting lists, might already have a document
+// inserted into the id/time mappers, which we do not want to take into account.
+// If there are no documents in the segment, we don’t update searched min/max ids to
+// anything.
+return;</p>
+</dd>
+<dt>} else if (lastSearchedDocID == DocIdSetIterator.NO_MORE_DOCS) {</dt><dd><p>// Segment exhausted.
+if (shouldCollectDetailedDebugInfo()) {</p>
+<blockquote>
+<div><p>debugInfo.add(“Segment exhausted”);</p>
+</div></blockquote>
+<p>}
+updateIDandTimeRanges(tweetIdMapper.getMinTweetID(), timeMapper.getFirstTime(),</p>
+<blockquote>
+<div><p>IdAndRangeUpdateType.END_SEGMENT);</p>
+</div></blockquote>
+</dd>
+<dt>} else if (lastSearchedDocID &gt;= 0) {</dt><dd><p>long lastSearchedTweetID = tweetIdMapper.getTweetID(lastSearchedDocID);
+int lastSearchTweetTime = timeMapper.getTime(lastSearchedDocID);
+if (shouldCollectDetailedDebugInfo()) {</p>
+<blockquote>
+<div><p>debugInfo.add(“lastSearchedDocId=” + lastSearchedDocID);</p>
+</div></blockquote>
+<p>}
+updateIDandTimeRanges(lastSearchedTweetID, lastSearchTweetTime,</p>
+<blockquote>
+<div><p>IdAndRangeUpdateType.END_SEGMENT);</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<p>numHitsCollectedPerSegment = 0;</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>private void updateIDandTimeRanges(long tweetID, int time, IdAndRangeUpdateType updateType) {</dt><dd><p>// We need to update minSearchedStatusID/maxSearchedStatusID and
+// minSearchedTime/maxSearchedTime independently: SEARCH-6139
+minSearchedStatusID = Math.min(minSearchedStatusID, tweetID);
+maxSearchedStatusID = Math.max(maxSearchedStatusID, tweetID);
+if (time &gt; 0) {</p>
+<blockquote>
+<div><p>minSearchedTime = Math.min(minSearchedTime, time);
+maxSearchedTime = Math.max(maxSearchedTime, time);</p>
+</div></blockquote>
+<p>}
+if (shouldCollectVerboseDebugInfo()) {</p>
+<blockquote>
+<div><dl>
+<dt>debugInfo.add(</dt><dd><dl>
+<dt>String.format(“call to updateIDandTimeRanges(%d, %d, %s)”</dt><dd><blockquote>
+<div><ul class="simple">
+<li><p>“ set minSearchStatusID=%d, maxSearchedStatusID=%d,”</p></li>
+<li><p>“ minSearchedTime=%d, maxSearchedTime=%d)”,</p></li>
+</ul>
+</div></blockquote>
+<p>tweetID, time, updateType.toString(),
+minSearchedStatusID, maxSearchedStatusID,
+minSearchedTime, maxSearchedTime));</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>This is called when a segment is skipped but we would want to do accounting</p></li>
+<li><p>for minSearchDocId as well as numDocsProcessed.</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+<dt>public void skipSegment(EarlybirdSingleSegmentSearcher searcher) throws IOException {</dt><dd><p>setNextReader(searcher.getTwitterIndexReader().getContext());
+trackCompleteSegment(DocIdSetIterator.NO_MORE_DOCS);
+if (shouldCollectDetailedDebugInfo()) {</p>
+<blockquote>
+<div><p>debugInfo.add(“Skipping segment: “ + currTimeSliceID);</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Returns the results collected by this collector.</p></li>
+</ul>
+<p><a href="#id9"><span class="problematic" id="id10">*</span></a>/</p>
+</dd>
+<dt>public final S getResults() throws IOException {</dt><dd><p>// In order to make pagination work, if minSearchedStatusID is greater than the asked max_id.
+// We force the minSearchedStatusID to be max_id + 1.
+IdTimeRanges idTimeRanges = searchRequestInfo.getIdTimeRanges();
+if (idTimeRanges != null) {</p>
+<blockquote>
+<div><p>Optional&lt;Long&gt; maxIDInclusive = idTimeRanges.getMaxIDInclusive();
+if (maxIDInclusive.isPresent() &amp;&amp; minSearchedStatusID &gt; maxIDInclusive.get()) {</p>
+<blockquote>
+<div><p>searcherStats.numCollectorAdjustedMinSearchedStatusID.increment();
+minSearchedStatusID = maxIDInclusive.get() + 1;</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>S results = doGetResults();
+results.setNumHitsProcessed((int) getNumHitsProcessed());
+results.setNumSearchedSegments(getNumSearchedSegments());
+if (searchedStatusIDsAndTimesInitialized()) {</p>
+<blockquote>
+<div><p>results.setMaxSearchedStatusID(maxSearchedStatusID);
+results.setMinSearchedStatusID(minSearchedStatusID);
+results.setMaxSearchedTime(maxSearchedTime);
+results.setMinSearchedTime(minSearchedTime);</p>
+</div></blockquote>
+<p>}
+results.setEarlyTerminated(getEarlyTerminationState().isTerminated());
+if (getEarlyTerminationState().isTerminated()) {</p>
+<blockquote>
+<div><p>results.setEarlyTerminationReason(getEarlyTerminationState().getTerminationReason());</p>
+</div></blockquote>
+<p>}
+Map&lt;Long, Integer&gt; counts = getHitCountMap();
+if (counts != null) {</p>
+<blockquote>
+<div><p>results.hitCounts.putAll(counts);</p>
+</div></blockquote>
+<p>}
+return results;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Returns a map of timestamps (specified in the query) to the number of hits that are more recent</p></li>
+<li><p>that the respective timestamps.</p></li>
+</ul>
+<p><a href="#id11"><span class="problematic" id="id12">*</span></a>/</p>
+</dd>
+<dt>public final Map&lt;Long, Integer&gt; getHitCountMap() {</dt><dd><p>int total = 0;
+if (hitCounts == null) {</p>
+<blockquote>
+<div><p>return null;</p>
+</div></blockquote>
+<p>}
+Map&lt;Long, Integer&gt; map = Maps.newHashMap();
+// since the array is incremental, need to aggregate here.
+for (int i = 0; i &lt; hitCounts.length; ++i) {</p>
+<blockquote>
+<div><p>map.put(hitCountsThresholdsMsec.get(i), total += hitCounts[i]);</p>
+</div></blockquote>
+<p>}
+return map;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Common helper for collecting per-field hit attribution data (if it’s available).</p></li>
+<li></li>
+<li><p>&#64;param metadata the metadata to fill for this hit.</p></li>
+</ul>
+<p><a href="#id13"><span class="problematic" id="id14">*</span></a>/</p>
+</dd>
+<dt>protected final void fillHitAttributionMetadata(ThriftSearchResultMetadata metadata) {</dt><dd><dl class="simple">
+<dt>if (searchRequestInfo.getHitAttributeHelper() == null) {</dt><dd><p>return;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>Map&lt;Integer, List&lt;String&gt;&gt; hitAttributeMapping =</dt><dd><p>searchRequestInfo.getHitAttributeHelper().getHitAttribution(curDocId);</p>
+</dd>
+</dl>
+<p>Preconditions.checkNotNull(hitAttributeMapping);</p>
+<p>FieldHitAttribution fieldHitAttribution = new FieldHitAttribution();
+for (Map.Entry&lt;Integer, List&lt;String&gt;&gt; entry : hitAttributeMapping.entrySet()) {</p>
+<blockquote>
+<div><p>FieldHitList fieldHitList = new FieldHitList();
+fieldHitList.setHitFields(entry.getValue());</p>
+<p>fieldHitAttribution.putToHitMap(entry.getKey(), fieldHitList);</p>
+</div></blockquote>
+<p>}
+metadata.setFieldHitAttribution(fieldHitAttribution);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Fill the geo location of the given document in metadata, if we have the lat/lon for it.</p></li>
+<li><p>For queries that specify a geolocation, this will also have the distance from</p></li>
+<li><p>the location specified in the query, and the location of this document.</p></li>
+</ul>
+<p><a href="#id15"><span class="problematic" id="id16">*</span></a>/</p>
+</dd>
+<dt>protected final void fillResultGeoLocation(ThriftSearchResultMetadata metadata)</dt><dd><blockquote>
+<div><p>throws IOException {</p>
+</div></blockquote>
+<p>Preconditions.checkNotNull(metadata);
+if (currTwitterReader != null &amp;&amp; fillInLatLonForHits) {</p>
+<blockquote>
+<div><p>// See if we can have a lat/lon for this doc.
+if (resultGeoCoordinate == null) {</p>
+<blockquote>
+<div><p>resultGeoCoordinate = new GeoCoordinate();</p>
+</div></blockquote>
+<p>}
+// Only fill if necessary
+if (searchRequestInfo.isCollectResultLocation()</p>
+<blockquote>
+<div><blockquote>
+<div><dl class="simple">
+<dt>&amp;&amp; GeoUtil.decodeLatLonFromInt64(</dt><dd><p>documentFeatures.getFeatureValue(EarlybirdFieldConstant.LAT_LON_CSF_FIELD),
+resultGeoCoordinate)) {</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>ThriftSearchResultGeoLocation resultLocation = new ThriftSearchResultGeoLocation();
+resultLocation.setLatitude(resultGeoCoordinate.getLatitude());
+resultLocation.setLongitude(resultGeoCoordinate.getLongitude());
+metadata.setResultLocation(resultLocation);</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;Override
+public ScoreMode scoreMode() {</p>
+<blockquote>
+<div><p>return ScoreMode.COMPLETE;</p>
+</div></blockquote>
+<p>}</p>
+<p>private int terminationDocID = -1;</p>
+<p>&#64;Override
+protected void collectedEnoughResults() throws IOException {</p>
+<blockquote>
+<div><p>// We find ‘terminationDocID’ once we collect enough results, so that we know the point at which
+// we can stop searching. We must do this because with the unordered doc ID mapper, tweets
+// are not ordered within a millisecond, so we must search the entire millisecond bucket before
+// terminating the search, otherwise we could skip over tweets and have an incorrect
+// minSearchedStatusID.
+if (curDocId != -1 &amp;&amp; terminationDocID == -1) {</p>
+<blockquote>
+<div><p>long tweetId = tweetIdMapper.getTweetID(curDocId);
+// We want to find the highest possible doc ID for this tweetId, so pass true.
+boolean findMaxDocID = true;
+terminationDocID = tweetIdMapper.findDocIdBound(tweetId,</p>
+<blockquote>
+<div><p>findMaxDocID,
+curDocId,
+curDocId);</p>
+</div></blockquote>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+protected boolean shouldTerminate() {</p>
+<blockquote>
+<div><p>return curDocId &gt;= terminationDocID;</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public List&lt;String&gt; getDebugInfo() {</p>
+<blockquote>
+<div><p>return debugInfo;</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>protected boolean shouldCollectDetailedDebugInfo() {</dt><dd><p>return requestDebugMode &gt;= 5;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// Use this for per-result debug info. Useful for queries with no results
+// or a very small number of results.
+protected boolean shouldCollectVerboseDebugInfo() {</p>
+<blockquote>
+<div><p>return requestDebugMode &gt;= 6;</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../_sources/src/java/com/twitter/search/earlybird/search/AbstractResultsCollector.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

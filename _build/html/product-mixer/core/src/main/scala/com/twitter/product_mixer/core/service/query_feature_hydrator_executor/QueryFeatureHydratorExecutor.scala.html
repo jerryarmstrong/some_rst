@@ -1,0 +1,399 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../../../" id="documentation_options" src="../../../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.product_mixer.core.service.query_feature_hydrator_executor</p>
+<p>import com.fasterxml.jackson.databind.annotation.JsonSerialize
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.product_mixer.core.feature.Feature
+import com.twitter.product_mixer.core.feature.featuremap.FeatureMap
+import com.twitter.product_mixer.core.feature.featuremap.asyncfeaturemap.AsyncFeatureMap
+import com.twitter.product_mixer.core.functional_component.feature_hydrator.AsyncHydrator
+import com.twitter.product_mixer.core.functional_component.feature_hydrator.BaseQueryFeatureHydrator
+import com.twitter.product_mixer.core.functional_component.feature_hydrator.featurestorev1.FeatureStoreV1QueryFeatureHydrator
+import com.twitter.product_mixer.core.model.common.Conditionally
+import com.twitter.product_mixer.core.model.common.identifier.FeatureHydratorIdentifier
+import com.twitter.product_mixer.core.model.common.identifier.PipelineStepIdentifier
+import com.twitter.product_mixer.core.pipeline.PipelineQuery
+import com.twitter.product_mixer.core.service.Executor
+import com.twitter.product_mixer.core.service.Executor._
+import com.twitter.product_mixer.core.service.ExecutorResult
+import com.twitter.product_mixer.core.service.feature_hydrator_observer.FeatureHydratorObserver
+import com.twitter.product_mixer.core.service.query_feature_hydrator_executor.QueryFeatureHydratorExecutor.AsyncIndividualFeatureHydratorResult
+import com.twitter.product_mixer.core.service.query_feature_hydrator_executor.QueryFeatureHydratorExecutor.BaseIndividualFeatureHydratorResult
+import com.twitter.product_mixer.core.service.query_feature_hydrator_executor.QueryFeatureHydratorExecutor.FeatureHydratorDisabled
+import com.twitter.product_mixer.core.service.query_feature_hydrator_executor.QueryFeatureHydratorExecutor.IndividualFeatureHydratorResult
+import com.twitter.product_mixer.core.service.query_feature_hydrator_executor.QueryFeatureHydratorExecutor.validateAsyncQueryFeatureHydrator
+import com.twitter.stitch.Arrow
+import com.twitter.stitch.Stitch
+import javax.inject.Inject
+import javax.inject.Singleton</p>
+<p>&#64;Singleton
+class QueryFeatureHydratorExecutor &#64;Inject() (override val statsReceiver: StatsReceiver)</p>
+<blockquote>
+<div><blockquote>
+<div><p>extends Executor {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>def arrow[Query &lt;: PipelineQuery](</dt><dd><p>hydrators: Seq[BaseQueryFeatureHydrator[Query, _]],
+validPipelineSteps: Set[PipelineStepIdentifier],
+context: Executor.Context</p>
+</dd>
+</dl>
+<p>): Arrow[Query, QueryFeatureHydratorExecutor.Result] = {</p>
+<blockquote>
+<div><p>val observer = new FeatureHydratorObserver(statsReceiver, hydrators, context)
+val hydratorsWithErrorHandling =</p>
+<blockquote>
+<div><dl>
+<dt>hydrators.map { hydrator =&gt;</dt><dd><dl class="simple">
+<dt>val queryFeatureHydratorArrow =</dt><dd><p>getQueryHydratorArrow(hydrator, context, observer)</p>
+</dd>
+<dt>val wrappedWithAsyncHandling =</dt><dd><p>handleAsyncHydrator(hydrator, validPipelineSteps, queryFeatureHydratorArrow)</p>
+</dd>
+</dl>
+<p>handleConditionally(hydrator, wrappedWithAsyncHandling)</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<dl>
+<dt>Arrow</dt><dd><p>.collect(hydratorsWithErrorHandling)
+.map {</p>
+<blockquote>
+<div><dl>
+<dt>results: Seq[</dt><dd><p>(FeatureHydratorIdentifier, BaseIndividualFeatureHydratorResult)</p>
+</dd>
+<dt>] =&gt;</dt><dd><dl class="simple">
+<dt>val combinedFeatureMap = FeatureMap.merge(results.collect {</dt><dd><p>case (_, IndividualFeatureHydratorResult(featureMap)) =&gt; featureMap</p>
+</dd>
+</dl>
+<p>})</p>
+<dl>
+<dt>val asyncFeatureMaps = results.collect {</dt><dd><dl>
+<dt>case (</dt><dd><blockquote>
+<div><p>hydratorIdentifier,
+AsyncIndividualFeatureHydratorResult(hydrateBefore, featuresToHydrate, ref)) =&gt;</p>
+</div></blockquote>
+<p>(hydratorIdentifier, hydrateBefore, featuresToHydrate, ref)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>QueryFeatureHydratorExecutor.Result(</dt><dd><p>individualFeatureMaps = results.toMap,
+featureMap = combinedFeatureMap,
+asyncFeatureMap = AsyncFeatureMap.fromFeatureMaps(asyncFeatureMaps)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>def handleConditionally[Query &lt;: PipelineQuery](</dt><dd><p>hydrator: BaseQueryFeatureHydrator[Query, _],
+arrow: Arrow[</p>
+<blockquote>
+<div><p>Query,
+BaseIndividualFeatureHydratorResult</p>
+</div></blockquote>
+<p>]</p>
+</dd>
+<dt>): Arrow[</dt><dd><p>Query,
+(FeatureHydratorIdentifier, BaseIndividualFeatureHydratorResult)</p>
+</dd>
+<dt>] = {</dt><dd><dl>
+<dt>val conditionallyRunArrow = hydrator match {</dt><dd><dl>
+<dt>case hydrator: BaseQueryFeatureHydrator[Query, _] with Conditionally[Query &#64;unchecked] =&gt;</dt><dd><dl class="simple">
+<dt>Arrow.ifelse[Query, BaseIndividualFeatureHydratorResult](</dt><dd><p>hydrator.onlyIf,
+arrow,
+Arrow.value(FeatureHydratorDisabled)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>case _ =&gt; arrow</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>Arrow.join(</dt><dd><p>Arrow.value(hydrator.identifier),
+conditionallyRunArrow</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def handleAsyncHydrator[Query &lt;: PipelineQuery](</dt><dd><p>hydrator: BaseQueryFeatureHydrator[Query, _],
+validPipelineSteps: Set[PipelineStepIdentifier],
+arrow: Arrow[</p>
+<blockquote>
+<div><p>Query,
+IndividualFeatureHydratorResult</p>
+</div></blockquote>
+<p>]</p>
+</dd>
+<dt>): Arrow[Query, BaseIndividualFeatureHydratorResult] = {</dt><dd><dl>
+<dt>hydrator match {</dt><dd><dl>
+<dt>case hydrator: BaseQueryFeatureHydrator[</dt><dd><blockquote>
+<div><blockquote>
+<div><p>Query,
+_</p>
+</div></blockquote>
+<p>] with AsyncHydrator =&gt;</p>
+</div></blockquote>
+<p>validateAsyncQueryFeatureHydrator(hydrator, validPipelineSteps)</p>
+<dl>
+<dt>startArrowAsync(arrow.map(_.featureMap))</dt><dd><dl>
+<dt>.map { ref =&gt;</dt><dd><dl class="simple">
+<dt>AsyncIndividualFeatureHydratorResult(</dt><dd><p>hydrator.hydrateBefore,
+hydrator.features.asInstanceOf[Set[Feature[_, _]]],
+ref</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>case _ =&gt; arrow</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>def getQueryHydratorArrow[Query &lt;: PipelineQuery](</dt><dd><p>hydrator: BaseQueryFeatureHydrator[Query, _],
+context: Executor.Context,
+queryFeatureHydratorObserver: FeatureHydratorObserver</p>
+</dd>
+</dl>
+<p>): Arrow[Query, IndividualFeatureHydratorResult] = {</p>
+<blockquote>
+<div><p>val componentExecutorContext = context.pushToComponentStack(hydrator.identifier)
+val hydratorArrow: Arrow[Query, FeatureMap] =</p>
+<blockquote>
+<div><p>Arrow.flatMap { query: Query =&gt; hydrator.hydrate(query) }</p>
+</div></blockquote>
+<dl>
+<dt>val validationFn: FeatureMap =&gt; FeatureMap = hydrator match {</dt><dd><p>// Feature store query hydrators store the resulting PredictionRecord and not
+// the features, so we cannot validate the same way
+case _: FeatureStoreV1QueryFeatureHydrator[Query] =&gt;</p>
+<blockquote>
+<div><p>identity</p>
+</div></blockquote>
+<dl class="simple">
+<dt>case _ =&gt;</dt><dd><dl class="simple">
+<dt>validateFeatureMap(</dt><dd><p>hydrator.features.asInstanceOf[Set[Feature[_, _]]],
+_,
+componentExecutorContext)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>// record the component-level stats
+val observedArrow =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>wrapComponentWithExecutorBookkeeping[Query, FeatureMap](</dt><dd><p>context,
+hydrator.identifier</p>
+</dd>
+</dl>
+<p>)(hydratorArrow.map(validationFn))</p>
+</div></blockquote>
+<p>// store non-configuration errors in the FeatureMap
+val liftNonValidationFailuresToFailedFeatures = Arrow.handle[FeatureMap, FeatureMap] {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case NotAMisconfiguredFeatureMapFailure(e) =&gt;</dt><dd><dl class="simple">
+<dt>featureMapWithFailuresForFeatures(</dt><dd><p>hydrator.features.asInstanceOf[Set[Feature[_, _]]],
+e,
+componentExecutorContext)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>val observedLiftedAndWrapped = observedArrow</dt><dd><p>.andThen(liftNonValidationFailuresToFailedFeatures)
+.applyEffect(Arrow.map[FeatureMap, Unit](featureMap =&gt;</p>
+<blockquote>
+<div><p>// record per-feature stats, this is separate from the component stats handled by <cite>wrapWithExecutorBookkeeping</cite>
+queryFeatureHydratorObserver.observeFeatureSuccessAndFailures(hydrator, Seq(featureMap))))</p>
+</div></blockquote>
+<p>.map(IndividualFeatureHydratorResult)</p>
+</dd>
+</dl>
+<p>observedLiftedAndWrapped</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>object QueryFeatureHydratorExecutor {</dt><dd><dl>
+<dt>case class Result(</dt><dd><dl class="simple">
+<dt>individualFeatureMaps: Map[</dt><dd><p>FeatureHydratorIdentifier,
+BaseIndividualFeatureHydratorResult</p>
+</dd>
+</dl>
+<p>],
+featureMap: FeatureMap,
+asyncFeatureMap: AsyncFeatureMap)</p>
+<blockquote>
+<div><p>extends ExecutorResult</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>sealed trait BaseIndividualFeatureHydratorResult</p>
+<p>case object FeatureHydratorDisabled extends BaseIndividualFeatureHydratorResult
+case class IndividualFeatureHydratorResult(featureMap: FeatureMap)</p>
+<blockquote>
+<div><p>extends BaseIndividualFeatureHydratorResult</p>
+</div></blockquote>
+<p>/** Async result, serializes without the [[Stitch]] field since it’s not serializable <a href="#id1"><span class="problematic" id="id2">*</span></a>/
+&#64;JsonSerialize(using = classOf[AsyncIndividualFeatureHydratorResultSerializer])
+case class AsyncIndividualFeatureHydratorResult(</p>
+<blockquote>
+<div><p>hydrateBefore: PipelineStepIdentifier,
+features: Set[Feature[_, _]],
+ref: Stitch[FeatureMap])</p>
+<blockquote>
+<div><p>extends BaseIndividualFeatureHydratorResult</p>
+</div></blockquote>
+</div></blockquote>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Validates whether the [[AsyncHydrator.hydrateBefore]] [[PipelineStepIdentifier]] is valid</p></li>
+<li></li>
+<li><p>&#64;param asyncQueryFeatureHydrator the hydrator to validate</p></li>
+<li><p>&#64;param validPipelineSteps        a Set of [[PipelineStepIdentifier]]s which are valid places to populate async</p></li>
+<li><p>[[Feature]]s in a [[com.twitter.product_mixer.core.pipeline.Pipeline]]</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>def validateAsyncQueryFeatureHydrator(</dt><dd><p>asyncQueryFeatureHydrator: AsyncHydrator,
+validPipelineSteps: Set[PipelineStepIdentifier]</p>
+</dd>
+<dt>): Unit =</dt><dd><dl>
+<dt>require(</dt><dd><p>validPipelineSteps.contains(asyncQueryFeatureHydrator.hydrateBefore),
+s”<cite>AsyncHydrator.hydrateBefore</cite> contained ${asyncQueryFeatureHydrator.hydrateBefore} which was not in the parent pipeline’s “ +</p>
+<blockquote>
+<div><p>s”<cite>PipelineConfig</cite> Companion object field <cite>stepsAsyncFeatureHydrationCanBeCompletedBy = $validPipelineSteps</cite>.”</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../../../_sources/product-mixer/core/src/main/scala/com/twitter/product_mixer/core/service/query_feature_hydrator_executor/QueryFeatureHydratorExecutor.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

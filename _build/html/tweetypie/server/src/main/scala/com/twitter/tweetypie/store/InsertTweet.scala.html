@@ -1,0 +1,446 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.tweetypie
+package store</p>
+<p>import com.twitter.context.thriftscala.FeatureContext
+import com.twitter.tweetypie.core.GeoSearchRequestId
+import com.twitter.tweetypie.store.TweetEventDataScrubber.scrub
+import com.twitter.tweetypie.thriftscala._</p>
+<p>object InsertTweet extends TweetStore.SyncModule {</p>
+<blockquote>
+<div><dl>
+<dt>case class Event(</dt><dd><p>tweet: Tweet,
+user: User,
+timestamp: Time,
+_internalTweet: Option[CachedTweet] = None,
+sourceTweet: Option[Tweet] = None,
+sourceUser: Option[User] = None,
+quotedTweet: Option[Tweet] = None,
+quotedUser: Option[User] = None,
+parentUserId: Option[UserId] = None,
+initialTweetUpdateRequest: Option[InitialTweetUpdateRequest] = None,
+dark: Boolean = false,
+hydrateOptions: WritePathHydrationOptions = WritePathHydrationOptions(),
+featureContext: Option[FeatureContext] = None,
+geoSearchRequestId: Option[GeoSearchRequestId] = None,
+additionalContext: Option[collection.Map[TweetCreateContextKey, String]] = None,
+transientContext: Option[TransientCreateContext] = None,
+quoterHasAlreadyQuotedTweet: Boolean = false,
+noteTweetMentionedUserIds: Option[Seq[Long]] = None)</p>
+<blockquote>
+<div><p>extends SyncTweetStoreEvent(“insert_tweet”)
+with QuotedTweetOps {</p>
+</div></blockquote>
+<dl>
+<dt>def internalTweet: CachedTweet =</dt><dd><dl>
+<dt>_internalTweet.getOrElse(</dt><dd><dl class="simple">
+<dt>throw new IllegalStateException(</dt><dd><p>s”internalTweet should have been set in WritePathHydration, ${this}”</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>def toAsyncRequest(</dt><dd><p>scrubUser: User =&gt; User,
+scrubSourceTweet: Tweet =&gt; Tweet,
+scrubSourceUser: User =&gt; User</p>
+</dd>
+<dt>): AsyncInsertRequest =</dt><dd><dl class="simple">
+<dt>AsyncInsertRequest(</dt><dd><p>tweet = tweet,
+cachedTweet = internalTweet,
+user = scrubUser(user),
+sourceTweet = sourceTweet.map(scrubSourceTweet),
+sourceUser = sourceUser.map(scrubSourceUser),
+quotedTweet = quotedTweet.map(scrubSourceTweet),
+quotedUser = quotedUser.map(scrubSourceUser),
+parentUserId = parentUserId,
+featureContext = featureContext,
+timestamp = timestamp.inMillis,
+geoSearchRequestId = geoSearchRequestId.map(_.requestID),
+additionalContext = additionalContext,
+transientContext = transientContext,
+quoterHasAlreadyQuotedTweet = Some(quoterHasAlreadyQuotedTweet),
+initialTweetUpdateRequest = initialTweetUpdateRequest,
+noteTweetMentionedUserIds = noteTweetMentionedUserIds</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>trait Store {</dt><dd><p>val insertTweet: FutureEffect[Event]</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>trait StoreWrapper extends Store { self: TweetStoreWrapper[Store] =&gt;</dt><dd><p>override val insertTweet: FutureEffect[Event] = wrap(underlying.insertTweet)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>object Store {</dt><dd><dl>
+<dt>def apply(</dt><dd><p>logLensStore: LogLensStore,
+manhattanStore: ManhattanTweetStore,
+tweetStatsStore: TweetStatsStore,
+cachingTweetStore: CachingTweetStore,
+limiterStore: LimiterStore,
+asyncEnqueueStore: AsyncEnqueueStore,
+userCountsUpdatingStore: GizmoduckUserCountsUpdatingStore,
+tweetCountsUpdatingStore: TweetCountsCacheUpdatingStore</p>
+</dd>
+<dt>): Store =</dt><dd><dl>
+<dt>new Store {</dt><dd><dl>
+<dt>override val insertTweet: FutureEffect[Event] =</dt><dd><dl>
+<dt>FutureEffect.sequentially(</dt><dd><p>logLensStore.insertTweet,
+manhattanStore.insertTweet,
+tweetStatsStore.insertTweet,
+FutureEffect.inParallel(</p>
+<blockquote>
+<div><p>// allow write-through caching to fail without failing entire insert
+cachingTweetStore.ignoreFailures.insertTweet,
+limiterStore.ignoreFailures.insertTweet,
+asyncEnqueueStore.insertTweet,
+userCountsUpdatingStore.insertTweet,
+tweetCountsUpdatingStore.insertTweet</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>object AsyncInsertTweet extends TweetStore.AsyncModule {</p>
+<blockquote>
+<div><p>private val log = Logger(getClass)</p>
+<dl>
+<dt>object Event {</dt><dd><dl>
+<dt>def fromAsyncRequest(request: AsyncInsertRequest): TweetStoreEventOrRetry[Event] =</dt><dd><dl>
+<dt>TweetStoreEventOrRetry(</dt><dd><dl class="simple">
+<dt>Event(</dt><dd><p>tweet = request.tweet,
+cachedTweet = request.cachedTweet,
+user = request.user,
+optUser = Some(request.user),
+timestamp = Time.fromMilliseconds(request.timestamp),
+sourceTweet = request.sourceTweet,
+sourceUser = request.sourceUser,
+parentUserId = request.parentUserId,
+featureContext = request.featureContext,
+quotedTweet = request.quotedTweet,
+quotedUser = request.quotedUser,
+geoSearchRequestId = request.geoSearchRequestId,
+additionalContext = request.additionalContext,
+transientContext = request.transientContext,
+quoterHasAlreadyQuotedTweet = request.quoterHasAlreadyQuotedTweet.getOrElse(false),
+initialTweetUpdateRequest = request.initialTweetUpdateRequest,
+noteTweetMentionedUserIds = request.noteTweetMentionedUserIds</p>
+</dd>
+</dl>
+<p>),
+request.retryAction,
+RetryEvent</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>case class Event(</dt><dd><p>tweet: Tweet,
+cachedTweet: CachedTweet,
+user: User,
+optUser: Option[User],
+timestamp: Time,
+sourceTweet: Option[Tweet] = None,
+sourceUser: Option[User] = None,
+parentUserId: Option[UserId] = None,
+featureContext: Option[FeatureContext] = None,
+quotedTweet: Option[Tweet] = None,
+quotedUser: Option[User] = None,
+geoSearchRequestId: Option[String] = None,
+additionalContext: Option[collection.Map[TweetCreateContextKey, String]] = None,
+transientContext: Option[TransientCreateContext] = None,
+quoterHasAlreadyQuotedTweet: Boolean = false,
+initialTweetUpdateRequest: Option[InitialTweetUpdateRequest] = None,
+noteTweetMentionedUserIds: Option[Seq[Long]] = None)</p>
+<blockquote>
+<div><p>extends AsyncTweetStoreEvent(“async_insert_tweet”)
+with QuotedTweetOps
+with TweetStoreTweetEvent {</p>
+</div></blockquote>
+<dl>
+<dt>def toAsyncRequest(action: Option[AsyncWriteAction] = None): AsyncInsertRequest =</dt><dd><dl class="simple">
+<dt>AsyncInsertRequest(</dt><dd><p>tweet = tweet,
+cachedTweet = cachedTweet,
+user = user,
+sourceTweet = sourceTweet,
+sourceUser = sourceUser,
+parentUserId = parentUserId,
+retryAction = action,
+featureContext = featureContext,
+timestamp = timestamp.inMillis,
+quotedTweet = quotedTweet,
+quotedUser = quotedUser,
+geoSearchRequestId = geoSearchRequestId,
+additionalContext = additionalContext,
+transientContext = transientContext,
+quoterHasAlreadyQuotedTweet = Some(quoterHasAlreadyQuotedTweet),
+initialTweetUpdateRequest = initialTweetUpdateRequest,
+noteTweetMentionedUserIds = noteTweetMentionedUserIds</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>override def toTweetEventData: Seq[TweetEventData] =</dt><dd><dl>
+<dt>Seq(</dt><dd><dl>
+<dt>TweetEventData.TweetCreateEvent(</dt><dd><dl class="simple">
+<dt>TweetCreateEvent(</dt><dd><p>tweet = scrub(tweet),
+user = user,
+sourceUser = sourceUser,
+sourceTweet = sourceTweet.map(scrub),
+retweetParentUserId = parentUserId,
+quotedTweet = publicQuotedTweet.map(scrub),
+quotedUser = publicQuotedUser,
+additionalContext = additionalContext,
+transientContext = transientContext,
+quoterHasAlreadyQuotedTweet = Some(quoterHasAlreadyQuotedTweet)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>override def enqueueRetry(service: ThriftTweetService, action: AsyncWriteAction): Future[Unit] =</dt><dd><p>service.asyncInsert(toAsyncRequest(Some(action)))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>case class RetryEvent(action: AsyncWriteAction, event: Event)</dt><dd><blockquote>
+<div><p>extends TweetStoreRetryEvent[Event] {</p>
+</div></blockquote>
+<p>override val eventType: AsyncWriteEventType.Insert.type = AsyncWriteEventType.Insert
+override val scribedTweetOnFailure: Option[Tweet] = Some(event.tweet)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>trait Store {</dt><dd><p>val asyncInsertTweet: FutureEffect[Event]
+val retryAsyncInsertTweet: FutureEffect[TweetStoreRetryEvent[Event]]</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>trait StoreWrapper extends Store { self: TweetStoreWrapper[Store] =&gt;</dt><dd><p>override val asyncInsertTweet: FutureEffect[Event] = wrap(underlying.asyncInsertTweet)
+override val retryAsyncInsertTweet: FutureEffect[TweetStoreRetryEvent[Event]] = wrap(</p>
+<blockquote>
+<div><p>underlying.retryAsyncInsertTweet)</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>object Store {</dt><dd><dl>
+<dt>def apply(</dt><dd><p>replicatingStore: ReplicatingTweetStore,
+indexingStore: TweetIndexingStore,
+tweetCountsUpdatingStore: TweetCountsCacheUpdatingStore,
+timelineUpdatingStore: TlsTimelineUpdatingStore,
+eventBusEnqueueStore: TweetEventBusStore,
+fanoutServiceStore: FanoutServiceStore,
+scribeMediaTagStore: ScribeMediaTagStore,
+userGeotagUpdateStore: GizmoduckUserGeotagUpdateStore,
+geoSearchRequestIDStore: GeoSearchRequestIDStore</p>
+</dd>
+<dt>): Store = {</dt><dd><dl>
+<dt>val stores: Seq[Store] =</dt><dd><dl class="simple">
+<dt>Seq(</dt><dd><p>replicatingStore,
+indexingStore,
+timelineUpdatingStore,
+eventBusEnqueueStore,
+fanoutServiceStore,
+userGeotagUpdateStore,
+tweetCountsUpdatingStore,
+scribeMediaTagStore,
+geoSearchRequestIDStore</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>def build[E &lt;: TweetStoreEvent](extract: Store =&gt; FutureEffect[E]): FutureEffect[E] =</dt><dd><p>FutureEffect.inParallel[E](stores.map(extract): _*)</p>
+</dd>
+<dt>new Store {</dt><dd><p>override val asyncInsertTweet: FutureEffect[Event] = build(_.asyncInsertTweet)
+override val retryAsyncInsertTweet: FutureEffect[TweetStoreRetryEvent[Event]] = build(</p>
+<blockquote>
+<div><p>_.retryAsyncInsertTweet)</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>object ReplicatedInsertTweet extends TweetStore.ReplicatedModule {</p>
+<blockquote>
+<div><dl>
+<dt>case class Event(</dt><dd><p>tweet: Tweet,
+cachedTweet: CachedTweet,
+quoterHasAlreadyQuotedTweet: Boolean = false,
+initialTweetUpdateRequest: Option[InitialTweetUpdateRequest] = None)</p>
+<blockquote>
+<div><p>extends ReplicatedTweetStoreEvent(“replicated_insert_tweet”)</p>
+</div></blockquote>
+</dd>
+<dt>trait Store {</dt><dd><p>val replicatedInsertTweet: FutureEffect[Event]</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>trait StoreWrapper extends Store { self: TweetStoreWrapper[Store] =&gt;</dt><dd><p>override val replicatedInsertTweet: FutureEffect[Event] = wrap(underlying.replicatedInsertTweet)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>object Store {</dt><dd><dl>
+<dt>def apply(</dt><dd><p>cachingTweetStore: CachingTweetStore,
+tweetCountsUpdatingStore: TweetCountsCacheUpdatingStore</p>
+</dd>
+<dt>): Store = {</dt><dd><dl>
+<dt>new Store {</dt><dd><dl>
+<dt>override val replicatedInsertTweet: FutureEffect[Event] =</dt><dd><dl class="simple">
+<dt>FutureEffect.inParallel(</dt><dd><p>cachingTweetStore.replicatedInsertTweet,
+tweetCountsUpdatingStore.replicatedInsertTweet.ignoreFailures</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/tweetypie/server/src/main/scala/com/twitter/tweetypie/store/InsertTweet.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.core.earlybird.index.inverted;</p>
+<p>import java.io.IOException;</p>
+<p>import javax.annotation.Nullable;</p>
+<p>import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Preconditions;</p>
+<p>import org.apache.lucene.index.PostingsEnum;
+import org.apache.lucene.search.DocIdSetIterator;
+import org.apache.lucene.util.packed.PackedInts;</p>
+<p>import com.twitter.search.common.metrics.SearchCounter;
+import com.twitter.search.common.util.io.flushable.DataDeserializer;
+import com.twitter.search.common.util.io.flushable.DataSerializer;
+import com.twitter.search.common.util.io.flushable.FlushInfo;
+import com.twitter.search.common.util.io.flushable.Flushable;</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>A posting list intended for low-df terms, terms that have a small number of postings.</p></li>
+<li></li>
+<li><p>The postings (docs and positions) are stored in PackedInts, packed based on the largest docId</p></li>
+<li><p>and position across all low-df terms in a field.</p></li>
+<li></li>
+<li><p>All docIds are packed together in their own PackedInts, and all positions are stored together</p></li>
+<li><p>in their own PackedInts.</p></li>
+<li><ul>
+<li><p>A docId is stored for every single posting, that is if a doc has a frequency of N, it will be</p></li>
+</ul>
+</li>
+<li><p>stored N times.</p></li>
+<li><ul>
+<li><p>For fields that omitPositions, positions are not stored at all.</p></li>
+</ul>
+</li>
+<li></li>
+<li><p>Example:</p></li>
+<li><p>Postings in the form (docId, position):</p></li>
+<li><p>(1, 0), (1, 1), (2, 1), (2, 3), (2, 5), (4, 0), (5, 0)</p></li>
+<li><p>Will be stored as:</p></li>
+<li><p>packedDocIds:    [1, 1, 2, 2, 2, 4, 5]</p></li>
+<li><p>packedPositions: [0, 1, 1, 3, 5, 0, 0]</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>public class LowDFPackedIntsPostingLists extends OptimizedPostingLists {</dt><dd><dl>
+<dt>private static final SearchCounter GETTING_POSITIONS_WITH_OMIT_POSITIONS =</dt><dd><p>SearchCounter.export(“low_df_packed_ints_posting_list_getting_positions_with_omit_positions”);</p>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Internal class for hiding PackedInts Readers and Writers. A Mutable instance of PackedInts is</p></li>
+<li><p>only required when we’re optimizing a new index.</p></li>
+<li><p>For the read side, we only need a PackedInts.Reader.</p></li>
+<li><p>For loaded indexes, we also only need a PackedInts.Reader.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>private static final class PackedIntsWrapper {</dt><dd><p>// Will be null if we are operating on a loaded in read-only index.
+&#64;Nullable
+private final PackedInts.Mutable mutablePackedInts;
+private final PackedInts.Reader readerPackedInts;</p>
+<dl class="simple">
+<dt>private PackedIntsWrapper(PackedInts.Mutable mutablePackedInts) {</dt><dd><p>this.mutablePackedInts = Preconditions.checkNotNull(mutablePackedInts);
+this.readerPackedInts = mutablePackedInts;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private PackedIntsWrapper(PackedInts.Reader readerPackedInts) {</dt><dd><p>this.mutablePackedInts = null;
+this.readerPackedInts = readerPackedInts;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public int size() {</dt><dd><p>return readerPackedInts.size();</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public PackedInts.Reader getReader() {</dt><dd><p>return readerPackedInts;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public void set(int index, long value) {</dt><dd><p>this.mutablePackedInts.set(index, value);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>private final PackedIntsWrapper packedDocIds;
+/**</p>
+<blockquote>
+<div><ul class="simple">
+<li><p>Will be null for fields that omitPositions.</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</div></blockquote>
+<p>&#64;Nullable
+private final PackedIntsWrapper packedPositions;
+private final boolean omitPositions;
+private final int totalPostingsAcrossTerms;
+private final int maxPosition;
+private int currentPackedIntsPosition;</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Creates a new LowDFPackedIntsPostingLists.</p></li>
+<li><p>&#64;param omitPositions whether positions should be omitted or not.</p></li>
+<li><p>&#64;param totalPostingsAcrossTerms how many postings across all terms this field has.</p></li>
+<li><p>&#64;param maxPosition the largest position used in all the postings for this field.</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+<dt>public LowDFPackedIntsPostingLists(</dt><dd><blockquote>
+<div><p>boolean omitPositions,
+int totalPostingsAcrossTerms,
+int maxPosition) {</p>
+</div></blockquote>
+<dl>
+<dt>this(</dt><dd><dl class="simple">
+<dt>new PackedIntsWrapper(PackedInts.getMutable(</dt><dd><p>totalPostingsAcrossTerms,
+PackedInts.bitsRequired(MAX_DOC_ID),
+PackedInts.DEFAULT)),</p>
+</dd>
+<dt>omitPositions</dt><dd><p>? null
+: new PackedIntsWrapper(PackedInts.getMutable(
+totalPostingsAcrossTerms,
+PackedInts.bitsRequired(maxPosition),
+PackedInts.DEFAULT)),</p>
+</dd>
+</dl>
+<p>omitPositions,
+totalPostingsAcrossTerms,
+maxPosition);</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private LowDFPackedIntsPostingLists(</dt><dd><blockquote>
+<div><p>PackedIntsWrapper packedDocIds,
+&#64;Nullable
+PackedIntsWrapper packedPositions,
+boolean omitPositions,
+int totalPostingsAcrossTerms,
+int maxPosition) {</p>
+</div></blockquote>
+<p>this.packedDocIds = packedDocIds;
+this.packedPositions = packedPositions;
+this.omitPositions = omitPositions;
+this.totalPostingsAcrossTerms = totalPostingsAcrossTerms;
+this.maxPosition = maxPosition;
+this.currentPackedIntsPosition = 0;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;Override
+public int copyPostingList(PostingsEnum postingsEnum, int numPostings) throws IOException {</p>
+<blockquote>
+<div><p>int pointer = currentPackedIntsPosition;</p>
+<p>int docId;</p>
+<dl>
+<dt>while ((docId = postingsEnum.nextDoc()) != DocIdSetIterator.NO_MORE_DOCS) {</dt><dd><p>assert docId &lt;= MAX_DOC_ID;
+int freq = postingsEnum.freq();
+assert freq &lt;= numPostings;</p>
+<dl>
+<dt>for (int i = 0; i &lt; freq; i++) {</dt><dd><p>packedDocIds.set(currentPackedIntsPosition, docId);
+if (packedPositions != null) {</p>
+<blockquote>
+<div><p>int position = postingsEnum.nextPosition();
+assert position &lt;= maxPosition;
+packedPositions.set(currentPackedIntsPosition, position);</p>
+</div></blockquote>
+<p>}
+currentPackedIntsPosition++;</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>return pointer;</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public EarlybirdPostingsEnum postings(</p>
+<blockquote>
+<div><blockquote>
+<div><p>int postingListPointer,
+int numPostings,
+int flags) throws IOException {</p>
+</div></blockquote>
+<dl>
+<dt>if (PostingsEnum.featureRequested(flags, PostingsEnum.POSITIONS) &amp;&amp; !omitPositions) {</dt><dd><p>assert packedPositions != null;
+return new LowDFPackedIntsPostingsEnum(</p>
+<blockquote>
+<div><p>packedDocIds.getReader(),
+packedPositions.getReader(),
+postingListPointer,
+numPostings);</p>
+</div></blockquote>
+</dd>
+<dt>} else {</dt><dd><dl class="simple">
+<dt>if (PostingsEnum.featureRequested(flags, PostingsEnum.POSITIONS) &amp;&amp; omitPositions) {</dt><dd><p>GETTING_POSITIONS_WITH_OMIT_POSITIONS.increment();</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>return new LowDFPackedIntsPostingsEnum(</dt><dd><p>packedDocIds.getReader(),
+null, // no positions
+postingListPointer,
+numPostings);</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;VisibleForTesting
+int getPackedIntsSize() {</p>
+<blockquote>
+<div><p>return packedDocIds.size();</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;VisibleForTesting
+int getMaxPosition() {</p>
+<blockquote>
+<div><p>return maxPosition;</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;VisibleForTesting
+boolean isOmitPositions() {</p>
+<blockquote>
+<div><p>return omitPositions;</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;SuppressWarnings(“unchecked”)
+&#64;Override
+public FlushHandler getFlushHandler() {</p>
+<blockquote>
+<div><p>return new FlushHandler(this);</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>static class FlushHandler extends Flushable.Handler&lt;LowDFPackedIntsPostingLists&gt; {</dt><dd><p>private static final String OMIT_POSITIONS_PROP_NAME = “omitPositions”;
+private static final String TOTAL_POSTINGS_PROP_NAME = “totalPostingsAcrossTerms”;
+private static final String MAX_POSITION_PROP_NAME = “maxPosition”;</p>
+<dl class="simple">
+<dt>public FlushHandler() {</dt><dd><p>super();</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public FlushHandler(LowDFPackedIntsPostingLists objectToFlush) {</dt><dd><p>super(objectToFlush);</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;Override
+protected void doFlush(FlushInfo flushInfo, DataSerializer out) throws IOException {</p>
+<blockquote>
+<div><p>LowDFPackedIntsPostingLists objectToFlush = getObjectToFlush();</p>
+<p>flushInfo.addBooleanProperty(OMIT_POSITIONS_PROP_NAME, objectToFlush.omitPositions);
+flushInfo.addIntProperty(TOTAL_POSTINGS_PROP_NAME, objectToFlush.totalPostingsAcrossTerms);
+flushInfo.addIntProperty(MAX_POSITION_PROP_NAME, objectToFlush.maxPosition);</p>
+<p>out.writePackedInts(objectToFlush.packedDocIds.getReader());</p>
+<dl class="simple">
+<dt>if (!objectToFlush.omitPositions) {</dt><dd><p>assert objectToFlush.packedPositions != null;
+out.writePackedInts(objectToFlush.packedPositions.getReader());</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+protected LowDFPackedIntsPostingLists doLoad(</p>
+<blockquote>
+<div><blockquote>
+<div><p>FlushInfo flushInfo,
+DataDeserializer in) throws IOException {</p>
+</div></blockquote>
+<p>boolean omitPositions = flushInfo.getBooleanProperty(OMIT_POSITIONS_PROP_NAME);
+int totalPostingsAcrossTerms = flushInfo.getIntProperty(TOTAL_POSTINGS_PROP_NAME);
+int maxPosition = flushInfo.getIntProperty(MAX_POSITION_PROP_NAME);</p>
+<p>PackedIntsWrapper packedDocIds = new PackedIntsWrapper(in.readPackedInts());</p>
+<p>PackedIntsWrapper packedPositions = null;
+if (!omitPositions) {</p>
+<blockquote>
+<div><p>packedPositions = new PackedIntsWrapper(in.readPackedInts());</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>return new LowDFPackedIntsPostingLists(</dt><dd><p>packedDocIds,
+packedPositions,
+omitPositions,
+totalPostingsAcrossTerms,
+maxPosition);</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/src/java/com/twitter/search/core/earlybird/index/inverted/LowDFPackedIntsPostingLists.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

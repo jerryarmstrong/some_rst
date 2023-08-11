@@ -1,0 +1,701 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../" id="documentation_options" src="../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.simclusters_v2.scalding</p>
+<p>import com.twitter.algebird.DecayedValue
+import com.twitter.algebird.DecayedValueMonoid
+import com.twitter.algebird.Monoid
+import com.twitter.algebird.Semigroup
+import com.twitter.conversions.DurationOps._
+import com.twitter.logging.Logger
+import com.twitter.scalding._
+import com.twitter.scalding.typed.UnsortedGrouped
+import com.twitter.scalding_internal.dalv2.DAL
+import com.twitter.scalding_internal.dalv2.DALWrite._
+import com.twitter.scalding_internal.dalv2.remote_access.ExplicitLocation
+import com.twitter.scalding_internal.dalv2.remote_access.ProcAtla
+import com.twitter.scalding_internal.job.TwitterExecutionApp
+import com.twitter.scalding_internal.job.analytics_batch._
+import com.twitter.simclusters_v2.common.TweetId
+import com.twitter.simclusters_v2.common.UserId
+import com.twitter.simclusters_v2.hdfs_sources._
+import com.twitter.simclusters_v2.scalding.common.Util
+import com.twitter.simclusters_v2.thriftscala.DecayedSums
+import com.twitter.simclusters_v2.thriftscala.EdgeWithDecayedWeights
+import com.twitter.timelineservice.thriftscala.ContextualizedFavoriteEvent
+import com.twitter.timelineservice.thriftscala.FavoriteEventUnion
+import com.twitter.usersource.snapshot.flat.UsersourceFlatScalaDataset
+import com.twitter.usersource.snapshot.flat.thriftscala.FlatUser
+import com.twitter.util.Time
+import twadoop_config.configuration.log_categories.group.timeline.TimelineServiceFavoritesScalaDataset</p>
+<p>sealed trait FavState</p>
+<p>object Fav extends FavState</p>
+<p>object UnFavWithoutPriorFav extends FavState</p>
+<p>object UnFavWithPriorFav extends FavState</p>
+<p>case class TimestampedFavState(favOrUnfav: FavState, timestampMillis: Long)</p>
+<dl>
+<dt>object TimestampedFavStateSemigroup extends Semigroup[TimestampedFavState] {</dt><dd><p>override def plus(left: TimestampedFavState, right: TimestampedFavState): TimestampedFavState = {</p>
+<blockquote>
+<div><dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Assigning to first, second ensures commutative property</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>val (first, second) = if (left.timestampMillis &lt; right.timestampMillis) {</dt><dd><p>(left, right)</p>
+</dd>
+<dt>} else {</dt><dd><p>(right, left)</p>
+</dd>
+</dl>
+<p>}
+(first.favOrUnfav, second.favOrUnfav) match {</p>
+<blockquote>
+<div><p>case (_, UnFavWithPriorFav) =&gt; second
+case (UnFavWithPriorFav, UnFavWithoutPriorFav) =&gt;</p>
+<blockquote>
+<div><p>TimestampedFavState(UnFavWithPriorFav, second.timestampMillis)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>case (Fav, UnFavWithoutPriorFav) =&gt;</dt><dd><p>TimestampedFavState(UnFavWithPriorFav, second.timestampMillis)</p>
+</dd>
+</dl>
+<p>case (UnFavWithoutPriorFav, UnFavWithoutPriorFav) =&gt; second
+case (_, Fav) =&gt; second</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>object UserUserFavGraph {</dt><dd><p>implicit val tz: java.util.TimeZone = DateOps.UTC
+// setting the prune threshold in the monoid below to 0.0, since we want to do our own pruning
+// outside the monoid, primarily to be able to count how many scores are pruned.
+implicit val dvMonoid: Monoid[DecayedValue] = DecayedValueMonoid(0.0)
+implicit val lfvSemigroup: Semigroup[TimestampedFavState] = TimestampedFavStateSemigroup</p>
+<dl>
+<dt>def getSummedFavGraph(</dt><dd><p>previousGraphOpt: Option[TypedPipe[EdgeWithDecayedWeights]],
+newFavsDateRange: DateRange,
+halfLivesInDays: List[Int],
+minScoreToKeep: Double</p>
+</dd>
+<dt>)(</dt><dd><p>implicit uniqueID: UniqueID</p>
+</dd>
+<dt>): TypedPipe[EdgeWithDecayedWeights] = {</dt><dd><p>val newFavs = DAL.read(TimelineServiceFavoritesScalaDataset, newFavsDateRange).toTypedPipe
+val endTime = Time.fromMilliseconds(newFavsDateRange.end.timestamp)
+val userSource =</p>
+<blockquote>
+<div><p>DAL.readMostRecentSnapshotNoOlderThan(UsersourceFlatScalaDataset, Days(7)).toTypedPipe</p>
+</div></blockquote>
+<dl class="simple">
+<dt>getSummedFavGraphWithValidUsers(</dt><dd><p>previousGraphOpt,
+newFavs,
+halfLivesInDays,
+endTime,
+minScoreToKeep,
+userSource</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def getSummedFavGraphWithValidUsers(</dt><dd><p>previousGraphOpt: Option[TypedPipe[EdgeWithDecayedWeights]],
+newFavs: TypedPipe[ContextualizedFavoriteEvent],
+halfLivesInDays: List[Int],
+endTime: Time,
+minScoreToKeep: Double,
+userSource: TypedPipe[FlatUser]</p>
+</dd>
+<dt>)(</dt><dd><p>implicit uniqueID: UniqueID</p>
+</dd>
+<dt>): TypedPipe[EdgeWithDecayedWeights] = {</dt><dd><dl class="simple">
+<dt>val fullGraph = getSummedFavGraph(</dt><dd><p>previousGraphOpt,
+newFavs,
+halfLivesInDays,
+endTime,
+minScoreToKeep</p>
+</dd>
+</dl>
+<p>)
+removeDeactivedOrSuspendedUsers(fullGraph, userSource)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def processRawFavEvents(</dt><dd><p>favsOrUnfavs: TypedPipe[ContextualizedFavoriteEvent]</p>
+</dd>
+<dt>)(</dt><dd><p>implicit uniqueID: UniqueID</p>
+</dd>
+<dt>): TypedPipe[((UserId, TweetId, UserId), TimestampedFavState)] = {</dt><dd><p>val numFavsBeforeUniq = Stat(“num_favs_before_uniq”)
+val numUnFavsBeforeUniq = Stat(“num_unfavs_before_uniq”)
+val numFinalFavs = Stat(“num_final_favs”)
+val numUnFavsWithPriorFavs = Stat(“num_unfavs_with_prior_favs”)
+val numUnFavsWithoutPriorFavs = Stat(“num_unfavs_without_prior_favs”)</p>
+<dl>
+<dt>favsOrUnfavs</dt><dd><dl>
+<dt>.flatMap { cfe: ContextualizedFavoriteEvent =&gt;</dt><dd><dl>
+<dt>cfe.event match {</dt><dd><dl>
+<dt>case FavoriteEventUnion.Favorite(fav) =&gt;</dt><dd><p>numFavsBeforeUniq.inc()
+Some(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>(</dt><dd><p>(fav.userId, fav.tweetId, fav.tweetUserId),
+TimestampedFavState(Fav, fav.eventTimeMs)))</p>
+</dd>
+</dl>
+</div></blockquote>
+</dd>
+<dt>case FavoriteEventUnion.Unfavorite(unfav) =&gt;</dt><dd><p>numUnFavsBeforeUniq.inc()
+Some(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>(</dt><dd><p>(unfav.userId, unfav.tweetId, unfav.tweetUserId),
+TimestampedFavState(UnFavWithoutPriorFav, unfav.eventTimeMs)))</p>
+</dd>
+</dl>
+</div></blockquote>
+</dd>
+</dl>
+<p>case _ =&gt; None</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}
+.sumByKey
+.toTypedPipe
+.flatMap {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case fav &#64; (_, TimestampedFavState(Fav, _)) =&gt;</dt><dd><p>numFinalFavs.inc()
+Some(fav)</p>
+</dd>
+<dt>case unfav &#64; (_, TimestampedFavState(UnFavWithoutPriorFav, _)) =&gt;</dt><dd><p>numUnFavsWithoutPriorFavs.inc()
+Some(unfav)</p>
+</dd>
+<dt>case (_, TimestampedFavState(UnFavWithPriorFav, _)) =&gt;</dt><dd><p>numUnFavsWithPriorFavs.inc()
+None</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private def getGraphFromNewFavsOnly(</dt><dd><p>newFavs: TypedPipe[ContextualizedFavoriteEvent],
+halfLivesInDays: List[Int],
+endTime: Time</p>
+</dd>
+<dt>)(</dt><dd><p>implicit uniqueID: UniqueID</p>
+</dd>
+</dl>
+<p>): UnsortedGrouped[(UserId, UserId), Map[Int, DecayedValue]] = {</p>
+<blockquote>
+<div><p>val numEventsNewerThanEndTime = Stat(“num_events_newer_than_endtime”)</p>
+<dl>
+<dt>processRawFavEvents(newFavs).map {</dt><dd><dl>
+<dt>case ((userId, _, authorId), TimestampedFavState(favOrUnfav, timestampMillis)) =&gt;</dt><dd><dl>
+<dt>val halfLifeInDaysToScores = halfLivesInDays.map { halfLifeInDays =&gt;</dt><dd><p>val givenTime = Time.fromMilliseconds(timestampMillis)
+if (givenTime &gt; endTime) {</p>
+<blockquote>
+<div><p>// technically this should never happen, and even if it did happen,
+// we shouldn’t have to care, but I’m noticing that the weights aren’t being computed
+// correctly for events that spilled over the edge
+numEventsNewerThanEndTime.inc()</p>
+</div></blockquote>
+<p>}
+val timeInSeconds = math.min(givenTime.inSeconds, endTime.inSeconds)
+val value = favOrUnfav match {</p>
+<blockquote>
+<div><p>case Fav =&gt; 1.0
+case UnFavWithoutPriorFav =&gt; -1.0
+case UnFavWithPriorFav =&gt; 0.0</p>
+</div></blockquote>
+<p>}
+val decayedValue = DecayedValue.build(value, timeInSeconds, halfLifeInDays.days.inSeconds)
+halfLifeInDays -&gt; decayedValue</p>
+</dd>
+</dl>
+<p>}
+((userId, authorId), halfLifeInDaysToScores.toMap)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}.sumByKey</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>def getSummedFavGraph(</dt><dd><p>previousGraphOpt: Option[TypedPipe[EdgeWithDecayedWeights]],
+newFavs: TypedPipe[ContextualizedFavoriteEvent],
+halfLivesInDays: List[Int],
+endTime: Time,
+minScoreToKeep: Double</p>
+</dd>
+<dt>)(</dt><dd><p>implicit uniqueID: UniqueID</p>
+</dd>
+<dt>): TypedPipe[EdgeWithDecayedWeights] = {</dt><dd><p>val prunedScoresCounter = Stat(“num_pruned_scores”)
+val negativeScoresCounter = Stat(“num_negative_scores”)
+val prunedEdgesCounter = Stat(“num_pruned_edges”)
+val keptEdgesCounter = Stat(“num_kept_edges”)
+val keptScoresCounter = Stat(“num_kept_scores”)
+val numCommonEdges = Stat(“num_common_edges”)
+val numNewEdges = Stat(“num_new_edges”)
+val numOldEdges = Stat(“num_old_edges”)</p>
+<dl>
+<dt>val unprunedOuterJoinedGraph = previousGraphOpt match {</dt><dd><dl>
+<dt>case Some(previousGraph) =&gt;</dt><dd><dl>
+<dt>previousGraph</dt><dd><dl>
+<dt>.map {</dt><dd><dl>
+<dt>case EdgeWithDecayedWeights(srcId, destId, decayedSums) =&gt;</dt><dd><p>val ts = decayedSums.lastUpdatedTimestamp.toDouble / 1000
+val map = decayedSums.halfLifeInDaysToDecayedSums.map {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case (halfLifeInDays, value) =&gt;</dt><dd><p>halfLifeInDays -&gt; DecayedValue.build(value, ts, halfLifeInDays.days.inSeconds)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}.toMap
+((srcId, destId), map)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+.outerJoin(getGraphFromNewFavsOnly(newFavs, halfLivesInDays, endTime))
+.toTypedPipe</p>
+</dd>
+</dl>
+</dd>
+<dt>case None =&gt;</dt><dd><dl>
+<dt>getGraphFromNewFavsOnly(newFavs, halfLivesInDays, endTime).toTypedPipe</dt><dd><dl class="simple">
+<dt>.map {</dt><dd><dl class="simple">
+<dt>case ((srcId, destId), scoreMap) =&gt;</dt><dd><p>((srcId, destId), (None, Some(scoreMap)))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>unprunedOuterJoinedGraph</dt><dd><dl>
+<dt>.flatMap {</dt><dd><dl>
+<dt>case ((srcId, destId), (previousScoreMapOpt, newScoreMapOpt)) =&gt;</dt><dd><dl class="simple">
+<dt>val latestTimeDecayedValues = halfLivesInDays.map { hlInDays =&gt;</dt><dd><p>hlInDays -&gt; DecayedValue.build(0, endTime.inSeconds, hlInDays.days.inSeconds)</p>
+</dd>
+</dl>
+<p>}.toMap</p>
+<dl class="simple">
+<dt>val updatedDecayedValues =</dt><dd><dl class="simple">
+<dt>Monoid.sum(</dt><dd><p>List(previousScoreMapOpt, newScoreMapOpt, Some(latestTimeDecayedValues)).flatten)</p>
+</dd>
+</dl>
+</dd>
+<dt>(previousScoreMapOpt, newScoreMapOpt) match {</dt><dd><p>case (Some(pm), None) =&gt; numOldEdges.inc()
+case (None, Some(nm)) =&gt; numNewEdges.inc()
+case (Some(pm), Some(nm)) =&gt; numCommonEdges.inc()</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>val prunedMap = updatedDecayedValues.flatMap {</dt><dd><dl>
+<dt>case (hlInDays, decayedValue) =&gt;</dt><dd><dl>
+<dt>if (decayedValue.value &lt; minScoreToKeep) {</dt><dd><dl class="simple">
+<dt>if (decayedValue.value &lt; 0) {</dt><dd><p>negativeScoresCounter.inc()</p>
+</dd>
+</dl>
+<p>}
+prunedScoresCounter.inc()
+None</p>
+</dd>
+<dt>} else {</dt><dd><p>keptScoresCounter.inc()
+Some((hlInDays, decayedValue.value))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>if (prunedMap.nonEmpty) {</dt><dd><p>keptEdgesCounter.inc()
+Some(EdgeWithDecayedWeights(srcId, destId, DecayedSums(endTime.inMillis, prunedMap)))</p>
+</dd>
+<dt>} else {</dt><dd><p>prunedEdgesCounter.inc()
+None</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def removeDeactivedOrSuspendedUsers(</dt><dd><p>full: TypedPipe[EdgeWithDecayedWeights],
+userSource: TypedPipe[FlatUser]</p>
+</dd>
+<dt>)(</dt><dd><p>implicit uniqueID: UniqueID</p>
+</dd>
+<dt>): TypedPipe[EdgeWithDecayedWeights] = {</dt><dd><p>val numValidUsers = Stat(“num_valid_users”)
+val numInvalidUsers = Stat(“num_invalid_users”)
+val numEdgesBeforeUsersourceJoin = Stat(“num_edges_before_join_with_usersource”)
+val numEdgesWithValidSource = Stat(“num_edges_with_valid_source”)
+val numEdgesWithValidSourceAndDest = Stat(“num_edges_with_valid_source_and_dest”)</p>
+<dl>
+<dt>val validUsers = userSource.flatMap {</dt><dd><dl>
+<dt>case flatUser</dt><dd><blockquote>
+<div><dl class="simple">
+<dt>if !flatUser.deactivated.contains(true) &amp;&amp; !flatUser.suspended.contains(true)</dt><dd><p>&amp;&amp; flatUser.id.nonEmpty =&gt;</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>numValidUsers.inc()
+flatUser.id</p>
+</dd>
+<dt>case _ =&gt;</dt><dd><p>numInvalidUsers.inc()
+None</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}.forceToDisk // avoid reading in the whole of userSource for both of the joins below</p>
+<dl class="simple">
+<dt>val toJoin = full.map { edge =&gt;</dt><dd><p>numEdgesBeforeUsersourceJoin.inc()
+(edge.sourceId, edge)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>toJoin</dt><dd><p>.join(validUsers.asKeys)
+.map {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case (_, (edge, _)) =&gt;</dt><dd><p>numEdgesWithValidSource.inc()
+(edge.destinationId, edge)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+.join(validUsers.asKeys)
+.map {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case (_, (edge, _)) =&gt;</dt><dd><p>numEdgesWithValidSourceAndDest.inc()
+edge</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>./bazel bundle src/scala/com/twitter/simclusters_v2/scalding:fav_graph_adhoc &amp;&amp; </p></li>
+<li><p>oscar hdfs –user frigate –host hadoopnest1.atla.twitter.com –bundle fav_graph_adhoc </p></li>
+<li><p>–tool com.twitter.simclusters_v2.scalding.UserUserFavGraphAdhoc –screen –screen-detached </p></li>
+<li><p>–tee logs/userUserFavGraphAdhoc_20170101 – –date 2017-01-01 –halfLivesInDays 14 50 100 </p></li>
+<li><p>–outputDir /user/frigate/your_ldap/userUserFavGraphAdhoc_20170101_hl14_50_100</p></li>
+<li></li>
+<li><p>./bazel bundle src/scala/com/twitter/simclusters_v2/scalding:fav_graph_adhoc &amp;&amp; </p></li>
+<li><p>oscar hdfs –user frigate –host hadoopnest1.atla.twitter.com –bundle fav_graph_adhoc </p></li>
+<li><p>–tool com.twitter.simclusters_v2.scalding.UserUserFavGraphAdhoc –screen –screen-detached </p></li>
+<li><p>–tee logs/userUserFavGraphAdhoc_20170102_addPrevious20170101 – –date 2017-01-02 </p></li>
+<li><p>–previousGraphDir /user/frigate/your_ldap/userUserFavGraphAdhoc_20170101_hl14_50_100 </p></li>
+<li><p>–halfLivesInDays 14 50 100 </p></li>
+<li><p>–outputDir /user/frigate/your_ldap/userUserFavGraphAdhoc_20170102_addPrevious20170101_hl14_50_100</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>object UserUserFavGraphAdhoc extends TwitterExecutionApp {</dt><dd><p>implicit val tz: java.util.TimeZone = DateOps.UTC
+implicit val dp = DateParser.default
+val log = Logger()</p>
+<dl>
+<dt>def job: Execution[Unit] =</dt><dd><dl>
+<dt>Execution.getConfigMode.flatMap {</dt><dd><dl>
+<dt>case (config, mode) =&gt;</dt><dd><dl>
+<dt>Execution.withId { implicit uniqueId =&gt;</dt><dd><p>val args = config.getArgs
+val previousGraphOpt = args.optional(“previousGraphDir”).map { dir =&gt;</p>
+<blockquote>
+<div><p>TypedPipe.from(EdgeWithDecayedWtsFixedPathSource(dir))</p>
+</div></blockquote>
+<p>}
+val favsDateRange = DateRange.parse(args.list(“date”))
+val halfLives = args.list(“halfLivesInDays”).map(_.toInt)
+val minScoreToKeep = args.double(“minScoreToKeep”, 1e-5)
+val outputDir = args(“outputDir”)
+Util.printCounters(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>UserUserFavGraph</dt><dd><p>.getSummedFavGraph(previousGraphOpt, favsDateRange, halfLives, minScoreToKeep)
+.writeExecution(EdgeWithDecayedWtsFixedPathSource(outputDir))</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>$ capesospy-v2 update –start_cron fav_graph src/scala/com/twitter/simclusters_v2/capesos_config/atla_proc.yaml</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>object UserUserFavGraphBatch extends TwitterScheduledExecutionApp {</dt><dd><p>private val firstTime: String = “2017-01-01”
+implicit val tz = DateOps.UTC
+implicit val parser = DateParser.default
+private val batchIncrement: Duration = Days(2)
+private val firstStartDate = DateRange.parse(firstTime).start</p>
+<p>val outputPath: String = “/user/cassowary/processed/user_user_fav_graph”
+val log = Logger()</p>
+<dl class="simple">
+<dt>private val execArgs = AnalyticsBatchExecutionArgs(</dt><dd><p>batchDesc = BatchDescription(this.getClass.getName),
+firstTime = BatchFirstTime(RichDate(firstTime)),
+lastTime = None,
+batchIncrement = BatchIncrement(batchIncrement)</p>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>override def scheduledJob: Execution[Unit] = AnalyticsBatchExecution(execArgs) { dateRange =&gt;</dt><dd><dl>
+<dt>Execution.withId { implicit uniqueId =&gt;</dt><dd><dl>
+<dt>Execution.withArgs { args =&gt;</dt><dd><dl>
+<dt>val previousGraph = if (dateRange.start.timestamp == firstStartDate.timestamp) {</dt><dd><p>log.info(“Looks like this is the first time, setting previousGraph to None”)
+None</p>
+</dd>
+<dt>} else {</dt><dd><dl class="simple">
+<dt>Some(</dt><dd><dl class="simple">
+<dt>DAL</dt><dd><p>.readMostRecentSnapshot(UserUserFavGraphScalaDataset, dateRange - batchIncrement)
+.toTypedPipe</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}
+val halfLives = args.list(“halfLivesInDays”).map(_.toInt)
+val minScoreToKeep = args.double(“minScoreToKeep”, 1e-5)
+Util.printCounters(</p>
+<blockquote>
+<div><dl>
+<dt>UserUserFavGraph</dt><dd><p>.getSummedFavGraph(previousGraph, dateRange, halfLives, minScoreToKeep)
+.writeDALSnapshotExecution(</p>
+<blockquote>
+<div><p>UserUserFavGraphScalaDataset,
+D.Daily,
+D.Suffix(outputPath),
+D.EBLzo(),
+dateRange.end)</p>
+</div></blockquote>
+</dd>
+</dl>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>object DumpFavGraphAdhoc extends TwitterExecutionApp {</dt><dd><p>implicit val tz: java.util.TimeZone = DateOps.UTC</p>
+<dl>
+<dt>def job: Execution[Unit] =</dt><dd><dl>
+<dt>Execution.getConfigMode.flatMap {</dt><dd><dl>
+<dt>case (config, mode) =&gt;</dt><dd><dl>
+<dt>Execution.withId { implicit uniqueId =&gt;</dt><dd><dl>
+<dt>val favGraph = DAL</dt><dd><p>.readMostRecentSnapshotNoOlderThan(UserUserFavGraphScalaDataset, Days(10))
+.withRemoteReadPolicy(ExplicitLocation(ProcAtla))
+.toTypedPipe
+.collect {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case edge if edge.weights.halfLifeInDaysToDecayedSums.contains(100) =&gt;</dt><dd><p>(edge.sourceId, edge.destinationId, edge.weights.halfLifeInDaysToDecayedSums(100))</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+<dt>Execution</dt><dd><dl>
+<dt>.sequence(</dt><dd><dl>
+<dt>Seq(</dt><dd><dl class="simple">
+<dt>Util.printSummaryOfNumericColumn(</dt><dd><p>favGraph.map(_._3),
+Some(“Weight”)</p>
+</dd>
+</dl>
+<p>),
+Util.printSummaryOfNumericColumn(</p>
+<blockquote>
+<div><p>favGraph.map(c =&gt; math.log10(10.0 + c._3)),
+Some(“Weight_Log_P10”)</p>
+</div></blockquote>
+<p>),
+Util.printSummaryOfNumericColumn(</p>
+<blockquote>
+<div><p>favGraph.map(c =&gt; math.log10(1.0 + c._3)),
+Some(“Weight_Log_P1”)</p>
+</div></blockquote>
+<p>),
+Util.printSummaryOfCategoricalColumn(favGraph.map(_._1), Some(“SourceId”)),
+Util.printSummaryOfCategoricalColumn(favGraph.map(_._2), Some(“DestId”))</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>).flatMap { summarySeq =&gt;</dt><dd><p>println(summarySeq.mkString(”n”))
+Execution.unit</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../_sources/src/scala/com/twitter/simclusters_v2/scalding/UserUserFavGraph.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

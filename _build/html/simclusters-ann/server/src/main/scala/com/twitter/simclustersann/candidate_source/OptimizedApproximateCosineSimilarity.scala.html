@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.simclustersann.candidate_source</p>
+<p>import com.twitter.simclusters_v2.common.ClusterId
+import com.twitter.simclusters_v2.common.SimClustersEmbedding
+import com.twitter.simclusters_v2.common.TweetId
+import com.twitter.simclusters_v2.thriftscala.InternalId
+import com.twitter.simclusters_v2.thriftscala.SimClustersEmbeddingId
+import com.twitter.simclustersann.thriftscala.ScoringAlgorithm
+import com.twitter.simclustersann.thriftscala.SimClustersANNConfig
+import com.twitter.snowflake.id.SnowflakeId
+import com.twitter.util.Duration
+import com.twitter.util.Time</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Compared with ApproximateCosineSimilarity, this implementation:</p></li>
+<li><ul>
+<li><p>moves some computation aroudn to reduce allocations</p></li>
+</ul>
+</li>
+<li><ul>
+<li><p>uses a single hashmap to store both scores and normalization coefficients</p></li>
+</ul>
+</li>
+<li><ul>
+<li><p>uses some java collections in place of scala ones</p></li>
+</ul>
+</li>
+<li><p>Testing is still in progress, but this implementation shows significant (&gt; 2x) improvements in</p></li>
+<li><p>CPU utilization and allocations with 800 tweets per cluster.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+</dl>
+<p>object OptimizedApproximateCosineSimilarity extends ApproximateCosineSimilarity {</p>
+<blockquote>
+<div><p>final val InitialCandidateMapSize = 16384
+val MaxNumResultsUpperBound = 1000
+final val MaxTweetCandidateAgeUpperBound = 175200</p>
+<dl>
+<dt>private def parseTweetId(embeddingId: SimClustersEmbeddingId): Option[TweetId] = {</dt><dd><dl class="simple">
+<dt>embeddingId.internalId match {</dt><dd><dl class="simple">
+<dt>case InternalId.TweetId(tweetId) =&gt;</dt><dd><p>Some(tweetId)</p>
+</dd>
+<dt>case _ =&gt;</dt><dd><p>None</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>override def apply(</dt><dd><p>sourceEmbedding: SimClustersEmbedding,
+sourceEmbeddingId: SimClustersEmbeddingId,
+config: SimClustersANNConfig,
+candidateScoresStat: Int =&gt; Unit,
+clusterTweetsMap: Map[ClusterId, Option[Seq[(TweetId, Double)]]] = Map.empty,
+clusterTweetsMapArray: Map[ClusterId, Option[Array[(TweetId, Double)]]] = Map.empty</p>
+</dd>
+<dt>): Seq[ScoredTweet] = {</dt><dd><p>val now = Time.now
+val earliestTweetId =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (config.maxTweetCandidateAgeHours &gt;= MaxTweetCandidateAgeUpperBound)</dt><dd><p>0L // Disable max tweet age filter</p>
+</dd>
+<dt>else</dt><dd><p>SnowflakeId.firstIdFor(now - Duration.fromHours(config.maxTweetCandidateAgeHours))</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl class="simple">
+<dt>val latestTweetId =</dt><dd><p>SnowflakeId.firstIdFor(now - Duration.fromHours(config.minTweetCandidateAgeHours))</p>
+</dd>
+</dl>
+<p>val candidateScoresMap = new java.util.HashMap[Long, (Double, Double)](InitialCandidateMapSize)</p>
+<p>val sourceTweetId = parseTweetId(sourceEmbeddingId).getOrElse(0L)</p>
+<dl>
+<dt>clusterTweetsMap.foreach {</dt><dd><dl>
+<dt>case (clusterId, Some(tweetScores)) if sourceEmbedding.contains(clusterId) =&gt;</dt><dd><p>val sourceClusterScore = sourceEmbedding.getOrElse(clusterId)</p>
+<dl>
+<dt>for (i &lt;- 0 until Math.min(tweetScores.size, config.maxTopTweetsPerCluster)) {</dt><dd><p>val (tweetId, score) = tweetScores(i)</p>
+<dl>
+<dt>if (tweetId &gt;= earliestTweetId &amp;&amp;</dt><dd><p>tweetId &lt;= latestTweetId &amp;&amp;
+tweetId != sourceTweetId) {</p>
+<p>val scores = candidateScoresMap.getOrDefault(tweetId, (0.0, 0.0))
+val newScores = (</p>
+<blockquote>
+<div><p>scores._1 + score * sourceClusterScore,
+scores._2 + score * score,</p>
+</div></blockquote>
+<p>)
+candidateScoresMap.put(tweetId, newScores)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>case _ =&gt; ()</p>
+</dd>
+</dl>
+<p>}</p>
+<p>candidateScoresStat(candidateScoresMap.size)</p>
+<dl class="simple">
+<dt>val normFn: (Long, (Double, Double)) =&gt; (Long, Double) = config.annAlgorithm match {</dt><dd><dl class="simple">
+<dt>case ScoringAlgorithm.LogCosineSimilarity =&gt;</dt><dd><dl class="simple">
+<dt>(candidateId: Long, score: (Double, Double)) =&gt;</dt><dd><p>candidateId -&gt; score._1 / sourceEmbedding.logNorm / math.log(1 + score._2)</p>
+</dd>
+</dl>
+</dd>
+<dt>case ScoringAlgorithm.CosineSimilarity =&gt;</dt><dd><dl class="simple">
+<dt>(candidateId: Long, score: (Double, Double)) =&gt;</dt><dd><p>candidateId -&gt; score._1 / sourceEmbedding.l2norm / math.sqrt(score._2)</p>
+</dd>
+</dl>
+</dd>
+<dt>case ScoringAlgorithm.CosineSimilarityNoSourceEmbeddingNormalization =&gt;</dt><dd><dl class="simple">
+<dt>(candidateId: Long, score: (Double, Double)) =&gt;</dt><dd><p>candidateId -&gt; score._1 / math.sqrt(score._2)</p>
+</dd>
+</dl>
+</dd>
+<dt>case ScoringAlgorithm.DotProduct =&gt;</dt><dd><p>(candidateId: Long, score: (Double, Double)) =&gt; (candidateId, score._1)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>val scoredTweets: java.util.ArrayList[(Long, Double)] =</dt><dd><p>new java.util.ArrayList(candidateScoresMap.size)</p>
+</dd>
+</dl>
+<p>val it = candidateScoresMap.entrySet().iterator()
+while (it.hasNext) {</p>
+<blockquote>
+<div><p>val mapEntry = it.next()
+val normedScore = normFn(mapEntry.getKey, mapEntry.getValue)
+if (normedScore._2 &gt;= config.minScore)</p>
+<blockquote>
+<div><p>scoredTweets.add(normedScore)</p>
+</div></blockquote>
+</div></blockquote>
+<p>}
+import scala.collection.JavaConverters._</p>
+<dl class="simple">
+<dt>scoredTweets.asScala</dt><dd><p>.sortBy(-_._2)
+.take(Math.min(config.maxNumResults, MaxNumResultsUpperBound))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/simclusters-ann/server/src/main/scala/com/twitter/simclustersann/candidate_source/OptimizedApproximateCosineSimilarity.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

@@ -1,0 +1,748 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../" id="documentation_options" src="../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.earlybird.search.queries;</p>
+<p>import java.io.IOException;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
+import javax.annotation.Nullable;</p>
+<p>import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Preconditions;
+import com.google.common.collect.Lists;
+import com.google.common.collect.Maps;</p>
+<p>import org.apache.lucene.index.LeafReaderContext;
+import org.apache.lucene.index.Term;
+import org.apache.lucene.index.Terms;
+import org.apache.lucene.index.TermsEnum;
+import org.apache.lucene.search.BooleanClause;
+import org.apache.lucene.search.BooleanQuery;
+import org.apache.lucene.search.BulkScorer;
+import org.apache.lucene.search.ConstantScoreQuery;
+import org.apache.lucene.search.ConstantScoreWeight;
+import org.apache.lucene.search.IndexSearcher;
+import org.apache.lucene.search.Query;
+import org.apache.lucene.search.Scorer;
+import org.apache.lucene.search.ScoreMode;
+import org.apache.lucene.search.Weight;
+import org.apache.lucene.util.BytesRef;</p>
+<p>import com.twitter.decider.Decider;
+import com.twitter.search.common.decider.DeciderUtil;
+import com.twitter.search.common.metrics.SearchCounter;
+import com.twitter.search.common.metrics.SearchTimer;
+import com.twitter.search.common.metrics.SearchTimerStats;
+import com.twitter.search.common.query.HitAttributeHelper;
+import com.twitter.search.common.query.IDDisjunctionQuery;
+import com.twitter.search.common.schema.base.ImmutableSchemaInterface;
+import com.twitter.search.common.schema.base.IndexedNumericFieldSettings;
+import com.twitter.search.common.schema.base.Schema;
+import com.twitter.search.common.schema.earlybird.EarlybirdCluster;
+import com.twitter.search.common.search.termination.QueryTimeout;
+import com.twitter.search.common.util.analysis.LongTermAttributeImpl;
+import com.twitter.search.common.util.analysis.SortableLongTermAttributeImpl;
+import com.twitter.search.core.earlybird.index.EarlybirdIndexSegmentAtomicReader;
+import com.twitter.search.core.earlybird.index.EarlybirdIndexSegmentData;
+import com.twitter.search.core.earlybird.index.inverted.InvertedIndex;
+import com.twitter.search.core.earlybird.index.inverted.MultiSegmentTermDictionary;
+import com.twitter.search.earlybird.partition.MultiSegmentTermDictionaryManager;
+import com.twitter.search.earlybird.queryparser.EarlybirdQueryHelper;
+import com.twitter.search.queryparser.query.QueryParserException;</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>A variant of a multi-term ID disjunction query (similar to <a class="reference external" href="mailto:{&#37;&#52;&#48;link">{<span>&#64;</span>link</a> UserIdMultiSegmentQuery}),</p></li>
+<li><p>that also uses a <a class="reference external" href="mailto:{&#37;&#52;&#48;link">{<span>&#64;</span>link</a> MultiSegmentTermDictionary} where available, for more efficient</p></li>
+<li><p>term lookups for queries that span multiple segments.</p></li>
+<li></li>
+<li><p>By default, a IDDisjunctionQuery (or Lucene’s MultiTermQuery), does a term dictionary lookup</p></li>
+<li><p>for all of the terms in its disjunction, and it does it once for each segment (or AtomicReader)</p></li>
+<li><p>that the query is searching.</p></li>
+<li><p>This means that when the term dictionary is large, and the term lookups are expensive, and when</p></li>
+<li><p>we are searching multiple segments, the query needs to make num_terms * num_segments expensive</p></li>
+<li><p>term dictionary lookups.</p></li>
+<li></li>
+<li><p>With the help of a MultiSegmentTermDictionary, this multi-term disjunction query implementation</p></li>
+<li><p>only does one lookup for all of the segments managed by the MultiSegmentTermDictionary.</p></li>
+<li><p>If a segment is not supported by the MultiSegmentTermDictionary (e.g. if it’s not optimized yet),</p></li>
+<li><p>a regular lookup in that segment’s term dictionary will be performed.</p></li>
+<li></li>
+<li><p>Usually, we will make ‘num_terms’ lookups in the current, un-optimized segment, and then if</p></li>
+<li><p>more segments need to be searched, we will make another ‘num_terms’ lookups, once for all of</p></li>
+<li><p>the remaining segments.</p></li>
+<li></li>
+<li><p>When performing lookups in the MultiSegmentTermDictionary, for each supported segment, we save</p></li>
+<li><p>a list of termIds from that segment for all the searched terms that appear in that segment.</p></li>
+<li></li>
+<li><p>For example, when querying for UserIdMultiSegmentQuery with user ids: {1L, 2L, 3L} and</p></li>
+<li><p>segments: {1, 2}, where segment 1 has user ids {1L, 2L} indexed under termIds {100, 200},</p></li>
+<li><p>and segment 2 has user ids {1L, 2L, 3L} indexed under termIds {200, 300, 400}, we will build</p></li>
+<li><p>up the following map once:</p></li>
+<li><p>segment1 -&gt; [100, 200]</p></li>
+<li><p>segment2 -&gt; [200, 300, 400]</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>public class UserIdMultiSegmentQuery extends Query {</dt><dd><p>&#64;VisibleForTesting
+public static final SearchTimerStats TERM_LOOKUP_STATS =</p>
+<blockquote>
+<div><p>SearchTimerStats.export(“multi_segment_query_term_lookup”, TimeUnit.NANOSECONDS, false);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>public static final SearchTimerStats QUERY_FROM_PRECOMPUTED =</dt><dd><p>SearchTimerStats.export(“multi_segment_query_from_precomputed”, TimeUnit.NANOSECONDS, false);</p>
+</dd>
+<dt>public static final SearchTimerStats QUERY_REGULAR =</dt><dd><p>SearchTimerStats.export(“multi_segment_query_regular”, TimeUnit.NANOSECONDS, false);</p>
+</dd>
+</dl>
+<p>&#64;VisibleForTesting
+public static final SearchCounter USED_MULTI_SEGMENT_TERM_DICTIONARY_COUNT = SearchCounter.export(</p>
+<blockquote>
+<div><p>“user_id_multi_segment_query_used_multi_segment_term_dictionary_count”);</p>
+</div></blockquote>
+<p>&#64;VisibleForTesting
+public static final SearchCounter USED_ORIGINAL_TERM_DICTIONARY_COUNT = SearchCounter.export(</p>
+<blockquote>
+<div><p>“user_id_multi_segment_query_used_original_term_dictionary_count”);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>private static final SearchCounter NEW_QUERY_COUNT =</dt><dd><p>SearchCounter.export(“user_id_multi_segment_new_query_count”);</p>
+</dd>
+<dt>private static final SearchCounter OLD_QUERY_COUNT =</dt><dd><p>SearchCounter.export(“user_id_multi_segment_old_query_count”);</p>
+</dd>
+</dl>
+<p>private static final HashMap&lt;String, SearchCounter&gt; QUERY_COUNT_BY_QUERY_NAME = new HashMap&lt;&gt;();
+private static final HashMap&lt;String, SearchCounter&gt; QUERY_COUNT_BY_FIELD_NAME = new HashMap&lt;&gt;();</p>
+<p>private static final String DECIDER_KEY_PREFIX = “<a href="#id9"><span class="problematic" id="id10">use_multi_segment_id_disjunction_queries_in_</span></a>”;</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Returns a new user ID disjunction query.</p></li>
+<li></li>
+<li><p>&#64;param ids The user IDs.</p></li>
+<li><p>&#64;param field The field storing the user IDs.</p></li>
+<li><p>&#64;param schemaSnapshot A snapshot of earlybird’s schema.</p></li>
+<li><p>&#64;param multiSegmentTermDictionaryManager The manager for the term dictionaries that span</p></li>
+<li><p>multiple segments.</p></li>
+<li><p>&#64;param decider The decider.</p></li>
+<li><p>&#64;param earlybirdCluster The earlybird cluster.</p></li>
+<li><p>&#64;param ranks The hit attribution ranks to be assigned to every user ID.</p></li>
+<li><p>&#64;param hitAttributeHelper The helper that tracks hit attributions.</p></li>
+<li><p>&#64;param queryTimeout The timeout to be enforced on this query.</p></li>
+<li><p>&#64;return A new user ID disjunction query.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>public static Query createIdDisjunctionQuery(</dt><dd><blockquote>
+<div><p>String queryName,
+List&lt;Long&gt; ids,
+String field,
+ImmutableSchemaInterface schemaSnapshot,
+MultiSegmentTermDictionaryManager multiSegmentTermDictionaryManager,
+Decider decider,
+EarlybirdCluster earlybirdCluster,
+List&lt;Integer&gt; ranks,
+&#64;Nullable HitAttributeHelper hitAttributeHelper,
+&#64;Nullable QueryTimeout queryTimeout) throws QueryParserException {</p>
+</div></blockquote>
+<dl>
+<dt>QUERY_COUNT_BY_QUERY_NAME.computeIfAbsent(queryName, name -&gt;</dt><dd><p>SearchCounter.export(”<a href="#id11"><span class="problematic" id="id12">multi_segment_query_name_</span></a>” + name)).increment();</p>
+</dd>
+<dt>QUERY_COUNT_BY_FIELD_NAME.computeIfAbsent(field, name -&gt;</dt><dd><p>SearchCounter.export(”<a href="#id13"><span class="problematic" id="id14">multi_segment_query_count_for_field_</span></a>” + name)).increment();</p>
+</dd>
+<dt>if (DeciderUtil.isAvailableForRandomRecipient(decider, getDeciderName(earlybirdCluster))) {</dt><dd><p>NEW_QUERY_COUNT.increment();
+MultiSegmentTermDictionary multiSegmentTermDictionary =</p>
+<blockquote>
+<div><p>multiSegmentTermDictionaryManager.getMultiSegmentTermDictionary(field);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>return new UserIdMultiSegmentQuery(</dt><dd><p>ids,
+field,
+schemaSnapshot,
+multiSegmentTermDictionary,
+ranks,
+hitAttributeHelper,
+queryTimeout);</p>
+</dd>
+</dl>
+</dd>
+<dt>} else {</dt><dd><p>OLD_QUERY_COUNT.increment();
+return new IDDisjunctionQuery(ids, field, schemaSnapshot);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;VisibleForTesting
+public static String getDeciderName(EarlybirdCluster earlybirdCluster) {</p>
+<blockquote>
+<div><p>return DECIDER_KEY_PREFIX + earlybirdCluster.name().toLowerCase();</p>
+</div></blockquote>
+<p>}</p>
+<p>private final boolean useOrderPreservingEncoding;
+private final HitAttributeHelper hitAttributeHelper;
+private final QueryTimeout queryTimeout;
+private final MultiSegmentTermDictionary multiSegmentTermDictionary;
+private final Schema.FieldInfo fieldInfo;
+private final String field;
+private final List&lt;Long&gt; ids;</p>
+<p>private final List&lt;Integer&gt; ranks;
+// For each segment where we have a multi-segment term dictionary, this map will contain the
+// termIds of all the terms that actually appear in that segment’s index.
+&#64;Nullable
+private Map&lt;InvertedIndex, List&lt;TermRankPair&gt;&gt; termIdsPerSegment;</p>
+<p>// A wrap class helps to associate termId with corresponding search operator rank if exist
+private final class TermRankPair {</p>
+<blockquote>
+<div><p>private final int termId;
+private final int rank;</p>
+<dl class="simple">
+<dt>TermRankPair(int termId, int rank) {</dt><dd><p>this.termId = termId;
+this.rank = rank;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public int getTermId() {</dt><dd><p>return termId;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public int getRank() {</dt><dd><p>return rank;</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;VisibleForTesting
+public UserIdMultiSegmentQuery(</p>
+<blockquote>
+<div><blockquote>
+<div><p>List&lt;Long&gt; ids,
+String field,
+ImmutableSchemaInterface schemaSnapshot,
+MultiSegmentTermDictionary termDictionary,
+List&lt;Integer&gt; ranks,
+&#64;Nullable HitAttributeHelper hitAttributeHelper,
+&#64;Nullable QueryTimeout queryTimeout) {</p>
+</div></blockquote>
+<p>this.field = field;
+this.ids = ids;
+this.multiSegmentTermDictionary = termDictionary;
+this.ranks = ranks;
+this.hitAttributeHelper = hitAttributeHelper;
+this.queryTimeout = queryTimeout;</p>
+<p>// check ids and ranks have same size
+Preconditions.checkArgument(ranks.size() == 0 || ranks.size() == ids.size());
+// hitAttributeHelper is not null iff ranks is not empty
+if (ranks.size() &gt; 0) {</p>
+<blockquote>
+<div><p>Preconditions.checkNotNull(hitAttributeHelper);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>Preconditions.checkArgument(hitAttributeHelper == null);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>if (!schemaSnapshot.hasField(field)) {</dt><dd><p>throw new IllegalStateException(“Tried to search a field which does not exist in schema”);</p>
+</dd>
+</dl>
+<p>}
+this.fieldInfo = Preconditions.checkNotNull(schemaSnapshot.getFieldInfo(field));</p>
+<dl class="simple">
+<dt>IndexedNumericFieldSettings numericFieldSettings =</dt><dd><p>fieldInfo.getFieldType().getNumericFieldSettings();</p>
+</dd>
+<dt>if (numericFieldSettings == null) {</dt><dd><p>throw new IllegalStateException(“Id field is not numerical”);</p>
+</dd>
+</dl>
+<p>}</p>
+<p>this.useOrderPreservingEncoding = numericFieldSettings.isUseSortableEncoding();</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>If it hasn’t been built yet, build up the map containing termIds of all the terms being</p></li>
+<li><p>searched, for all of the segments that are managed by the multi-segment term dictionary.</p></li>
+<li></li>
+<li><p>We only do this once, when we have to search the first segment that’s supported by our</p></li>
+<li><p>multi-segment term dictionary.</p></li>
+<li></li>
+<li><p>Flow here is to:</p></li>
+<li><ol class="arabic simple">
+<li><p>go through all the ids being queried.</p></li>
+</ol>
+</li>
+<li><ol class="arabic simple" start="2">
+<li><p>for each id, get the termIds for that term in all of the segments in the term dictionary</p></li>
+</ol>
+</li>
+<li><ol class="arabic simple" start="3">
+<li><p>for all of the segments that have that term, add the termId to that segment’s list of</p></li>
+</ol>
+</li>
+<li><p>term ids (in the ‘termIdsPerSegment’ map).</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>private void createTermIdsPerSegment() {</dt><dd><dl class="simple">
+<dt>if (termIdsPerSegment != null) {</dt><dd><p>// already created the map
+return;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>long start = System.nanoTime();</p>
+<dl class="simple">
+<dt>final BytesRef termRef = useOrderPreservingEncoding</dt><dd><p>? SortableLongTermAttributeImpl.newBytesRef()
+: LongTermAttributeImpl.newBytesRef();</p>
+</dd>
+</dl>
+<p>termIdsPerSegment = Maps.newHashMap();
+List&lt;? extends InvertedIndex&gt; segmentIndexes = multiSegmentTermDictionary.getSegmentIndexes();</p>
+<dl>
+<dt>for (int idx = 0; idx &lt; ids.size(); ++idx) {</dt><dd><p>long longTerm = ids.get(idx);</p>
+<dl class="simple">
+<dt>if (useOrderPreservingEncoding) {</dt><dd><p>SortableLongTermAttributeImpl.copyLongToBytesRef(termRef, longTerm);</p>
+</dd>
+<dt>} else {</dt><dd><p>LongTermAttributeImpl.copyLongToBytesRef(termRef, longTerm);</p>
+</dd>
+</dl>
+<p>}</p>
+<p>int[] termIds = multiSegmentTermDictionary.lookupTermIds(termRef);
+Preconditions.checkState(segmentIndexes.size() == termIds.length,</p>
+<blockquote>
+<div><p>“SegmentIndexes: %s, field: %s, termIds: %s”,
+segmentIndexes.size(), field, termIds.length);</p>
+</div></blockquote>
+<dl>
+<dt>for (int indexId = 0; indexId &lt; termIds.length; indexId++) {</dt><dd><p>int termId = termIds[indexId];
+if (termId != EarlybirdIndexSegmentAtomicReader.TERM_NOT_FOUND) {</p>
+<blockquote>
+<div><p>InvertedIndex fieldIndex = segmentIndexes.get(indexId);</p>
+<p>List&lt;TermRankPair&gt; termIdsList = termIdsPerSegment.get(fieldIndex);
+if (termIdsList == null) {</p>
+<blockquote>
+<div><p>termIdsList = Lists.newArrayList();
+termIdsPerSegment.put(fieldIndex, termIdsList);</p>
+</div></blockquote>
+<p>}
+termIdsList.add(new TermRankPair(</p>
+<blockquote>
+<div><p>termId, ranks.size() &gt; 0 ? ranks.get(idx) : -1));</p>
+</div></blockquote>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>long elapsed = System.nanoTime() - start;
+TERM_LOOKUP_STATS.timerIncrement(elapsed);</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;Override
+public Weight createWeight(IndexSearcher searcher, ScoreMode scoreMode, float boost) {</p>
+<blockquote>
+<div><p>return new UserIdMultiSegmentQueryWeight(searcher, scoreMode, boost);</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public int hashCode() {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>return Arrays.hashCode(</dt><dd><p>new Object[] {useOrderPreservingEncoding, queryTimeout, field, ids, ranks});</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public boolean equals(Object obj) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (!(obj instanceof UserIdMultiSegmentQuery)) {</dt><dd><p>return false;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>UserIdMultiSegmentQuery query = UserIdMultiSegmentQuery.class.cast(obj);
+return Arrays.equals(</p>
+<blockquote>
+<div><p>new Object[] {useOrderPreservingEncoding, queryTimeout, field, ids, ranks},
+new Object[] {query.useOrderPreservingEncoding,</p>
+<blockquote>
+<div><p>query.queryTimeout,
+query.field,
+query.ids,
+query.ranks});</p>
+</div></blockquote>
+</div></blockquote>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public String toString(String fieldName) {</p>
+<blockquote>
+<div><p>StringBuilder builder = new StringBuilder();
+builder.append(getClass().getSimpleName()).append(“[“).append(fieldName).append(“:”);
+for (Long id : this.ids) {</p>
+<blockquote>
+<div><p>builder.append(id);
+builder.append(“,”);</p>
+</div></blockquote>
+<p>}
+builder.setLength(builder.length() - 1);
+builder.append(“]”);
+return builder.toString();</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>private final class UserIdMultiSegmentQueryWeight extends ConstantScoreWeight {</dt><dd><p>private final IndexSearcher searcher;
+private final ScoreMode scoreMode;</p>
+<dl>
+<dt>private UserIdMultiSegmentQueryWeight(</dt><dd><blockquote>
+<div><p>IndexSearcher searcher,
+ScoreMode scoreMode,
+float boost) {</p>
+</div></blockquote>
+<p>super(UserIdMultiSegmentQuery.this, boost);
+this.searcher = searcher;
+this.scoreMode = scoreMode;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;Override
+public Scorer scorer(LeafReaderContext context) throws IOException {</p>
+<blockquote>
+<div><p>Weight weight = rewrite(context);
+if (weight != null) {</p>
+<blockquote>
+<div><p>return weight.scorer(context);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>return null;</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public BulkScorer bulkScorer(LeafReaderContext context) throws IOException {</p>
+<blockquote>
+<div><p>Weight weight = rewrite(context);
+if (weight != null) {</p>
+<blockquote>
+<div><p>return weight.bulkScorer(context);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>return null;</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public void extractTerms(Set&lt;Term&gt; terms) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>terms.addAll(ids</dt><dd><p>.stream()
+.map(id -&gt; new Term(field, LongTermAttributeImpl.copyIntoNewBytesRef(id)))
+.collect(Collectors.toSet()));</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public boolean isCacheable(LeafReaderContext ctx) {</p>
+<blockquote>
+<div><p>return true;</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>private Weight rewrite(LeafReaderContext context) throws IOException {</dt><dd><p>final Terms terms = context.reader().terms(field);
+if (terms == null) {</p>
+<blockquote>
+<div><p>// field does not exist
+return null;</p>
+</div></blockquote>
+<p>}
+final TermsEnum termsEnum = terms.iterator();
+Preconditions.checkNotNull(termsEnum, “No termsEnum for field: %s”, field);</p>
+<p>BooleanQuery bq;
+// See if the segment is supported by the multi-segment term dictionary. If so, build up
+// the query using the termIds from the multi-segment term dictionary.
+// If not (for the current segment), do the term lookups directly in the queried segment.
+InvertedIndex fieldIndex = getFieldIndexFromMultiTermDictionary(context);
+if (fieldIndex != null) {</p>
+<blockquote>
+<div><p>createTermIdsPerSegment();</p>
+<p>USED_MULTI_SEGMENT_TERM_DICTIONARY_COUNT.increment();
+SearchTimer timer = QUERY_FROM_PRECOMPUTED.startNewTimer();
+bq = addPrecomputedTermQueries(fieldIndex, termsEnum);
+QUERY_FROM_PRECOMPUTED.stopTimerAndIncrement(timer);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>USED_ORIGINAL_TERM_DICTIONARY_COUNT.increment();
+// This segment is not supported by the multi-segment term dictionary. Lookup terms
+// directly.
+SearchTimer timer = QUERY_REGULAR.startNewTimer();
+bq = addTermQueries(termsEnum);
+QUERY_REGULAR.stopTimerAndIncrement(timer);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>return searcher.rewrite(new ConstantScoreQuery(bq)).createWeight(</dt><dd><p>searcher, scoreMode, score());</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>If the multi-segment term dictionary supports this segment/LeafReader, then return the</p></li>
+<li><p>InvertedIndex representing this segment.</p></li>
+<li></li>
+<li><p>If the segment being queried right now is not in the multi-segment term dictionary (e.g.</p></li>
+<li><p>if it’s not optimized yet), return null.</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+</dl>
+<p>&#64;Nullable
+private InvertedIndex getFieldIndexFromMultiTermDictionary(LeafReaderContext context)</p>
+<blockquote>
+<div><blockquote>
+<div><p>throws IOException {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>if (multiSegmentTermDictionary == null) {</dt><dd><p>return null;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>if (context.reader() instanceof EarlybirdIndexSegmentAtomicReader) {</dt><dd><dl class="simple">
+<dt>EarlybirdIndexSegmentAtomicReader reader =</dt><dd><p>(EarlybirdIndexSegmentAtomicReader) context.reader();</p>
+</dd>
+</dl>
+<p>EarlybirdIndexSegmentData segmentData = reader.getSegmentData();
+InvertedIndex fieldIndex = segmentData.getFieldIndex(field);</p>
+<dl class="simple">
+<dt>if (multiSegmentTermDictionary.supportSegmentIndex(fieldIndex)) {</dt><dd><p>return fieldIndex;</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>return null;</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>private BooleanQuery addPrecomputedTermQueries(</dt><dd><blockquote>
+<div><p>InvertedIndex fieldIndex,
+TermsEnum termsEnum) throws IOException {</p>
+</div></blockquote>
+<p>BooleanQuery.Builder bqBuilder = new BooleanQuery.Builder();
+int numClauses = 0;</p>
+<p>List&lt;TermRankPair&gt; termRankPairs = termIdsPerSegment.get(fieldIndex);
+if (termRankPairs != null) {</p>
+<blockquote>
+<div><dl>
+<dt>for (TermRankPair pair<span class="classifier">termRankPairs) {</span></dt><dd><p>int termId = pair.getTermId();
+if (numClauses &gt;= BooleanQuery.getMaxClauseCount()) {</p>
+<blockquote>
+<div><p>BooleanQuery saved = bqBuilder.build();
+bqBuilder = new BooleanQuery.Builder();
+bqBuilder.add(saved, BooleanClause.Occur.SHOULD);
+numClauses = 1;</p>
+</div></blockquote>
+<p>}</p>
+<p>Query query;
+if (pair.getRank() != -1) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>query = EarlybirdQueryHelper.maybeWrapWithHitAttributionCollector(</dt><dd><p>new SimpleTermQuery(termsEnum, termId),
+pair.getRank(),
+fieldInfo,
+hitAttributeHelper);</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>query = new SimpleTermQuery(termsEnum, termId);</p>
+</dd>
+</dl>
+<p>}
+bqBuilder.add(EarlybirdQueryHelper.maybeWrapWithTimeout(query, queryTimeout),</p>
+<blockquote>
+<div><p>BooleanClause.Occur.SHOULD);</p>
+</div></blockquote>
+<p>++numClauses;</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}
+return bqBuilder.build();</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private BooleanQuery addTermQueries(TermsEnum termsEnum) throws IOException {</dt><dd><dl class="simple">
+<dt>final BytesRef termRef = useOrderPreservingEncoding</dt><dd><p>? SortableLongTermAttributeImpl.newBytesRef()
+: LongTermAttributeImpl.newBytesRef();</p>
+</dd>
+</dl>
+<p>BooleanQuery.Builder bqBuilder = new BooleanQuery.Builder();
+int numClauses = 0;</p>
+<dl>
+<dt>for (int idx = 0; idx &lt; ids.size(); ++idx) {</dt><dd><p>long longTerm = ids.get(idx);
+if (useOrderPreservingEncoding) {</p>
+<blockquote>
+<div><p>SortableLongTermAttributeImpl.copyLongToBytesRef(termRef, longTerm);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>LongTermAttributeImpl.copyLongToBytesRef(termRef, longTerm);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>if (termsEnum.seekExact(termRef)) {</dt><dd><dl class="simple">
+<dt>if (numClauses &gt;= BooleanQuery.getMaxClauseCount()) {</dt><dd><p>BooleanQuery saved = bqBuilder.build();
+bqBuilder = new BooleanQuery.Builder();
+bqBuilder.add(saved, BooleanClause.Occur.SHOULD);
+numClauses = 1;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>if (ranks.size() &gt; 0) {</dt><dd><dl>
+<dt>bqBuilder.add(EarlybirdQueryHelper.maybeWrapWithHitAttributionCollector(</dt><dd><blockquote>
+<div><p>new SimpleTermQuery(termsEnum, termsEnum.ord()),
+ranks.get(idx),
+fieldInfo,
+hitAttributeHelper),</p>
+</div></blockquote>
+<p>BooleanClause.Occur.SHOULD);</p>
+</dd>
+</dl>
+</dd>
+<dt>} else {</dt><dd><dl class="simple">
+<dt>bqBuilder.add(new SimpleTermQuery(termsEnum, termsEnum.ord()),</dt><dd><p>BooleanClause.Occur.SHOULD);</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+++numClauses;</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>return bqBuilder.build();</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../_sources/src/java/com/twitter/search/earlybird/search/queries/UserIdMultiSegmentQuery.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

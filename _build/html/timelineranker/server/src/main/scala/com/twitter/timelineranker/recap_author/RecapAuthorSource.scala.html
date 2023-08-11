@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.timelineranker.recap_author</p>
+<p>import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.servo.util.FutureArrow
+import com.twitter.storehaus.Store
+import com.twitter.timelineranker.common._
+import com.twitter.timelineranker.core.CandidateEnvelope
+import com.twitter.timelineranker.core.HydratedCandidatesAndFeaturesEnvelope
+import com.twitter.timelineranker.model.RecapQuery.DependencyProvider
+import com.twitter.timelineranker.model._
+import com.twitter.timelineranker.monitoring.UsersSearchResultMonitoringTransform
+import com.twitter.timelineranker.parameters.monitoring.MonitoringParams
+import com.twitter.timelineranker.parameters.recap.RecapParams
+import com.twitter.timelineranker.parameters.recap_author.RecapAuthorParams
+import com.twitter.timelineranker.recap.model.ContentFeatures
+import com.twitter.timelineranker.util.CopyContentFeaturesIntoHydratedTweetsTransform
+import com.twitter.timelineranker.util.CopyContentFeaturesIntoThriftTweetFeaturesTransform
+import com.twitter.timelineranker.util.TweetFilters
+import com.twitter.timelineranker.visibility.FollowGraphDataProvider
+import com.twitter.timelines.clients.gizmoduck.GizmoduckClient
+import com.twitter.timelines.clients.manhattan.UserMetadataClient
+import com.twitter.timelines.clients.relevance_search.SearchClient
+import com.twitter.timelines.clients.tweetypie.TweetyPieClient
+import com.twitter.timelines.model.TweetId
+import com.twitter.timelines.util.FailOpenHandler
+import com.twitter.timelines.util.stats.RequestStatsReceiver
+import com.twitter.timelines.visibility.VisibilityEnforcer
+import com.twitter.util.Future</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>This source controls what tweets are fetched from earlybird given a</p></li>
+<li><p>list of authors to fetch tweets from. The controls available are:</p></li>
+<li><ol class="arabic simple">
+<li><p>The ‘’filters’’ val, which is also overridden</p></li>
+</ol>
+</li>
+<li><p>by the query options in TweetKindOptions (see Recap.scala, the</p></li>
+<li><p>parent class, for details on how this override works). For example, one</p></li>
+<li><p>can choose to retrieve replies, retweets and/or extended replies</p></li>
+<li><p>by changing the options passed in, which get added to ‘’filters’’.</p></li>
+<li><ol class="arabic simple" start="2">
+<li><p>The visiblityEnforcer passed in, which controls what visibility rules</p></li>
+</ol>
+</li>
+<li><p>are applied to the tweets returned from earlybird (e.g. mutes, blocks).</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>class RecapAuthorSource(</dt><dd><p>gizmoduckClient: GizmoduckClient,
+searchClient: SearchClient,
+tweetyPieClient: TweetyPieClient,
+userMetadataClient: UserMetadataClient,
+followGraphDataProvider: FollowGraphDataProvider,
+contentFeaturesCache: Store[TweetId, ContentFeatures],
+visibilityEnforcer: VisibilityEnforcer,
+statsReceiver: StatsReceiver) {</p>
+<p>private[this] val baseScope = statsReceiver.scope(“recapAuthor”)
+private[this] val requestStats = RequestStatsReceiver(baseScope)</p>
+<p>private[this] val failOpenScope = baseScope.scope(“failOpen”)
+private[this] val userProfileHandler = new FailOpenHandler(failOpenScope, “userProfileInfo”)
+private[this] val userLanguagesHandler = new FailOpenHandler(failOpenScope, “userLanguages”)</p>
+<dl>
+<dt>/*</dt><dd><ul class="simple">
+<li><p>Similar to RecapSource, we filter out tweets directed at non-followed users that</p></li>
+<li><p>are not “replies” i.e. those that begin with the &#64;-handle.</p></li>
+<li><p>For tweets to non-followed users that are replies, these are “extended replies”</p></li>
+<li><p>and are handled separately by the dynamic filters (see Recap.scala for details).</p></li>
+<li><p>Reply and retweet filtering is also handled by dynamic filters, overriden by</p></li>
+<li><p>TweetKindOptions passed in with the query (again, details in Recap.scala)</p></li>
+<li><p>We however do not filter out tweets from non-followed users, unlike RecapSource,</p></li>
+<li><p>because one of the main use cases of this endpoint is to retrieve tweets from out</p></li>
+<li><p>of network authors.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>val filters: TweetFilters.ValueSet = TweetFilters.ValueSet(</dt><dd><p>TweetFilters.DuplicateTweets,
+TweetFilters.DuplicateRetweets,
+TweetFilters.DirectedAtNotFollowedUsers,
+TweetFilters.NonReplyDirectedAtNotFollowedUsers</p>
+</dd>
+</dl>
+<p>)</p>
+<dl class="simple">
+<dt>private[this] val visibilityEnforcingTransform = new VisibilityEnforcingTransform(</dt><dd><p>visibilityEnforcer</p>
+</dd>
+</dl>
+<p>)</p>
+<dl class="simple">
+<dt>private[this] val hydratedTweetsFilter = new HydratedTweetsFilterTransform(</dt><dd><p>outerFilters = filters,
+innerFilters = TweetFilters.None,
+useFollowGraphData = true,
+useSourceTweets = false,
+statsReceiver = baseScope,
+numRetweetsAllowed = HydratedTweetsFilterTransform.NumDuplicateRetweetsAllowed</p>
+</dd>
+</dl>
+<p>)</p>
+<dl class="simple">
+<dt>private[this] val dynamicHydratedTweetsFilter = new TweetKindOptionHydratedTweetsFilterTransform(</dt><dd><p>useFollowGraphData = false,
+useSourceTweets = false,
+statsReceiver = baseScope</p>
+</dd>
+</dl>
+<p>)</p>
+<dl class="simple">
+<dt>private[this] val maxFollowedUsersProvider =</dt><dd><p>DependencyProvider.value(RecapParams.MaxFollowedUsers.default)</p>
+</dd>
+<dt>private[this] val followGraphDataTransform =</dt><dd><p>new FollowGraphDataTransform(followGraphDataProvider, maxFollowedUsersProvider)</p>
+</dd>
+<dt>private[this] val maxSearchResultCountProvider = DependencyProvider { query =&gt;</dt><dd><p>query.maxCount.getOrElse(query.params(RecapParams.DefaultMaxTweetCount))</p>
+</dd>
+</dl>
+<p>}
+private[this] val relevanceOptionsMaxHitsToProcessProvider =</p>
+<blockquote>
+<div><p>DependencyProvider.from(RecapParams.RelevanceOptionsMaxHitsToProcessParam)</p>
+</div></blockquote>
+<dl>
+<dt>private[this] val retrieveSearchResultsTransform = new RecapAuthorSearchResultsTransform(</dt><dd><p>searchClient = searchClient,
+maxCountProvider = maxSearchResultCountProvider,
+relevanceOptionsMaxHitsToProcessProvider = relevanceOptionsMaxHitsToProcessProvider,
+enableSettingTweetTypesWithTweetKindOptionProvider =</p>
+<blockquote>
+<div><p>DependencyProvider.from(RecapParams.EnableSettingTweetTypesWithTweetKindOption),</p>
+</div></blockquote>
+<p>statsReceiver = baseScope,
+logSearchDebugInfo = false)</p>
+</dd>
+<dt>private[this] val debugAuthorsMonitoringProvider =</dt><dd><p>DependencyProvider.from(MonitoringParams.DebugAuthorsAllowListParam)</p>
+</dd>
+<dt>private[this] val preTruncateSearchResultsTransform =</dt><dd><dl>
+<dt>new UsersSearchResultMonitoringTransform(</dt><dd><p>name = “RecapSearchResultsTruncationTransform”,
+new RecapSearchResultsTruncationTransform(</p>
+<blockquote>
+<div><p>extraSortBeforeTruncationGate = DependencyProvider.True,
+maxCountProvider = maxSearchResultCountProvider,
+statsReceiver = baseScope.scope(“afterSearchResultsTransform”)</p>
+</div></blockquote>
+<p>),
+baseScope.scope(“afterSearchResultsTransform”),
+debugAuthorsMonitoringProvider</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>private[this] val searchResultsTransform = retrieveSearchResultsTransform</dt><dd><p>.andThen(preTruncateSearchResultsTransform)</p>
+</dd>
+<dt>private[this] val userProfileInfoTransform =</dt><dd><p>new UserProfileInfoTransform(userProfileHandler, gizmoduckClient)</p>
+</dd>
+<dt>private[this] val languagesTransform =</dt><dd><p>new UserLanguagesTransform(userLanguagesHandler, userMetadataClient)</p>
+</dd>
+<dt>private[this] val contentFeaturesHydrationTransform =</dt><dd><dl>
+<dt>new ContentFeaturesHydrationTransformBuilder(</dt><dd><p>tweetyPieClient = tweetyPieClient,
+contentFeaturesCache = contentFeaturesCache,
+enableContentFeaturesGate =</p>
+<blockquote>
+<div><p>RecapQuery.paramGate(RecapAuthorParams.EnableContentFeaturesHydrationParam),</p>
+</div></blockquote>
+<dl class="simple">
+<dt>enableTokensInContentFeaturesGate =</dt><dd><p>RecapQuery.paramGate(RecapAuthorParams.EnableTokensInContentFeaturesHydrationParam),</p>
+</dd>
+<dt>enableTweetTextInContentFeaturesGate =</dt><dd><p>RecapQuery.paramGate(RecapAuthorParams.EnableTweetTextInContentFeaturesHydrationParam),</p>
+</dd>
+<dt>enableConversationControlContentFeaturesGate = RecapQuery.paramGate(</dt><dd><p>RecapAuthorParams.EnableConversationControlInContentFeaturesHydrationParam),</p>
+</dd>
+<dt>enableTweetMediaHydrationGate =</dt><dd><p>RecapQuery.paramGate(RecapAuthorParams.EnableTweetMediaHydrationParam),</p>
+</dd>
+</dl>
+<p>hydrateInReplyToTweets = false,
+statsReceiver = baseScope</p>
+</dd>
+</dl>
+<p>).build()</p>
+</dd>
+<dt>private[this] def hydratesContentFeatures(</dt><dd><p>hydratedEnvelope: HydratedCandidatesAndFeaturesEnvelope</p>
+</dd>
+<dt>): Boolean =</dt><dd><p>hydratedEnvelope.candidateEnvelope.query.hydratesContentFeatures.getOrElse(true)</p>
+</dd>
+<dt>private[this] val contentFeaturesTransformer = FutureArrow.choose(</dt><dd><p>predicate = hydratesContentFeatures,
+ifTrue = contentFeaturesHydrationTransform</p>
+<blockquote>
+<div><p>.andThen(CopyContentFeaturesIntoThriftTweetFeaturesTransform)
+.andThen(CopyContentFeaturesIntoHydratedTweetsTransform),</p>
+</div></blockquote>
+<dl class="simple">
+<dt>ifFalse = FutureArrow[</dt><dd><p>HydratedCandidatesAndFeaturesEnvelope,
+HydratedCandidatesAndFeaturesEnvelope</p>
+</dd>
+</dl>
+<p>](Future.value) // empty transformer</p>
+</dd>
+</dl>
+<p>)</p>
+<p>private[this] val candidateGenerationTransform = new CandidateGenerationTransform(baseScope)</p>
+<dl>
+<dt>val hydrationAndFilteringPipeline: FutureArrow[RecapQuery, CandidateEnvelope] =</dt><dd><dl>
+<dt>CreateCandidateEnvelopeTransform // Create empty CandidateEnvelope</dt><dd><p>.andThen(followGraphDataTransform) // Fetch follow graph data
+.andThen(searchResultsTransform) // Fetch search results
+.andThen(SearchResultDedupAndSortingTransform)
+.andThen(CandidateTweetHydrationTransform) // candidate hydration
+.andThen(visibilityEnforcingTransform) // filter hydrated tweets to visible ones
+.andThen(hydratedTweetsFilter) // filter hydrated tweets based on predefined filter
+.andThen(dynamicHydratedTweetsFilter) // filter hydrated tweets based on query TweetKindOption
+.andThen(</p>
+<blockquote>
+<div><p>TrimToMatchHydratedTweetsTransform</p>
+</div></blockquote>
+<p>) // trim search result set to match filtered hydrated tweets (this needs to be accurate for feature hydration)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>// runs the main pipeline in parallel with fetching user profile info and user languages
+val featureHydrationDataTransform: FeatureHydrationDataTransform =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>new FeatureHydrationDataTransform(</dt><dd><p>hydrationAndFilteringPipeline,
+languagesTransform,
+userProfileInfoTransform</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<p>// Copy transforms must go after the search features transform, as the search transform
+// overwrites the ThriftTweetFeatures.
+val featureHydrationPipeline: FutureArrow[RecapQuery, CandidateTweetsResult] =</p>
+<blockquote>
+<div><dl>
+<dt>featureHydrationDataTransform</dt><dd><dl class="simple">
+<dt>.andThen(</dt><dd><p>InNetworkTweetsSearchFeaturesHydrationTransform</p>
+</dd>
+</dl>
+<p>) // RecapAuthorSource uses InNetworkTweetsSearchFeaturesHydrationTransform because PYLE uses the in-network model and features.
+.andThen(contentFeaturesTransformer)
+.andThen(candidateGenerationTransform)</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl>
+<dt>def get(query: RecapQuery): Future[CandidateTweetsResult] = {</dt><dd><dl class="simple">
+<dt>requestStats.addEventStats {</dt><dd><p>featureHydrationPipeline(query)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>def get(queries: Seq[RecapQuery]): Future[Seq[CandidateTweetsResult]] = {</dt><dd><p>Future.collect(queries.map(get))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/timelineranker/server/src/main/scala/com/twitter/timelineranker/recap_author/RecapAuthorSource.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

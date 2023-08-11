@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../" id="documentation_options" src="../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.simclusters_v2.scalding.embedding.abuse</p>
+<p>import com.google.common.annotations.VisibleForTesting
+import com.twitter.scalding._
+import com.twitter.simclusters_v2.scalding.common.matrix.SparseMatrix
+import com.twitter.simclusters_v2.scalding.embedding.common.EmbeddingUtil.ClusterId
+import com.twitter.simclusters_v2.scalding.embedding.common.EmbeddingUtil.UserId
+import com.twitter.simclusters_v2.thriftscala.AdhocSingleSideClusterScores
+import com.twitter.simclusters_v2.thriftscala.SimClusterWithScore
+import com.twitter.simclusters_v2.thriftscala.SimClustersEmbedding</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Logic for building a SimCluster represenation of interaction signals. The purpose of this job is</p></li>
+<li><p>to model negative behavior (like abuse and blocks).</p></li>
+<li></li>
+<li><p>This is a “SingleSide”, because we are only considering one side of the interaction graph to</p></li>
+<li><p>build these features. So for instance we would keep track of which simclusters are most likely to</p></li>
+<li><p>get reported for abuse regardless of who reported it. Another job will be responsible for</p></li>
+<li><p>building the simcluster to simcluster interaction matrix as described in the doc.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+</dl>
+<p>object SingleSideInteractionTransformation {</p>
+<blockquote>
+<div><dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Compute a score for every SimCluster. The SimCluster score is a count of the number of</p></li>
+<li><p>interactions for each SimCluster. For a user that has many SimClusters, we distribute each of</p></li>
+<li><p>their interactions across all of these SimClusters.</p></li>
+<li></li>
+<li><p>&#64;param normalizedUserSimClusters Sparse matrix of User-SimCluster scores. Users are rows and</p></li>
+<li><p>SimClusters are columns. This should already by L2normalized.</p></li>
+<li><p>It is important that we normalize so that each interaction</p></li>
+<li><p>only adds 1 to the counts.</p></li>
+<li><p>&#64;param interactionGraph Graph of interactions. Rows are the users, columns are not used.</p></li>
+<li><p>All values in this graph are assumed to be positive; they are the number of</p></li>
+<li><p>interactions.</p></li>
+<li></li>
+<li><p>&#64;return SingleSideClusterFeatures for each SimCluster that has user with an interaction.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>def computeClusterFeatures(</dt><dd><p>normalizedUserSimClusters: SparseMatrix[UserId, ClusterId, Double],
+interactionGraph: SparseMatrix[UserId, _, Double]</p>
+</dd>
+</dl>
+<p>): TypedPipe[SimClusterWithScore] = {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>val numReportsForUserEntries = interactionGraph.rowL1Norms.map {</dt><dd><p>// turn into a vector where we use 1 as the column key for every entry.
+case (user, count) =&gt; (user, 1, count)</p>
+</dd>
+</dl>
+<p>}</p>
+<p>val numReportsForUser = SparseMatrix[UserId, Int, Double](numReportsForUserEntries)</p>
+<dl>
+<dt>normalizedUserSimClusters.transpose</dt><dd><p>.multiplySparseMatrix(numReportsForUser)
+.toTypedPipe
+.map {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case (clusterId, _, clusterScore: Double) =&gt;</dt><dd><p>SimClusterWithScore(clusterId, clusterScore)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Given that we have the score for each SimCluster and the user’s SimClusters, create a</p></li>
+<li><p>representation of the user so that the new SimCluster scores are an estimate of the</p></li>
+<li><p>interactions for this user.</p></li>
+<li></li>
+<li><p>&#64;param normalizedUserSimClusters sparse matrix of User-SimCluster scores. Users are rows and</p></li>
+<li><p>SimClusters are columns. This should already be L2 normalized.</p></li>
+<li><p>&#64;param simClusterFeatures For each SimCluster, a score associated with this interaction type.</p></li>
+<li></li>
+<li><p>&#64;return SingleSideAbuseFeatures for each user the SimClusters and scores for this</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+</dl>
+<p>&#64;VisibleForTesting
+private[abuse] def computeUserFeaturesFromClusters(</p>
+<blockquote>
+<div><p>normalizedUserSimClusters: SparseMatrix[UserId, ClusterId, Double],
+simClusterFeatures: TypedPipe[SimClusterWithScore]</p>
+</div></blockquote>
+<p>): TypedPipe[(UserId, SimClustersEmbedding)] = {</p>
+<blockquote>
+<div><dl>
+<dt>normalizedUserSimClusters.toTypedPipe</dt><dd><dl class="simple">
+<dt>.map {</dt><dd><dl class="simple">
+<dt>case (userId, clusterId, score) =&gt;</dt><dd><p>(clusterId, (userId, score))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+.group
+// There are at most 140k SimClusters. They should fit in memory
+.hashJoin(simClusterFeatures.groupBy(_.clusterId))
+.map {</p>
+<blockquote>
+<div><dl>
+<dt>case (_, ((userId, score), singleSideClusterFeatures)) =&gt;</dt><dd><dl>
+<dt>(</dt><dd><p>userId,
+List(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>SimClusterWithScore(</dt><dd><p>singleSideClusterFeatures.clusterId,
+singleSideClusterFeatures.score * score))</p>
+</dd>
+</dl>
+</div></blockquote>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+.sumByKey
+.mapValues(SimClustersEmbedding.apply)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Combines all the different SimClustersEmbedding for a user into one</p></li>
+<li><p>AdhocSingleSideClusterScores.</p></li>
+<li></li>
+<li><p>&#64;param interactionMap The key is an identifier for the embedding type. The typed pipe will have</p></li>
+<li><p>embeddings of only for that type of embedding.</p></li>
+<li><p>&#64;return Typed pipe with one AdhocSingleSideClusterScores per user.</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+<dt>def pairScores(</dt><dd><p>interactionMap: Map[String, TypedPipe[(UserId, SimClustersEmbedding)]]</p>
+</dd>
+</dl>
+<p>): TypedPipe[AdhocSingleSideClusterScores] = {</p>
+<blockquote>
+<div><dl>
+<dt>val combinedInteractions = interactionMap</dt><dd><dl>
+<dt>.map {</dt><dd><dl>
+<dt>case (interactionTypeName, userInteractionFeatures) =&gt;</dt><dd><dl class="simple">
+<dt>userInteractionFeatures.map {</dt><dd><dl class="simple">
+<dt>case (userId, simClustersEmbedding) =&gt;</dt><dd><p>(userId, List((interactionTypeName, simClustersEmbedding)))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+.reduce[TypedPipe[(UserId, List[(String, SimClustersEmbedding)])]] {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case (list1, list2) =&gt;</dt><dd><p>list1 ++ list2</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+.group
+.sumByKey</p>
+</dd>
+<dt>combinedInteractions.toTypedPipe</dt><dd><dl>
+<dt>.map {</dt><dd><dl>
+<dt>case (userId, interactionFeatureList) =&gt;</dt><dd><dl class="simple">
+<dt>AdhocSingleSideClusterScores(</dt><dd><p>userId,
+interactionFeatureList.toMap</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Given the SimCluster and interaction graph get the user representation for this interaction.</p></li>
+<li><p>See the documentation of the underlying methods for more details</p></li>
+<li></li>
+<li><p>&#64;param normalizedUserSimClusters sparse matrix of User-SimCluster scores. Users are rows and</p></li>
+<li><p>SimClusters are columns. This should already by L2normalized.</p></li>
+<li><p>&#64;param interactionGraph Graph of interactions. Rows are the users, columns are not used.</p></li>
+<li><p>All values in this graph are assumed to be positive; they are the number of</p></li>
+<li><p>interactions.</p></li>
+<li></li>
+<li><p>&#64;return SimClustersEmbedding for all users in the give SimCluster graphs</p></li>
+</ul>
+<p><a href="#id9"><span class="problematic" id="id10">*</span></a>/</p>
+</dd>
+<dt>def clusterScoresFromGraphs(</dt><dd><p>normalizedUserSimClusters: SparseMatrix[UserId, ClusterId, Double],
+interactionGraph: SparseMatrix[UserId, _, Double]</p>
+</dd>
+<dt>): TypedPipe[(UserId, SimClustersEmbedding)] = {</dt><dd><p>val clusterFeatures = computeClusterFeatures(normalizedUserSimClusters, interactionGraph)
+computeUserFeaturesFromClusters(normalizedUserSimClusters, clusterFeatures)</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../_sources/src/scala/com/twitter/simclusters_v2/scalding/embedding/abuse/SingleSideInteractionTransformation.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

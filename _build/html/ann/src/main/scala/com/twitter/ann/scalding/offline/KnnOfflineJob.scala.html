@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.ann.scalding.offline</p>
+<p>import com.twitter.ann.common.Metric
+import com.twitter.bijection.scrooge.BinaryScalaCodec
+import com.twitter.ml.featurestore.lib.UserId
+import com.twitter.ml.featurestore.lib.embedding.EmbeddingWithEntity
+import com.twitter.cortex.ml.embeddings.common.EntityKind
+import com.twitter.entityembeddings.neighbors.thriftscala.{EntityKey, NearestNeighbors}
+import com.twitter.scalding.commons.source.VersionedKeyValSource
+import com.twitter.scalding.typed.TypedPipe
+import com.twitter.scalding.{Args, DateOps, DateParser, DateRange, Execution, TypedTsv, UniqueID}
+import com.twitter.scalding_internal.job.TwitterExecutionApp
+import com.twitter.search.common.file.{AbstractFile, LocalFile}
+import java.util.TimeZone</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Generates the nearest neighbour for users and store them in Manhattan format i.e sequence files.</p></li>
+<li><p>See README for oscar usage.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>object KnnOfflineJob extends TwitterExecutionApp {</dt><dd><dl>
+<dt>override def job: Execution[Unit] = Execution.withId { implicit uniqueId =&gt;</dt><dd><dl>
+<dt>Execution.getArgs.flatMap { args: Args =&gt;</dt><dd><p>val knnDirectoryOpt: Option[String] = args.optional(“knn_directory”)
+knnDirectoryOpt match {</p>
+<blockquote>
+<div><dl>
+<dt>case Some(knnDirectory) =&gt;</dt><dd><dl class="simple">
+<dt>Execution.withCachedFile(knnDirectory) { directory =&gt;</dt><dd><p>execute(args, Some(new LocalFile(directory.file)))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>case None =&gt;</dt><dd><p>execute(args, None)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Execute KnnOfflineJob</p></li>
+<li><p>&#64;param args: The args object for this job</p></li>
+<li><p>&#64;param abstractFile: An optional of producer embedding path</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>def execute(</dt><dd><p>args: Args,
+abstractFile: Option[AbstractFile]</p>
+</dd>
+<dt>)(</dt><dd><p>implicit uniqueID: UniqueID</p>
+</dd>
+<dt>): Execution[Unit] = {</dt><dd><p>implicit val tz: TimeZone = TimeZone.getDefault()
+implicit val dp: DateParser = DateParser.default
+implicit val dateRange = DateRange.parse(args.list(“date”))(DateOps.UTC, DateParser.default)
+implicit val keyInject = BinaryScalaCodec(EntityKey)
+implicit val valueInject = BinaryScalaCodec(NearestNeighbors)</p>
+<p>val entityKind = EntityKind.getEntityKind(args(“producer_entity_kind”))
+val metric = Metric.fromString(args(“metric”))
+val outputPath: String = args(“output_path”)
+val numNeighbors: Int = args(“neighbors”).toInt
+val ef = args.getOrElse(“ef”, numNeighbors.toString).toInt
+val reducers: Int = args(“reducers”).toInt
+val knnDimension: Int = args(“dimension”).toInt
+val debugOutputPath: Option[String] = args.optional(“debug_output_path”)
+val filterPath: Option[String] = args.optional(“users_filter_path”)
+val shards: Int = args.getOrElse(“shards”, “100”).toInt
+val useHashJoin: Boolean = args.getOrElse(“use_hash_join”, “false”).toBoolean
+val mhOutput = VersionedKeyValSource[EntityKey, NearestNeighbors](</p>
+<blockquote>
+<div><p>path = outputPath,
+sourceVersion = None,
+sinkVersion = None,
+maxFailures = 0,
+versionsToKeep = 1</p>
+</div></blockquote>
+<p>)</p>
+<dl>
+<dt>val consumerEmbeddings: TypedPipe[EmbeddingWithEntity[UserId]] =</dt><dd><dl class="simple">
+<dt>KnnHelper.getFilteredUserEmbeddings(</dt><dd><p>args,
+filterPath,
+reducers,
+useHashJoin</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>val neighborsPipe: TypedPipe[(EntityKey, NearestNeighbors)] = KnnHelper.getNeighborsPipe(</dt><dd><p>args,
+entityKind,
+metric,
+ef,
+consumerEmbeddings,
+abstractFile,
+reducers,
+numNeighbors,
+knnDimension</p>
+</dd>
+</dl>
+<p>)</p>
+<dl class="simple">
+<dt>val neighborsExecution: Execution[Unit] = neighborsPipe</dt><dd><p>.writeExecution(mhOutput)</p>
+</dd>
+</dl>
+<p>// Write manual Inspection
+debugOutputPath match {</p>
+<blockquote>
+<div><dl>
+<dt>case Some(path: String) =&gt;</dt><dd><dl>
+<dt>val debugExecution: Execution[Unit] = KnnDebug</dt><dd><dl class="simple">
+<dt>.getDebugTable(</dt><dd><p>neighborsPipe = neighborsPipe,
+shards = shards,
+reducers = reducers</p>
+</dd>
+</dl>
+<p>)
+.writeExecution(TypedTsv(path))</p>
+</dd>
+</dl>
+<p>Execution.zip(debugExecution, neighborsExecution).unit</p>
+</dd>
+</dl>
+<p>case None =&gt; neighborsExecution</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/ann/src/main/scala/com/twitter/ann/scalding/offline/KnnOfflineJob.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

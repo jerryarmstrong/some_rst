@@ -1,0 +1,620 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.tweetypie
+package handler</p>
+<p>import com.twitter.container.thriftscala.MaterializeAsTweetRequest
+import com.twitter.context.TestingSignalsContext
+import com.twitter.servo.exception.thriftscala.ClientError
+import com.twitter.servo.exception.thriftscala.ClientErrorCause
+import com.twitter.servo.util.FutureArrow
+import com.twitter.spam.rtf.thriftscala.FilteredReason
+import com.twitter.spam.rtf.thriftscala.SafetyLevel
+import com.twitter.stitch.NotFound
+import com.twitter.stitch.Stitch
+import com.twitter.tweetypie.additionalfields.AdditionalFields
+import com.twitter.tweetypie.core._
+import com.twitter.tweetypie.repository._
+import com.twitter.tweetypie.thriftscala._</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Handler for the <cite>getTweets</cite> endpoint.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>object GetTweetsHandler {</dt><dd><p>type Type = FutureArrow[GetTweetsRequest, Seq[GetTweetResult]]</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>A <cite>TweetQuery.Include</cite> instance with options set as the default base options</p></li>
+<li><p>for the <cite>getTweets</cite> endpoint.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>val BaseInclude: TweetQuery.Include =</dt><dd><dl>
+<dt>TweetQuery.Include(</dt><dd><dl class="simple">
+<dt>tweetFields = Set(</dt><dd><p>Tweet.CoreDataField.id,
+Tweet.UrlsField.id,
+Tweet.MentionsField.id,
+Tweet.MediaField.id,
+Tweet.HashtagsField.id,
+Tweet.CashtagsField.id,
+Tweet.TakedownCountryCodesField.id,
+Tweet.TakedownReasonsField.id,
+Tweet.DeviceSourceField.id,
+Tweet.LanguageField.id,
+Tweet.ContributorField.id,
+Tweet.QuotedTweetField.id,
+Tweet.UnderlyingCreativesContainerIdField.id,</p>
+</dd>
+</dl>
+<p>),
+pastedMedia = true</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>def apply(</dt><dd><p>tweetRepo: TweetResultRepository.Type,
+creativesContainerRepo: CreativesContainerMaterializationRepository.GetTweetType,
+deletedTweetVisibilityRepo: DeletedTweetVisibilityRepository.Type,
+stats: StatsReceiver,
+shouldMaterializeContainers: Gate[Unit]</p>
+</dd>
+<dt>): Type = {</dt><dd><dl>
+<dt>FutureArrow[GetTweetsRequest, Seq[GetTweetResult]] { request =&gt;</dt><dd><p>val requestOptions = request.options.getOrElse(GetTweetOptions())</p>
+<dl>
+<dt>val invalidAdditionalFields =</dt><dd><p>requestOptions.additionalFieldIds.filter(!AdditionalFields.isAdditionalFieldId(_))</p>
+</dd>
+<dt>if (invalidAdditionalFields.nonEmpty) {</dt><dd><dl>
+<dt>Future.exception(</dt><dd><dl>
+<dt>ClientError(</dt><dd><p>ClientErrorCause.BadRequest,
+“Requested additional fields contain invalid field id “ +</p>
+<blockquote>
+<div><p>s”${invalidAdditionalFields.mkString(”, “)}. Additional fields ids must be greater than 100.”</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>} else {</dt><dd><p>val opts = toTweetQueryOptions(requestOptions)
+val measureRacyReads: TweetId =&gt; Unit = trackLossyReadsAfterWrite(</p>
+<blockquote>
+<div><p>stats.stat(“racy_reads”, “get_tweets”),
+Duration.fromSeconds(3)</p>
+</div></blockquote>
+<p>)</p>
+<dl>
+<dt>Stitch.run(</dt><dd><dl>
+<dt>Stitch.traverse(request.tweetIds) { id =&gt;</dt><dd><dl>
+<dt>tweetRepo(id, opts).liftToTry</dt><dd><dl>
+<dt>.flatMap {</dt><dd><dl>
+<dt>case Throw(NotFound) =&gt;</dt><dd><p>measureRacyReads(id)</p>
+<p>Stitch.value(GetTweetResult(id, StatusState.NotFound))</p>
+</dd>
+<dt>case Throw(ex) =&gt;</dt><dd><p>failureResult(deletedTweetVisibilityRepo, id, requestOptions, ex)</p>
+</dd>
+<dt>case Return(r) =&gt;</dt><dd><dl class="simple">
+<dt>toGetTweetResult(</dt><dd><p>deletedTweetVisibilityRepo,
+creativesContainerRepo,
+requestOptions,
+tweetResult = r,
+includeSourceTweet = requestOptions.includeSourceTweet,
+includeQuotedTweet = requestOptions.includeQuotedTweet,
+stats,
+shouldMaterializeContainers</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+<dt>}.flatMap { getTweetResult =&gt;</dt><dd><p>// check if tweet data is backed by creatives container and needs to be hydrated from creatives
+// container service.
+hydrateCreativeContainerBackedTweet(</p>
+<blockquote>
+<div><p>getTweetResult,
+requestOptions,
+creativesContainerRepo,
+stats,
+shouldMaterializeContainers</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def toTweetQueryOptions(options: GetTweetOptions): TweetQuery.Options = {</dt><dd><p>val shouldSkipCache = TestingSignalsContext().flatMap(_.simulateBackPressure).nonEmpty
+val cacheControl =</p>
+<blockquote>
+<div><p>if (shouldSkipCache) CacheControl.NoCache
+else if (options.doNotCache) CacheControl.ReadOnlyCache
+else CacheControl.ReadWriteCache</p>
+</div></blockquote>
+<p>val countsFields = toCountsFields(options)
+val mediaFields = toMediaFields(options)</p>
+<dl>
+<dt>TweetQuery.Options(</dt><dd><dl class="simple">
+<dt>include = BaseInclude.also(</dt><dd><p>tweetFields = toTweetFields(options, countsFields),
+countsFields = countsFields,
+mediaFields = mediaFields,
+quotedTweet = Some(options.includeQuotedTweet)</p>
+</dd>
+</dl>
+<p>),
+cacheControl = cacheControl,
+cardsPlatformKey = options.cardsPlatformKey,
+excludeReported = options.excludeReported,
+enforceVisibilityFiltering = !options.bypassVisibilityFiltering,
+safetyLevel = options.safetyLevel.getOrElse(SafetyLevel.FilterDefault),
+forUserId = options.forUserId,
+languageTag = options.languageTag,
+extensionsArgs = options.extensionsArgs,
+forExternalConsumption = true,
+simpleQuotedTweet = options.simpleQuotedTweet</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def toTweetFields(opts: GetTweetOptions, countsFields: Set[FieldId]): Set[FieldId] = {</dt><dd><p>val bldr = Set.newBuilder[FieldId]</p>
+<p>bldr ++= opts.additionalFieldIds</p>
+<p>if (opts.includePlaces) bldr += Tweet.PlaceField.id
+if (opts.forUserId.nonEmpty) {</p>
+<blockquote>
+<div><p>if (opts.includePerspectivals) bldr += Tweet.PerspectiveField.id
+if (opts.includeConversationMuted) bldr += Tweet.ConversationMutedField.id</p>
+</div></blockquote>
+<p>}
+if (opts.includeCards &amp;&amp; opts.cardsPlatformKey.isEmpty) bldr += Tweet.CardsField.id
+if (opts.includeCards &amp;&amp; opts.cardsPlatformKey.nonEmpty) bldr += Tweet.Card2Field.id
+if (opts.includeProfileGeoEnrichment) bldr += Tweet.ProfileGeoEnrichmentField.id</p>
+<p>if (countsFields.nonEmpty) bldr += Tweet.CountsField.id</p>
+<p>if (opts.includeCardUri) bldr += Tweet.CardReferenceField.id</p>
+<p>bldr.result()</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def toCountsFields(opts: GetTweetOptions): Set[FieldId] = {</dt><dd><p>val bldr = Set.newBuilder[FieldId]</p>
+<p>if (opts.includeRetweetCount) bldr += StatusCounts.RetweetCountField.id
+if (opts.includeReplyCount) bldr += StatusCounts.ReplyCountField.id
+if (opts.includeFavoriteCount) bldr += StatusCounts.FavoriteCountField.id
+if (opts.includeQuoteCount) bldr += StatusCounts.QuoteCountField.id</p>
+<p>bldr.result()</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private def toMediaFields(opts: GetTweetOptions): Set[FieldId] = {</dt><dd><dl class="simple">
+<dt>if (opts.includeMediaAdditionalMetadata)</dt><dd><p>Set(MediaEntity.AdditionalMetadataField.id)</p>
+</dd>
+<dt>else</dt><dd><p>Set.empty</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Converts a <cite>TweetResult</cite> into a <cite>GetTweetResult</cite>.</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>def toGetTweetResult(</dt><dd><p>deletedTweetVisibilityRepo: DeletedTweetVisibilityRepository.Type,
+creativesContainerRepo: CreativesContainerMaterializationRepository.GetTweetType,
+options: GetTweetOptions,
+tweetResult: TweetResult,
+includeSourceTweet: Boolean,
+includeQuotedTweet: Boolean,
+stats: StatsReceiver,
+shouldMaterializeContainers: Gate[Unit]</p>
+</dd>
+<dt>): Stitch[GetTweetResult] = {</dt><dd><p>val tweetData = tweetResult.value</p>
+<p>// only include missing fields if non empty
+def asMissingFields(set: Set[FieldByPath]): Option[Set[FieldByPath]] =</p>
+<blockquote>
+<div><p>if (set.isEmpty) None else Some(set)</p>
+</div></blockquote>
+<p>val missingFields = asMissingFields(tweetResult.state.failedFields)</p>
+<dl>
+<dt>val sourceTweetResult =</dt><dd><dl class="simple">
+<dt>tweetData.sourceTweetResult</dt><dd><p>.filter(_ =&gt; includeSourceTweet)</p>
+</dd>
+</dl>
+</dd>
+<dt>val sourceTweetData = tweetData.sourceTweetResult</dt><dd><p>.getOrElse(tweetResult)
+.value</p>
+</dd>
+<dt>val quotedTweetResult: Option[QuotedTweetResult] = sourceTweetData.quotedTweetResult</dt><dd><p>.filter(_ =&gt; includeQuotedTweet)</p>
+</dd>
+<dt>val qtFilteredReasonStitch =</dt><dd><dl>
+<dt>((sourceTweetData.tweet.quotedTweet, quotedTweetResult) match {</dt><dd><dl>
+<dt>case (Some(quotedTweet), Some(QuotedTweetResult.Filtered(filteredState))) =&gt;</dt><dd><dl>
+<dt>deletedTweetVisibilityRepo(</dt><dd><dl class="simple">
+<dt>DeletedTweetVisibilityRepository.VisibilityRequest(</dt><dd><p>filteredState,
+quotedTweet.tweetId,
+options.safetyLevel,
+options.forUserId,
+isInnerQuotedTweet = true</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>case _ =&gt; Stitch.None</p>
+</dd>
+</dl>
+<p>})
+//Use quotedTweetResult filtered reason when VF filtered reason is not present</p>
+<blockquote>
+<div><p>.map(fsOpt =&gt; fsOpt.orElse(quotedTweetResult.flatMap(_.filteredReason)))</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>val suppress = tweetData.suppress.orElse(tweetData.sourceTweetResult.flatMap(_.value.suppress))</p>
+<dl>
+<dt>val quotedTweetStitch: Stitch[Option[Tweet]] =</dt><dd><dl>
+<dt>quotedTweetResult match {</dt><dd><p>// check if quote tweet is backed by creatives container and needs to be hydrated from creatives
+// container service. detail see go/creatives-containers-tdd
+case Some(QuotedTweetResult.Found(tweetResult)) =&gt;</p>
+<blockquote>
+<div><dl>
+<dt>hydrateCreativeContainerBackedTweet(</dt><dd><dl class="simple">
+<dt>originalGetTweetResult = GetTweetResult(</dt><dd><p>tweetId = tweetResult.value.tweet.id,
+tweetState = StatusState.Found,
+tweet = Some(tweetResult.value.tweet)</p>
+</dd>
+</dl>
+<p>),
+getTweetRequestOptions = options,
+creativesContainerRepo = creativesContainerRepo,
+stats = stats,
+shouldMaterializeContainers</p>
+</dd>
+</dl>
+<p>).map(_.tweet)</p>
+</div></blockquote>
+<dl>
+<dt>case _ =&gt;</dt><dd><dl class="simple">
+<dt>Stitch.value(</dt><dd><dl class="simple">
+<dt>quotedTweetResult</dt><dd><p>.flatMap(_.toOption)
+.map(_.value.tweet)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>Stitch.join(qtFilteredReasonStitch, quotedTweetStitch).map {</dt><dd><dl>
+<dt>case (qtFilteredReason, quotedTweet) =&gt;</dt><dd><dl>
+<dt>GetTweetResult(</dt><dd><p>tweetId = tweetData.tweet.id,
+tweetState =</p>
+<blockquote>
+<div><p>if (suppress.nonEmpty) StatusState.Suppress
+else if (missingFields.nonEmpty) StatusState.Partial
+else StatusState.Found,</p>
+</div></blockquote>
+<p>tweet = Some(tweetData.tweet),
+missingFields = missingFields,
+filteredReason = suppress.map(_.filteredReason),
+sourceTweet = sourceTweetResult.map(_.value.tweet),
+sourceTweetMissingFields = sourceTweetResult</p>
+<blockquote>
+<div><p>.map(_.state.failedFields)
+.flatMap(asMissingFields),</p>
+</div></blockquote>
+<p>quotedTweet = quotedTweet,
+quotedTweetMissingFields = quotedTweetResult</p>
+<blockquote>
+<div><p>.flatMap(_.toOption)
+.map(_.state.failedFields)
+.flatMap(asMissingFields),</p>
+</div></blockquote>
+<p>quotedTweetFilteredReason = qtFilteredReason</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>private[this] val AuthorAccountIsInactive = FilteredReason.AuthorAccountIsInactive(true)</p>
+<dl>
+<dt>def failureResult(</dt><dd><p>deletedTweetVisibilityRepo: DeletedTweetVisibilityRepository.Type,
+tweetId: TweetId,
+options: GetTweetOptions,
+ex: Throwable</p>
+</dd>
+<dt>): Stitch[GetTweetResult] = {</dt><dd><dl>
+<dt>def deletedState(deleted: Boolean, statusState: StatusState) =</dt><dd><dl class="simple">
+<dt>if (deleted &amp;&amp; options.enableDeletedState) {</dt><dd><p>statusState</p>
+</dd>
+<dt>} else {</dt><dd><p>StatusState.NotFound</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>ex match {</dt><dd><dl class="simple">
+<dt>case FilteredState.Unavailable.Author.Deactivated =&gt;</dt><dd><p>Stitch.value(GetTweetResult(tweetId, StatusState.DeactivatedUser))</p>
+</dd>
+<dt>case FilteredState.Unavailable.Author.NotFound =&gt;</dt><dd><p>Stitch.value(GetTweetResult(tweetId, StatusState.NotFound))</p>
+</dd>
+<dt>case FilteredState.Unavailable.Author.Offboarded =&gt;</dt><dd><dl class="simple">
+<dt>Stitch.value(</dt><dd><p>GetTweetResult(tweetId, StatusState.Drop, filteredReason = Some(AuthorAccountIsInactive)))</p>
+</dd>
+</dl>
+</dd>
+<dt>case FilteredState.Unavailable.Author.Suspended =&gt;</dt><dd><p>Stitch.value(GetTweetResult(tweetId, StatusState.SuspendedUser))</p>
+</dd>
+<dt>case FilteredState.Unavailable.Author.Protected =&gt;</dt><dd><p>Stitch.value(GetTweetResult(tweetId, StatusState.ProtectedUser))</p>
+</dd>
+<dt>case FilteredState.Unavailable.Author.Unsafe =&gt;</dt><dd><p>Stitch.value(GetTweetResult(tweetId, StatusState.Drop))</p>
+</dd>
+</dl>
+<p>//Handle delete state with optional FilteredReason
+case FilteredState.Unavailable.TweetDeleted =&gt;</p>
+<blockquote>
+<div><dl>
+<dt>deletedTweetVisibilityRepo(</dt><dd><dl class="simple">
+<dt>DeletedTweetVisibilityRepository.VisibilityRequest(</dt><dd><p>ex,
+tweetId,
+options.safetyLevel,
+options.forUserId,
+isInnerQuotedTweet = false</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>).map(filteredReasonOpt =&gt; {</dt><dd><p>val deleteState = deletedState(deleted = true, StatusState.Deleted)
+GetTweetResult(tweetId, deleteState, filteredReason = filteredReasonOpt)</p>
+</dd>
+</dl>
+<p>})</p>
+</div></blockquote>
+<dl>
+<dt>case FilteredState.Unavailable.BounceDeleted =&gt;</dt><dd><dl>
+<dt>deletedTweetVisibilityRepo(</dt><dd><dl class="simple">
+<dt>DeletedTweetVisibilityRepository.VisibilityRequest(</dt><dd><p>ex,
+tweetId,
+options.safetyLevel,
+options.forUserId,
+isInnerQuotedTweet = false</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>).map(filteredReasonOpt =&gt; {</dt><dd><p>val deleteState = deletedState(deleted = true, StatusState.BounceDeleted)
+GetTweetResult(tweetId, deleteState, filteredReason = filteredReasonOpt)</p>
+</dd>
+</dl>
+<p>})</p>
+</dd>
+<dt>case FilteredState.Unavailable.SourceTweetNotFound(d) =&gt;</dt><dd><dl>
+<dt>deletedTweetVisibilityRepo(</dt><dd><dl class="simple">
+<dt>DeletedTweetVisibilityRepository.VisibilityRequest(</dt><dd><p>ex,
+tweetId,
+options.safetyLevel,
+options.forUserId,
+isInnerQuotedTweet = false</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>).map(filteredReasonOpt =&gt; {</dt><dd><p>val deleteState = deletedState(d, StatusState.Deleted)
+GetTweetResult(tweetId, deleteState, filteredReason = filteredReasonOpt)</p>
+</dd>
+</dl>
+<p>})</p>
+</dd>
+<dt>case FilteredState.Unavailable.Reported =&gt;</dt><dd><p>Stitch.value(GetTweetResult(tweetId, StatusState.ReportedTweet))</p>
+</dd>
+<dt>case fs: FilteredState.HasFilteredReason =&gt;</dt><dd><dl class="simple">
+<dt>Stitch.value(</dt><dd><p>GetTweetResult(tweetId, StatusState.Drop, filteredReason = Some(fs.filteredReason)))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>case OverCapacity(_) =&gt; Stitch.value(GetTweetResult(tweetId, StatusState.OverCapacity))
+case _ =&gt; Stitch.value(GetTweetResult(tweetId, StatusState.Failed))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def hydrateCreativeContainerBackedTweet(</dt><dd><p>originalGetTweetResult: GetTweetResult,
+getTweetRequestOptions: GetTweetOptions,
+creativesContainerRepo: CreativesContainerMaterializationRepository.GetTweetType,
+stats: StatsReceiver,
+shouldMaterializeContainers: Gate[Unit]</p>
+</dd>
+<dt>): Stitch[GetTweetResult] = {</dt><dd><p>// creatives container backed tweet stats
+val ccTweetMaterialized = stats.scope(“creatives_container”, “get_tweets”)
+val ccTweetMaterializeFiltered = ccTweetMaterialized.scope(“filtered”)
+val ccTweetMaterializeSuccess = ccTweetMaterialized.counter(“success”)
+val ccTweetMaterializeFailed = ccTweetMaterialized.counter(“failed”)
+val ccTweetMaterializeRequests = ccTweetMaterialized.counter(“requests”)</p>
+<p>val tweetId = originalGetTweetResult.tweetId
+val tweetState = originalGetTweetResult.tweetState
+val underlyingCreativesContainerId =</p>
+<blockquote>
+<div><p>originalGetTweetResult.tweet.flatMap(_.underlyingCreativesContainerId)</p>
+</div></blockquote>
+<dl>
+<dt>(</dt><dd><p>tweetState,
+underlyingCreativesContainerId,
+getTweetRequestOptions.disableTweetMaterialization,
+shouldMaterializeContainers()</p>
+</dd>
+<dt>) match {</dt><dd><p>// 1. creatives container backed tweet is determined by <cite>underlyingCreativesContainerId</cite> field presence.
+// 2. if the frontend tweet is suppressed by any reason, respect that and not do this hydration.
+// (this logic can be revisited and improved further)
+case (_, None, _, _) =&gt;</p>
+<blockquote>
+<div><p>Stitch.value(originalGetTweetResult)</p>
+</div></blockquote>
+<dl>
+<dt>case (_, Some(_), _, false) =&gt;</dt><dd><p>ccTweetMaterializeFiltered.counter(“decider_suppressed”).incr()
+Stitch.value(GetTweetResult(tweetId, StatusState.NotFound))</p>
+</dd>
+<dt>case (StatusState.Found, Some(containerId), false, _) =&gt;</dt><dd><p>ccTweetMaterializeRequests.incr()
+val materializationRequest =</p>
+<blockquote>
+<div><p>MaterializeAsTweetRequest(containerId, tweetId, Some(originalGetTweetResult))</p>
+</div></blockquote>
+<dl>
+<dt>creativesContainerRepo(</dt><dd><p>materializationRequest,
+Some(getTweetRequestOptions)</p>
+</dd>
+<dt>).onSuccess(_ =&gt; ccTweetMaterializeSuccess.incr())</dt><dd><p>.onFailure(_ =&gt; ccTweetMaterializeFailed.incr())
+.handle {</p>
+<blockquote>
+<div><p>case _ =&gt; GetTweetResult(tweetId, StatusState.Failed)</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+<dt>case (_, Some(_), true, _) =&gt;</dt><dd><p>ccTweetMaterializeFiltered.counter(“suppressed”).incr()
+Stitch.value(GetTweetResult(tweetId, StatusState.NotFound))</p>
+</dd>
+<dt>case (state, Some(_), _, _) =&gt;</dt><dd><p>ccTweetMaterializeFiltered.counter(state.name).incr()
+Stitch.value(originalGetTweetResult)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/tweetypie/server/src/main/scala/com/twitter/tweetypie/handler/GetTweetsHandler.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

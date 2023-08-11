@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.tweetypie
+package hydrator</p>
+<p>import com.twitter.tweetypie.core._
+import com.twitter.tweetypie.repository.TweetQuery
+import com.twitter.tweetypie.tweettext.TweetText
+import com.twitter.tweetypie.thriftscala._</p>
+<p>object CopyFromSourceTweet {</p>
+<blockquote>
+<div><dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>A <cite>ValueHydrator</cite> that copies and/or merges certain fields from a retweet’s source</p></li>
+<li><p>tweet into the retweet.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>def hydrator: ValueHydrator[TweetData, TweetQuery.Options] =</dt><dd><dl>
+<dt>ValueHydrator.map { (td, _) =&gt;</dt><dd><dl class="simple">
+<dt>td.sourceTweetResult.map(_.value.tweet) match {</dt><dd><p>case None =&gt; ValueState.unmodified(td)
+case Some(src) =&gt; ValueState.modified(td.copy(tweet = copy(src, td.tweet)))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Updates <cite>dst</cite> with fields from <cite>src</cite>. This is more complicated than you would think, because:</p></li>
+<li></li>
+<li><ul>
+<li><p>the tweet has an extra mention entity due to the “RT &#64;user” prefix;</p></li>
+</ul>
+</li>
+<li><ul>
+<li><p>the retweet text may be truncated at the end, and doesn’t necessarily contain all of the</p></li>
+</ul>
+</li>
+<li><p>the text from the source tweet.  truncation may happen in the middle of entity.</p></li>
+<li><ul>
+<li><p>the text in the retweet may have a different unicode normalization, which affects</p></li>
+</ul>
+</li>
+<li><p>code point indices. this means entities aren’t shifted by a fixed amount equal to</p></li>
+<li><p>the RT prefix.</p></li>
+<li><ul>
+<li><p>url entities, when hydrated, may be converted to media entities; url entities may not</p></li>
+</ul>
+</li>
+<li><p>be hydrated in the retweet, so the source tweet may have a media entity that corresponds</p></li>
+<li><p>to an unhydrated url entity in the retweet.</p></li>
+<li><ul>
+<li><p>there may be multiple media entities that map to a single url entity, because the tweet</p></li>
+</ul>
+</li>
+<li><p>may have multiple photos.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>def copy(src: Tweet, dst: Tweet): Tweet = {</dt><dd><p>val srcCoreData = src.coreData.get
+val dstCoreData = dst.coreData.get</p>
+<p>// get the code point index of the end of the text
+val max = getText(dst).codePointCount(0, getText(dst).length).toShort</p>
+<p>// get all entities from the source tweet, merged into a single list sorted by fromIndex.
+val srcEntities = getWrappedEntities(src)</p>
+<p>// same for the retweet, but drop first &#64;mention, add back later
+val dstEntities = getWrappedEntities(dst).drop(1)</p>
+<p>// merge indices from dst into srcEntities. at the end, resort entities back
+// to their original ordering.  for media entities, order matters to clients.
+val mergedEntities = merge(srcEntities, dstEntities, max).sortBy(_.position)</p>
+<p>// extract entities back out by type
+val mentions = mergedEntities.collect { case WrappedMentionEntity(e, _) =&gt; e }
+val hashtags = mergedEntities.collect { case WrappedHashtagEntity(e, _) =&gt; e }
+val cashtags = mergedEntities.collect { case WrappedCashtagEntity(e, _) =&gt; e }
+val urls = mergedEntities.collect { case WrappedUrlEntity(e, _) =&gt; e }
+val media = mergedEntities.collect { case WrappedMediaEntity(e, _) =&gt; e }</p>
+<p>// merge the updated entities back into the retweet, adding the RT &#64;mention back in
+dst.copy(</p>
+<blockquote>
+<div><dl>
+<dt>coreData = Some(</dt><dd><dl class="simple">
+<dt>dstCoreData.copy(</dt><dd><p>hasMedia = srcCoreData.hasMedia,
+hasTakedown = dstCoreData.hasTakedown || srcCoreData.hasTakedown</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>),
+mentions = Some(getMentions(dst).take(1) ++ mentions),
+hashtags = Some(hashtags),
+cashtags = Some(cashtags),
+urls = Some(urls),
+media = Some(media.map(updateSourceStatusId(src.id, getUserId(src)))),
+quotedTweet = src.quotedTweet,
+card2 = src.card2,
+cards = src.cards,
+language = src.language,
+mediaTags = src.mediaTags,
+spamLabel = src.spamLabel,
+takedownCountryCodes =</p>
+<blockquote>
+<div><p>mergeTakedowns(Seq(src, dst).map(TweetLenses.takedownCountryCodes.get): _*),</p>
+</div></blockquote>
+<p>conversationControl = src.conversationControl,
+exclusiveTweetControl = src.exclusiveTweetControl</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Merges one or more optional lists of takedowns.  If no lists are defined, returns None.</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>private def mergeTakedowns(takedowns: Option[Seq[CountryCode]]*): Option[Seq[CountryCode]] =</dt><dd><dl class="simple">
+<dt>if (takedowns.exists(_.isDefined)) {</dt><dd><p>Some(takedowns.flatten.flatten.distinct.sorted)</p>
+</dd>
+<dt>} else {</dt><dd><p>None</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>A retweet should never have media without a source_status_id or source_user_id</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+<dt>private def updateSourceStatusId(</dt><dd><p>srcTweetId: TweetId,
+srcUserId: UserId</p>
+</dd>
+<dt>): MediaEntity =&gt; MediaEntity =</dt><dd><dl>
+<dt>mediaEntity =&gt;</dt><dd><dl>
+<dt>if (mediaEntity.sourceStatusId.nonEmpty) {</dt><dd><p>// when sourceStatusId is set this indicates the media is “pasted media” so the values
+// should already be correct (retweeting won’t change sourceStatusId / sourceUserId)
+mediaEntity</p>
+</dd>
+<dt>} else {</dt><dd><dl class="simple">
+<dt>mediaEntity.copy(</dt><dd><p>sourceStatusId = Some(srcTweetId),
+sourceUserId = Some(mediaEntity.sourceUserId.getOrElse(srcUserId))</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Attempts to match up entities from the source tweet with entities from the retweet,</p></li>
+<li><p>and to use the source tweet entities but shifted to the retweet entity indices.  If an entity</p></li>
+<li><p>got truncated at the end of the retweet text, we drop it and any following entities.</p></li>
+</ul>
+<p><a href="#id9"><span class="problematic" id="id10">*</span></a>/</p>
+</dd>
+<dt>private def merge(</dt><dd><p>srcEntities: List[WrappedEntity],
+rtEntities: List[WrappedEntity],
+maxIndex: Short</p>
+</dd>
+<dt>): List[WrappedEntity] = {</dt><dd><dl>
+<dt>(srcEntities, rtEntities) match {</dt><dd><dl>
+<dt>case (Nil, Nil) =&gt;</dt><dd><p>// successfully matched all entities!
+Nil</p>
+</dd>
+<dt>case (Nil, _) =&gt;</dt><dd><p>// no more source tweet entities, but we still have remaining retweet entities.
+// this can happen if a a text truncation turns something invalid like #tag1#tag2 or
+// &#64;mention1&#64;mention2 into a valid entity. just drop all the remaining retweet entities.
+Nil</p>
+</dd>
+<dt>case (_, Nil) =&gt;</dt><dd><p>// no more retweet entities, which means the remaining entities have been truncated.
+Nil</p>
+</dd>
+<dt>case (srcHead :: srcTail, rtHead :: rtTail) =&gt;</dt><dd><p>// we have more entities from the source tweet and the retweet.  typically, we can
+// match these entities because they have the same normalized text, but the retweet
+// entity might be truncated, so we allow for a prefix match if the retweet entity
+// ends at the end of the tweet.
+val possiblyTruncated = rtHead.toIndex == maxIndex - 1
+val exactMatch = srcHead.normalizedText == rtHead.normalizedText</p>
+<dl>
+<dt>if (exactMatch) {</dt><dd><p>// there could be multiple media entities for the same t.co url, so we need to find
+// contiguous groupings of entities that share the same fromIndex.
+val rtTail = rtEntities.dropWhile(_.fromIndex == rtHead.fromIndex)
+val srcGroup =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>srcEntities</dt><dd><p>.takeWhile(_.fromIndex == srcHead.fromIndex)
+.map(_.shift(rtHead.fromIndex, rtHead.toIndex))</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>val srcTail = srcEntities.drop(srcGroup.size)</p>
+<p>srcGroup ++ merge(srcTail, rtTail, maxIndex)</p>
+</dd>
+<dt>} else {</dt><dd><p>// if we encounter a mismatch, it is most likely because of truncation,
+// so we stop here.
+Nil</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Wraps all the entities with the appropriate WrappedEntity subclasses, merges them into</p></li>
+<li><p>a single list, and sorts by fromIndex.</p></li>
+</ul>
+<p><a href="#id11"><span class="problematic" id="id12">*</span></a>/</p>
+</dd>
+<dt>private def getWrappedEntities(tweet: Tweet): List[WrappedEntity] =</dt><dd><dl class="simple">
+<dt>(getUrls(tweet).zipWithIndex.map { case (e, p) =&gt; WrappedUrlEntity(e, p) } ++</dt><dd><p>getMedia(tweet).zipWithIndex.map { case (e, p) =&gt; WrappedMediaEntity(e, p) } ++
+getMentions(tweet).zipWithIndex.map { case (e, p) =&gt; WrappedMentionEntity(e, p) } ++
+getHashtags(tweet).zipWithIndex.map { case (e, p) =&gt; WrappedHashtagEntity(e, p) } ++
+getCashtags(tweet).zipWithIndex.map { case (e, p) =&gt; WrappedCashtagEntity(e, p) })
+.sortBy(_.fromIndex)
+.toList</p>
+</dd>
+</dl>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>The thrift-entity classes don’t share a common entity parent class, so we wrap</p></li>
+<li><p>them with a class that allows us to mix entities together into a single list, and</p></li>
+<li><p>to provide a generic interface for shifting indicies.</p></li>
+</ul>
+<p><a href="#id13"><span class="problematic" id="id14">*</span></a>/</p>
+</dd>
+<dt>private sealed abstract class WrappedEntity(</dt><dd><p>val fromIndex: Short,
+val toIndex: Short,
+val rawText: String) {</p>
+<p>/** the original position of the entity within the entity group <a href="#id15"><span class="problematic" id="id16">*</span></a>/
+val position: Int</p>
+<p>val normalizedText: String = TweetText.nfcNormalize(rawText).toLowerCase</p>
+<p>def shift(fromIndex: Short, toIndex: Short): WrappedEntity</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private case class WrappedUrlEntity(entity: UrlEntity, position: Int)</dt><dd><blockquote>
+<div><p>extends WrappedEntity(entity.fromIndex, entity.toIndex, entity.url) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>override def shift(fromIndex: Short, toIndex: Short): WrappedUrlEntity =</dt><dd><p>copy(entity.copy(fromIndex = fromIndex, toIndex = toIndex))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private case class WrappedMediaEntity(entity: MediaEntity, position: Int)</dt><dd><blockquote>
+<div><p>extends WrappedEntity(entity.fromIndex, entity.toIndex, entity.url) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>override def shift(fromIndex: Short, toIndex: Short): WrappedMediaEntity =</dt><dd><p>copy(entity.copy(fromIndex = fromIndex, toIndex = toIndex))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private case class WrappedMentionEntity(entity: MentionEntity, position: Int)</dt><dd><blockquote>
+<div><p>extends WrappedEntity(entity.fromIndex, entity.toIndex, entity.screenName) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>override def shift(fromIndex: Short, toIndex: Short): WrappedMentionEntity =</dt><dd><p>copy(entity.copy(fromIndex = fromIndex, toIndex = toIndex))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private case class WrappedHashtagEntity(entity: HashtagEntity, position: Int)</dt><dd><blockquote>
+<div><p>extends WrappedEntity(entity.fromIndex, entity.toIndex, entity.text) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>override def shift(fromIndex: Short, toIndex: Short): WrappedHashtagEntity =</dt><dd><p>copy(entity.copy(fromIndex = fromIndex, toIndex = toIndex))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private case class WrappedCashtagEntity(entity: CashtagEntity, position: Int)</dt><dd><blockquote>
+<div><p>extends WrappedEntity(entity.fromIndex, entity.toIndex, entity.text) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>override def shift(fromIndex: Short, toIndex: Short): WrappedCashtagEntity =</dt><dd><p>copy(entity.copy(fromIndex = fromIndex, toIndex = toIndex))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/tweetypie/server/src/main/scala/com/twitter/tweetypie/hydrator/CopyFromSourceTweet.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

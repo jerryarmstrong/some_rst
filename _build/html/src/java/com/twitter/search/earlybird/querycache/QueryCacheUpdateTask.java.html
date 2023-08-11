@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../" id="documentation_options" src="../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.earlybird.querycache;</p>
+<p>import java.io.IOException;
+import java.util.concurrent.TimeUnit;</p>
+<p>import com.google.common.annotations.VisibleForTesting;
+import com.google.common.cache.CacheBuilder;
+import com.google.common.cache.CacheLoader;
+import com.google.common.cache.LoadingCache;</p>
+<p>import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;</p>
+<p>import com.twitter.common.quantity.Amount;
+import com.twitter.common.quantity.Time;
+import com.twitter.common.util.Clock;
+import com.twitter.decider.Decider;
+import com.twitter.search.common.metrics.SearchCounter;
+import com.twitter.search.common.metrics.SearchLongGauge;
+import com.twitter.search.common.metrics.Timer;
+import com.twitter.search.common.search.TerminationTracker;
+import com.twitter.search.core.earlybird.index.QueryCacheResultForSegment;
+import com.twitter.search.earlybird.common.config.EarlybirdConfig;
+import com.twitter.search.earlybird.common.userupdates.UserTable;
+import com.twitter.search.earlybird.exception.CriticalExceptionHandler;
+import com.twitter.search.earlybird.exception.EarlybirdException;
+import com.twitter.search.earlybird.index.EarlybirdSegment;
+import com.twitter.search.earlybird.index.EarlybirdSingleSegmentSearcher;
+import com.twitter.search.earlybird.partition.SegmentInfo;
+import com.twitter.search.earlybird.search.SearchResultsInfo;
+import com.twitter.search.earlybird.stats.EarlybirdSearcherStats;
+import com.twitter.search.earlybird.util.ScheduledExecutorTask;</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Each task is responsible for one filter on one segment. We should have a total</p></li>
+<li><p>of num_of_filter * num_of_segments tasks</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+</dl>
+<p>&#64;VisibleForTesting
+class QueryCacheUpdateTask extends ScheduledExecutorTask {</p>
+<blockquote>
+<div><p>private static final Logger LOG =  LoggerFactory.getLogger(QueryCacheUpdateTask.class);</p>
+<p>// See OBSERVE-10347
+private static final boolean EXPORT_STATS =</p>
+<blockquote>
+<div><p>EarlybirdConfig.getBool(“export_query_cache_update_task_stats”, false);</p>
+</div></blockquote>
+<dl>
+<dt>private static final LoadingCache&lt;String, TaskStats&gt; TASK_STATS =</dt><dd><dl>
+<dt>CacheBuilder.newBuilder().build(new CacheLoader&lt;String, TaskStats&gt;() {</dt><dd><p>&#64;Override
+public TaskStats load(String statNamePrefix) {</p>
+<blockquote>
+<div><p>return new TaskStats(statNamePrefix, EXPORT_STATS);</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>});</p>
+</dd>
+<dt>private static final SearchCounter FINISHED_TASKS = SearchCounter.export(</dt><dd><p>“querycache_finished_tasks”);</p>
+</dd>
+</dl>
+<p>private final QueryCacheFilter filter;</p>
+<p>// Info/data of the segment this task is responsible for
+private final SegmentInfo segmentInfo;</p>
+<p>private final UserTable userTable;</p>
+<p>private volatile boolean ranOnce;
+private final TaskStats stats;
+private Amount&lt;Long, Time&gt; lastRunFinishTime;</p>
+<p>// See SEARCH-4346
+private final String filterAndSegment;</p>
+<p>private final Decider decider;</p>
+<dl>
+<dt>private static final class TaskStats {</dt><dd><p>private final SearchLongGauge numHitsStat;
+private final SearchLongGauge updateLatencyStat;
+private final SearchCounter updateSuccessCountStat;
+private final SearchCounter updateFailureCountStat;</p>
+<dl>
+<dt>private TaskStats(String statNamePrefix, boolean exportStats) {</dt><dd><p>// See SEARCH-3698
+numHitsStat = exportStats ? SearchLongGauge.export(statNamePrefix + “numhit”)</p>
+<blockquote>
+<div><p>: new SearchLongGauge(statNamePrefix + “numhit”);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>updateLatencyStat = exportStats</dt><dd><p>? SearchLongGauge.export(statNamePrefix + “update_latency_ms”)
+: new SearchLongGauge(statNamePrefix + “update_latency_ms”);</p>
+</dd>
+<dt>updateSuccessCountStat = exportStats</dt><dd><p>? SearchCounter.export(statNamePrefix + “update_success_count”)
+: SearchCounter.create(statNamePrefix + “update_success_count”);</p>
+</dd>
+<dt>updateFailureCountStat = exportStats</dt><dd><p>? SearchCounter.export(statNamePrefix + “update_failure_count”)
+: SearchCounter.create(statNamePrefix + “update_failure_count”);</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>private final Amount&lt;Long, Time&gt; updateInterval;
+private final Amount&lt;Long, Time&gt; initialDelay;</p>
+<p>private final EarlybirdSearcherStats searcherStats;
+private final CriticalExceptionHandler criticalExceptionHandler;</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Constructor</p></li>
+<li><p>&#64;param filter Filter to be used to populate the cache</p></li>
+<li><p>&#64;param segmentInfo Segment this task is responsible for</p></li>
+<li><p>&#64;param updateInterval Time between successive updates</p></li>
+<li><p>&#64;param initialDelay Time before the first update</p></li>
+<li><p>&#64;param updateIterationCounter</p></li>
+<li><p>&#64;param decider</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>public QueryCacheUpdateTask(QueryCacheFilter filter,</dt><dd><blockquote>
+<div><p>SegmentInfo segmentInfo,
+UserTable userTable,
+Amount&lt;Long, Time&gt; updateInterval,
+Amount&lt;Long, Time&gt; initialDelay,
+SearchCounter updateIterationCounter,
+EarlybirdSearcherStats searcherStats,
+Decider decider,
+CriticalExceptionHandler criticalExceptionHandler,
+Clock clock) {</p>
+</div></blockquote>
+<p>super(updateIterationCounter, clock);
+this.filter = filter;
+this.segmentInfo = segmentInfo;
+this.userTable = userTable;
+this.ranOnce = false;
+this.updateInterval = updateInterval;
+this.initialDelay = initialDelay;
+this.stats = setupStats();
+this.filterAndSegment = String.format(</p>
+<blockquote>
+<div><p>“QueryCacheFilter: %s | Segment: %d”,
+filter.getFilterName(), segmentInfo.getTimeSliceID());</p>
+</div></blockquote>
+<p>this.searcherStats = searcherStats;
+this.criticalExceptionHandler = criticalExceptionHandler;
+this.decider = decider;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;Override
+protected void runOneIteration() {</p>
+<blockquote>
+<div><dl>
+<dt>try {</dt><dd><dl>
+<dt>if (LOG.isDebugEnabled()) {</dt><dd><dl class="simple">
+<dt>LOG.debug(</dt><dd><p>“[{}] Updating with query [{}] for the {} th time.”,
+filterAndSegment,
+filter.getQueryString(),
+stats.updateSuccessCountStat.get() + stats.updateFailureCountStat.get() + 1</p>
+</dd>
+</dl>
+<p>);
+if (lastRunFinishTime != null) {</p>
+<blockquote>
+<div><dl>
+<dt>LOG.debug(</dt><dd><p>“[{}] Last run, {} th time, finished {} secs ago. Should run every {} secs”,
+filterAndSegment,
+stats.updateSuccessCountStat.get() + stats.updateFailureCountStat.get(),
+TimeUnit.NANOSECONDS.toSeconds(</p>
+<blockquote>
+<div><p>System.nanoTime() - lastRunFinishTime.as(Time.NANOSECONDS)),</p>
+</div></blockquote>
+<p>updateInterval.as(Time.SECONDS)</p>
+</dd>
+</dl>
+<p>);</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>Timer timer = new Timer(TimeUnit.MILLISECONDS);
+SearchResultsInfo result = null;
+try {</p>
+<blockquote>
+<div><p>result = update();</p>
+</div></blockquote>
+<dl>
+<dt>} catch (Exception e) {</dt><dd><dl class="simple">
+<dt>String msg = “Failed to update query cache entry [” + filter.getFilterName()</dt><dd><ul class="simple">
+<li><p>“] on segment [” + segmentInfo.getTimeSliceID() + “]”;</p></li>
+</ul>
+</dd>
+</dl>
+<p>LOG.warn(msg, e);</p>
+</dd>
+</dl>
+<p>}</p>
+<p>long endTime = timer.stop();
+updateStats(result, endTime);</p>
+<dl class="simple">
+<dt>if (LOG.isDebugEnabled()) {</dt><dd><dl class="simple">
+<dt>LOG.debug(“[{}] Updated in {} ms, hit {} docs.”,</dt><dd><p>filterAndSegment, endTime, stats.numHitsStat.read());</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+// Need to catch throwable here instead of exception so we handle errors like OutOfMemory
+// See RB=528695 and SEARCH-4402</p>
+</dd>
+<dt>} catch (Throwable t) {</dt><dd><p>String message = String.format(“Got unexpected throwable in %s”, getClass().getName());
+LOG.error(message, t);</p>
+<p>// Wrap the Throwable in a FatalEarlybirdException to categorize it and ensure it’s
+// handled as a fatal exception
+criticalExceptionHandler.handle(this,</p>
+<blockquote>
+<div><p>new EarlybirdException(message, t));</p>
+</div></blockquote>
+</dd>
+<dt>} finally {</dt><dd><p>// Earlybird won’t become CURRENT until all tasks are run at least once. We don’t want
+// failed “run” (update) to prevent Earlybird from becoming CURRENT. As long as all tasks
+// got a chance to run at least once, we are good to go.
+ranOnce = true;</p>
+<p>lastRunFinishTime = Amount.of(System.nanoTime(), Time.NANOSECONDS);</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>public boolean ranOnce() {</dt><dd><p>return ranOnce;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private TaskStats setupStats() {</dt><dd><p>return TASK_STATS.getUnchecked(statNamePrefix());</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private SearchResultsInfo update() throws IOException {</dt><dd><p>// There’s a chance that the EarlybirdSegment of a SegmentInfo to change at any
+// time. Therefore, it’s not safe to operate segments on the SegmentInfo level.
+// On the archive clusters we create a new EarlybirdSegment and then swap it in when there’s
+// new data instead of appending to an existing EarlybirdSegment.
+EarlybirdSegment earlybirdSegment = segmentInfo.getIndexSegment();</p>
+<p>EarlybirdSingleSegmentSearcher searcher = earlybirdSegment.getSearcher(userTable);
+if (searcher == null) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>LOG.warn(“Unable to get searcher from TwitterIndexManager for segment [”</dt><dd><ul class="simple">
+<li><p>segmentInfo.getTimeSliceID() + “]. Has it been dropped?”);</p></li>
+</ul>
+</dd>
+</dl>
+<p>return null;</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>QueryCacheResultCollector collector = new QueryCacheResultCollector(</dt><dd><p>searcher.getSchemaSnapshot(), filter, searcherStats, decider, clock, 0);</p>
+</dd>
+</dl>
+<p>searcher.search(filter.getLuceneQuery(), collector);</p>
+<p>QueryCacheResultForSegment cacheResult = collector.getCachedResult();
+searcher.getTwitterIndexReader().getSegmentData().updateQueryCacheResult(</p>
+<blockquote>
+<div><p>filter.getFilterName(), cacheResult);</p>
+</div></blockquote>
+<p>FINISHED_TASKS.increment();</p>
+<dl>
+<dt>if (LOG.isDebugEnabled()) {</dt><dd><p>TerminationTracker tracker = collector.getSearchRequestInfo().getTerminationTracker();
+LOG.debug(</p>
+<blockquote>
+<div><p>“[{}] Updating query finished, start time ms is {}, termination reason is {}”,
+filterAndSegment,
+tracker.getLocalStartTimeMillis(),
+tracker.getEarlyTerminationState().getTerminationReason());</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<p>return collector.getResults();</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private void updateStats(SearchResultsInfo result, long endTime) {</dt><dd><dl class="simple">
+<dt>if (result != null) {</dt><dd><p>stats.numHitsStat.set(result.getNumHitsProcessed());
+stats.updateSuccessCountStat.increment();</p>
+</dd>
+<dt>} else {</dt><dd><p>stats.updateFailureCountStat.increment();</p>
+</dd>
+</dl>
+<p>}
+stats.updateLatencyStat.set(endTime);</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;VisibleForTesting
+String statNamePrefix() {</p>
+<blockquote>
+<div><p>// If we use this and try to display in monviz “ts(partition, single_instance, querycache*)”,
+// the UI shows “Really expensive query” message. We can keep this around for times when we
+// want to start things manually and debug.
+return “<a href="#id5"><span class="problematic" id="id6">querycache_</span></a>” + filter.getFilterName() + “_” + segmentInfo.getTimeSliceID() + “_”;</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>public long getTimeSliceID() {</dt><dd><p>return segmentInfo.getTimeSliceID();</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;VisibleForTesting
+String getFilterNameForTest() {</p>
+<blockquote>
+<div><p>return filter.getFilterName();</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;VisibleForTesting
+Amount&lt;Long, Time&gt; getUpdateIntervalForTest() {</p>
+<blockquote>
+<div><p>return updateInterval;</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;VisibleForTesting
+Amount&lt;Long, Time&gt; getInitialDelayForTest() {</p>
+<blockquote>
+<div><p>return initialDelay;</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;VisibleForTesting
+TaskStats getTaskStatsForTest() {</p>
+<blockquote>
+<div><p>return stats;</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../_sources/src/java/com/twitter/search/earlybird/querycache/QueryCacheUpdateTask.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

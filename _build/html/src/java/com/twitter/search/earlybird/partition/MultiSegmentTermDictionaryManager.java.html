@@ -1,0 +1,486 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../" id="documentation_options" src="../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.earlybird.partition;</p>
+<p>import java.io.IOException;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.TimeUnit;
+import javax.annotation.Nullable;</p>
+<p>import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Preconditions;
+import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.Lists;
+import com.google.common.collect.Maps;</p>
+<p>import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;</p>
+<p>import com.twitter.decider.Decider;
+import com.twitter.search.common.decider.DeciderUtil;
+import com.twitter.search.common.metrics.SearchLongGauge;
+import com.twitter.search.common.metrics.SearchStatsReceiver;
+import com.twitter.search.common.metrics.SearchTimerStats;
+import com.twitter.search.common.schema.earlybird.EarlybirdCluster;
+import com.twitter.search.core.earlybird.index.inverted.InvertedIndex;
+import com.twitter.search.core.earlybird.index.inverted.MultiSegmentTermDictionary;
+import com.twitter.search.core.earlybird.index.inverted.MultiSegmentTermDictionaryWithFastutil;
+import com.twitter.search.core.earlybird.index.inverted.OptimizedMemoryIndex;
+import com.twitter.search.earlybird.common.config.EarlybirdConfig;
+import com.twitter.search.earlybird.index.EarlybirdSegment;
+import com.twitter.search.earlybird.partition.SegmentManager.Filter;
+import com.twitter.search.earlybird.partition.SegmentManager.Order;</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Manages MultiSegmentTermDictionary’s for specific fields on this earlybird. Only manages them</p></li>
+<li><p>for optimized segments, and should only regenerate new dictionaries when the list of optimized</p></li>
+<li><p>segments changes. See SEARCH-10836</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>public class MultiSegmentTermDictionaryManager {</dt><dd><dl class="simple">
+<dt>private static final Logger LOG =</dt><dd><p>LoggerFactory.getLogger(MultiSegmentTermDictionaryManager.class);</p>
+</dd>
+</dl>
+<p>&#64;VisibleForTesting
+public static final SearchTimerStats TERM_DICTIONARY_CREATION_STATS =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>SearchTimerStats.export(“multi_segment_term_dictionary_manager_build_dictionary”,</dt><dd><p>TimeUnit.MILLISECONDS, false);</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl>
+<dt>public static final MultiSegmentTermDictionaryManager NOOP_INSTANCE =</dt><dd><dl>
+<dt>new MultiSegmentTermDictionaryManager(</dt><dd><blockquote>
+<div><p>new Config(Collections.emptyList()), null, null, null, null) {</p>
+</div></blockquote>
+<p>&#64;Override
+public boolean buildDictionary() {</p>
+<blockquote>
+<div><p>return false;</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>};</p>
+</dd>
+<dt>private static final String MANAGER_DISABLED_DECIDER_KEY_PREFIX =</dt><dd><p>“<a href="#id11"><span class="problematic" id="id12">multi_segment_term_dictionary_manager_disabled_in_</span></a>”;</p>
+</dd>
+<dt>public static class Config {</dt><dd><p>private final ImmutableList&lt;String&gt; fieldNames;</p>
+<dl class="simple">
+<dt>public Config(List&lt;String&gt; fieldNames) {</dt><dd><p>Preconditions.checkNotNull(fieldNames);
+this.fieldNames = ImmutableList.copyOf(fieldNames);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public List&lt;String&gt; managedFieldNames() {</dt><dd><p>return fieldNames;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public boolean isEnabled() {</dt><dd><p>return EarlybirdConfig.getBool(“multi_segment_term_dictionary_enabled”, false);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;VisibleForTesting
+public static String getManagerDisabledDeciderName(EarlybirdCluster earlybirdCluster) {</p>
+<blockquote>
+<div><p>return MANAGER_DISABLED_DECIDER_KEY_PREFIX + earlybirdCluster.name().toLowerCase();</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>private static final class FieldStats {</dt><dd><p>private final SearchTimerStats buildTime;
+private final SearchLongGauge numTerms;
+private final SearchLongGauge numTermEntries;</p>
+<dl>
+<dt>private FieldStats(SearchStatsReceiver statsReceiver, String fieldName) {</dt><dd><p>Preconditions.checkNotNull(fieldName);
+Preconditions.checkNotNull(statsReceiver);</p>
+<dl class="simple">
+<dt>String timerName = String.format(</dt><dd><p>“multi_segment_term_dictionary_manager_field_%s_build_dictionary”, fieldName);</p>
+</dd>
+<dt>this.buildTime = statsReceiver.getTimerStats(</dt><dd><p>timerName, TimeUnit.MILLISECONDS, false, false, false);</p>
+</dd>
+<dt>String numTermsName = String.format(</dt><dd><p>“multi_segment_term_dictionary_manager_field_%s_num_terms”, fieldName);</p>
+</dd>
+</dl>
+<p>this.numTerms = statsReceiver.getLongGauge(numTermsName);</p>
+<dl class="simple">
+<dt>String numTermEntriesName = String.format(</dt><dd><p>“multi_segment_term_dictionary_manager_field_%s_num_term_entries”, fieldName);</p>
+</dd>
+</dl>
+<p>this.numTermEntries = statsReceiver.getLongGauge(numTermEntriesName);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>private final Config config;
+&#64;Nullable private final SegmentManager segmentManager;
+&#64;Nullable private final Decider decider;
+&#64;Nullable private final EarlybirdCluster earlybirdCluster;
+private final ImmutableMap&lt;String, FieldStats&gt; fieldTimerStats;
+// A per-field map of multi-segment term dictionaries. Each key is a field. The values are the
+// multi-segment term dictionaries for that field.
+private volatile ImmutableMap&lt;String, MultiSegmentTermDictionary&gt; multiSegmentTermDictionaryMap;
+private List&lt;SegmentInfo&gt; previousSegmentsToMerge;</p>
+<dl>
+<dt>public MultiSegmentTermDictionaryManager(</dt><dd><blockquote>
+<div><p>Config config,
+SegmentManager segmentManager,
+SearchStatsReceiver statsReceiver,
+Decider decider,
+EarlybirdCluster earlybirdCluster) {</p>
+</div></blockquote>
+<p>this.config = config;
+this.segmentManager = segmentManager;
+this.decider = decider;
+this.earlybirdCluster = earlybirdCluster;</p>
+<p>this.multiSegmentTermDictionaryMap = ImmutableMap.of();
+this.previousSegmentsToMerge = Lists.newArrayList();</p>
+<p>ImmutableMap.Builder&lt;String, FieldStats&gt; builder = ImmutableMap.builder();
+if (statsReceiver != null) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>for (String fieldName<span class="classifier">config.managedFieldNames()) {</span></dt><dd><p>builder.put(fieldName, new FieldStats(statsReceiver, fieldName));</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}
+this.fieldTimerStats = builder.build();</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Return the most recently built MultiSegmentTermDictionary for the given field.</p></li>
+<li><p>Will return null if the field is not supported by this manager.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+</dl>
+<p>&#64;Nullable
+public MultiSegmentTermDictionary getMultiSegmentTermDictionary(String fieldName) {</p>
+<blockquote>
+<div><p>return this.multiSegmentTermDictionaryMap.get(fieldName);</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Build new versions of multi-segment term dictionaries if the manager is enabled, and new</p></li>
+<li><p>segments are available.</p></li>
+<li><p>&#64;return true if the manager actually ran, and generated new versions of multi-segment term</p></li>
+<li><p>dictionaries.</p></li>
+<li></li>
+<li><p>We synchronize this method because it would be a logic error to modify the variables from</p></li>
+<li><p>multiple threads simultaneously, and it is possible for two segments to finish optimizing at</p></li>
+<li><p>the same time and try to run it.</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>public synchronized boolean buildDictionary() {</dt><dd><dl class="simple">
+<dt>if (!config.isEnabled()) {</dt><dd><p>return false;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>Preconditions.checkNotNull(decider);
+Preconditions.checkNotNull(earlybirdCluster);
+if (DeciderUtil.isAvailableForRandomRecipient(decider,</p>
+<blockquote>
+<div><blockquote>
+<div><p>getManagerDisabledDeciderName(earlybirdCluster))) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>LOG.info(“Multi segment term dictionary manager is disabled via decider for cluster {}.”,</dt><dd><p>earlybirdCluster);</p>
+</dd>
+</dl>
+<p>this.multiSegmentTermDictionaryMap = ImmutableMap.of();
+this.previousSegmentsToMerge = Lists.newArrayList();
+return false;</p>
+</div></blockquote>
+<p>}</p>
+<p>List&lt;SegmentInfo&gt; segmentsToMerge = getSegmentsToMerge();</p>
+<dl>
+<dt>if (differentFromPreviousList(segmentsToMerge)) {</dt><dd><p>long start = System.currentTimeMillis();
+try {</p>
+<blockquote>
+<div><p>this.multiSegmentTermDictionaryMap = createNewDictionaries(segmentsToMerge);
+this.previousSegmentsToMerge = segmentsToMerge;
+return true;</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} catch (IOException e) {</dt><dd><p>LOG.error(“Unable to build multi segment term dictionaries”, e);
+return false;</p>
+</dd>
+<dt>} finally {</dt><dd><p>long elapsed = System.currentTimeMillis() - start;
+TERM_DICTIONARY_CREATION_STATS.timerIncrement(elapsed);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>} else {</dt><dd><p>LOG.warn(“No-op for buildDictionary()”);
+return false;</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Only merge terms from enabled and optimized segments. No need to look at non-enabled segments,</p></li>
+<li><p>and we also don’t want to use un-optimized segments as their term dictionaries are still</p></li>
+<li><p>changing.</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+<dt>private List&lt;SegmentInfo&gt; getSegmentsToMerge() {</dt><dd><dl class="simple">
+<dt>Iterable&lt;SegmentInfo&gt; segmentInfos =</dt><dd><p>segmentManager.getSegmentInfos(Filter.Enabled, Order.OLD_TO_NEW);</p>
+</dd>
+</dl>
+<p>List&lt;SegmentInfo&gt; segmentsToMerge = Lists.newArrayList();
+for (SegmentInfo segmentInfo : segmentInfos) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (segmentInfo.getIndexSegment().isOptimized()) {</dt><dd><p>segmentsToMerge.add(segmentInfo);</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}
+return segmentsToMerge;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private boolean differentFromPreviousList(List&lt;SegmentInfo&gt; segmentsToMerge) {</dt><dd><p>// there is a potentially different approach here to only check if the
+// segmentsToMerge is subsumed by the previousSegmentsToMerge list, and not recompute
+// the multi segment term dictionary if so.
+// There is a case where a new segment is added, the previously current segment is not yet
+// optimized, but the oldest segment is dropped. With this impl, we will recompute to remove
+// the dropped segment, however, we will recompute soon again when the
+// “previously current segment” is actually optimized. We can potentially delay the first
+// merging before the optimization.
+if (this.previousSegmentsToMerge.size() == segmentsToMerge.size()) {</p>
+<blockquote>
+<div><dl>
+<dt>for (int i = 0; i &lt; this.previousSegmentsToMerge.size(); i++) {</dt><dd><dl class="simple">
+<dt>if (previousSegmentsToMerge.get(i).compareTo(segmentsToMerge.get(i)) != 0) {</dt><dd><p>return true;</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}
+return false;</p>
+</div></blockquote>
+<p>}
+return true;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Rebuild the term dictionaries from scratch for all the managed fields.</p></li>
+<li><p>Returning a brand new map here with all the fields’ term dictionaries so that we can isolate</p></li>
+<li><p>failures to build, and only replace the entire map of all the fields are built successfully.</p></li>
+</ul>
+<p><a href="#id9"><span class="problematic" id="id10">*</span></a>/</p>
+</dd>
+<dt>private ImmutableMap&lt;String, MultiSegmentTermDictionary&gt; createNewDictionaries(</dt><dd><blockquote>
+<div><p>List&lt;SegmentInfo&gt; segments) throws IOException {</p>
+</div></blockquote>
+<p>Map&lt;String, MultiSegmentTermDictionary&gt; map = Maps.newHashMap();</p>
+<dl>
+<dt>for (String field<span class="classifier">config.managedFieldNames()) {</span></dt><dd><p>LOG.info(“Merging term dictionaries for field {}”, field);</p>
+<p>List&lt;OptimizedMemoryIndex&gt; indexesToMerge = findFieldIndexesToMerge(segments, field);</p>
+<dl>
+<dt>if (indexesToMerge.isEmpty()) {</dt><dd><p>LOG.info(“No indexes to merge for field {}”, field);</p>
+</dd>
+<dt>} else {</dt><dd><p>long start = System.currentTimeMillis();</p>
+<dl class="simple">
+<dt>MultiSegmentTermDictionary multiSegmentTermDictionary =</dt><dd><p>mergeDictionaries(field, indexesToMerge);</p>
+</dd>
+</dl>
+<p>map.put(field, multiSegmentTermDictionary);</p>
+<p>long elapsed = System.currentTimeMillis() - start;
+LOG.info(“Done merging term dictionary for field {}, for {} segments in {}ms”,</p>
+<blockquote>
+<div><p>field, indexesToMerge.size(), elapsed);</p>
+</div></blockquote>
+<p>FieldStats fieldStats = fieldTimerStats.get(field);
+fieldStats.buildTime.timerIncrement(elapsed);
+fieldStats.numTerms.set(multiSegmentTermDictionary.getNumTerms());
+fieldStats.numTermEntries.set(multiSegmentTermDictionary.getNumTermEntries());</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}
+return ImmutableMap.copyOf(map);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private List&lt;OptimizedMemoryIndex&gt; findFieldIndexesToMerge(</dt><dd><blockquote>
+<div><p>List&lt;SegmentInfo&gt; segments, String field) throws IOException {</p>
+</div></blockquote>
+<p>List&lt;OptimizedMemoryIndex&gt; indexesToMerge = Lists.newArrayList();</p>
+<dl>
+<dt>for (SegmentInfo segment<span class="classifier">segments) {</span></dt><dd><p>EarlybirdSegment indexSegment = segment.getIndexSegment();
+Preconditions.checkState(indexSegment.isOptimized(),</p>
+<blockquote>
+<div><p>“Expect segment to be optimized: %s”, segment);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>InvertedIndex fieldIndex = Preconditions.checkNotNull(indexSegment.getIndexReader())</dt><dd><p>.getSegmentData().getFieldIndex(field);</p>
+</dd>
+</dl>
+<p>// See SEARCH-11952
+// We will only have a InvertedIndex/OptimizedMemoryIndex here
+// in the in-memory non-lucene-based indexes, and not in the archive. We can somewhat
+// reasonably extend this to work with the archive by making the dictionaries work with
+// TermsEnum’s directly instead of OptimizedMemoryIndex’s. Leaving this as a further
+// extension for now.
+if (fieldIndex != null) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (fieldIndex instanceof OptimizedMemoryIndex) {</dt><dd><p>indexesToMerge.add((OptimizedMemoryIndex) fieldIndex);</p>
+</dd>
+<dt>} else {</dt><dd><dl class="simple">
+<dt>LOG.info(“Found field index for field {} in segment {} of type {}”,</dt><dd><p>field, segment, fieldIndex.getClass());</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>LOG.info(“Found null field index for field {} in segment {}”, field, segment);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}
+LOG.info(“Found good fields for {} out of {} segments”, indexesToMerge.size(),</p>
+<blockquote>
+<div><p>segments.size());</p>
+</div></blockquote>
+<p>return indexesToMerge;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private MultiSegmentTermDictionary mergeDictionaries(</dt><dd><blockquote>
+<div><p>String field,
+List&lt;OptimizedMemoryIndex&gt; indexes) {</p>
+</div></blockquote>
+<p>// May change this if we get a better implementation in the future.
+return new MultiSegmentTermDictionaryWithFastutil(field, indexes);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../_sources/src/java/com/twitter/search/earlybird/partition/MultiSegmentTermDictionaryManager.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

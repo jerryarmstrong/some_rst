@@ -1,0 +1,540 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../" id="documentation_options" src="../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>use anyhow::{anyhow, Result};
+use arrayvec::ArrayVec;
+use itertools::Itertools;
+use log::{error, info};
+use std::fmt::{Debug, Display};
+use std::string::String;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::process::Command;
+use tokio::sync::mpsc::error::TryRecvError;
+use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::sync::{mpsc, oneshot};
+use tokio::time::{Instant, sleep};
+use warp::Filter;</p>
+<p>use crate::batch::BatchPredictor;
+use crate::bootstrap::TensorInput;
+use crate::{MAX_NUM_MODELS, MAX_VERSIONS_PER_MODEL, META_INFO, metrics, ModelFactory, PredictMessage, PredictResult, TensorReturnEnum, utils};</p>
+<p>use crate::cli_args::{ARGS, MODEL_SPECS};
+use crate::cores::validator::validatior::cli_validator;
+use crate::metrics::MPSC_CHANNEL_SIZE;
+use serde_json::{self, Value};</p>
+<dl>
+<dt>pub trait Model: Send + Sync + Display + Debug + ‘static {</dt><dd><p>fn warmup(&amp;self) -&gt; Result&lt;()&gt;;
+//TODO: refactor this to return vec&lt;vec&lt;TensorScores&gt;&gt;, i.e.
+//we have the underlying runtime impl to split the response to each client.
+//It will eliminate some inefficient memory copy in onnx_model.rs as well as simplify code
+fn do_predict(</p>
+<blockquote>
+<div><p>&amp;self,
+input_tensors: Vec&lt;Vec&lt;TensorInput&gt;&gt;,
+total_len: u64,</p>
+</div></blockquote>
+<p>) -&gt; (Vec&lt;TensorReturnEnum&gt;, Vec&lt;Vec&lt;usize&gt;&gt;);
+fn model_idx(&amp;self) -&gt; usize;
+fn version(&amp;self) -&gt; i64;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>#[derive(Debug)]
+pub struct PredictService&lt;T: Model&gt; {</p>
+<blockquote>
+<div><p>tx: Sender&lt;PredictMessage&lt;T&gt;&gt;,</p>
+</div></blockquote>
+<p>}
+impl&lt;T: Model&gt; PredictService&lt;T&gt; {</p>
+<blockquote>
+<div><dl>
+<dt>pub async fn init(model_factory: ModelFactory&lt;T&gt;) -&gt; Self {</dt><dd><p>cli_validator::validate_ps_model_args();
+let (tx, rx) = mpsc::channel(32_000);
+tokio::spawn(PredictService::tf_queue_manager(rx));
+tokio::spawn(PredictService::model_watcher_latest(</p>
+<blockquote>
+<div><p>model_factory,
+tx.clone(),</p>
+</div></blockquote>
+<p>));
+let metrics_route = warp::path!(“metrics”).and_then(metrics::metrics_handler);
+let metric_server = warp::serve(metrics_route).run(([0, 0, 0, 0], ARGS.prometheus_port));
+tokio::spawn(metric_server);
+PredictService { tx }</p>
+</dd>
+</dl>
+<p>}
+#[inline(always)]
+pub async fn predict(</p>
+<blockquote>
+<div><p>&amp;self,
+idx: usize,
+version: Option&lt;i64&gt;,
+val: Vec&lt;TensorInput&gt;,
+ts: Instant,</p>
+</div></blockquote>
+<dl>
+<dt>) -&gt; Result&lt;PredictResult&gt; {</dt><dd><p>let (tx, rx) = oneshot::channel();
+if let Err(e) = self</p>
+<blockquote>
+<div><p>.tx
+.clone()
+.send(PredictMessage::Predict(idx, version, val, tx, ts))
+.await</p>
+</div></blockquote>
+<dl class="simple">
+<dt>{</dt><dd><p>error!(“mpsc send error:{}”, e);
+Err(anyhow!(e))</p>
+</dd>
+<dt>} else {</dt><dd><p>MPSC_CHANNEL_SIZE.inc();
+rx.await.map_err(anyhow::Error::msg)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>async fn load_latest_model_from_model_dir(</dt><dd><p>model_factory: ModelFactory&lt;T&gt;,
+model_config: &amp;Value,
+tx: Sender&lt;PredictMessage&lt;T&gt;&gt;,
+idx: usize,
+max_version: String,
+latest_version: &amp;mut String,</p>
+</dd>
+<dt>) {</dt><dd><dl>
+<dt>match model_factory(idx, max_version.clone(), model_config) {</dt><dd><dl>
+<dt>Ok(tf_model) =&gt; tx</dt><dd><p>.send(PredictMessage::UpsertModel(tf_model))
+.await
+.map_or_else(</p>
+<blockquote>
+<div><p><a href="#id5"><span class="problematic" id="id6">|e|</span></a> error!(“send UpsertModel error: {}”, e),
+<a href="#id7"><span class="problematic" id="id8">|_|</span></a> <a href="#id1"><span class="problematic" id="id2">*</span></a>latest_version = max_version,</p>
+</div></blockquote>
+<p>),</p>
+</dd>
+<dt>Err(e) =&gt; {</dt><dd><p>error!(“skip loading model due to failure: {:?}”, e);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>async fn scan_load_latest_model_from_model_dir(</dt><dd><p>model_factory: ModelFactory&lt;T&gt;,
+model_config: &amp;Value,
+tx: Sender&lt;PredictMessage&lt;T&gt;&gt;,
+model_idx: usize,
+cur_version: &amp;mut String,</p>
+</dd>
+<dt>) -&gt; Result&lt;()&gt; {</dt><dd><p>let model_dir = &amp;ARGS.model_dir[model_idx];
+let next_version = utils::get_config_or_else(model_config, “version”, || {</p>
+<blockquote>
+<div><p>info!(“no version found, hence use max version”);
+std::fs::read_dir(model_dir)</p>
+<blockquote>
+<div><p>.map_err(<a href="#id9"><span class="problematic" id="id10">|e|</span></a> format!(“read dir error:{}”, e))
+.and_then(<a href="#id11"><span class="problematic" id="id12">|paths|</span></a> {</p>
+<blockquote>
+<div><dl>
+<dt>paths</dt><dd><p>.into_iter()
+.flat_map(<a href="#id13"><span class="problematic" id="id14">|p|</span></a> {</p>
+<blockquote>
+<div><dl>
+<dt>p.map_err(<a href="#id15"><span class="problematic" id="id16">|e|</span></a> error!(“dir entry error: {}”, e))</dt><dd><dl class="simple">
+<dt>.and_then(<a href="#id17"><span class="problematic" id="id18">|dir|</span></a> {</dt><dd><dl class="simple">
+<dt>dir.file_name()</dt><dd><p>.into_string()
+.map_err(<a href="#id19"><span class="problematic" id="id20">|e|</span></a> error!(“osstring error: {:?}”, e))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>})
+.ok()</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>})
+.filter(<a href="#id21"><span class="problematic" id="id22">|f|</span></a> !f.to_lowercase().contains(&amp;META_INFO.to_lowercase()))
+.max()
+.ok_or_else(|| “no dir found hence no max”.to_owned())</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>})
+.unwrap_or_else(<a href="#id23"><span class="problematic" id="id24">|e|</span></a> {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>error!(</dt><dd><p>“can’t get the max version hence return cur_version, error is: {}”,
+e</p>
+</dd>
+</dl>
+<p>);
+cur_version.to_string()</p>
+</div></blockquote>
+<p>})</p>
+</div></blockquote>
+</div></blockquote>
+<p>});
+//as long as next version doesn’t match cur version maintained we reload
+if next_version.ne(cur_version) {</p>
+<blockquote>
+<div><p>info!(“reload the version: {}-&gt;{}”, cur_version, next_version);
+PredictService::load_latest_model_from_model_dir(</p>
+<blockquote>
+<div><p>model_factory,
+model_config,
+tx,
+model_idx,
+next_version,
+cur_version,</p>
+</div></blockquote>
+<p>)
+.await;</p>
+</div></blockquote>
+<p>}
+Ok(())</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>async fn model_watcher_latest(model_factory: ModelFactory&lt;T&gt;, tx: Sender&lt;PredictMessage&lt;T&gt;&gt;) {</dt><dd><dl>
+<dt>async fn call_external_modelsync(cli: &amp;str, cur_versions: &amp;Vec&lt;String&gt;) -&gt; Result&lt;()&gt; {</dt><dd><p>let mut args = cli.split_whitespace();</p>
+<p>let mut cmd = Command::new(args.next().ok_or(anyhow!(“model sync cli empty”))?);
+let extr_args = MODEL_SPECS</p>
+<blockquote>
+<div><p>.iter()
+.zip(cur_versions)
+.flat_map(<a href="#id25"><span class="problematic" id="id26">|(spec, version)|</span></a> vec![”–model-spec”, spec, “–cur-version”, version])
+.collect_vec();</p>
+</div></blockquote>
+<p>info!(“run model sync: {} with extra args: {:?}”, cli, extr_args);
+let output = cmd.args(args).args(extr_args).output().await?;
+info!(“model sync stdout:{}”, String::from_utf8(output.stdout)?);
+info!(“model sync stderr:{}”, String::from_utf8(output.stderr)?);
+if output.status.success() {</p>
+<blockquote>
+<div><p>Ok(())</p>
+</div></blockquote>
+<dl>
+<dt>} else {</dt><dd><dl class="simple">
+<dt>Err(anyhow!(</dt><dd><p>“model sync failed with status: {:?}!”,
+output.status</p>
+</dd>
+</dl>
+<p>))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}
+let meta_dir = utils::get_meta_dir();
+let meta_file = format!(“{}{}”, meta_dir, META_INFO);
+//initialize the latest version array
+let mut cur_versions = vec![“”.to_owned(); MODEL_SPECS.len()];
+loop {</p>
+<blockquote>
+<div><p>info!(”<strong>*polling for models*</strong>”); //nice deliminter
+if let Some(ref cli) = ARGS.modelsync_cli {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if let Err(e) = call_external_modelsync(cli, &amp;cur_versions).await {</dt><dd><p>error!(“model sync cli running error:{}”, e)</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}
+let config = utils::read_config(&amp;meta_file).unwrap_or_else(<a href="#id27"><span class="problematic" id="id28">|e|</span></a> {</p>
+<blockquote>
+<div><p>info!(“config file {} not found due to: {}”, meta_file, e);
+Value::Null</p>
+</div></blockquote>
+<p>});
+info!(“config:{}”, config);
+for (idx, cur_version) in cur_versions.iter_mut().enumerate() {</p>
+<blockquote>
+<div><p>let model_dir = &amp;ARGS.model_dir[idx];
+PredictService::scan_load_latest_model_from_model_dir(</p>
+<blockquote>
+<div><p>model_factory,
+&amp;config[&amp;MODEL_SPECS[idx]],
+tx.clone(),
+idx,
+cur_version,</p>
+</div></blockquote>
+<p>)
+.await
+.map_or_else(</p>
+<blockquote>
+<div><p><a href="#id29"><span class="problematic" id="id30">|e|</span></a> error!(“scanned {}, error {:?}”, model_dir, e),
+<a href="#id31"><span class="problematic" id="id32">|_|</span></a> info!(“scanned {}, latest_version: {}”, model_dir, cur_version),</p>
+</div></blockquote>
+<p>);</p>
+</div></blockquote>
+<p>}
+sleep(Duration::from_secs(ARGS.model_check_interval_secs)).await;</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}
+async fn tf_queue_manager(mut rx: Receiver&lt;PredictMessage&lt;T&gt;&gt;) {</p>
+<blockquote>
+<div><p>// Start receiving messages
+info!(“setting up queue manager”);
+let max_batch_size = ARGS</p>
+<blockquote>
+<div><p>.max_batch_size
+.iter()
+.map(<a href="#id33"><span class="problematic" id="id34">|b|</span></a> b.parse().unwrap())
+.collect::&lt;Vec&lt;usize&gt;&gt;();</p>
+</div></blockquote>
+<dl class="simple">
+<dt>let batch_time_out_millis = ARGS</dt><dd><p>.batch_time_out_millis
+.iter()
+.map(<a href="#id35"><span class="problematic" id="id36">|b|</span></a> b.parse().unwrap())
+.collect::&lt;Vec&lt;u64&gt;&gt;();</p>
+</dd>
+</dl>
+<p>let no_msg_wait_millis = <a href="#id3"><span class="problematic" id="id4">*</span></a>batch_time_out_millis.iter().min().unwrap();
+let mut all_model_predictors: ArrayVec::&lt;ArrayVec&lt;BatchPredictor&lt;T&gt;, MAX_VERSIONS_PER_MODEL&gt;, MAX_NUM_MODELS&gt; =</p>
+<blockquote>
+<div><p>(0 ..MAX_NUM_MODELS).map( <a href="#id37"><span class="problematic" id="id38">|_|</span></a> ArrayVec::&lt;BatchPredictor&lt;T&gt;, MAX_VERSIONS_PER_MODEL&gt;::new()).collect();</p>
+</div></blockquote>
+<dl>
+<dt>loop {</dt><dd><p>let msg = rx.try_recv();
+let no_more_msg = match msg {</p>
+<blockquote>
+<div><dl>
+<dt>Ok(PredictMessage::Predict(model_spec_at, version, val, resp, ts)) =&gt; {</dt><dd><dl>
+<dt>if let Some(model_predictors) = all_model_predictors.get_mut(model_spec_at) {</dt><dd><dl class="simple">
+<dt>if model_predictors.is_empty() {</dt><dd><dl class="simple">
+<dt>resp.send(PredictResult::ModelNotReady(model_spec_at))</dt><dd><p>.unwrap_or_else(<a href="#id39"><span class="problematic" id="id40">|e|</span></a> error!(“cannot send back model not ready error: {:?}”, e));</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+else {</p>
+<blockquote>
+<div><dl>
+<dt>match version {</dt><dd><p>None =&gt; model_predictors[0].push(val, resp, ts),
+Some(the_version) =&gt; match model_predictors</p>
+<blockquote>
+<div><p>.iter_mut()
+.find(<a href="#id41"><span class="problematic" id="id42">|x|</span></a> x.model.version() == the_version)</p>
+</div></blockquote>
+<dl>
+<dt>{</dt><dd><dl>
+<dt>None =&gt; resp</dt><dd><dl class="simple">
+<dt>.send(PredictResult::ModelVersionNotFound(</dt><dd><p>model_spec_at,
+the_version,</p>
+</dd>
+</dl>
+<p>))
+.unwrap_or_else(<a href="#id43"><span class="problematic" id="id44">|e|</span></a> {</p>
+<blockquote>
+<div><p>error!(“cannot send back version error: {:?}”, e)</p>
+</div></blockquote>
+<p>}),</p>
+</dd>
+</dl>
+<p>Some(predictor) =&gt; predictor.push(val, resp, ts),</p>
+</dd>
+</dl>
+<p>},</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+<dt>} else {</dt><dd><dl class="simple">
+<dt>resp.send(PredictResult::ModelNotFound(model_spec_at))</dt><dd><p>.unwrap_or_else(<a href="#id45"><span class="problematic" id="id46">|e|</span></a> error!(“cannot send back model not found error: {:?}”, e))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+MPSC_CHANNEL_SIZE.dec();
+false</p>
+</dd>
+</dl>
+<p>}
+Ok(PredictMessage::UpsertModel(tf_model)) =&gt; {</p>
+<blockquote>
+<div><p>let idx = tf_model.model_idx();
+let predictor = BatchPredictor {</p>
+<blockquote>
+<div><p>model: Arc::new(tf_model),
+input_tensors: Vec::with_capacity(max_batch_size[idx]),
+callbacks: Vec::with_capacity(max_batch_size[idx]),
+cur_batch_size: 0,
+max_batch_size: max_batch_size[idx],
+batch_time_out_millis: batch_time_out_millis[idx],
+//initialize to be current time
+queue_reset_ts: Instant::now(),
+queue_earliest_rq_ts: Instant::now(),</p>
+</div></blockquote>
+<p>};
+assert!(idx &lt; all_model_predictors.len());
+metrics::NEW_MODEL_SNAPSHOT</p>
+<blockquote>
+<div><p>.with_label_values(&amp;[&amp;MODEL_SPECS[idx]])
+.inc();</p>
+</div></blockquote>
+<p>//we can do this since the vector is small
+let predictors = &amp;mut all_model_predictors[idx];
+if predictors.len() == 0 {</p>
+<blockquote>
+<div><p>info!(“now we serve new model: {}”, predictor.model);</p>
+</div></blockquote>
+<p>}
+else {</p>
+<blockquote>
+<div><p>info!(“now we serve updated model: {}”, predictor.model);</p>
+</div></blockquote>
+<p>}
+if predictors.len() == ARGS.versions_per_model {</p>
+<blockquote>
+<div><p>predictors.remove(predictors.len() - 1);</p>
+</div></blockquote>
+<p>}
+predictors.insert(0, predictor);
+false</p>
+</div></blockquote>
+<p>}
+Err(TryRecvError::Empty) =&gt; true,
+Err(TryRecvError::Disconnected) =&gt; true,</p>
+</div></blockquote>
+<p>};
+for predictor in all_model_predictors.iter_mut().flatten() {</p>
+<blockquote>
+<div><p>//if predictor batch queue not empty and times out or no more msg in the queue, flush
+if (!predictor.input_tensors.is_empty() &amp;&amp; (predictor.duration_past(predictor.batch_time_out_millis) || no_more_msg))</p>
+<blockquote>
+<div><p>//if batch queue reaches limit, flush
+|| predictor.cur_batch_size &gt;= predictor.max_batch_size</p>
+</div></blockquote>
+<dl class="simple">
+<dt>{</dt><dd><p>predictor.batch_predict();</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}
+if no_more_msg {</p>
+<blockquote>
+<div><p>sleep(Duration::from_millis(no_msg_wait_millis)).await;</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}
+#[inline(always)]
+pub fn get_model_index(model_spec: &amp;str) -&gt; Option&lt;usize&gt; {</p>
+<blockquote>
+<div><p>MODEL_SPECS.iter().position(<a href="#id47"><span class="problematic" id="id48">|m|</span></a> m == model_spec)</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../_sources/navi/navi/src/predict_service.rs.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

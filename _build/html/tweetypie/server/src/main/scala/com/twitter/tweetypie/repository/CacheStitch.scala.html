@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.tweetypie
+package repository</p>
+<p>import com.twitter.servo.repository._
+import com.twitter.stitch.Stitch
+import com.twitter.util.Try</p>
+<p>object CacheStitch {</p>
+<blockquote>
+<div><dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Cacheable defines a function that takes a cache query and a Try value,</p></li>
+<li><p>and returns what should be written to cache, as a Option[StitchLockingCache.Val].</p></li>
+<li></li>
+<li><p>None signifies that this value should not be written to cache.</p></li>
+<li></li>
+<li><p>Val can be one of Found[V], NotFound, and Deleted. The function will determine what kinds</p></li>
+<li><p>of values and exceptions (captured in the Try) correspond to which kind of cached values.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+</dl>
+<p>type Cacheable[Q, V] = (Q, Try[V]) =&gt; Option[StitchLockingCache.Val[V]]</p>
+<p>// Cache successful values as Found, stitch.NotFound as NotFound, and don’t cache other exceptions
+def cacheFoundAndNotFound[K, V]: CacheStitch.Cacheable[K, V] =</p>
+<blockquote>
+<div><dl>
+<dt>(_, t: Try[V]) =&gt;</dt><dd><dl>
+<dt>t match {</dt><dd><p>// Write successful values as Found
+case Return(v) =&gt; Some(StitchLockingCache.Val.Found[V](v))</p>
+<p>// Write stitch.NotFound as NotFound
+case Throw(com.twitter.stitch.NotFound) =&gt; Some(StitchLockingCache.Val.NotFound)</p>
+<p>// Don’t write other exceptions back to cache
+case _ =&gt; None</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>case class CacheStitch[Q, K, V](</dt><dd><p>repo: Q =&gt; Stitch[V],
+cache: StitchLockingCache[K, V],
+queryToKey: Q =&gt; K,
+handler: CachedResult.Handler[K, V],
+cacheable: CacheStitch.Cacheable[Q, V])</p>
+<blockquote>
+<div><p>extends (Q =&gt; Stitch[V]) {</p>
+</div></blockquote>
+<p>import com.twitter.servo.repository.CachedResultAction._</p>
+<dl>
+<dt>private[this] def getFromCache(key: K): Stitch[CachedResult[K, V]] = {</dt><dd><dl>
+<dt>cache</dt><dd><p>.get(key)
+.handle {</p>
+<blockquote>
+<div><p>case t =&gt; CachedResult.Failed(key, t)</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>// Exposed for testing
+private[repository] def readThrough(query: Q): Stitch[V] =</p>
+<blockquote>
+<div><dl>
+<dt>repo(query).liftToTry.applyEffect { value: Try[V] =&gt;</dt><dd><dl class="simple">
+<dt>cacheable(query, value) match {</dt><dd><dl class="simple">
+<dt>case Some(v) =&gt;</dt><dd><p>// cacheable returned Some of a StitchLockingCache.Val to cache
+//
+// This is async to ensure that we don’t wait for the cache
+// update to complete before returning. This also ignores
+// any exceptions from setting the value.
+Stitch.async(cache.lockAndSet(queryToKey(query), v))</p>
+</dd>
+<dt>case None =&gt;</dt><dd><p>// cacheable returned None so don’t cache
+Stitch.Unit</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}.lowerFromTry</p>
+</div></blockquote>
+<dl>
+<dt>private[this] def handle(query: Q, action: CachedResultAction[V]): Stitch[V] =</dt><dd><dl>
+<dt>action match {</dt><dd><p>case HandleAsFound(value) =&gt; Stitch(value)
+case HandleAsMiss =&gt; readThrough(query)
+case HandleAsDoNotCache =&gt; repo(query)
+case HandleAsFailed(t) =&gt; Stitch.exception(t)
+case HandleAsNotFound =&gt; Stitch.NotFound
+case t: TransformSubAction[V] =&gt; handle(query, t.action).map(t.f)
+case SoftExpiration(subAction) =&gt;</p>
+<blockquote>
+<div><dl class="simple">
+<dt>Stitch</dt><dd><p>.async(readThrough(query))
+.flatMap { _ =&gt; handle(query, subAction) }</p>
+</dd>
+</dl>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>override def apply(query: Q): Stitch[V] =</dt><dd><dl class="simple">
+<dt>getFromCache(queryToKey(query))</dt><dd><p>.flatMap { result: CachedResult[K, V] =&gt; handle(query, handler(result)) }</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/tweetypie/server/src/main/scala/com/twitter/tweetypie/repository/CacheStitch.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

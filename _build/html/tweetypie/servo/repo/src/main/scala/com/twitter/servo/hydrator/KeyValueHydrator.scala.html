@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../../" id="documentation_options" src="../../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.servo.hydrator</p>
+<p>import com.twitter.servo.data.Mutation
+import com.twitter.servo.util.{Effect, Gate}
+import com.twitter.servo.repository._
+import com.twitter.util.{Future, Return, Try}</p>
+<dl>
+<dt>object KeyValueHydrator {</dt><dd><p>// KeyValueHydrator extends this function type
+type FunctionType[Q, K, V] = (Q, Future[KeyValueResult[K, V]]) =&gt; Future[Mutation[V]]
+type Filter[Q, K, V] = (Q, Future[KeyValueResult[K, V]]) =&gt; Future[Boolean]</p>
+<p>private[this] val _unit = fromMutation[Any, Any, Any](Mutation.unit[Any])</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>A no-op hydrator.  Forms a monoid with <cite>also</cite>.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>def unit[Q, K, V]: KeyValueHydrator[Q, K, V] =</dt><dd><p>_unit.asInstanceOf[KeyValueHydrator[Q, K, V]]</p>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Packages a function as a KeyValueHydrator</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>def apply[Q, K, V](f: FunctionType[Q, K, V]): KeyValueHydrator[Q, K, V] =</dt><dd><dl class="simple">
+<dt>new KeyValueHydrator[Q, K, V] {</dt><dd><dl class="simple">
+<dt>override def apply(query: Q, futureResults: Future[KeyValueResult[K, V]]) =</dt><dd><p>f(query, futureResults)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Creates a new KeyValueHydrator out of several underlying KVHydrators. The</p></li>
+<li><p>apply method is called on each KeyValueHydrator with the same</p></li>
+<li><p>futureResults, allowing each to kick-off some asynchronous work</p></li>
+<li><p>to produce a future Hydrated[Mutation]. When all the future</p></li>
+<li><p>Hydrated[Mutation]s are available, the results are folded,</p></li>
+<li><p>left-to-right, over the mutations, to build up the final</p></li>
+<li><p>results.</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>def inParallel[Q, K, V](hydrators: KeyValueHydrator[Q, K, V]*): KeyValueHydrator[Q, K, V] =</dt><dd><dl>
+<dt>KeyValueHydrator[Q, K, V] { (query, futureResults) =&gt;</dt><dd><dl class="simple">
+<dt>val futureMutations = hydrators map { t =&gt;</dt><dd><p>t(query, futureResults)</p>
+</dd>
+</dl>
+<p>}
+Future.collect(futureMutations) map Mutation.all</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>def const[Q, K, V](futureMutation: Future[Mutation[V]]): KeyValueHydrator[Q, K, V] =</dt><dd><dl class="simple">
+<dt>KeyValueHydrator[Q, K, V] { (_, _) =&gt;</dt><dd><p>futureMutation</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>def fromMutation[Q, K, V](mutation: Mutation[V]): KeyValueHydrator[Q, K, V] =</dt><dd><p>const[Q, K, V](Future.value(mutation))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>A KeyValueHydrator builds a Mutation to be applied to the values in a KeyValueResult, but does</p></li>
+<li><p>not itself apply the Mutation.  This allows several KeyValueHydrators to be composed together to</p></li>
+<li><p>begin their work in parallel to build the Mutations, which can then be combined and applied</p></li>
+<li><p>to the results later (see asRepositoryFilter).</p></li>
+<li></li>
+<li><p>Forms a monoid with KeyValueHydrator.unit as unit and <cite>also</cite> as the combining function.</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+<dt>trait KeyValueHydrator[Q, K, V] extends KeyValueHydrator.FunctionType[Q, K, V] {</dt><dd><p>protected[this] val unitMutation = Mutation.unit[V]
+protected[this] val futureUnitMutation = Future.value(unitMutation)</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Combines two KeyValueHydrators.  Forms a monoid with KeyValueHydator.unit</p></li>
+</ul>
+<p><a href="#id9"><span class="problematic" id="id10">*</span></a>/</p>
+</dd>
+<dt>def also(next: KeyValueHydrator[Q, K, V]): KeyValueHydrator[Q, K, V] =</dt><dd><p>KeyValueHydrator.inParallel(this, next)</p>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Turns a single KeyValueHydrator into a RepositoryFilter by applying the Mutation to</p></li>
+<li><p>found values in the KeyValueResult.  If the mutation throws an exception, it will</p></li>
+<li><p>be caught and the resulting key/value paired moved to the failed map of the resulting</p></li>
+<li><p>KeyValueResult.</p></li>
+</ul>
+<p><a href="#id11"><span class="problematic" id="id12">*</span></a>/</p>
+</dd>
+<dt>lazy val asRepositoryFilter: RepositoryFilter[Q, KeyValueResult[K, V], KeyValueResult[K, V]] =</dt><dd><dl>
+<dt>(query, futureResults) =&gt; {</dt><dd><dl>
+<dt>this(query, futureResults) flatMap { mutation =&gt;</dt><dd><p>val update = mutation.endo
+futureResults map { results =&gt;</p>
+<blockquote>
+<div><dl class="simple">
+<dt>results.mapValues {</dt><dd><p>case Return(Some(value)) =&gt; Try(Some(update(value)))
+case x =&gt; x</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Apply this hydrator to the result of a repository.</p></li>
+</ul>
+<p><a href="#id13"><span class="problematic" id="id14">*</span></a>/</p>
+</dd>
+<dt>def <a href="#id23"><span class="problematic" id="id24">hydratedBy_</span></a>:(repo: KeyValueRepository[Q, K, V]): KeyValueRepository[Q, K, V] =</dt><dd><p>Repository.composed(repo, asRepositoryFilter)</p>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Return a new hydrator that applies the same mutation as this</p></li>
+<li><p>hydrator, but can be enabled/disabled or dark enabled/disabled via Gates.  The light</p></li>
+<li><p>gate takes precedence over the dark gate.  This allows you to go from 0%-&gt;100% dark,</p></li>
+<li><p>and then from 0%-&gt;100% light without affecting backend traffic.</p></li>
+</ul>
+<p><a href="#id15"><span class="problematic" id="id16">*</span></a>/</p>
+</dd>
+</dl>
+<p>&#64;deprecated(“Use enabledBy(() =&gt; Boolean, () =&gt; Boolean)”, “2.5.1”)
+def enabledBy(light: Gate[Unit], dark: Gate[Unit] = Gate.False): KeyValueHydrator[Q, K, V] =</p>
+<blockquote>
+<div><dl>
+<dt>enabledBy(</dt><dd><dl class="simple">
+<dt>{ () =&gt;</dt><dd><p>light()</p>
+</dd>
+</dl>
+<p>},
+{ () =&gt;</p>
+<blockquote>
+<div><p>dark()</p>
+</div></blockquote>
+<p>})</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Return a new hydrator that applies the same mutation as this</p></li>
+<li><p>hydrator, but can be enabled/disabled or dark enable/disabled via nullary boolean functions.</p></li>
+<li><p>The light function takes precedence over the dark function.</p></li>
+<li><p>This allows you to go from 0%-&gt;100% dark, and then from 0%-&gt;100% light</p></li>
+<li><p>without affecting backend traffic.</p></li>
+</ul>
+<p><a href="#id17"><span class="problematic" id="id18">*</span></a>/</p>
+</dd>
+<dt>def enabledBy(light: () =&gt; Boolean, dark: () =&gt; Boolean): KeyValueHydrator[Q, K, V] =</dt><dd><dl>
+<dt>KeyValueHydrator[Q, K, V] { (query, futureResults) =&gt;</dt><dd><p>val isLight = light()
+val isDark = !isLight &amp;&amp; dark()
+if (!isLight &amp;&amp; !isDark) {</p>
+<blockquote>
+<div><p>futureUnitMutation</p>
+</div></blockquote>
+<dl>
+<dt>} else {</dt><dd><dl class="simple">
+<dt>this(query, futureResults) map {</dt><dd><p>case mutation if isLight =&gt; mutation
+case mutation if isDark =&gt; mutation.dark</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Build a new hydrator that will return the same result as the current hydrator,</p></li>
+<li><p>but will additionally perform the supplied effect on the result of hydration.</p></li>
+</ul>
+<p><a href="#id19"><span class="problematic" id="id20">*</span></a>/</p>
+</dd>
+<dt>def withEffect(effect: Effect[Option[V]]): KeyValueHydrator[Q, K, V] =</dt><dd><dl class="simple">
+<dt>KeyValueHydrator[Q, K, V] { (query, futureResults) =&gt;</dt><dd><p>this(query, futureResults) map { _ withEffect effect }</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Builds a new hydrator that only attempt to hydrate if the</p></li>
+<li><p>supplied filter returns true.</p></li>
+</ul>
+<p><a href="#id21"><span class="problematic" id="id22">*</span></a>/</p>
+</dd>
+<dt>def filter(predicate: KeyValueHydrator.Filter[Q, K, V]): KeyValueHydrator[Q, K, V] =</dt><dd><dl>
+<dt>KeyValueHydrator[Q, K, V] { (q, r) =&gt;</dt><dd><dl class="simple">
+<dt>predicate(q, r) flatMap { t =&gt;</dt><dd><p>if (t) this(q, r) else futureUnitMutation</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../../_sources/tweetypie/servo/repo/src/main/scala/com/twitter/servo/hydrator/KeyValueHydrator.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

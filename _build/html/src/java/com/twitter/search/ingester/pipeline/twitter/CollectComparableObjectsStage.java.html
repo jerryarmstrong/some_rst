@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../" id="documentation_options" src="../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>&amp;copy; Copyright 2008, Summize, Inc. All rights reserved.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+</dl>
+<p>package com.twitter.search.ingester.pipeline.twitter;</p>
+<p>import java.util.Collections;
+import java.util.NavigableSet;
+import java.util.TreeSet;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;</p>
+<p>import org.apache.commons.pipeline.StageException;
+import org.apache.commons.pipeline.validation.ConsumedTypes;
+import org.apache.commons.pipeline.validation.ProducedTypes;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;</p>
+<p>import com.twitter.search.common.debug.DebugEventUtil;
+import com.twitter.search.common.metrics.SearchCounter;
+import com.twitter.search.common.metrics.SearchCustomGauge;
+import com.twitter.search.common.metrics.SearchTimerStats;</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Collect incoming objects into batches of the configured size and then</p></li>
+<li><p>emit the &lt;code&gt;Collection&lt;/code&gt; of objects. Internally uses a &lt;code&gt;TreeSet&lt;/code&gt;</p></li>
+<li><p>to remove duplicates. Incoming objects MUST implement the &lt;code&gt;Comparable&lt;/code&gt;</p></li>
+<li><p>interface.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+</dl>
+<p>&#64;ConsumedTypes(Comparable.class)
+&#64;ProducedTypes(NavigableSet.class)
+public class CollectComparableObjectsStage extends TwitterBaseStage&lt;Void, Void&gt; {</p>
+<blockquote>
+<div><p>private static final Logger LOG = LoggerFactory.getLogger(CollectComparableObjectsStage.class);</p>
+<p>// Batch size of the collections we are emitting.
+private int batchSize = -1;</p>
+<p>// Top tweets sorts the tweets in reverse order.
+private Boolean reverseOrder = false;</p>
+<p>// Batch being constructed.
+private TreeSet&lt;Object&gt; currentCollection = null;</p>
+<p>// Timestamp (ms) of last batch emission.
+private final AtomicLong lastEmitTimeMillis = new AtomicLong(-1);
+// If set, will emit a batch (only upon arrival of a new element), if time since last emit has
+// exceeded this threshold.
+private long emitAfterMillis = -1;</p>
+<p>private SearchCounter sizeBasedEmitCount;
+private SearchCounter timeBasedEmitCount;
+private SearchCounter sizeAndTimeBasedEmitCount;
+private SearchTimerStats batchEmitTimeStats;</p>
+<p>&#64;Override
+protected void initStats() {</p>
+<blockquote>
+<div><p>super.initStats();</p>
+<dl class="simple">
+<dt>SearchCustomGauge.export(getStageNamePrefix() + “_last_emit_time”,</dt><dd><p>() -&gt; lastEmitTimeMillis.get());</p>
+</dd>
+</dl>
+<p>sizeBasedEmitCount = SearchCounter.export(getStageNamePrefix() + “_size_based_emit_count”);
+timeBasedEmitCount = SearchCounter.export(getStageNamePrefix() + “_time_based_emit_count”);
+sizeAndTimeBasedEmitCount = SearchCounter.export(</p>
+<blockquote>
+<div><p>getStageNamePrefix() + “_size_and_time_based_emit_count”);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>batchEmitTimeStats = SearchTimerStats.export(</dt><dd><p>getStageNamePrefix() + “_batch_emit_time”,
+TimeUnit.MILLISECONDS,
+false, // no cpu timers
+true); // with percentiles</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+protected void doInnerPreprocess() throws StageException {</p>
+<blockquote>
+<div><p>// We have to initialize this stat here, because initStats() is called before
+// doInnerPreprocess(), so at that point the ‘clock’ is not set yet.
+SearchCustomGauge.export(getStageNamePrefix() + “_millis_since_last_emit”,</p>
+<blockquote>
+<div><p>() -&gt; clock.nowMillis() - lastEmitTimeMillis.get());</p>
+</div></blockquote>
+<p>currentCollection = newBatchCollection();
+if (batchSize &lt;= 0) {</p>
+<blockquote>
+<div><p>throw new StageException(this, “Must set the batchSize parameter to a value &gt;0”);</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>private TreeSet&lt;Object&gt; newBatchCollection() {</dt><dd><p>return new TreeSet&lt;&gt;(reverseOrder ? Collections.reverseOrder() : null);</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;Override
+public void innerProcess(Object obj) throws StageException {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (!Comparable.class.isAssignableFrom(obj.getClass())) {</dt><dd><dl class="simple">
+<dt>throw new StageException(</dt><dd><p>this, “Attempt to add a non-comparable object to a sorted collection”);</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>currentCollection.add(obj);
+if (shouldEmit()) {</p>
+<blockquote>
+<div><p>// We want to trace here when we actually emit the batch, as tweets sit in this stage until
+// a batch is full, and we want to see how long they actually stick around.
+DebugEventUtil.addDebugEventToCollection(</p>
+<blockquote>
+<div><p>currentCollection, “CollectComparableObjectsStage.outgoing”, clock.nowMillis());</p>
+</div></blockquote>
+<p>emitAndCount(currentCollection);
+updateLastEmitTime();</p>
+<p>currentCollection = newBatchCollection();</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>private boolean shouldEmit() {</dt><dd><dl class="simple">
+<dt>if (lastEmitTimeMillis.get() &lt; 0) {</dt><dd><p>// Initialize lastEmit at the first tweet seen by this stage.
+lastEmitTimeMillis.set(clock.nowMillis());</p>
+</dd>
+</dl>
+<p>}</p>
+<p>final boolean sizeBasedEmit = currentCollection.size() &gt;= batchSize;
+final boolean timeBasedEmit =</p>
+<blockquote>
+<div><p>emitAfterMillis &gt; 0 &amp;&amp; lastEmitTimeMillis.get() + emitAfterMillis &lt;= clock.nowMillis();</p>
+</div></blockquote>
+<dl class="simple">
+<dt>if (sizeBasedEmit &amp;&amp; timeBasedEmit) {</dt><dd><p>sizeAndTimeBasedEmitCount.increment();
+return true;</p>
+</dd>
+<dt>} else if (sizeBasedEmit) {</dt><dd><p>sizeBasedEmitCount.increment();
+return true;</p>
+</dd>
+<dt>} else if (timeBasedEmit) {</dt><dd><p>timeBasedEmitCount.increment();
+return true;</p>
+</dd>
+<dt>} else {</dt><dd><p>return false;</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;Override
+public void innerPostprocess() throws StageException {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (!currentCollection.isEmpty()) {</dt><dd><p>emitAndCount(currentCollection);
+updateLastEmitTime();
+currentCollection = newBatchCollection();</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>private void updateLastEmitTime() {</dt><dd><p>long currentEmitTime = clock.nowMillis();
+long previousEmitTime = lastEmitTimeMillis.getAndSet(currentEmitTime);</p>
+<p>// Also stat how long each emit takes.
+batchEmitTimeStats.timerIncrement(currentEmitTime - previousEmitTime);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public void setBatchSize(Integer size) {</dt><dd><p>LOG.info(“Updating all CollectComparableObjectsStage batchSize to {}.”, size);
+this.batchSize = size;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public Boolean getReverseOrder() {</dt><dd><p>return reverseOrder;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public void setReverseOrder(Boolean reverseOrder) {</dt><dd><p>this.reverseOrder = reverseOrder;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public void setEmitAfterMillis(long emitAfterMillis) {</dt><dd><p>LOG.info(“Setting emitAfterMillis to {}.”, emitAfterMillis);
+this.emitAfterMillis = emitAfterMillis;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public long getSizeBasedEmitCount() {</dt><dd><p>return sizeBasedEmitCount.get();</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public long getTimeBasedEmitCount() {</dt><dd><p>return timeBasedEmitCount.get();</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../_sources/src/java/com/twitter/search/ingester/pipeline/twitter/CollectComparableObjectsStage.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

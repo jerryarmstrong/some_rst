@@ -1,0 +1,676 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../" id="documentation_options" src="../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.earlybird_root.routers;</p>
+<p>import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;</p>
+<p>import com.google.common.base.Preconditions;</p>
+<p>import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;</p>
+<p>import com.twitter.common.util.Clock;
+import com.twitter.finagle.Service;
+import com.twitter.search.common.decider.SearchDecider;
+import com.twitter.search.common.futures.Futures;
+import com.twitter.search.common.metrics.SearchCounter;
+import com.twitter.search.common.util.earlybird.EarlybirdResponseMergeUtil;
+import com.twitter.search.earlybird.thrift.AdjustedRequestParams;
+import com.twitter.search.earlybird.thrift.EarlybirdRequest;
+import com.twitter.search.earlybird.thrift.EarlybirdResponse;
+import com.twitter.search.earlybird.thrift.EarlybirdResponseCode;
+import com.twitter.search.earlybird.thrift.ThriftSearchQuery;
+import com.twitter.search.earlybird.thrift.ThriftSearchRankingMode;
+import com.twitter.search.earlybird.thrift.ThriftSearchResults;
+import com.twitter.search.earlybird_root.common.ClientErrorException;
+import com.twitter.search.earlybird_root.common.EarlybirdFeatureSchemaMerger;
+import com.twitter.search.earlybird_root.common.EarlybirdRequestContext;
+import com.twitter.search.earlybird_root.common.EarlybirdRequestUtil;
+import com.twitter.search.earlybird_root.common.EarlybirdServiceResponse;
+import com.twitter.search.earlybird_root.filters.EarlybirdTimeRangeFilter;
+import com.twitter.search.earlybird_root.mergers.SuperRootResponseMerger;
+import com.twitter.search.queryparser.util.QueryUtil;
+import com.twitter.util.Function;
+import com.twitter.util.Function0;
+import com.twitter.util.Future;</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>For Recency traffic SuperRoot hits realtime and/or protected realtime first and then archive</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>public abstract class AbstractRecencyAndRelevanceRequestRouter extends RequestRouter {</dt><dd><dl class="simple">
+<dt>public static final String FULL_ARCHIVE_AVAILABLE_FOR_GET_PROTECTED_TWEETS_ONLY_DECIDER_KEY =</dt><dd><p>“superroot_full_archive_cluster_available_for_get_protected_tweets_only_requests”;</p>
+</dd>
+<dt>public static final String FULL_ARCHIVE_AVAILABLE_FOR_NOT_ENOUGH_PROTECTED_RESULTS_DECIDER_KEY =</dt><dd><p>“superroot_full_archive_cluster_available_for_requests_without_enough_protected_results”;</p>
+</dd>
+<dt>private static final Logger LOG =</dt><dd><p>LoggerFactory.getLogger(AbstractRecencyAndRelevanceRequestRouter.class);</p>
+</dd>
+</dl>
+<p>private final String skipProtectedClusterDeciderKey;
+private final String skipFullArchiveClusterDeciderKey;</p>
+<p>private final SearchCounter realtimeResponseInvalidCounter;
+private final SearchCounter realtimeResponseSearchResultsNotSetCounter;
+private final SearchCounter minSearchedStatusIdLargerThanRequestMaxIdCounter;
+private final SearchCounter minSearchedStatusIdLargerThanRequestUntilTimeCounter;</p>
+<p>private final Service&lt;EarlybirdRequestContext, EarlybirdResponse&gt; realtime;
+private final Service&lt;EarlybirdRequestContext, EarlybirdResponse&gt; protectedRealtime;
+private final Service&lt;EarlybirdRequestContext, EarlybirdResponse&gt; fullArchive;
+private final SuperRootResponseMerger responseMerger;
+private final SearchDecider decider;</p>
+<dl>
+<dt>AbstractRecencyAndRelevanceRequestRouter(</dt><dd><blockquote>
+<div><p>Service&lt;EarlybirdRequestContext, EarlybirdResponse&gt; realtime,
+Service&lt;EarlybirdRequestContext, EarlybirdResponse&gt; protectedRealtime,
+Service&lt;EarlybirdRequestContext, EarlybirdResponse&gt; fullArchive,
+EarlybirdTimeRangeFilter realtimeTimeRangeFilter,
+EarlybirdTimeRangeFilter protectedTimeRangeFilter,
+EarlybirdTimeRangeFilter fullArchiveTimeRangeFilter,
+ThriftSearchRankingMode rankingMode,
+Clock clock,
+SearchDecider decider,
+EarlybirdFeatureSchemaMerger featureSchemaMerger) {</p>
+</div></blockquote>
+<p>LOG.info(“Instantiating AbstractRecencyAndRelevanceRequestRouter”);
+this.realtime = realtimeTimeRangeFilter.andThen(realtime);
+this.protectedRealtime = protectedTimeRangeFilter.andThen(protectedRealtime);
+this.fullArchive = fullArchiveTimeRangeFilter.andThen(fullArchive);
+this.responseMerger = new SuperRootResponseMerger(rankingMode, featureSchemaMerger, clock);
+this.decider = decider;</p>
+<p>String rankingModeForStats = rankingMode.name().toLowerCase();
+skipProtectedClusterDeciderKey =</p>
+<blockquote>
+<div><p>String.format(“superroot_skip_protected_cluster_for_%s_requests”, rankingModeForStats);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>skipFullArchiveClusterDeciderKey =</dt><dd><p>String.format(“superroot_skip_full_archive_cluster_for_%s_requests”, rankingModeForStats);</p>
+</dd>
+<dt>realtimeResponseInvalidCounter =</dt><dd><p>SearchCounter.export(rankingModeForStats + “_realtime_response_invalid”);</p>
+</dd>
+<dt>realtimeResponseSearchResultsNotSetCounter =</dt><dd><p>SearchCounter.export(rankingModeForStats + “_realtime_response_search_results_not_set”);</p>
+</dd>
+<dt>minSearchedStatusIdLargerThanRequestMaxIdCounter = SearchCounter.export(</dt><dd><p>rankingModeForStats + “_min_searched_status_id_larger_than_request_max_id”);</p>
+</dd>
+<dt>minSearchedStatusIdLargerThanRequestUntilTimeCounter = SearchCounter.export(</dt><dd><p>rankingModeForStats + “_min_searched_status_id_larger_than_request_until_time”);</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private void checkRequestPreconditions(EarlybirdRequest request) {</dt><dd><p>// CollectorParams should be set in EarlybirdRequestUtil.checkAndSetCollectorParams().
+Preconditions.checkNotNull(request.getSearchQuery().getCollectorParams());</p>
+<p>// return a Client error if the num results are less than 0
+if (request.getSearchQuery().getNumResults() &lt; 0) {</p>
+<blockquote>
+<div><p>throw new ClientErrorException(“The request.searchQuery.numResults field can’t be negative”);</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>if (request.getSearchQuery().getCollectorParams().getNumResultsToReturn() &lt; 0) {</dt><dd><dl class="simple">
+<dt>throw new ClientErrorException(“The request.searchQuery.collectorParams.numResultsToReturn “</dt><dd><ul class="simple">
+<li><p>“field can’t be negative”);</p></li>
+</ul>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Hit realtime and/or protected realtime first, if not enough results, then hit archive,</p></li>
+<li><p>merge the results.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+</dl>
+<p>&#64;Override
+public Future&lt;EarlybirdResponse&gt; route(final EarlybirdRequestContext requestContext) {</p>
+<blockquote>
+<div><p>EarlybirdRequest request = requestContext.getRequest();</p>
+<p>this.checkRequestPreconditions(request);</p>
+<p>ArrayList&lt;RequestResponse&gt; savedRequestResponses = new ArrayList&lt;&gt;();</p>
+<p>// If clients do not define numResults to return or the numResults requested are 0
+// return an empty EarlyBirdResponse without hitting any service.
+if (request.getSearchQuery().getNumResults() == 0</p>
+<blockquote>
+<div><blockquote>
+<div><p>|| request.getSearchQuery().getCollectorParams().getNumResultsToReturn() == 0) {</p>
+</div></blockquote>
+<p>return Future.value(successNoResultsResponse());</p>
+</div></blockquote>
+<p>}</p>
+<p>// Realtime earlybird response is already required. Even if the service is not called
+// the result passed to the mergers should be a valid one.
+EarlybirdServiceResponse.ServiceState realtimeServiceState =</p>
+<blockquote>
+<div><p>getRealtimeServiceState(requestContext);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>final Future&lt;EarlybirdServiceResponse&gt; realtimeResponseFuture =</dt><dd><dl class="simple">
+<dt>realtimeServiceState.serviceWasCalled()</dt><dd><p>? getRealtimeResponse(savedRequestResponses, requestContext)
+: Future.value(EarlybirdServiceResponse.serviceNotCalled(realtimeServiceState));</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>// If no flock response (followedUserIds) is set, request wont be sent to protected.
+EarlybirdServiceResponse.ServiceState protectedServiceState =</p>
+<blockquote>
+<div><p>getProtectedServiceState(requestContext);</p>
+</div></blockquote>
+<dl>
+<dt>final Future&lt;EarlybirdServiceResponse&gt; protectedResponseFuture =</dt><dd><dl class="simple">
+<dt>protectedServiceState.serviceWasCalled()</dt><dd><p>? getProtectedResponse(savedRequestResponses, requestContext)
+: Future.value(EarlybirdServiceResponse.serviceNotCalled(protectedServiceState));</p>
+</dd>
+</dl>
+</dd>
+<dt>final Future&lt;EarlybirdServiceResponse&gt; archiveResponseFuture =</dt><dd><dl>
+<dt>Futures.flatMap(realtimeResponseFuture, protectedResponseFuture,</dt><dd><dl>
+<dt>new Function0&lt;Future&lt;EarlybirdServiceResponse&gt;&gt;() {</dt><dd><p>&#64;Override
+public Future&lt;EarlybirdServiceResponse&gt; apply() {</p>
+<blockquote>
+<div><p>EarlybirdServiceResponse realtimeResponse = Futures.get(realtimeResponseFuture);
+EarlybirdServiceResponse protectedResponse = Futures.get(protectedResponseFuture);
+EarlybirdServiceResponse.ServiceState fullArchiveServiceState =</p>
+<blockquote>
+<div><p>getFullArchiveServiceState(requestContext, realtimeResponse, protectedResponse);</p>
+</div></blockquote>
+<dl>
+<dt>return fullArchiveServiceState.serviceWasCalled()</dt><dd><p>? getFullArchiveResponse(savedRequestResponses, requestContext,
+realtimeResponse.getResponse(), protectedResponse.getResponse())
+: Future.value(</p>
+<blockquote>
+<div><p>EarlybirdServiceResponse.serviceNotCalled(fullArchiveServiceState));</p>
+</div></blockquote>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>);</p>
+</dd>
+<dt>Future&lt;EarlybirdResponse&gt; mergedResponse = responseMerger.mergeResponseFutures(</dt><dd><p>requestContext, realtimeResponseFuture, protectedResponseFuture, archiveResponseFuture);</p>
+</dd>
+<dt>mergedResponse = mergedResponse</dt><dd><dl class="simple">
+<dt>.map(RequestRouterUtil.checkMinSearchedStatusId(</dt><dd><p>requestContext,
+“max_id”,
+EarlybirdRequestUtil.getRequestMaxId(requestContext.getParsedQuery()),
+realtimeResponseFuture,
+protectedResponseFuture,
+archiveResponseFuture,
+minSearchedStatusIdLargerThanRequestMaxIdCounter))</p>
+</dd>
+<dt>.map(RequestRouterUtil.checkMinSearchedStatusId(</dt><dd><p>requestContext,
+“until_time”,
+EarlybirdRequestUtil.getRequestMaxIdFromUntilTime(requestContext.getParsedQuery()),
+realtimeResponseFuture,
+protectedResponseFuture,
+archiveResponseFuture,
+minSearchedStatusIdLargerThanRequestUntilTimeCounter));</p>
+</dd>
+</dl>
+</dd>
+<dt>return this.maybeAttachSentRequestsToDebugInfo(</dt><dd><p>savedRequestResponses,
+requestContext,
+mergedResponse</p>
+</dd>
+</dl>
+<p>);</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>private EarlybirdResponse successNoResultsResponse() {</dt><dd><dl class="simple">
+<dt>return new EarlybirdResponse(EarlybirdResponseCode.SUCCESS, 0)</dt><dd><p>.setSearchResults(new ThriftSearchResults().setResults(Collections.emptyList()));</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>protected abstract boolean shouldSendRequestToFullArchiveCluster(</dt><dd><p>EarlybirdRequest request, EarlybirdResponse realtimeResponse);</p>
+</dd>
+</dl>
+<p>/** Determines if the protected service is available and if a request should be sent to it. <a href="#id5"><span class="problematic" id="id6">*</span></a>/
+private EarlybirdServiceResponse.ServiceState getProtectedServiceState(</p>
+<blockquote>
+<div><blockquote>
+<div><p>EarlybirdRequestContext requestContext) {</p>
+</div></blockquote>
+<dl>
+<dt>if (!requestContext.getRequest().isSetFollowedUserIds()</dt><dd><blockquote>
+<div><p>|| requestContext.getRequest().getFollowedUserIds().isEmpty()) {</p>
+</div></blockquote>
+<p>return EarlybirdServiceResponse.ServiceState.SERVICE_NOT_REQUESTED;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>if (decider.isAvailable(skipProtectedClusterDeciderKey)) {</dt><dd><p>return EarlybirdServiceResponse.ServiceState.SERVICE_NOT_AVAILABLE;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>return EarlybirdServiceResponse.ServiceState.SERVICE_CALLED;</p>
+</div></blockquote>
+<p>}</p>
+<p>/** Determines if the realtime service is available and if a request should be sent to it. <a href="#id7"><span class="problematic" id="id8">*</span></a>/
+private EarlybirdServiceResponse.ServiceState getRealtimeServiceState(</p>
+<blockquote>
+<div><blockquote>
+<div><p>EarlybirdRequestContext requestContext) {</p>
+</div></blockquote>
+<p>EarlybirdRequest request = requestContext.getRequest();</p>
+<p>// SERVICE_NOT_REQUESTED should always be returned before other states as
+// SuperRootResponseMerger has special logic for this case.
+if (request.isSetGetProtectedTweetsOnly() &amp;&amp; request.isGetProtectedTweetsOnly()) {</p>
+<blockquote>
+<div><p>return EarlybirdServiceResponse.ServiceState.SERVICE_NOT_REQUESTED;</p>
+</div></blockquote>
+<p>}</p>
+<p>return EarlybirdServiceResponse.ServiceState.SERVICE_CALLED;</p>
+</div></blockquote>
+<p>}</p>
+<p>/** Determines if the full archive service is available and if a request should be sent to it. <a href="#id9"><span class="problematic" id="id10">*</span></a>/
+private EarlybirdServiceResponse.ServiceState getFullArchiveServiceState(</p>
+<blockquote>
+<div><blockquote>
+<div><p>EarlybirdRequestContext requestContext,
+EarlybirdServiceResponse publicServiceResponse,
+EarlybirdServiceResponse protectedServiceResponse) {</p>
+</div></blockquote>
+<p>// SERVICE_NOT_REQUESTED should be always be returned before other states as
+// SuperRootResponseMerger has special logic for this case.
+if (!requestContext.getRequest().isSetGetOlderResults()</p>
+<blockquote>
+<div><blockquote>
+<div><p>|| !requestContext.getRequest().isGetOlderResults()) {</p>
+</div></blockquote>
+<p>return EarlybirdServiceResponse.ServiceState.SERVICE_NOT_REQUESTED;</p>
+</div></blockquote>
+<p>}</p>
+<p>// allow requesting full archive service when decider is enabled
+if (!decider.isAvailable(FULL_ARCHIVE_AVAILABLE_FOR_GET_PROTECTED_TWEETS_ONLY_DECIDER_KEY)</p>
+<blockquote>
+<div><blockquote>
+<div><p>&amp;&amp; requestContext.getRequest().isSetGetProtectedTweetsOnly()
+&amp;&amp; requestContext.getRequest().isGetProtectedTweetsOnly()) {</p>
+</div></blockquote>
+<p>return EarlybirdServiceResponse.ServiceState.SERVICE_NOT_REQUESTED;</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>if (decider.isAvailable(skipFullArchiveClusterDeciderKey)) {</dt><dd><p>return EarlybirdServiceResponse.ServiceState.SERVICE_NOT_AVAILABLE;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>boolean serviceWasCalledForPublic =</dt><dd><p>getFullArchiveServiceState(requestContext, publicServiceResponse).serviceWasCalled();</p>
+</dd>
+<dt>boolean serviceWasCalledForProtected =</dt><dd><p>decider.isAvailable(FULL_ARCHIVE_AVAILABLE_FOR_NOT_ENOUGH_PROTECTED_RESULTS_DECIDER_KEY)
+&amp;&amp; getFullArchiveServiceState(requestContext, protectedServiceResponse).serviceWasCalled();</p>
+</dd>
+<dt>if (!serviceWasCalledForPublic &amp;&amp; !serviceWasCalledForProtected) {</dt><dd><p>return EarlybirdServiceResponse.ServiceState.SERVICE_NOT_CALLED;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>return EarlybirdServiceResponse.ServiceState.SERVICE_CALLED;</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>private EarlybirdServiceResponse.ServiceState getFullArchiveServiceState(</dt><dd><blockquote>
+<div><p>EarlybirdRequestContext requestContext,
+EarlybirdServiceResponse realtimeServiceResponse) {</p>
+</div></blockquote>
+<p>EarlybirdResponse realtimeResponse = realtimeServiceResponse.getResponse();</p>
+<dl class="simple">
+<dt>if (!EarlybirdResponseMergeUtil.isValidResponse(realtimeResponse)) {</dt><dd><p>realtimeResponseInvalidCounter.increment();
+return EarlybirdServiceResponse.ServiceState.SERVICE_NOT_CALLED;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>if (!realtimeResponse.isSetSearchResults()) {</dt><dd><p>realtimeResponseSearchResultsNotSetCounter.increment();
+return EarlybirdServiceResponse.ServiceState.SERVICE_NOT_CALLED;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>if (!shouldSendRequestToFullArchiveCluster(requestContext.getRequest(), realtimeResponse)) {</dt><dd><p>return EarlybirdServiceResponse.ServiceState.SERVICE_NOT_CALLED;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>return EarlybirdServiceResponse.ServiceState.SERVICE_CALLED;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Modify the original request context based on the followedUserId field and then send the</p></li>
+<li><p>request to the protected cluster.</p></li>
+</ul>
+<p><a href="#id11"><span class="problematic" id="id12">*</span></a>/</p>
+</dd>
+<dt>private Future&lt;EarlybirdServiceResponse&gt; getProtectedResponse(</dt><dd><blockquote>
+<div><p>ArrayList&lt;RequestResponse&gt; savedRequestResponses,
+final EarlybirdRequestContext requestContext) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>EarlybirdRequestContext protectedRequestContext =</dt><dd><p>EarlybirdRequestContext.newContextWithRestrictFromUserIdFilter64(requestContext);</p>
+</dd>
+<dt>Preconditions.checkArgument(</dt><dd><p>protectedRequestContext.getRequest().getSearchQuery().isSetFromUserIDFilter64());</p>
+</dd>
+</dl>
+<p>// SERVICE_NOT_REQUESTED should be always be returned before other states as
+// SuperRootResponseMerger has special logic for this case.
+if (protectedRequestContext.getRequest().getSearchQuery().getFromUserIDFilter64().isEmpty()) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>return Future.value(EarlybirdServiceResponse.serviceNotCalled(</dt><dd><p>EarlybirdServiceResponse.ServiceState.SERVICE_NOT_REQUESTED));</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>if (requestContext.getRequest().isSetAdjustedProtectedRequestParams()) {</dt><dd><dl class="simple">
+<dt>adjustRequestParams(protectedRequestContext.getRequest(),</dt><dd><p>requestContext.getRequest().getAdjustedProtectedRequestParams());</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>LOG.debug(“Request sent to the protected cluster: {}”, protectedRequestContext.getRequest());
+return toEarlybirdServiceResponseFuture(</p>
+<blockquote>
+<div><p>savedRequestResponses,
+protectedRequestContext,
+“protected”,
+this.protectedRealtime</p>
+</div></blockquote>
+<p>);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private Future&lt;EarlybirdServiceResponse&gt; getRealtimeResponse(</dt><dd><blockquote>
+<div><p>ArrayList&lt;RequestResponse&gt; savedRequestResponses,
+EarlybirdRequestContext requestContext) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>return toEarlybirdServiceResponseFuture(</dt><dd><p>savedRequestResponses,
+requestContext,
+“realtime”,
+this.realtime);</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Modifying the existing max id filter of the request or appending a new</p></li>
+<li><p>max id filter and then send the request to the full archive cluster.</p></li>
+</ul>
+<p><a href="#id13"><span class="problematic" id="id14">*</span></a>/</p>
+</dd>
+<dt>private Future&lt;EarlybirdServiceResponse&gt; getFullArchiveResponse(</dt><dd><blockquote>
+<div><p>ArrayList&lt;RequestResponse&gt; savedRequestResponses,
+EarlybirdRequestContext requestContext,
+EarlybirdResponse realtimeResponse,
+EarlybirdResponse protectedResponse) {</p>
+</div></blockquote>
+<p>long realtimeMinId = getMinSearchedId(realtimeResponse);
+long protectedMinId = getMinSearchedId(protectedResponse);
+// if both realtime and protected min searched ids are available, the larger(newer) one is used
+// to make sure no tweets are left out. However, this means it might introduce duplicates for
+// the other response. The response merger will dedup the response. This logic is enabled
+// when full archive cluster is available for requests without enough protected results.
+long minId =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>decider.isAvailable(FULL_ARCHIVE_AVAILABLE_FOR_NOT_ENOUGH_PROTECTED_RESULTS_DECIDER_KEY)</dt><dd><p>? Math.max(realtimeMinId, protectedMinId) : realtimeMinId;</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl class="simple">
+<dt>if (minId &lt;= 0) {</dt><dd><p>// If the realtime response doesn’t have a minSearchedStatusID set, get all results from
+// the full archive cluster.
+minId = Long.MAX_VALUE;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// The [max_id] operator is inclusive in earlybirds. This means that a query with [max_id X]
+// will return tweet X, if X matches the rest of the query. So we should add a [max_id (X - 1)]
+// operator to the full archive query (instead of [max_id X]). Otherwise, we could end up with
+// duplicates. For example:
+//
+//  realtime response: results = [ 100, 90, 80 ], minSearchedStatusID = 80
+//  full archive request: [max_id 80]
+//  full archive response: results = [ 80, 70, 60 ]
+//
+// In this case, tweet 80 would be returned from both the realtime and full archive clusters.
+EarlybirdRequestContext archiveRequestContext =</p>
+<blockquote>
+<div><dl>
+<dt>EarlybirdRequestContext.copyRequestContext(</dt><dd><p>requestContext,
+QueryUtil.addOrReplaceMaxIdFilter(</p>
+<blockquote>
+<div><p>requestContext.getParsedQuery(),
+minId - 1));</p>
+</div></blockquote>
+</dd>
+</dl>
+</div></blockquote>
+<dl class="simple">
+<dt>if (requestContext.getRequest().isSetAdjustedFullArchiveRequestParams()) {</dt><dd><dl class="simple">
+<dt>adjustRequestParams(archiveRequestContext.getRequest(),</dt><dd><p>requestContext.getRequest().getAdjustedFullArchiveRequestParams());</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>LOG.debug(“Request sent to the full archive cluster: {},”, archiveRequestContext.getRequest());
+return toEarlybirdServiceResponseFuture(</p>
+<blockquote>
+<div><p>savedRequestResponses,
+archiveRequestContext,
+“archive”,
+this.fullArchive</p>
+</div></blockquote>
+<p>);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private long getMinSearchedId(EarlybirdResponse response) {</dt><dd><dl class="simple">
+<dt>return response != null &amp;&amp; response.isSetSearchResults()</dt><dd><p>? response.getSearchResults().getMinSearchedStatusID() : 0;</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private void adjustRequestParams(EarlybirdRequest request,</dt><dd><blockquote>
+<div><p>AdjustedRequestParams adjustedRequestParams) {</p>
+</div></blockquote>
+<p>ThriftSearchQuery searchQuery = request.getSearchQuery();</p>
+<dl>
+<dt>if (adjustedRequestParams.isSetNumResults()) {</dt><dd><p>searchQuery.setNumResults(adjustedRequestParams.getNumResults());
+if (searchQuery.isSetCollectorParams()) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>searchQuery.getCollectorParams().setNumResultsToReturn(</dt><dd><p>adjustedRequestParams.getNumResults());</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>if (adjustedRequestParams.isSetMaxHitsToProcess()) {</dt><dd><p>searchQuery.setMaxHitsToProcess(adjustedRequestParams.getMaxHitsToProcess());
+if (searchQuery.isSetRelevanceOptions()) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>searchQuery.getRelevanceOptions().setMaxHitsToProcess(</dt><dd><p>adjustedRequestParams.getMaxHitsToProcess());</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+if (searchQuery.isSetCollectorParams()</p>
+<blockquote>
+<div><blockquote>
+<div><p>&amp;&amp; searchQuery.getCollectorParams().isSetTerminationParams()) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>searchQuery.getCollectorParams().getTerminationParams().setMaxHitsToProcess(</dt><dd><p>adjustedRequestParams.getMaxHitsToProcess());</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>if (adjustedRequestParams.isSetReturnAllResults()) {</dt><dd><dl class="simple">
+<dt>if (searchQuery.isSetRelevanceOptions()) {</dt><dd><dl class="simple">
+<dt>searchQuery.getRelevanceOptions().setReturnAllResults(</dt><dd><p>adjustedRequestParams.isReturnAllResults());</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private Future&lt;EarlybirdServiceResponse&gt; toEarlybirdServiceResponseFuture(</dt><dd><blockquote>
+<div><p>List&lt;RequestResponse&gt; savedRequestResponses,
+EarlybirdRequestContext requestContext,
+String sentTo,
+Service&lt;EarlybirdRequestContext, EarlybirdResponse&gt; service) {</p>
+</div></blockquote>
+<p>Future&lt;EarlybirdResponse&gt; responseFuture = service.apply(requestContext);
+this.saveRequestResponse(</p>
+<blockquote>
+<div><p>savedRequestResponses, sentTo, requestContext, responseFuture</p>
+</div></blockquote>
+<p>);</p>
+<dl>
+<dt>return responseFuture.map(new Function&lt;EarlybirdResponse, EarlybirdServiceResponse&gt;() {</dt><dd><p>&#64;Override
+public EarlybirdServiceResponse apply(EarlybirdResponse response) {</p>
+<blockquote>
+<div><p>return EarlybirdServiceResponse.serviceCalled(response);</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>});</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../_sources/src/java/com/twitter/search/earlybird_root/routers/AbstractRecencyAndRelevanceRequestRouter.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

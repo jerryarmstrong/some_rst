@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../" id="documentation_options" src="../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.simclusters_v2.scalding.topic_recommendations</p>
+<p>import com.twitter.bijection.Bufferable
+import com.twitter.bijection.Injection
+import com.twitter.recos.entities.thriftscala._
+import com.twitter.scalding._
+import com.twitter.scalding_internal.dalv2.DALWrite._
+import com.twitter.scalding_internal.multiformat.format.keyval.KeyVal
+import com.twitter.simclusters_v2.common.Country
+import com.twitter.simclusters_v2.common.Language
+import com.twitter.simclusters_v2.common.TopicId
+import com.twitter.simclusters_v2.common.UserId
+import com.twitter.simclusters_v2.hdfs_sources.DataSources
+import com.twitter.simclusters_v2.hdfs_sources.TopProducersForLocaleTopicsFromTopicFollowGraphScalaDataset
+import com.twitter.simclusters_v2.scalding.common.matrix.SparseMatrix
+import com.twitter.simclusters_v2.scalding.embedding.common.EmbeddingUtil.ProducerId
+import com.twitter.simclusters_v2.scalding.embedding.common.ExternalDataSources
+import com.twitter.simclusters_v2.thriftscala.UserAndNeighbors
+import com.twitter.wtf.scalding.jobs.common.AdhocExecutionApp
+import com.twitter.wtf.scalding.jobs.common.ScheduledExecutionApp
+import java.util.TimeZone</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>In this file, we compute the top producers for a topic from the Topic Follow Graph</p></li>
+<li></li>
+<li><p>It works as follows:</p></li>
+<li></li>
+<li><ol class="arabic simple">
+<li><p>Producer embedding: List of users who follow the producer’s profile and follow atleast one topic</p></li>
+</ol>
+</li>
+<li></li>
+<li><ol class="arabic simple" start="2">
+<li><p>Topic embedding: List of users who follow the topic</p></li>
+</ol>
+</li>
+<li></li>
+<li><ol class="arabic simple" start="3">
+<li><p>Score(producer, topic) = cosine similarity of the producer and topic embedding as defined above</p></li>
+</ol>
+</li>
+<li></li>
+<li><ol class="arabic simple" start="4">
+<li><p>Please note that we compute the top producers for each topic locale.</p></li>
+</ol>
+</li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+</dl>
+<p>/**
+scalding remote run –user cassowary </p>
+<blockquote>
+<div><p>–target src/scala/com/twitter/simclusters_v2/scalding/topic_recommendations:top_producers_for_topics_from_topic_follow_graph-adhoc –main-class com.twitter.simclusters_v2.scalding.topic_recommendations.ProducersForTopicsFromTopicFollowGraphAdhocApp –submitter  hadoopnest1.atla.twitter.com  –  –date 2021-01-06 –minActiveFollowers 400 –maxProducersPerTopic 50 –output_dir_producers_per_topic /user/cassowary/adhoc/ldap/ttf_profile_pages_topics_to_producers
+<a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</div></blockquote>
+<p>object ProducersForTopicsFromTopicFollowGraphAdhocApp extends AdhocExecutionApp {</p>
+<blockquote>
+<div><dl>
+<dt>override def runOnDateRange(</dt><dd><p>args: Args</p>
+</dd>
+<dt>)(</dt><dd><p>implicit dateRange: DateRange,
+timeZone: TimeZone,
+uniqueID: UniqueID</p>
+</dd>
+<dt>): Execution[Unit] = {</dt><dd><p>import ProducersForTopicsFromTopicFollowGraph._
+val outputDirProducersPerTopic = args(“output_dir_producers_per_topic”)
+val minActiveFollowersForProducer = args.int(“minActiveFollowers”, 400)
+val maxProducersPerTopicPerLocale = args.int(“maxProducersPerTopic”, 50)
+val minTopicFollows = args.int(“minTopicFollows”, 100)</p>
+<dl>
+<dt>val topicsFollowedByProducersFollowers = getTopicsFromProducersFollowers(</dt><dd><dl class="simple">
+<dt>DataSources</dt><dd><p>.userUserNormalizedGraphSource(dateRange.prepend(Days(7))),</p>
+</dd>
+</dl>
+<p>ExternalDataSources.topicFollowGraphSource,
+ExternalDataSources.userSource,
+ExternalDataSources.inferredUserConsumedLanguageSource,
+minActiveFollowersForProducer,
+minTopicFollows</p>
+</dd>
+</dl>
+<p>)</p>
+<dl class="simple">
+<dt>sortAndGetTopProducersPerLocaleTopic(</dt><dd><p>topicsFollowedByProducersFollowers,
+maxProducersPerTopicPerLocale).writeExecution(TypedTsv(outputDirProducersPerTopic))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>/**
+capesospy-v2 update –build_locally </p>
+<blockquote>
+<div><p>–start_cron top_producers_for_topics_from_topic_follow_graph src/scala/com/twitter/simclusters_v2/capesos_config/atla_proc3.yaml
+<a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</div></blockquote>
+<dl>
+<dt>object ProducersForTopicsFromTopicFollowGraphBatchApp extends ScheduledExecutionApp {</dt><dd><p>override val firstTime: RichDate = RichDate(“2020-10-01”)</p>
+<p>override val batchIncrement: Duration = Days(1)</p>
+<dl>
+<dt>private val topProducersForLocaleTopicsPath: String =</dt><dd><p>“/user/cassowary/manhattan_sequence_files/top_producers_for_topics_from_topic_follow_graph”</p>
+</dd>
+<dt>override def runOnDateRange(</dt><dd><p>args: Args</p>
+</dd>
+<dt>)(</dt><dd><p>implicit dateRange: DateRange,
+timeZone: TimeZone,
+uniqueID: UniqueID</p>
+</dd>
+<dt>): Execution[Unit] = {</dt><dd><p>import ProducersForTopicsFromTopicFollowGraph._
+val minActiveFollowersForProducer = args.int(“minActiveFollowers”, 400)
+val maxProducersPerTopicPerLocale = args.int(“maxProducersPerTopic”, 50)
+val minTopicFollows = args.int(“minTopicFollows”, 100)</p>
+<dl>
+<dt>val topicsFollowedByProducersFollowers = getTopicsFromProducersFollowers(</dt><dd><dl class="simple">
+<dt>DataSources</dt><dd><p>.userUserNormalizedGraphSource(dateRange.prepend(Days(7))),</p>
+</dd>
+</dl>
+<p>ExternalDataSources.topicFollowGraphSource,
+ExternalDataSources.userSource,
+ExternalDataSources.inferredUserConsumedLanguageSource,
+minActiveFollowersForProducer,
+minTopicFollows</p>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>sortAndGetTopProducersPerLocaleTopic(</dt><dd><p>topicsFollowedByProducersFollowers,
+maxProducersPerTopicPerLocale)
+.map {</p>
+<blockquote>
+<div><dl>
+<dt>case ((topicId, languageOpt, countryOpt), producersWithScores) =&gt;</dt><dd><dl>
+<dt>KeyVal(</dt><dd><dl class="simple">
+<dt>SemanticCoreEntityWithLocale(</dt><dd><p>entityId = topicId,
+context = Locale(language = languageOpt, country = countryOpt)),</p>
+</dd>
+<dt>UserScoreList(producersWithScores.map {</dt><dd><dl class="simple">
+<dt>case (producerId, producerScore) =&gt;</dt><dd><p>UserWithScore(userId = producerId, score = producerScore)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>})</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl class="simple">
+<dt>}.writeDALVersionedKeyValExecution(</dt><dd><p>TopProducersForLocaleTopicsFromTopicFollowGraphScalaDataset,
+D.Suffix(topProducersForLocaleTopicsPath),
+version = ExplicitEndTime(dateRange.end)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>object ProducersForTopicsFromTopicFollowGraph {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>implicit val sparseMatrixInj: Injection[</dt><dd><p>(ProducerId, Option[Language], Option[Country]),
+Array[Byte]</p>
+</dd>
+<dt>] =</dt><dd><p>Bufferable.injectionOf[(ProducerId, Option[Language], Option[Country])]</p>
+</dd>
+</dl>
+<p>// This function takes the producer to topics map and generates the sorted and
+// truncated top producers ranked list for each locale topic
+def sortAndGetTopProducersPerLocaleTopic(</p>
+<blockquote>
+<div><p>producerToTopics: TypedPipe[(ProducerId, (TopicId, Option[Language], Option[Country]), Double)],
+maxProducersPerLocaleTopic: Int</p>
+</div></blockquote>
+<dl>
+<dt>)(</dt><dd><p>implicit uniqueID: UniqueID</p>
+</dd>
+<dt>): TypedPipe[((TopicId, Option[Language], Option[Country]), List[(ProducerId, Double)])] = {</dt><dd><p>val numTopicsWithLocales = Stat(“num_topics_with_locales”)
+producerToTopics</p>
+<blockquote>
+<div><dl class="simple">
+<dt>.map {</dt><dd><dl class="simple">
+<dt>case (producerId, (topicId, languageOpt, countryOpt), score) =&gt;</dt><dd><p>((topicId, languageOpt, countryOpt), Seq((producerId, score)))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+.sumByKey.mapValues { producersList =&gt;</p>
+<blockquote>
+<div><p>numTopicsWithLocales.inc()
+producersList.sortBy(-_._2).take(maxProducersPerLocaleTopic).toList</p>
+</div></blockquote>
+<p>}.toTypedPipe</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>def getTopicsFromProducersFollowers(</dt><dd><p>userUserGraph: TypedPipe[UserAndNeighbors],
+followedTopicsToUsers: TypedPipe[(TopicId, UserId)],
+userSource: TypedPipe[(UserId, (Country, Language))],
+userLanguages: TypedPipe[(UserId, Seq[(Language, Double)])],
+minActiveFollowersForProducer: Int,
+minTopicFollows: Int</p>
+</dd>
+<dt>)(</dt><dd><p>implicit dateRange: DateRange,
+timeZone: TimeZone,
+uniqueID: UniqueID</p>
+</dd>
+</dl>
+<p>): TypedPipe[(ProducerId, (TopicId, Option[Language], Option[Country]), Double)] = {</p>
+<blockquote>
+<div><p>val usersFollowingTopics: TypedPipe[UserId] = followedTopicsToUsers.map(_._2).distinct
+val producerToUsersSparseMatrix: SparseMatrix[ProducerId, UserId, Double] =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>TopicsForProducersUtils</dt><dd><dl class="simple">
+<dt>.getProducersToFollowedByUsersSparseMatrix(</dt><dd><p>userUserGraph,
+minActiveFollowersForProducer).filterCols(usersFollowingTopics).rowL2Normalize</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</div></blockquote>
+<dl class="simple">
+<dt>val userToTopicsSparseSkinnyMatrix: SparseMatrix[</dt><dd><p>UserId,
+(TopicId, Option[Language], Option[Country]),
+Double</p>
+</dd>
+<dt>] =</dt><dd><dl class="simple">
+<dt>TopicsForProducersUtils</dt><dd><dl class="simple">
+<dt>.getFollowedTopicsToUserSparseMatrix(</dt><dd><p>followedTopicsToUsers,
+userSource,
+userLanguages,
+minTopicFollows).rowL2Normalize.transpose</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>// Obtain the Producer to Locale Topics Matrix
+val producersToLocaleTopicsMatrix: SparseMatrix[</p>
+<blockquote>
+<div><p>ProducerId,
+(TopicId, Option[Language], Option[Country]),
+Double</p>
+</div></blockquote>
+<dl class="simple">
+<dt>] =</dt><dd><p>producerToUsersSparseMatrix.multiplySparseMatrix(userToTopicsSparseSkinnyMatrix)</p>
+</dd>
+</dl>
+<p>producersToLocaleTopicsMatrix.toTypedPipe</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../_sources/src/scala/com/twitter/simclusters_v2/scalding/topic_recommendations/ProducersForTopicsFromTopicFollowGraph.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

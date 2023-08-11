@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../" id="documentation_options" src="../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.ingester.pipeline.util;</p>
+<p>import java.util.HashSet;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;</p>
+<p>import com.google.common.collect.Sets;</p>
+<p>import com.twitter.util.Future;
+import com.twitter.util.Promise;</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Batches single requests of type RQ -&gt; Future&lt;RP&gt; to an underlying client that supports batch</p></li>
+<li><p>calls with multiple values of type RQ. Threadsafe.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>public class BatchingClient&lt;RQ, RP&gt; {</dt><dd><p>&#64;FunctionalInterface
+public interface BatchClient&lt;RQ, RP&gt; {</p>
+<blockquote>
+<div><dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Issue a request to the underlying store which supports batches of requests.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+</dl>
+<p>Future&lt;Map&lt;RQ, RP&gt;&gt; batchGet(Set&lt;RQ&gt; requests);</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>unsentRequests is not threadsafe, and so it must be externally synchronized.</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+</dl>
+<p>private final HashSet&lt;RQ&gt; unsentRequests = new HashSet&lt;&gt;();</p>
+<p>private final ConcurrentHashMap&lt;RQ, Promise&lt;RP&gt;&gt; promises = new ConcurrentHashMap&lt;&gt;();</p>
+<p>private final BatchClient&lt;RQ, RP&gt; batchClient;
+private final int batchSize;</p>
+<dl class="simple">
+<dt>public BatchingClient(</dt><dd><p>BatchClient&lt;RQ, RP&gt; batchClient,
+int batchSize</p>
+</dd>
+<dt>) {</dt><dd><p>this.batchClient = batchClient;
+this.batchSize = batchSize;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Send a request and receive a Future&lt;RP&gt;. The future will not be resolved until at there at</p></li>
+<li><p>least batchSize requests ready to send.</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+<dt>public Future&lt;RP&gt; call(RQ request) {</dt><dd><p>Promise&lt;RP&gt; promise = promises.computeIfAbsent(request, r -&gt; new Promise&lt;&gt;());</p>
+<p>maybeBatchCall(request);</p>
+<p>return promise;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private void maybeBatchCall(RQ request) {</dt><dd><p>Set&lt;RQ&gt; frozenRequests;
+synchronized (unsentRequests) {</p>
+<blockquote>
+<div><p>unsentRequests.add(request);
+if (unsentRequests.size() &lt; batchSize) {</p>
+<blockquote>
+<div><p>return;</p>
+</div></blockquote>
+<p>}</p>
+<p>// Make a copy of requests so we can modify it inside executeBatchCall without additional
+// synchronization.
+frozenRequests = new HashSet&lt;&gt;(unsentRequests);
+unsentRequests.clear();</p>
+</div></blockquote>
+<p>}</p>
+<p>executeBatchCall(frozenRequests);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private void executeBatchCall(Set&lt;RQ&gt; requests) {</dt><dd><dl>
+<dt>batchClient.batchGet(requests)</dt><dd><dl>
+<dt>.onSuccess(responseMap -&gt; {</dt><dd><dl>
+<dt>for (Map.Entry&lt;RQ, RP&gt; entry<span class="classifier">responseMap.entrySet()) {</span></dt><dd><p>Promise&lt;RP&gt; promise = promises.remove(entry.getKey());
+if (promise != null) {</p>
+<blockquote>
+<div><p>promise.become(Future.value(entry.getValue()));</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>Set&lt;RQ&gt; outstandingRequests = Sets.difference(requests, responseMap.keySet());
+for (RQ request : outstandingRequests) {</p>
+<blockquote>
+<div><p>Promise&lt;RP&gt; promise = promises.remove(request);
+if (promise != null) {</p>
+<blockquote>
+<div><p>promise.become(Future.exception(new ResponseNotReturnedException(request)));</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>return null;</p>
+</dd>
+</dl>
+<p>})
+.onFailure(exception -&gt; {</p>
+<blockquote>
+<div><dl>
+<dt>for (RQ request<span class="classifier">requests) {</span></dt><dd><p>Promise&lt;RP&gt; promise = promises.remove(request);
+if (promise != null) {</p>
+<blockquote>
+<div><p>promise.become(Future.exception(exception));</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>return null;</p>
+</div></blockquote>
+<p>});</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../_sources/src/java/com/twitter/search/ingester/pipeline/util/BatchingClient.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

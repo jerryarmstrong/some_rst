@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../" id="documentation_options" src="../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.simclusters_v2.scalding.embedding.tfg</p>
+<p>import com.twitter.bijection.{Bufferable, Injection}
+import com.twitter.dal.client.dataset.KeyValDALDataset
+import com.twitter.scalding._
+import com.twitter.scalding_internal.dalv2.DALWrite.{D, _}
+import com.twitter.scalding_internal.multiformat.format.keyval.KeyVal
+import com.twitter.simclusters_v2.common.{Country, Language, SimClustersEmbedding, TopicId}
+import com.twitter.simclusters_v2.hdfs_sources.InterestedInSources
+import com.twitter.simclusters_v2.scalding.common.matrix.{SparseMatrix, SparseRowMatrix}
+import com.twitter.simclusters_v2.scalding.embedding.common.EmbeddingUtil.{UserId, _}
+import com.twitter.simclusters_v2.scalding.embedding.common.{</p>
+<blockquote>
+<div><p>EmbeddingUtil,
+ExternalDataSources,
+SimClustersEmbeddingBaseJob</p>
+</div></blockquote>
+<p>}
+import com.twitter.simclusters_v2.thriftscala.{</p>
+<blockquote>
+<div><p>EmbeddingType,
+InternalId,
+ModelVersion,
+SimClustersEmbeddingId,
+UserToInterestedInClusterScores,
+SimClustersEmbedding =&gt; ThriftSimClustersEmbedding,
+TopicId =&gt; ThriftTopicId</p>
+</div></blockquote>
+<p>}
+import com.twitter.wtf.scalding.jobs.common.DateRangeExecutionApp
+import java.util.TimeZone</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Base app to generate Topic-Follow-Graph (TFG) topic embeddings from inferred languages.</p></li>
+<li><p>In this app, topic embeddings are keyed by (topic, language, country).</p></li>
+<li><p>Given a (topic t, country c, language l) tuple, the embedding is the sum of the</p></li>
+<li><p>InterestedIn of the topic followers whose inferred language has l and account country is c</p></li>
+<li><p>The language and the country fields in the keys are optional.</p></li>
+<li><p>The app will generate 1) country-language-based 2) language-based 3) global embeddings in one dataset.</p></li>
+<li><p>It’s up to the clients to decide which embeddings to use</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>trait InferredLanguageTfgBasedTopicEmbeddingsBaseApp</dt><dd><blockquote>
+<div><p>extends SimClustersEmbeddingBaseJob[(TopicId, Option[Language], Option[Country])]
+with DateRangeExecutionApp {</p>
+</div></blockquote>
+<p>val isAdhoc: Boolean
+val embeddingType: EmbeddingType
+val embeddingSource: KeyValDALDataset[KeyVal[SimClustersEmbeddingId, ThriftSimClustersEmbedding]]
+val pathSuffix: String
+val modelVersion: ModelVersion
+def scoreExtractor: UserToInterestedInClusterScores =&gt; Double</p>
+<p>override def numClustersPerNoun: Int = 50
+override def numNounsPerClusters: Int = 1 // not used for now. Set to an arbitrary number
+override def thresholdForEmbeddingScores: Double = 0.001</p>
+<dl class="simple">
+<dt>implicit val inj: Injection[(TopicId, Option[Language], Option[Country]), Array[Byte]] =</dt><dd><p>Bufferable.injectionOf[(TopicId, Option[Language], Option[Country])]</p>
+</dd>
+</dl>
+<p>// Default to 10K, top 1% for (topic, country, language) follows
+// Child classes may want to tune this number for their own use cases.
+val minPerCountryFollowers = 10000
+val minFollowers = 100</p>
+<dl>
+<dt>def getTopicUsers(</dt><dd><p>topicFollowGraph: TypedPipe[(TopicId, UserId)],
+userSource: TypedPipe[(UserId, (Country, Language))],
+userLanguages: TypedPipe[(UserId, Seq[(Language, Double)])]</p>
+</dd>
+<dt>): TypedPipe[((TopicId, Option[Language], Option[Country]), UserId, Double)] = {</dt><dd><dl>
+<dt>topicFollowGraph</dt><dd><p>.map { case (topic, user) =&gt; (user, topic) }
+.join(userSource)
+.join(userLanguages)
+.flatMap {</p>
+<blockquote>
+<div><dl>
+<dt>case (user, ((topic, (country, _)), scoredLangs)) =&gt;</dt><dd><dl>
+<dt>scoredLangs.flatMap {</dt><dd><dl>
+<dt>case (lang, score) =&gt;</dt><dd><dl class="simple">
+<dt>Seq(</dt><dd><p>((topic, Some(lang), Some(country)), user, score), // with language and country
+((topic, Some(lang), None), user, score) // with language</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>} ++ Seq(((topic, None, None), user, 1.0)) // non-language</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}.forceToDisk</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def getValidTopics(</dt><dd><p>topicUsers: TypedPipe[((TopicId, Option[Language], Option[Country]), UserId, Double)]</p>
+</dd>
+<dt>)(</dt><dd><p>implicit uniqueID: UniqueID</p>
+</dd>
+<dt>): TypedPipe[(TopicId, Option[Language], Option[Country])] = {</dt><dd><p>val countryBasedTopics = Stat(“country_based_topics”)
+val nonCountryBasedTopics = Stat(“non_country_based_topics”)</p>
+<dl class="simple">
+<dt>val (countryBased, nonCountryBased) = topicUsers.partition {</dt><dd><p>case ((_, lang, country), _, _) =&gt; lang.isDefined &amp;&amp; country.isDefined</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>SparseMatrix(countryBased).rowL1Norms.collect {</dt><dd><dl class="simple">
+<dt>case (key, l1Norm) if l1Norm &gt;= minPerCountryFollowers =&gt;</dt><dd><p>countryBasedTopics.inc()
+key</p>
+</dd>
+</dl>
+</dd>
+<dt>} ++</dt><dd><dl class="simple">
+<dt>SparseMatrix(nonCountryBased).rowL1Norms.collect {</dt><dd><dl class="simple">
+<dt>case (key, l1Norm) if l1Norm &gt;= minFollowers =&gt;</dt><dd><p>nonCountryBasedTopics.inc()
+key</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>override def prepareNounToUserMatrix(</dt><dd><p>implicit dateRange: DateRange,
+timeZone: TimeZone,
+uniqueID: UniqueID</p>
+</dd>
+<dt>): SparseMatrix[(TopicId, Option[Language], Option[Country]), UserId, Double] = {</dt><dd><dl class="simple">
+<dt>val topicUsers = getTopicUsers(</dt><dd><p>ExternalDataSources.topicFollowGraphSource,
+ExternalDataSources.userSource,
+ExternalDataSources.inferredUserConsumedLanguageSource)</p>
+</dd>
+<dt>SparseMatrix[(TopicId, Option[Language], Option[Country]), UserId, Double](topicUsers)</dt><dd><p>.filterRows(getValidTopics(topicUsers))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>override def prepareUserToClusterMatrix(</dt><dd><p>implicit dateRange: DateRange,
+timeZone: TimeZone,
+uniqueID: UniqueID</p>
+</dd>
+<dt>): SparseRowMatrix[UserId, ClusterId, Double] =</dt><dd><dl>
+<dt>SparseRowMatrix(</dt><dd><dl>
+<dt>InterestedInSources</dt><dd><p>.simClustersInterestedInSource(modelVersion, dateRange, timeZone)
+.map {</p>
+<blockquote>
+<div><dl>
+<dt>case (userId, clustersUserIsInterestedIn) =&gt;</dt><dd><dl>
+<dt>userId -&gt; clustersUserIsInterestedIn.clusterIdToScores</dt><dd><dl class="simple">
+<dt>.map {</dt><dd><dl class="simple">
+<dt>case (clusterId, scores) =&gt;</dt><dd><p>clusterId -&gt; scoreExtractor(scores)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+.filter(_._2 &gt; 0.0)
+.toMap</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</div></blockquote>
+<p>},</p>
+</dd>
+</dl>
+<p>isSkinnyMatrix = true</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>override def writeNounToClustersIndex(</dt><dd><p>output: TypedPipe[((TopicId, Option[Language], Option[Country]), Seq[(ClusterId, Double)])]</p>
+</dd>
+<dt>)(</dt><dd><p>implicit dateRange: DateRange,
+timeZone: TimeZone,
+uniqueID: UniqueID</p>
+</dd>
+<dt>): Execution[Unit] = {</dt><dd><p>val topicEmbeddingCount = Stat(s”topic_embedding_count”)</p>
+<dl>
+<dt>val tsvExec =</dt><dd><dl>
+<dt>output</dt><dd><dl class="simple">
+<dt>.map {</dt><dd><dl class="simple">
+<dt>case ((entityId, language, country), clustersWithScores) =&gt;</dt><dd><p>(entityId, language, country, clustersWithScores.take(5).mkString(“,”))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+.shard(5)
+.writeExecution(TypedTsv[(TopicId, Option[Language], Option[Country], String)](</p>
+<blockquote>
+<div><p>s”/user/recos-platform/adhoc/topic_embedding/$pathSuffix/$ModelVersionPathMap($modelVersion)”))</p>
+</div></blockquote>
+</dd>
+</dl>
+</dd>
+<dt>val keyValExec = output</dt><dd><dl>
+<dt>.map {</dt><dd><dl>
+<dt>case ((entityId, lang, country), clustersWithScores) =&gt;</dt><dd><p>topicEmbeddingCount.inc()
+KeyVal(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>SimClustersEmbeddingId(</dt><dd><p>embeddingType,
+modelVersion,
+InternalId.TopicId(ThriftTopicId(entityId, lang, country))</p>
+</dd>
+</dl>
+<p>),
+SimClustersEmbedding(clustersWithScores).toThrift</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+.writeDALVersionedKeyValExecution(</p>
+<blockquote>
+<div><p>embeddingSource,
+D.Suffix(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>EmbeddingUtil</dt><dd><p>.getHdfsPath(isAdhoc = isAdhoc, isManhattanKeyVal = true, modelVersion, pathSuffix))</p>
+</dd>
+</dl>
+</div></blockquote>
+</div></blockquote>
+<p>)</p>
+</dd>
+<dt>if (isAdhoc)</dt><dd><p>Execution.zip(tsvExec, keyValExec).unit</p>
+</dd>
+<dt>else</dt><dd><p>keyValExec</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>override def writeClusterToNounsIndex(</dt><dd><p>output: TypedPipe[(ClusterId, Seq[((TopicId, Option[Language], Option[Country]), Double)])]</p>
+</dd>
+<dt>)(</dt><dd><p>implicit dateRange: DateRange,
+timeZone: TimeZone,
+uniqueID: UniqueID</p>
+</dd>
+<dt>): Execution[Unit] = {</dt><dd><p>Execution.unit // do not need this</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../_sources/src/scala/com/twitter/simclusters_v2/scalding/embedding/tfg/InferredLanguageTfgBasedTopicEmbeddingsBaseApp.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

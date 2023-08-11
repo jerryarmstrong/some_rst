@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.cr_mixer.similarity_engine</p>
+<p>import com.twitter.cr_mixer.param.decider.CrMixerDecider
+import com.twitter.cr_mixer.thriftscala.SimilarityEngineType
+import com.twitter.finagle.GlobalRequestTimeoutException
+import com.twitter.finagle.mux.ClientDiscardedRequestException
+import com.twitter.finagle.memcached.Client
+import com.twitter.finagle.mux.ServerApplicationError
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.frigate.common.util.StatsUtil
+import com.twitter.hashing.KeyHasher
+import com.twitter.hermit.store.common.ObservedMemcachedReadableStore
+import com.twitter.relevance_platform.common.injection.LZ4Injection
+import com.twitter.relevance_platform.common.injection.SeqObjectInjection
+import com.twitter.storehaus.ReadableStore
+import com.twitter.timelines.configapi.FSParam
+import com.twitter.timelines.configapi.Params
+import com.twitter.util.Duration
+import com.twitter.util.Future
+import com.twitter.util.TimeoutException
+import com.twitter.util.logging.Logging
+import org.apache.thrift.TApplicationException</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>A SimilarityEngine is a wrapper which, given a [[Query]], returns a list of [[Candidate]]</p></li>
+<li><p>The main purposes of a SimilarityEngine is to provide a consistent interface for candidate</p></li>
+<li><p>generation logic, and provides default functions, including:</p></li>
+<li><ul>
+<li><p>Identification</p></li>
+</ul>
+</li>
+<li><ul>
+<li><p>Observability</p></li>
+</ul>
+</li>
+<li><ul>
+<li><p>Timeout settings</p></li>
+</ul>
+</li>
+<li><ul>
+<li><p>Exception Handling</p></li>
+</ul>
+</li>
+<li><ul>
+<li><p>Gating by Deciders &amp; FeatureSwitch settings</p></li>
+</ul>
+</li>
+<li><ul>
+<li><p>(coming soon): Dark traffic</p></li>
+</ul>
+</li>
+<li></li>
+<li><p>Note:</p></li>
+<li><p>A SimilarityEngine by itself is NOT meant to be cacheable.</p></li>
+<li><p>Caching should be implemented in the underlying ReadableStore that provides the [[Candidate]]s</p></li>
+<li></li>
+<li><p>Please keep extension of this class local this directory only</p></li>
+<li></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+</dl>
+<p>trait SimilarityEngine[Query, Candidate] {</p>
+<blockquote>
+<div><dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Uniquely identifies a similarity engine.</p></li>
+<li><p>Avoid using the same engine type for more than one engine, it will cause stats to double count</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+</dl>
+<p>private[similarity_engine] def identifier: SimilarityEngineType</p>
+<p>def getCandidates(query: Query): Future[Option[Seq[Candidate]]]</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>object SimilarityEngine extends Logging {</dt><dd><dl>
+<dt>case class SimilarityEngineConfig(</dt><dd><p>timeout: Duration,
+gatingConfig: GatingConfig)</p>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Controls for whether or not this Engine is enabled.</p></li>
+<li><p>In our previous design, we were expecting a Sim Engine will only take one set of Params,</p></li>
+<li><p>and that’s why we decided to have GatingConfig and the EnableFeatureSwitch in the trait.</p></li>
+<li><p>However, we now have two candidate generation pipelines: Tweet Rec, Related Tweets</p></li>
+<li><p>and they are now having their own set of Params, but EnableFeatureSwitch can only put in 1 fixed value.</p></li>
+<li><p>We need some further refactor work to make it more flexible.</p></li>
+<li></li>
+<li><p>&#64;param deciderConfig Gate the Engine by a decider. If specified,</p></li>
+<li><p>&#64;param enableFeatureSwitch. DO NOT USE IT FOR NOW. It needs some refactorting. Please set it to None (SD-20268)</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>case class GatingConfig(</dt><dd><p>deciderConfig: Option[DeciderConfig],
+enableFeatureSwitch: Option[</p>
+<blockquote>
+<div><p>FSParam[Boolean]</p>
+</div></blockquote>
+<p>]) // Do NOT use the enableFeatureSwitch. It needs some refactoring.</p>
+</dd>
+<dt>case class DeciderConfig(</dt><dd><p>decider: CrMixerDecider,
+deciderString: String)</p>
+</dd>
+<dt>case class MemCacheConfig[K](</dt><dd><p>cacheClient: Client,
+ttl: Duration,
+asyncUpdate: Boolean = false,
+keyToString: K =&gt; String)</p>
+</dd>
+<dt>private[similarity_engine] def isEnabled(</dt><dd><p>params: Params,
+gatingConfig: GatingConfig</p>
+</dd>
+<dt>): Boolean = {</dt><dd><dl>
+<dt>val enabledByDecider =</dt><dd><dl class="simple">
+<dt>gatingConfig.deciderConfig.forall { config =&gt;</dt><dd><p>config.decider.isAvailable(config.deciderString)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>val enabledByFS = gatingConfig.enableFeatureSwitch.forall(params.apply)</p>
+<p>enabledByDecider &amp;&amp; enabledByFS</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// Default key hasher for memcache keys
+val keyHasher: KeyHasher = KeyHasher.FNV1A_64</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Add a MemCache wrapper to a ReadableStore with a preset key and value injection functions</p></li>
+<li><p>Note: The [[Query]] object needs to be cacheable,</p></li>
+<li><p>i.e. it cannot be a runtime objects or complex objects, for example, configapi.Params</p></li>
+<li></li>
+<li><p>&#64;param underlyingStore un-cached store implementation</p></li>
+<li><p>&#64;param keyPrefix       a prefix differentiates 2 stores if they share the same key space.</p></li>
+<li><p>e.x. 2 implementations of ReadableStore[UserId, Seq[Candidiate] ]</p></li>
+<li><p>can use prefix “store_v1”, “store_v2”</p></li>
+<li><p>&#64;return                A ReadableStore with a MemCache wrapper</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+<dt>private[similarity_engine] def addMemCache[Query, Candidate &lt;: Serializable](</dt><dd><p>underlyingStore: ReadableStore[Query, Seq[Candidate]],
+memCacheConfig: MemCacheConfig[Query],
+keyPrefix: Option[String] = None,
+statsReceiver: StatsReceiver</p>
+</dd>
+<dt>): ReadableStore[Query, Seq[Candidate]] = {</dt><dd><p>val prefix = keyPrefix.getOrElse(“”)</p>
+<dl class="simple">
+<dt>ObservedMemcachedReadableStore.fromCacheClient[Query, Seq[Candidate]](</dt><dd><p>backingStore = underlyingStore,
+cacheClient = memCacheConfig.cacheClient,
+ttl = memCacheConfig.ttl,
+asyncUpdate = memCacheConfig.asyncUpdate,</p>
+</dd>
+<dt>)(</dt><dd><p>valueInjection = LZ4Injection.compose(SeqObjectInjection[Candidate]()),
+keyToString = { k: Query =&gt; s”CRMixer:$prefix${memCacheConfig.keyToString(k)}” },
+statsReceiver = statsReceiver</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<p>private val timer = com.twitter.finagle.util.DefaultTimer</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Applies runtime configs, like stats, timeouts, exception handling, onto fn</p></li>
+</ul>
+<p><a href="#id9"><span class="problematic" id="id10">*</span></a>/</p>
+</dd>
+<dt>private[similarity_engine] def getFromFn[Query, Candidate](</dt><dd><p>fn: Query =&gt; Future[Option[Seq[Candidate]]],
+storeQuery: Query,
+engineConfig: SimilarityEngineConfig,
+params: Params,
+scopedStats: StatsReceiver</p>
+</dd>
+<dt>): Future[Option[Seq[Candidate]]] = {</dt><dd><dl>
+<dt>if (isEnabled(params, engineConfig.gatingConfig)) {</dt><dd><p>scopedStats.counter(“gate_enabled”).incr()</p>
+<dl>
+<dt>StatsUtil</dt><dd><dl class="simple">
+<dt>.trackOptionItemsStats(scopedStats) {</dt><dd><p>fn.apply(storeQuery).raiseWithin(engineConfig.timeout)(timer)</p>
+</dd>
+</dl>
+<p>}
+.rescue {</p>
+<blockquote>
+<div><dl>
+<dt>case _: TimeoutException | _: GlobalRequestTimeoutException | _: TApplicationException |</dt><dd><blockquote>
+<div><p>_: ClientDiscardedRequestException |
+_: ServerApplicationError // TApplicationException inside
+=&gt;</p>
+</div></blockquote>
+<p>debug(“Failed to fetch. request aborted or timed out”)
+Future.None</p>
+</dd>
+<dt>case e =&gt;</dt><dd><p>error(“Failed to fetch. request aborted or timed out”, e)
+Future.None</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+<dt>} else {</dt><dd><p>scopedStats.counter(“gate_disabled”).incr()
+Future.None</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/cr-mixer/server/src/main/scala/com/twitter/cr_mixer/similarity_engine/SimilarityEngine.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

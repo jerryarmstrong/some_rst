@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../" id="documentation_options" src="../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.simclusters_v2.scalding.topic_recommendations
+import com.twitter.bijection.{Bufferable, Injection}
+import com.twitter.scalding._
+import com.twitter.simclusters_v2.common.{Country, Language, SemanticCoreEntityId, TopicId, UserId}
+import com.twitter.simclusters_v2.scalding.common.matrix.SparseMatrix
+import com.twitter.simclusters_v2.scalding.embedding.common.EmbeddingUtil.ProducerId
+import com.twitter.simclusters_v2.thriftscala.UserAndNeighbors</p>
+<p>object TopicsForProducersUtils {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>implicit val sparseMatrixInj: Injection[</dt><dd><p>(SemanticCoreEntityId, Option[Language], Option[Country]),
+Array[Byte]</p>
+</dd>
+<dt>] =</dt><dd><p>Bufferable.injectionOf[(SemanticCoreEntityId, Option[Language], Option[Country])]</p>
+</dd>
+</dl>
+<p>// This function provides the set of ‘valid’ topics, i.e topics with atleast a certain number of
+// follows. This helps remove some noisy topic associations to producers in the dataset.
+def getValidTopics(</p>
+<blockquote>
+<div><p>topicUsers: TypedPipe[((TopicId, Option[Language], Option[Country]), UserId, Double)],
+minTopicFollowsThreshold: Int</p>
+</div></blockquote>
+<dl>
+<dt>)(</dt><dd><p>implicit uniqueID: UniqueID</p>
+</dd>
+<dt>): TypedPipe[(TopicId, Option[Language], Option[Country])] = {</dt><dd><p>val numValidTopics = Stat(“num_valid_topics”)
+SparseMatrix(topicUsers).rowNnz.collect {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case (topicsWithLocaleKey, numFollows) if numFollows &gt;= minTopicFollowsThreshold =&gt;</dt><dd><p>numValidTopics.inc()
+topicsWithLocaleKey</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// Get the users with atleast minNumUserFollowers following
+def getValidProducers(</p>
+<blockquote>
+<div><p>userToFollowersEdges: TypedPipe[(UserId, UserId, Double)],
+minNumUserFollowers: Int</p>
+</div></blockquote>
+<dl>
+<dt>)(</dt><dd><p>implicit uniqueID: UniqueID</p>
+</dd>
+<dt>): TypedPipe[ProducerId] = {</dt><dd><p>val numProducersForTopics = Stat(“num_producers_for_topics”)
+SparseMatrix(userToFollowersEdges).rowL1Norms.collect {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case (userId, l1Norm) if l1Norm &gt;= minNumUserFollowers =&gt;</dt><dd><p>numProducersForTopics.inc()
+userId</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// This function returns the User to Followed Topics Matrix
+def getFollowedTopicsToUserSparseMatrix(</p>
+<blockquote>
+<div><p>followedTopicsToUsers: TypedPipe[(TopicId, UserId)],
+userCountryAndLanguage: TypedPipe[(UserId, (Country, Language))],
+userLanguages: TypedPipe[(UserId, Seq[(Language, Double)])],
+minTopicFollowsThreshold: Int</p>
+</div></blockquote>
+<dl>
+<dt>)(</dt><dd><p>implicit uniqueID: UniqueID</p>
+</dd>
+<dt>): SparseMatrix[(TopicId, Option[Language], Option[Country]), UserId, Double] = {</dt><dd><dl>
+<dt>val localeTopicsWithUsers: TypedPipe[</dt><dd><p>((TopicId, Option[Language], Option[Country]), UserId, Double)</p>
+</dd>
+<dt>] =</dt><dd><dl>
+<dt>followedTopicsToUsers</dt><dd><p>.map { case (topic, user) =&gt; (user, topic) }
+.join(userCountryAndLanguage)
+.join(userLanguages)
+.withDescription(“joining user locale information”)
+.flatMap {</p>
+<blockquote>
+<div><dl>
+<dt>case (user, ((topic, (country, _)), scoredLangs)) =&gt;</dt><dd><dl>
+<dt>scoredLangs.flatMap {</dt><dd><dl>
+<dt>case (lang, score) =&gt;</dt><dd><p>// To compute the top topics with/without language and country level personalization
+// So the same dataset has 3 keys for each topicId (unless it gets filtered after):
+// (TopicId, Language, Country), (TopicId, Language, None), (TopicId, None, None)
+Seq(</p>
+<blockquote>
+<div><p>((topic, Some(lang), Some(country)), user, score), // with language and country
+((topic, Some(lang), None), user, score) // with language</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>} ++ Seq(((topic, None, None), user, 1.0)) // no locale</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>SparseMatrix(localeTopicsWithUsers).filterRowsByMinSum(minTopicFollowsThreshold)</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// This function returns the Producers To User Followers Matrix
+def getProducersToFollowedByUsersSparseMatrix(</p>
+<blockquote>
+<div><p>userUserGraph: TypedPipe[UserAndNeighbors],
+minActiveFollowers: Int,</p>
+</div></blockquote>
+<dl class="simple">
+<dt>)(</dt><dd><p>implicit uniqueID: UniqueID</p>
+</dd>
+</dl>
+<p>): SparseMatrix[ProducerId, UserId, Double] = {</p>
+<blockquote>
+<div><p>val numEdgesFromUsersToFollowers = Stat(“num_edges_from_users_to_followers”)</p>
+<dl>
+<dt>val userToFollowersEdges: TypedPipe[(UserId, UserId, Double)] =</dt><dd><dl>
+<dt>userUserGraph</dt><dd><dl>
+<dt>.flatMap { userAndNeighbors =&gt;</dt><dd><dl>
+<dt>userAndNeighbors.neighbors</dt><dd><dl class="simple">
+<dt>.collect {</dt><dd><dl class="simple">
+<dt>case neighbor if neighbor.isFollowed.getOrElse(false) =&gt;</dt><dd><p>numEdgesFromUsersToFollowers.inc()
+(neighbor.neighborId, userAndNeighbors.userId, 1.0)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>SparseMatrix(userToFollowersEdges).filterRowsByMinSum(minActiveFollowers)</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../_sources/src/scala/com/twitter/simclusters_v2/scalding/topic_recommendations/TopicsForProducersUtils.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

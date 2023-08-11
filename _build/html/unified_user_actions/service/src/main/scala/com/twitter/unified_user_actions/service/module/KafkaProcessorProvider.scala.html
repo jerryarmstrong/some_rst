@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../../" id="documentation_options" src="../../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.unified_user_actions.service.module</p>
+<p>import com.twitter.decider.Decider
+import com.twitter.finagle.stats.Counter
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.finatra.kafka.producers.BlockingFinagleKafkaProducer
+import com.twitter.finatra.kafka.serde.ScalaSerdes
+import com.twitter.finatra.kafka.serde.UnKeyed
+import com.twitter.finatra.kafka.serde.UnKeyedSerde
+import com.twitter.kafka.client.headers.Implicits._
+import com.twitter.kafka.client.headers.Zone
+import com.twitter.kafka.client.processor.AtLeastOnceProcessor
+import com.twitter.unified_user_actions.adapter.AbstractAdapter
+import com.twitter.unified_user_actions.kafka.ClientConfigs
+import com.twitter.unified_user_actions.kafka.ClientProviders
+import com.twitter.unified_user_actions.thriftscala.UnifiedUserAction
+import com.twitter.util.Duration
+import com.twitter.util.Future
+import com.twitter.util.StorageUnit
+import com.twitter.util.logging.Logging
+import org.apache.kafka.clients.consumer.ConsumerRecord
+import org.apache.kafka.clients.producer.ProducerRecord
+import org.apache.kafka.common.header.Headers
+import org.apache.kafka.common.record.CompressionType
+import org.apache.kafka.common.serialization.Deserializer</p>
+<dl>
+<dt>object KafkaProcessorProvider extends Logging {</dt><dd><dl>
+<dt>lazy val actionTypeStatsCounterMap: collection.mutable.Map[String, Counter] =</dt><dd><p>collection.mutable.Map.empty</p>
+</dd>
+<dt>lazy val productSurfaceTypeStatsCounterMap: collection.mutable.Map[String, Counter] =</dt><dd><p>collection.mutable.Map.empty</p>
+</dd>
+<dt>def updateActionTypeCounters(</dt><dd><p>statsReceiver: StatsReceiver,
+v: UnifiedUserAction,
+topic: String</p>
+</dd>
+<dt>): Unit = {</dt><dd><p>val actionType = v.actionType.name
+val actionTypeAndTopicKey = s”$actionType-$topic”
+actionTypeStatsCounterMap.get(actionTypeAndTopicKey) match {</p>
+<blockquote>
+<div><p>case Some(actionCounter) =&gt; actionCounter.incr()
+case _ =&gt;</p>
+<blockquote>
+<div><dl class="simple">
+<dt>actionTypeStatsCounterMap(actionTypeAndTopicKey) =</dt><dd><p>statsReceiver.counter(“uuaActionType”, topic, actionType)</p>
+</dd>
+</dl>
+<p>actionTypeStatsCounterMap(actionTypeAndTopicKey).incr()</p>
+</div></blockquote>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def updateProductSurfaceTypeCounters(</dt><dd><p>statsReceiver: StatsReceiver,
+v: UnifiedUserAction,
+topic: String</p>
+</dd>
+<dt>): Unit = {</dt><dd><p>val productSurfaceType = v.productSurface.map(_.name).getOrElse(“null”)
+val productSurfaceTypeAndTopicKey = s”$productSurfaceType-$topic”
+productSurfaceTypeStatsCounterMap.get(productSurfaceTypeAndTopicKey) match {</p>
+<blockquote>
+<div><p>case Some(productSurfaceCounter) =&gt; productSurfaceCounter.incr()
+case _ =&gt;</p>
+<blockquote>
+<div><dl class="simple">
+<dt>productSurfaceTypeStatsCounterMap(productSurfaceTypeAndTopicKey) =</dt><dd><p>statsReceiver.counter(“uuaProductSurfaceType”, topic, productSurfaceType)</p>
+</dd>
+</dl>
+<p>productSurfaceTypeStatsCounterMap(productSurfaceTypeAndTopicKey).incr()</p>
+</div></blockquote>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>def updateProcessingTimeStats(statsReceiver: StatsReceiver, v: UnifiedUserAction): Unit = {</dt><dd><dl class="simple">
+<dt>statsReceiver</dt><dd><dl class="simple">
+<dt>.stat(“uuaProcessingTimeDiff”).add(</dt><dd><p>v.eventMetadata.receivedTimestampMs - v.eventMetadata.sourceTimestampMs)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def defaultProducer(</dt><dd><p>producer: BlockingFinagleKafkaProducer[UnKeyed, UnifiedUserAction],
+k: UnKeyed,
+v: UnifiedUserAction,
+sinkTopic: String,
+headers: Headers,
+statsReceiver: StatsReceiver,
+decider: Decider,</p>
+</dd>
+<dt>): Future[Unit] =</dt><dd><dl>
+<dt>if (DefaultDeciderUtils.shouldPublish(decider = decider, uua = v, sinkTopic = sinkTopic)) {</dt><dd><p>updateActionTypeCounters(statsReceiver, v, sinkTopic)
+updateProcessingTimeStats(statsReceiver, v)</p>
+<p>// If we were to enable xDC replicator, then we can safely remove the Zone header since xDC
+// replicator works in the following way:
+//  - If the message does not have a header, the replicator will assume it is local and
+//    set the header, copy the message
+//  - If the message has a header that is the local zone, the replicator will copy the message
+//  - If the message has a header for a different zone, the replicator will drop the message
+producer</p>
+<blockquote>
+<div><dl class="simple">
+<dt>.send(</dt><dd><dl class="simple">
+<dt>new ProducerRecord[UnKeyed, UnifiedUserAction](</dt><dd><p>sinkTopic,
+null,
+k,
+v,
+headers.remove(Zone.Key)))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>.onSuccess { _ =&gt; statsReceiver.counter(“publishSuccess”, sinkTopic).incr() }
+.onFailure { e: Throwable =&gt;</p>
+<blockquote>
+<div><p>statsReceiver.counter(“publishFailure”, sinkTopic).incr()
+error(s”Publish error to topic $sinkTopic: $e”)</p>
+</div></blockquote>
+<p>}.unit</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>} else Future.Unit</p>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>The default AtLeastOnceProcessor mainly for consuming from a single Kafka topic -&gt; process/adapt -&gt; publish to</p></li>
+<li><p>the single sink Kafka topic.</p></li>
+<li></li>
+<li><p>Important Note: Currently all sink topics share the same Kafka producer!!! If you need to create different</p></li>
+<li><p>producers for different topics, you would need to create a customized function like this one.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>def provideDefaultAtLeastOnceProcessor[K, V](</dt><dd><p>name: String,
+kafkaSourceCluster: String,
+kafkaGroupId: String,
+kafkaSourceTopic: String,
+sourceKeyDeserializer: Deserializer[K],
+sourceValueDeserializer: Deserializer[V],
+commitInterval: Duration = ClientConfigs.kafkaCommitIntervalDefault,
+maxPollRecords: Int = ClientConfigs.consumerMaxPollRecordsDefault,
+maxPollInterval: Duration = ClientConfigs.consumerMaxPollIntervalDefault,
+sessionTimeout: Duration = ClientConfigs.consumerSessionTimeoutDefault,
+fetchMax: StorageUnit = ClientConfigs.consumerFetchMaxDefault,
+fetchMin: StorageUnit = ClientConfigs.consumerFetchMinDefault,
+receiveBuffer: StorageUnit = ClientConfigs.consumerReceiveBufferSizeDefault,
+processorMaxPendingRequests: Int,
+processorWorkerThreads: Int,
+adapter: AbstractAdapter[V, UnKeyed, UnifiedUserAction],
+kafkaSinkTopics: Seq[String],
+kafkaDestCluster: String,
+kafkaProducerClientId: String,
+batchSize: StorageUnit = ClientConfigs.producerBatchSizeDefault,
+linger: Duration = ClientConfigs.producerLingerDefault,
+bufferMem: StorageUnit = ClientConfigs.producerBufferMemDefault,
+compressionType: CompressionType = ClientConfigs.compressionDefault.compressionType,
+retries: Int = ClientConfigs.retriesDefault,
+retryBackoff: Duration = ClientConfigs.retryBackoffDefault,
+requestTimeout: Duration = ClientConfigs.producerRequestTimeoutDefault,
+produceOpt: Option[</p>
+<blockquote>
+<div><dl class="simple">
+<dt>(BlockingFinagleKafkaProducer[UnKeyed, UnifiedUserAction], UnKeyed, UnifiedUserAction, String,</dt><dd><p>Headers, StatsReceiver, Decider) =&gt; Future[Unit]</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>] = None,
+trustStoreLocationOpt: Option[String] = Some(ClientConfigs.trustStoreLocationDefault),
+statsReceiver: StatsReceiver,
+decider: Decider,
+zone: Zone,
+maybeProcess: (ConsumerRecord[K, V], Zone) =&gt; Boolean = ZoneFiltering.localDCFiltering[K, V] _,</p>
+</dd>
+</dl>
+<p>): AtLeastOnceProcessor[K, V] = {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>lazy val singletonProducer = ClientProviders.mkProducer[UnKeyed, UnifiedUserAction](</dt><dd><p>bootstrapServer = kafkaDestCluster,
+clientId = kafkaProducerClientId,
+keySerde = UnKeyedSerde.serializer,
+valueSerde = ScalaSerdes.Thrift[UnifiedUserAction].serializer,
+idempotence = false,
+batchSize = batchSize,
+linger = linger,
+bufferMem = bufferMem,
+compressionType = compressionType,
+retries = retries,
+retryBackoff = retryBackoff,
+requestTimeout = requestTimeout,
+trustStoreLocationOpt = trustStoreLocationOpt,</p>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>mkAtLeastOnceProcessor[K, V, UnKeyed, UnifiedUserAction](</dt><dd><p>name = name,
+kafkaSourceCluster = kafkaSourceCluster,
+kafkaGroupId = kafkaGroupId,
+kafkaSourceTopic = kafkaSourceTopic,
+sourceKeyDeserializer = sourceKeyDeserializer,
+sourceValueDeserializer = sourceValueDeserializer,
+commitInterval = commitInterval,
+maxPollRecords = maxPollRecords,
+maxPollInterval = maxPollInterval,
+sessionTimeout = sessionTimeout,
+fetchMax = fetchMax,
+fetchMin = fetchMin,
+receiveBuffer = receiveBuffer,
+processorMaxPendingRequests = processorMaxPendingRequests,
+processorWorkerThreads = processorWorkerThreads,
+adapter = adapter,
+kafkaProducersAndSinkTopics =</p>
+<blockquote>
+<div><p>kafkaSinkTopics.map(sinkTopic =&gt; (singletonProducer, sinkTopic)),</p>
+</div></blockquote>
+<p>produce = produceOpt.getOrElse(defaultProducer),
+trustStoreLocationOpt = trustStoreLocationOpt,
+statsReceiver = statsReceiver,
+decider = decider,
+zone = zone,
+maybeProcess = maybeProcess,</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>A common AtLeastOnceProcessor provider</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>def mkAtLeastOnceProcessor[K, V, OUTK, OUTV](</dt><dd><p>name: String,
+kafkaSourceCluster: String,
+kafkaGroupId: String,
+kafkaSourceTopic: String,
+sourceKeyDeserializer: Deserializer[K],
+sourceValueDeserializer: Deserializer[V],
+commitInterval: Duration = ClientConfigs.kafkaCommitIntervalDefault,
+maxPollRecords: Int = ClientConfigs.consumerMaxPollRecordsDefault,
+maxPollInterval: Duration = ClientConfigs.consumerMaxPollIntervalDefault,
+sessionTimeout: Duration = ClientConfigs.consumerSessionTimeoutDefault,
+fetchMax: StorageUnit = ClientConfigs.consumerFetchMaxDefault,
+fetchMin: StorageUnit = ClientConfigs.consumerFetchMinDefault,
+receiveBuffer: StorageUnit = ClientConfigs.consumerReceiveBufferSizeDefault,
+processorMaxPendingRequests: Int,
+processorWorkerThreads: Int,
+adapter: AbstractAdapter[V, OUTK, OUTV],
+kafkaProducersAndSinkTopics: Seq[(BlockingFinagleKafkaProducer[OUTK, OUTV], String)],
+produce: (BlockingFinagleKafkaProducer[OUTK, OUTV], OUTK, OUTV, String, Headers, StatsReceiver,</p>
+<blockquote>
+<div><p>Decider) =&gt; Future[Unit],</p>
+</div></blockquote>
+<p>trustStoreLocationOpt: Option[String] = Some(ClientConfigs.trustStoreLocationDefault),
+statsReceiver: StatsReceiver,
+decider: Decider,
+zone: Zone,
+maybeProcess: (ConsumerRecord[K, V], Zone) =&gt; Boolean = ZoneFiltering.localDCFiltering[K, V] _,</p>
+</dd>
+<dt>): AtLeastOnceProcessor[K, V] = {</dt><dd><dl>
+<dt>val threadSafeKafkaClient =</dt><dd><dl class="simple">
+<dt>ClientProviders.mkConsumer[K, V](</dt><dd><p>bootstrapServer = kafkaSourceCluster,
+keySerde = sourceKeyDeserializer,
+valueSerde = sourceValueDeserializer,
+groupId = kafkaGroupId,
+autoCommit = false,
+maxPollRecords = maxPollRecords,
+maxPollInterval = maxPollInterval,
+sessionTimeout = sessionTimeout,
+fetchMax = fetchMax,
+fetchMin = fetchMin,
+receiveBuffer = receiveBuffer,
+trustStoreLocationOpt = trustStoreLocationOpt</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>def publish(</dt><dd><p>event: ConsumerRecord[K, V]</p>
+</dd>
+<dt>): Future[Unit] = {</dt><dd><p>statsReceiver.counter(“consumedEvents”).incr()</p>
+<dl>
+<dt>if (maybeProcess(event, zone))</dt><dd><dl>
+<dt>Future</dt><dd><dl>
+<dt>.collect(</dt><dd><dl>
+<dt>adapter</dt><dd><p>.adaptOneToKeyedMany(event.value, statsReceiver)
+.flatMap {</p>
+<blockquote>
+<div><dl>
+<dt>case (k, v) =&gt;</dt><dd><dl class="simple">
+<dt>kafkaProducersAndSinkTopics.map {</dt><dd><dl class="simple">
+<dt>case (producer, sinkTopic) =&gt;</dt><dd><p>produce(producer, k, v, sinkTopic, event.headers(), statsReceiver, decider)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}).unit</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+<dt>else</dt><dd><p>Future.Unit</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>AtLeastOnceProcessor[K, V](</dt><dd><p>name = name,
+topic = kafkaSourceTopic,
+consumer = threadSafeKafkaClient,
+processor = publish,
+maxPendingRequests = processorMaxPendingRequests,
+workerThreads = processorWorkerThreads,
+commitIntervalMs = commitInterval.inMilliseconds,
+statsReceiver = statsReceiver</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../../_sources/unified_user_actions/service/src/main/scala/com/twitter/unified_user_actions/service/module/KafkaProcessorProvider.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../../" id="documentation_options" src="../../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.tweetypie
+package federated.columns</p>
+<p>import com.twitter.io.Buf
+import com.twitter.scrooge.TFieldBlob
+import com.twitter.stitch.Stitch
+import com.twitter.strato.access.Access
+import com.twitter.strato.catalog.OpMetadata
+import com.twitter.strato.config.AllowAll
+import com.twitter.strato.config.ContactInfo
+import com.twitter.strato.config.Policy
+import com.twitter.strato.data.Conv
+import com.twitter.strato.data.Description.PlainText
+import com.twitter.strato.data.Lifecycle.Production
+import com.twitter.strato.data.Type
+import com.twitter.strato.data.Val
+import com.twitter.strato.fed.StratoFed
+import com.twitter.strato.opcontext.OpContext
+import com.twitter.strato.serialization.MVal
+import com.twitter.strato.serialization.Thrift
+import com.twitter.strato.util.Strings
+import com.twitter.tweetypie.thriftscala.GetTweetFieldsResult
+import com.twitter.tweetypie.thriftscala.SetAdditionalFieldsRequest
+import com.twitter.tweetypie.thriftscala.Tweet
+import com.twitter.tweetypie.thriftscala.TweetFieldsResultState.Found
+import com.twitter.util.Future
+import org.apache.thrift.protocol.TField</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Federated strato column to return tweet fields</p></li>
+<li><p>&#64;param federatedFieldsGroup Group to be used for Stitch batching.</p></li>
+<li><p>This is a function that takes a GroupOptions and returns a FederatedFieldGroup.</p></li>
+<li><p>Using a function that accepts a GroupOptions allows for Stitch to handle a new group for distinct GroupOptions.</p></li>
+<li><p>&#64;param setAdditionalFields Handler to set additional fields on tweets.</p></li>
+<li><p>&#64;param stratoValueType Type to be returned by the strato column.</p></li>
+<li><p>&#64;param tfield Tweet thrift field to be stored</p></li>
+<li><p>&#64;param pathName Path to be used in the strato catalog</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>class FederatedFieldColumn(</dt><dd><p>federatedFieldsGroup: FederatedFieldGroupBuilder.Type,
+setAdditionalFields: SetAdditionalFieldsRequest =&gt; Future[Unit],
+stratoValueType: Type,
+tfield: TField,
+pathOverride: Option[String] = None)</p>
+<blockquote>
+<div><p>extends StratoFed.Column(pathOverride.getOrElse(FederatedFieldColumn.makeColumnPath(tfield)))
+with StratoFed.Fetch.StitchWithContext
+with StratoFed.Put.Stitch {</p>
+</div></blockquote>
+<p>type Key = Long
+type View = Unit
+type Value = Val.T</p>
+<p>override val keyConv: Conv[Key] = Conv.ofType
+override val viewConv: Conv[View] = Conv.ofType
+override val valueConv: Conv[Value] = Conv(stratoValueType, identity, identity)</p>
+<p>override val policy: Policy = AllowAll</p>
+<dl>
+<dt>/*</dt><dd><ul class="simple">
+<li><p>A fetch that proxies GetTweetFieldsColumn.fetch but only requests and</p></li>
+<li><p>returns one specific field.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+</dl>
+<p>override def fetch(tweetId: Key, view: View, opContext: OpContext): Stitch[Result[Value]] = {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>val twitterUserId: Option[UserId] = Access.getTwitterUserId match {</dt><dd><p>// Access.getTwitterUserId should return a value when request is made on behalf of a user
+// and will not return a value otherwise
+case Some(twitterUser) =&gt; Some(twitterUser.id)
+case None =&gt; None</p>
+</dd>
+</dl>
+<p>}</p>
+<p>val stitchGroup = federatedFieldsGroup(GroupOptions(twitterUserId))</p>
+<dl>
+<dt>Stitch</dt><dd><dl>
+<dt>.call(FederatedFieldReq(tweetId, tfield.id), stitchGroup).map {</dt><dd><dl>
+<dt>result: GetTweetFieldsResult =&gt;</dt><dd><dl>
+<dt>result.tweetResult match {</dt><dd><dl>
+<dt>case Found(f) =&gt;</dt><dd><dl>
+<dt>f.tweet.getFieldBlob(tfield.id) match {</dt><dd><dl class="simple">
+<dt>case Some(v: TFieldBlob) =&gt;</dt><dd><p>found(blobToVal(v))</p>
+</dd>
+</dl>
+<p>case None =&gt; missing</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>case _ =&gt; missing</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/*</dt><dd><ul class="simple">
+<li><p>A strato put interface for writing a single additional field to a tweet</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>override def put(tweetId: Key, value: Val.T): Stitch[Unit] = {</dt><dd><p>val tweet: Tweet = Tweet(id = tweetId).setField(valToBlob(value))
+val request: SetAdditionalFieldsRequest = SetAdditionalFieldsRequest(tweet)
+Stitch.callFuture(setAdditionalFields(request))</p>
+</dd>
+</dl>
+<p>}</p>
+<p>val mval: Thrift.Codec = MVal.codec(stratoValueType).thrift(4)</p>
+<dl class="simple">
+<dt>def valToBlob(value: Val.T): TFieldBlob =</dt><dd><p>TFieldBlob(tfield, mval.write[Buf](value, Thrift.compactProto))</p>
+</dd>
+<dt>def blobToVal(thriftFieldBlob: TFieldBlob): Val.T =</dt><dd><p>mval.read(thriftFieldBlob.content, Thrift.compactProto)</p>
+</dd>
+</dl>
+<p>override val contactInfo: ContactInfo = TweetypieContactInfo
+override val metadata: OpMetadata = OpMetadata(</p>
+<blockquote>
+<div><p>lifecycle = Some(Production),
+description = Some(PlainText(s”A federated column for the field tweet.$stratoValueType”))</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>object FederatedFieldColumn {</dt><dd><dl class="simple">
+<dt>val idAllowlist: Seq[Short] = Seq(</dt><dd><p>Tweet.CoreDataField.id,
+Tweet.LanguageField.id,
+Tweet.ConversationMutedField.id</p>
+</dd>
+</dl>
+<p>)
+val ID_START = 157
+val ID_END = 32000</p>
+<p>private val MigrationFields: Seq[Short] = Seq(157)</p>
+<p>def isFederatedField(id: Short) = id &gt;= ID_START &amp;&amp; id &lt; ID_END || idAllowlist.contains(id)</p>
+<p>def isMigrationFederatedField(tField: TField): Boolean = MigrationFields.contains(tField.id)</p>
+<dl>
+<dt>/* federated field column strato configs must conform to this</dt><dd><ul class="simple">
+<li><p>path name scheme for tweetypie to pick them up</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+<dt>def makeColumnPath(tField: TField) = {</dt><dd><p>val columnName = Strings.toCamelCase(tField.name.stripSuffix(“id”))
+s”tweetypie/fields/${columnName}.Tweet”</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>def makeV1ColumnPath(tField: TField): String = {</dt><dd><p>val columnName = Strings.toCamelCase(tField.name.stripSuffix(“id”))
+s”tweetypie/fields/$columnName-V1.Tweet”</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../../_sources/tweetypie/server/src/main/scala/com/twitter/tweetypie/federated/columns/FederatedFieldColumn.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

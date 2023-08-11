@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../" id="documentation_options" src="../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>from collections import defaultdict
+import os</p>
+<p>from toxicity_ml_pipeline.settings.default_settings_tox import REMOTE_LOGDIR
+from toxicity_ml_pipeline.settings.default_settings_abs import LABEL_NAMES
+from toxicity_ml_pipeline.utils.absv_utils import parse_labeled_data
+from toxicity_ml_pipeline.utils.helpers import compute_precision_fixed_recall, execute_command</p>
+<p>from sklearn.metrics import average_precision_score, roc_auc_score
+import tensorflow as tf
+import wandb</p>
+<dl>
+<dt>class NothingCallback(tf.keras.callbacks.Callback):</dt><dd><dl class="simple">
+<dt>def on_epoch_begin(self, epoch, logs=None):</dt><dd><p>print(“ici, “, epoch)</p>
+</dd>
+<dt>def on_epoch_end(self, epoch, logs=None):</dt><dd><p>print(“fin “, epoch)</p>
+</dd>
+<dt>def on_train_batch_end(self, batch, logs=None):</dt><dd><p>print(“fin de batch “, batch)</p>
+</dd>
+</dl>
+</dd>
+<dt>class ControlledStoppingCheckpointCallback(tf.keras.callbacks.ModelCheckpoint):</dt><dd><dl>
+<dt>def __init__(self, stopping_epoch, <a href="#id1"><span class="problematic" id="id2">*</span></a>args, <a href="#id3"><span class="problematic" id="id4">**</span></a>kwargs):</dt><dd><p>super().__init__(<a href="#id5"><span class="problematic" id="id6">*</span></a>args, <a href="#id7"><span class="problematic" id="id8">**</span></a>kwargs)
+self.stopping_epoch = stopping_epoch</p>
+</dd>
+<dt>def on_epoch_end(self, epoch, logs=None):</dt><dd><p>super().on_epoch_end(epoch, logs)
+if epoch == self.stopping_epoch:</p>
+<blockquote>
+<div><p>self.model.stop_training = True</p>
+</div></blockquote>
+</dd>
+</dl>
+</dd>
+<dt>class SyncingTensorBoard(tf.keras.callbacks.TensorBoard):</dt><dd><dl class="simple">
+<dt>def __init__(self, remote_logdir=None, <a href="#id9"><span class="problematic" id="id10">*</span></a>args, <a href="#id11"><span class="problematic" id="id12">**</span></a>kwargs):</dt><dd><p>super().__init__(<a href="#id13"><span class="problematic" id="id14">*</span></a>args, <a href="#id15"><span class="problematic" id="id16">**</span></a>kwargs)
+self.remote_logdir = remote_logdir if remote_logdir is not None else REMOTE_LOGDIR</p>
+</dd>
+<dt>def on_epoch_end(self, epoch, logs=None):</dt><dd><p>super().on_epoch_end(epoch, logs=logs)
+self.synchronize()</p>
+</dd>
+<dt>def synchronize(self):</dt><dd><p>base_dir = os.path.dirname(self.log_dir)
+cmd = f”gsutil -m rsync -r {base_dir} {self.remote_logdir}”
+execute_command(cmd)</p>
+</dd>
+</dl>
+</dd>
+<dt>class GradientLoggingTensorBoard(SyncingTensorBoard):</dt><dd><dl>
+<dt>def __init__(self, loader, val_data, freq, <a href="#id17"><span class="problematic" id="id18">*</span></a>args, <a href="#id19"><span class="problematic" id="id20">**</span></a>kwargs):</dt><dd><p>super().__init__(<a href="#id21"><span class="problematic" id="id22">*</span></a>args, <a href="#id23"><span class="problematic" id="id24">**</span></a>kwargs)
+val_dataset = loader.get_balanced_dataset(</p>
+<blockquote>
+<div><p>training_data=val_data, size_limit=50, return_as_batch=False</p>
+</div></blockquote>
+<p>)
+data_args = list(val_dataset.batch(32).take(1))[0]
+self.x_batch, self.y_batch = data_args[0], data_args[1]
+self.freq = freq
+self.counter = 0</p>
+</dd>
+<dt>def _log_gradients(self):</dt><dd><p>writer = self._train_writer</p>
+<dl>
+<dt>with writer.as_default():</dt><dd><dl class="simple">
+<dt>with tf.GradientTape() as tape:</dt><dd><p>y_pred = self.model(self.x_batch)
+loss = self.model.compiled_loss(y_true=self.y_batch, y_pred=y_pred)
+gradient_norm = tf.linalg.global_norm(tape.gradient(loss, self.model.trainable_weights))</p>
+</dd>
+</dl>
+<p>tf.summary.scalar(“gradient_norm”, data=gradient_norm, step=self.counter)</p>
+</dd>
+</dl>
+<p>writer.flush()</p>
+</dd>
+<dt>def on_train_batch_end(self, batch, logs=None):</dt><dd><p>super().on_batch_end(batch, logs=logs)
+self.counter += 1
+if batch % self.freq == 0:</p>
+<blockquote>
+<div><p>self._log_gradients()</p>
+</div></blockquote>
+</dd>
+</dl>
+</dd>
+<dt>class AdditionalResultLogger(tf.keras.callbacks.Callback):</dt><dd><dl>
+<dt>def __init__(</dt><dd><p>self,
+data,
+<a href="#id41"><span class="problematic" id="id42">set_</span></a>,
+fixed_recall=0.85,
+from_logits=False,
+dataset_transform_func=None,
+batch_size=64,
+dual_head=None,
+<a href="#id25"><span class="problematic" id="id26">*</span></a>args,
+<a href="#id27"><span class="problematic" id="id28">**</span></a>kwargs,</p>
+</dd>
+<dt>):</dt><dd><p>super().__init__(<a href="#id29"><span class="problematic" id="id30">*</span></a>args, <a href="#id31"><span class="problematic" id="id32">**</span></a>kwargs)
+<a href="#id43"><span class="problematic" id="id44">self.set_</span></a> = <a href="#id45"><span class="problematic" id="id46">set_</span></a>
+if data is None:</p>
+<blockquote>
+<div><p>return None</p>
+</div></blockquote>
+<p>self.single_head = True
+try:</p>
+<blockquote>
+<div><p>self.labels = data.int_label.values</p>
+</div></blockquote>
+<dl>
+<dt>except AttributeError:</dt><dd><p>self.labels = data.to_dataframe()[LABEL_NAMES].values.astype(‘int’)
+self.data = data.to_tf_dataset().map(parse_labeled_data).batch(batch_size)
+self.label_names = LABEL_NAMES</p>
+</dd>
+<dt>else:</dt><dd><p>self.label_names = [‘’]
+if dual_head:</p>
+<blockquote>
+<div><p>self.label_names = [f’{e}_label’ for e in dual_head]
+self.labels = {f’{e}_output’: data[f’{e}_label’].values for e in dual_head}
+self.single_head = False</p>
+</div></blockquote>
+<dl class="simple">
+<dt>if dataset_transform_func is None:</dt><dd><p>self.data = data.text.values</p>
+</dd>
+<dt>else:</dt><dd><p>self.data = dataset_transform_func(data, mb_size=batch_size, shuffle=False)</p>
+</dd>
+</dl>
+</dd>
+<dt>finally:</dt><dd><dl class="simple">
+<dt>if len(self.label_names) == 1:</dt><dd><p>self.metric_kw = {}</p>
+</dd>
+<dt>else:</dt><dd><p>self.metric_kw = {‘average’: None}</p>
+</dd>
+</dl>
+<p>self.counter = 0
+self.best_metrics = defaultdict(float)
+self.from_logits = from_logits
+print(f”Loaded callback for {<a href="#id47"><span class="problematic" id="id48">set_</span></a>}, from_logits: {from_logits}, labels {self.label_names}”)</p>
+<dl class="simple">
+<dt>if 1 &lt; fixed_recall &lt;= 100:</dt><dd><p>fixed_recall = fixed_recall / 100</p>
+</dd>
+<dt>elif not (0 &lt; fixed_recall &lt;= 100):</dt><dd><p>raise ValueError(“Threshold should be between 0 and 1, or 0 and 100”)</p>
+</dd>
+</dl>
+<p>self.fixed_recall = fixed_recall
+self.batch_size = batch_size</p>
+</dd>
+</dl>
+</dd>
+<dt>def compute_precision_fixed_recall(self, labels, preds):</dt><dd><dl class="simple">
+<dt>result, _ = compute_precision_fixed_recall(labels=labels, preds=preds,</dt><dd><p>fixed_recall=self.fixed_recall)</p>
+</dd>
+</dl>
+<p>return result</p>
+</dd>
+<dt>def on_epoch_end(self, epoch, logs=None):</dt><dd><p>self.additional_evaluations(step=epoch, eval_time=”epoch”)</p>
+</dd>
+<dt>def on_train_batch_end(self, batch, logs=None):</dt><dd><p>self.counter += 1
+if self.counter % 2000 == 0:</p>
+<blockquote>
+<div><p>self.additional_evaluations(step=self.counter, eval_time=”batch”)</p>
+</div></blockquote>
+</dd>
+<dt>def _binary_evaluations(self, preds, label_name=None, class_index=None):</dt><dd><p>mask = None
+curr_labels = self.labels
+if label_name is not None:</p>
+<blockquote>
+<div><p>curr_labels = self.labels[label_name]
+if class_index is not None:</p>
+<blockquote>
+<div><p>curr_labels = (curr_labels == class_index).astype(int)</p>
+</div></blockquote>
+</div></blockquote>
+<dl>
+<dt>if -1 in curr_labels:</dt><dd><p>mask = curr_labels != -1
+curr_labels = curr_labels[mask]
+preds = preds[mask]</p>
+</dd>
+<dt>return {</dt><dd><blockquote>
+<div><dl class="simple">
+<dt>f”precision_recall{self.fixed_recall}”: self.compute_precision_fixed_recall(</dt><dd><p>labels=curr_labels, preds=preds</p>
+</dd>
+</dl>
+<p>),
+“pr_auc”: average_precision_score(y_true=curr_labels, y_score=preds),
+“roc_auc”: roc_auc_score(y_true=curr_labels, y_score=preds),</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+<dt>def _multiclass_evaluations(self, preds):</dt><dd><p>pr_auc_l = average_precision_score(y_true=self.labels, y_score=preds, <a href="#id33"><span class="problematic" id="id34">**</span></a>self.metric_kw)
+roc_auc_l = roc_auc_score(y_true=self.labels, y_score=preds, <a href="#id35"><span class="problematic" id="id36">**</span></a>self.metric_kw)
+metrics = {}
+for i, label in enumerate(self.label_names):</p>
+<blockquote>
+<div><p>metrics[f’pr_auc_{label}’] = pr_auc_l[i]
+metrics[f’roc_auc_{label}’] = roc_auc_l[i]</p>
+</div></blockquote>
+<p>return metrics</p>
+</dd>
+<dt>def additional_evaluations(self, step, eval_time):</dt><dd><p>print(“Evaluating “, <a href="#id49"><span class="problematic" id="id50">self.set_</span></a>, eval_time, step)</p>
+<p>preds = self.model.predict(x=self.data, batch_size=self.batch_size)
+if self.from_logits:</p>
+<blockquote>
+<div><p>preds = tf.keras.activations.sigmoid(preds.logits).numpy()</p>
+</div></blockquote>
+<dl>
+<dt>if self.single_head:</dt><dd><dl class="simple">
+<dt>if len(self.label_names) == 1:</dt><dd><p>metrics = self._binary_evaluations(preds)</p>
+</dd>
+<dt>else:</dt><dd><p>metrics = self._multiclass_evaluations(preds)</p>
+</dd>
+</dl>
+</dd>
+<dt>else:</dt><dd><dl class="simple">
+<dt>if preds[0].shape[1] == 1:</dt><dd><p>binary_preds = preds[0]
+multic_preds = preds[1]</p>
+</dd>
+<dt>else:</dt><dd><p>binary_preds = preds[1]
+multic_preds = preds[0]</p>
+</dd>
+</dl>
+<p>binary_metrics = self._binary_evaluations(binary_preds, label_name=’target_output’)
+metrics = {f’{k}_target’: v for k, v in binary_metrics.items()}
+num_classes = multic_preds.shape[1]
+for <a href="#id51"><span class="problematic" id="id52">class_</span></a> in range(num_classes):</p>
+<blockquote>
+<div><p>binary_metrics = self._binary_evaluations(multic_preds[:, <a href="#id53"><span class="problematic" id="id54">class_</span></a>], label_name=’content_output’, class_index=class_)
+metrics.update({f’{k}_content_{<a href="#id55"><span class="problematic" id="id56">class_</span></a>}’: v for k, v in binary_metrics.items()})</p>
+</div></blockquote>
+</dd>
+<dt>for k, v in metrics.items():</dt><dd><p>self.best_metrics[f”max_{k}”] = max(v, self.best_metrics[f”max_{k}”])</p>
+</dd>
+</dl>
+<p>self.log_metrics(metrics, step=step, eval_time=eval_time)</p>
+</dd>
+<dt>def log_metrics(self, metrics_d, step, eval_time):</dt><dd><p>commit = False if <a href="#id57"><span class="problematic" id="id58">self.set_</span></a> == “validation” else True
+to_report = {<a href="#id59"><span class="problematic" id="id60">self.set_</span></a>: {<a href="#id37"><span class="problematic" id="id38">**</span></a>metrics_d, <a href="#id39"><span class="problematic" id="id40">**</span></a>self.best_metrics}}</p>
+<dl class="simple">
+<dt>if eval_time == “epoch”:</dt><dd><p>to_report[“epoch”] = step</p>
+</dd>
+</dl>
+<p>wandb.log(to_report, commit=commit)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../_sources/trust_and_safety_models/toxicity/optim/callbacks.py.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

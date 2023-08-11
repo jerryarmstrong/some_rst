@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../" id="documentation_options" src="../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.earlybird.partition;</p>
+<p>import java.time.Duration;
+import java.util.Arrays;
+import java.util.Collections;</p>
+<p>import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.clients.consumer.ConsumerRecords;
+import org.apache.kafka.clients.consumer.KafkaConsumer;
+import org.apache.kafka.common.TopicPartition;</p>
+<p>import com.twitter.search.common.indexing.thriftjava.ThriftVersionedEvents;
+import com.twitter.search.common.metrics.SearchRateCounter;</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>BalancingKafkaConsumer is designed to read from the tweets and updates streams in proportion to</p></li>
+<li><p>the rates that those streams are written to, i.e. both topics should have nearly the same amount</p></li>
+<li><p>of lag. This is important because if one stream gets too far ahead of the other, we could end up</p></li>
+<li><p>in a situation where:</p></li>
+<li><ol class="arabic simple">
+<li><p>If the tweet stream is ahead of the updates stream, we couldn’t apply an update because a</p></li>
+</ol>
+</li>
+<li><p>segment has been optimized, and one of those fields became frozen.</p></li>
+<li><ol class="arabic simple" start="2">
+<li><p>If the updates stream is ahead of the tweet stream, we might drop updates because they are</p></li>
+</ol>
+</li>
+<li><p>more than a minute old, but the tweets might still not be indexed.</p></li>
+<li></li>
+<li><p>Also see ‘Consumption Flow Control’ in</p></li>
+<li><p><a class="reference external" href="https://kafka.apache.org/23/javadoc/index.html?org/apache/kafka/clients/consumer/KafkaConsumer.html">https://kafka.apache.org/23/javadoc/index.html?org/apache/kafka/clients/consumer/KafkaConsumer.html</a></p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>public class BalancingKafkaConsumer {</dt><dd><p>// If one of the topic-partitions lags the other by more than 10 seconds,
+// it’s worth it to pause the faster one and let the slower one catch up.
+private static final long BALANCE_THRESHOLD_MS = Duration.ofSeconds(10).toMillis();
+private final KafkaConsumer&lt;Long, ThriftVersionedEvents&gt; kafkaConsumer;
+private final TopicPartition tweetTopic;
+private final TopicPartition updateTopic;
+private final SearchRateCounter tweetsPaused;
+private final SearchRateCounter updatesPaused;
+private final SearchRateCounter resumed;</p>
+<p>private long tweetTimestamp = 0;
+private long updateTimestamp = 0;
+private long pausedAt = 0;
+private boolean paused = false;</p>
+<dl>
+<dt>public BalancingKafkaConsumer(</dt><dd><p>KafkaConsumer&lt;Long, ThriftVersionedEvents&gt; kafkaConsumer,
+TopicPartition tweetTopic,
+TopicPartition updateTopic</p>
+</dd>
+<dt>) {</dt><dd><p>this.kafkaConsumer = kafkaConsumer;
+this.tweetTopic = tweetTopic;
+this.updateTopic = updateTopic;</p>
+<p>String prefix = “<a href="#id5"><span class="problematic" id="id6">balancing_kafka_</span></a>”;
+String suffix = “_topic_paused”;</p>
+<p>tweetsPaused = SearchRateCounter.export(prefix + tweetTopic.topic() + suffix);
+updatesPaused = SearchRateCounter.export(prefix + updateTopic.topic() + suffix);
+resumed = SearchRateCounter.export(prefix + “topics_resumed”);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Calls poll on the underlying consumer and pauses topics as necessary.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>public ConsumerRecords&lt;Long, ThriftVersionedEvents&gt; poll(Duration timeout) {</dt><dd><p>ConsumerRecords&lt;Long, ThriftVersionedEvents&gt; records = kafkaConsumer.poll(timeout);
+topicFlowControl(records);
+return records;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private void topicFlowControl(ConsumerRecords&lt;Long, ThriftVersionedEvents&gt; records) {</dt><dd><dl>
+<dt>for (ConsumerRecord&lt;Long, ThriftVersionedEvents&gt; record<span class="classifier">records) {</span></dt><dd><p>long timestamp = record.timestamp();</p>
+<dl class="simple">
+<dt>if (updateTopic.topic().equals(record.topic())) {</dt><dd><p>updateTimestamp = Math.max(updateTimestamp, timestamp);</p>
+</dd>
+<dt>} else if (tweetTopic.topic().equals(record.topic())) {</dt><dd><p>tweetTimestamp = Math.max(tweetTimestamp, timestamp);</p>
+</dd>
+<dt>} else {</dt><dd><dl class="simple">
+<dt>throw new IllegalStateException(</dt><dd><p>“Unexpected partition “ + record.topic() + “ in BalancingKafkaConsumer”);</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>if (paused) {</dt><dd><p>// If we paused and one of the streams is still below the pausedAt point, we want to continue
+// reading from just the lagging stream.
+if (tweetTimestamp &gt;= pausedAt &amp;&amp; updateTimestamp &gt;= pausedAt) {</p>
+<blockquote>
+<div><p>// We caught up, resume reading from both topics.
+paused = false;
+kafkaConsumer.resume(Arrays.asList(tweetTopic, updateTopic));
+resumed.increment();</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+<dt>} else {</dt><dd><p>long difference = Math.abs(tweetTimestamp - updateTimestamp);</p>
+<dl class="simple">
+<dt>if (difference &lt; BALANCE_THRESHOLD_MS) {</dt><dd><p>// The streams have approximately the same lag, so no need to pause anything.
+return;</p>
+</dd>
+</dl>
+<p>}
+// The difference is too great, one of the streams is lagging behind the other so we need to
+// pause one topic so the other can catch up.
+paused = true;
+pausedAt = Math.max(updateTimestamp, tweetTimestamp);
+if (tweetTimestamp &gt; updateTimestamp) {</p>
+<blockquote>
+<div><p>kafkaConsumer.pause(Collections.singleton(tweetTopic));
+tweetsPaused.increment();</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>kafkaConsumer.pause(Collections.singleton(updateTopic));
+updatesPaused.increment();</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public void close() {</dt><dd><p>kafkaConsumer.close();</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../_sources/src/java/com/twitter/search/earlybird/partition/BalancingKafkaConsumer.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

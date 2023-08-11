@@ -1,0 +1,607 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../" id="documentation_options" src="../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.simclusters_v2.scalding.mbcg</p>
+<p>import com.twitter.ann.common.EntityEmbedding
+import com.twitter.ann.common.Cosine
+import com.twitter.ann.common.CosineDistance
+import com.twitter.ann.common.InnerProduct
+import com.twitter.ann.common.InnerProductDistance
+import com.twitter.ann.common.ReadWriteFuturePool
+import com.twitter.ann.hnsw.TypedHnswIndex
+import com.twitter.ann.util.IndexBuilderUtils
+import com.twitter.conversions.DurationOps._
+import com.twitter.cortex.deepbird.runtime.prediction_engine.TensorflowPredictionEngineConfig
+import com.twitter.cortex.ml.embeddings.common.TweetKind
+import com.twitter.cortex.ml.embeddings.common.UserKind
+import com.twitter.finagle.mtls.authentication.ServiceIdentifier
+import com.twitter.finagle.stats.NullStatsReceiver
+import com.twitter.iesource.common.util.InteractionEventUtils
+import com.twitter.iesource.processing.events.batch.ServerEngagementsScalaDataset
+import com.twitter.iesource.thriftscala.InteractionDetails
+import com.twitter.ml.api.embedding.Embedding
+import com.twitter.ml.api.FeatureUtil
+import com.twitter.ml.api.constant.SharedFeatures
+import com.twitter.ml.api.embedding.EmbeddingSerDe
+import com.twitter.ml.api.thriftscala
+import com.twitter.ml.api.thriftscala.{GeneralTensor =&gt; ThriftGeneralTensor}
+import com.twitter.ml.api.util.FDsl._
+import com.twitter.ml.api.util.ScalaToJavaDataRecordConversions
+import com.twitter.ml.featurestore.lib.TweetId
+import com.twitter.ml.featurestore.lib.embedding.EmbeddingWithEntity
+import com.twitter.scalding.Args
+import com.twitter.scalding.DateParser
+import com.twitter.scalding.DateRange
+import com.twitter.scalding.Execution
+import com.twitter.scalding.UniqueID
+import com.twitter.scalding._
+import com.twitter.scalding_internal.dalv2.DAL
+import com.twitter.scalding_internal.dalv2.remote_access.AllowCrossDC
+import com.twitter.scalding_internal.job.FutureHelper
+import com.twitter.scalding_internal.job.TwitterExecutionApp
+import com.twitter.scalding_internal.job.analytics_batch.AnalyticsBatchExecution
+import com.twitter.scalding_internal.job.analytics_batch.AnalyticsBatchExecutionArgs
+import com.twitter.scalding_internal.job.analytics_batch.BatchDescription
+import com.twitter.scalding_internal.job.analytics_batch.BatchFirstTime
+import com.twitter.scalding_internal.job.analytics_batch.BatchIncrement
+import com.twitter.scalding_internal.job.analytics_batch.BatchWidth
+import com.twitter.scalding_internal.job.analytics_batch.TwitterScheduledExecutionApp
+import com.twitter.search.common.file.FileUtils
+import com.twitter.simclusters_v2.scalding.common.LogFavBasedPersistentTweetEmbeddingMhExportSource
+import com.twitter.simclusters_v2.thriftscala.PersistentSimClustersEmbedding
+import com.twitter.tweetsource.common.thriftscala.MediaType
+import com.twitter.tweetsource.public_tweets.PublicTweetsScalaDataset
+import com.twitter.tweetsource.public_tweets.thriftscala.PublicTweet
+import com.twitter.twml.runtime.scalding.TensorflowBatchPredictor
+import com.twitter.twml.runtime.scalding.TensorflowBatchPredictor.ScaldingThreadingConfig
+import com.twitter.util.FuturePool
+import com.twitter.util.logging.Logger
+import java.util.TimeZone
+import java.util.concurrent.Executors</p>
+<p>/*
+This class does the following:
+1) Get tweet simcluster features from LogFavBasedPersistentTweetEmbeddingMhExportSource
+2) Filter them down to English media tweets that aren’t replies or quote tweets using TweetSource
+3) Convert the remaining tweets into DataRecords using TweetSimclusterRecordAdapter
+4) Run inference using a TF model exported with a DataRecord compatible serving signature
+5) Create an ANN index from the generated tweet embeddings</p>
+<blockquote>
+<div><p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</div></blockquote>
+<dl>
+<dt>trait TweetEmbeddingGenerationTrait {</dt><dd><p>implicit val tz: TimeZone = DateOps.UTC
+implicit val dp: DateParser = DateParser.default
+implicit val updateHours = 4</p>
+<p>private val inputNodeName = “request:0”
+private val outputNodeName = “response:0”
+private val functionSignatureName = “serve”
+private val predictionRequestTimeout = 5.seconds
+private val SupportedLanguages = Set(“en”)
+private val tweetSourceLookback = Days(2)</p>
+<p>private val DEFAULT_F2V_VECTOR: Embedding[Float] = Embedding(Array.fill[Float](200)(0.0f))</p>
+<dl>
+<dt>def getPredictionEngine(modelName: String, modelPath: String): TensorflowBatchPredictor = {</dt><dd><dl class="simple">
+<dt>val config = TensorflowPredictionEngineConfig(</dt><dd><p>modelName = modelName,
+modelSource = modelPath,
+threadingConfig = Some(ScaldingThreadingConfig),
+defaultInputNode = inputNodeName,
+defaultOutputNode = outputNodeName,
+functionSignatureName = functionSignatureName,
+statsReceiver = NullStatsReceiver</p>
+</dd>
+</dl>
+<p>)
+TensorflowBatchPredictor(config, predictionRequestTimeout)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def getEmbeddingWithEntity(tweetEmbeddingTensor: ThriftGeneralTensor, tweetId: Long) = {</dt><dd><dl>
+<dt>tweetEmbeddingTensor match {</dt><dd><dl>
+<dt>case ThriftGeneralTensor.RawTypedTensor(rawTensor) =&gt;</dt><dd><dl class="simple">
+<dt>val embedding = EmbeddingSerDe.floatEmbeddingSerDe.fromThrift(</dt><dd><p>thriftscala.Embedding(Some(rawTensor))</p>
+</dd>
+</dl>
+<p>)
+EmbeddingWithEntity[TweetId](TweetId(tweetId), embedding)</p>
+</dd>
+</dl>
+<p>case _ =&gt; throw new IllegalArgumentException(“tensor is wrong type!”)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def buildAnnIndex(</dt><dd><p>pipe: TypedPipe[EmbeddingWithEntity[TweetId]],
+args: Args</p>
+</dd>
+<dt>): Execution[Unit] = {</dt><dd><p>def embeddingDimension: Int = args.int(“embedding_dimension”, 128)
+def efConstruction: Int = args.int(“ef_construction”, 800)
+def maxM: Int = args.int(“max_M”, 40)
+val log: Logger = Logger(getClass)
+val annOutputPath: String = args(“ann_output_path”)</p>
+<dl class="simple">
+<dt>val embeddingWithEntity = pipe.map {</dt><dd><dl class="simple">
+<dt>case EmbeddingWithEntity(tweetId, embedding) =&gt;</dt><dd><p>EntityEmbedding[TweetId](tweetId, embedding)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+val concurrencyLevel = args.int(“concurrency_level”, 60)
+val expectedElements = args.int(“expected_elements”, 30000000)
+val threadPool = Executors.newFixedThreadPool(concurrencyLevel)
+val hnswIndex = TypedHnswIndex.serializableIndex[TweetId, InnerProductDistance](</p>
+<blockquote>
+<div><p>embeddingDimension,
+InnerProduct,
+efConstruction,
+maxM,
+expectedElements,
+TweetKind.byteInjection,
+ReadWriteFuturePool(FuturePool.apply(threadPool))</p>
+</div></blockquote>
+<p>)</p>
+<p>// Create a timestamped directory to use for recovery in case of index corruption
+val timeStampedAnnOutputPath: String = annOutputPath + “/” + (System.currentTimeMillis() / 1000)
+val timeStampedAnnOutputDirectory = FileUtils.getFileHandle(timeStampedAnnOutputPath)</p>
+<dl>
+<dt>embeddingWithEntity.toIterableExecution</dt><dd><dl>
+<dt>.flatMap { annEmbeddings =&gt;</dt><dd><dl>
+<dt>val future =</dt><dd><p>IndexBuilderUtils.addToIndex(hnswIndex, annEmbeddings.toStream, concurrencyLevel)</p>
+</dd>
+<dt>val result = future.map { numberUpdates =&gt;</dt><dd><p>log.info(s”Performed $numberUpdates updates”)
+hnswIndex.toDirectory(timeStampedAnnOutputDirectory)
+log.info(s”Finished writing to timestamped index directory - “ +</p>
+<blockquote>
+<div><p>s”$timeStampedAnnOutputDirectory”)</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}
+FutureHelper.executionFrom(result).unit</p>
+</dd>
+<dt>}.onComplete { _ =&gt;</dt><dd><p>threadPool.shutdown()
+Unit</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def getTweetSimclusterFeatures(</dt><dd><p>args: Args</p>
+</dd>
+<dt>)(</dt><dd><p>implicit dateRange: DateRange</p>
+</dd>
+<dt>): TypedPipe[(Long, PersistentSimClustersEmbedding)] = {</dt><dd><p>val serviceIdEnv = args.getOrElse(“sIdEnv”, “prod”)
+val serviceIdRole = args.getOrElse(“sIdRole”, “cassowary”)
+val serviceIdZone = args.getOrElse(“sIdZone”, “atla”)
+val serviceIdName = args</p>
+<blockquote>
+<div><p>.getOrElse(“sIdName”, “tweet-embedding-generation-batch-job”)</p>
+</div></blockquote>
+<dl>
+<dt>val serviceId = ServiceIdentifier(</dt><dd><p>role = serviceIdRole,
+service = serviceIdName,
+environment = serviceIdEnv,
+zone = serviceIdZone)</p>
+</dd>
+<dt>val logFavBasedPersistentTweetEmbeddingSource =</dt><dd><dl class="simple">
+<dt>new LogFavBasedPersistentTweetEmbeddingMhExportSource(</dt><dd><p>range = dateRange.prepend(Hours(24)),
+serviceIdentifier = serviceId)</p>
+</dd>
+</dl>
+</dd>
+<dt>val tweetSimclusterEmbeddingTypedPipe = TypedPipe</dt><dd><p>.from(logFavBasedPersistentTweetEmbeddingSource)
+.collect {</p>
+<blockquote>
+<div><dl>
+<dt>case (</dt><dd><blockquote>
+<div><blockquote>
+<div><p>(tweetId, timestamp),
+simclusterEmbedding: PersistentSimClustersEmbedding</p>
+</div></blockquote>
+<p>) if timestamp == 1L =&gt; // 1L corresponds to the LongestL2Norm simcluster embedding</p>
+</div></blockquote>
+<p>(tweetId.toLong, simclusterEmbedding)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>tweetSimclusterEmbeddingTypedPipe</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def getTweetSource()(implicit dateRange: DateRange): TypedPipe[PublicTweet] = {</dt><dd><dl class="simple">
+<dt>val recentTweets = DAL</dt><dd><p>.read(PublicTweetsScalaDataset, dateRange.prepend(tweetSourceLookback))
+.toTypedPipe</p>
+</dd>
+</dl>
+<p>recentTweets</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def isVideoTweet(tweet: PublicTweet): Boolean = {</dt><dd><dl>
+<dt>tweet.media.exists { mediaSeq =&gt;</dt><dd><dl class="simple">
+<dt>mediaSeq.exists { e =&gt;</dt><dd><p>e.mediaType.contains(MediaType.Video)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def getEngagementFilteredTweets(</dt><dd><p>minFavCount: Long</p>
+</dd>
+<dt>)(</dt><dd><p>implicit dateRange: DateRange</p>
+</dd>
+<dt>): TypedPipe[(Long, Int)] = {</dt><dd><dl>
+<dt>val engagementFilteredTweetsPipe = DAL</dt><dd><dl>
+<dt>.read(ServerEngagementsScalaDataset, dateRange.prepend(Days(2))).withRemoteReadPolicy(</dt><dd><p>AllowCrossDC).toTypedPipe</p>
+</dd>
+<dt>.collect {</dt><dd><dl>
+<dt>case event if InteractionEventUtils.isTweetType(event) =&gt;</dt><dd><p>val targetTweetId = event.targetId
+event.details match {</p>
+<blockquote>
+<div><p>case InteractionDetails.Favorite(_) =&gt; (targetTweetId, 1)
+case _ =&gt; (targetTweetId, 0)</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+.sumByKey
+.map {</p>
+<blockquote>
+<div><p>case (tweetId, count) =&gt; (tweetId, count)</p>
+</div></blockquote>
+<p>}
+.filter(_._2 &gt;= minFavCount)</p>
+</dd>
+</dl>
+<p>engagementFilteredTweetsPipe</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def run(args: Args)(implicit dateRange: DateRange, idx: UniqueID) = {</dt><dd><p>val minFavCount = args.int(“minFavCount”, 32)
+val indexAllTweets = args.boolean(“indexAllTweets”)</p>
+<p>val tweetSimclusterDataset = getTweetSimclusterFeatures(args)
+val tweetSourceDataset = getTweetSource()
+val engagementFilteredTweetsPipe = getEngagementFilteredTweets(minFavCount)
+val inputEmbeddingFormat = UserKind.parser</p>
+<blockquote>
+<div><p>.getEmbeddingFormat(args, “f2v_input”, Some(dateRange.prepend(Days(14))))</p>
+</div></blockquote>
+<dl>
+<dt>val f2vProducerEmbeddings = inputEmbeddingFormat.getEmbeddings</dt><dd><dl class="simple">
+<dt>.map {</dt><dd><p>case EmbeddingWithEntity(userId, embedding) =&gt; (userId.userId, embedding)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>val engagementFilteredTweetInfoPipe = tweetSourceDataset</dt><dd><p>.groupBy(_.tweetId)
+.join(engagementFilteredTweetsPipe.groupBy(_._1))
+.map {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case (tweetId, (tweetInfo, tweetFavCount)) =&gt;</dt><dd><p>(tweetId, tweetInfo)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+<dt>val filteredSimclustersPipe = tweetSimclusterDataset</dt><dd><p>.groupBy(_._1)
+.join(engagementFilteredTweetInfoPipe.groupBy(_._1))
+.map {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case (tweetId, ((_, simclusterEmbedding), (_, tweetInfo))) =&gt;</dt><dd><p>(tweetId, simclusterEmbedding, tweetInfo)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+.filter {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case (_, _, tweetInfo) =&gt;</dt><dd><dl class="simple">
+<dt>tweetInfo.quotedTweetTweetId.isEmpty &amp;&amp;</dt><dd><p>tweetInfo.inReplyToTweetId.isEmpty &amp;&amp;
+tweetInfo.language.exists(SupportedLanguages.contains) &amp;&amp;
+(indexAllTweets || (!tweetInfo.media.exists(_.isEmpty) &amp;&amp; isVideoTweet(tweetInfo))) &amp;&amp;
+!tweetInfo.nsfwAdmin &amp;&amp;
+!tweetInfo.nsfwUser</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+.map {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case (tweetId, simclusterEmbedding, tweetInfo) =&gt;</dt><dd><p>(tweetInfo.userId, tweetId, simclusterEmbedding)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+<dt>val dataRecordsPipe = filteredSimclustersPipe</dt><dd><p>.groupBy(_._1)
+.leftJoin(f2vProducerEmbeddings.groupBy(_._1))
+.values
+.map {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case ((authorId1, tweetId, simclusterEmbedding), Some((authorId2, f2vEmbedding))) =&gt;</dt><dd><dl class="simple">
+<dt>TweetSimclusterRecordAdapter.adaptToDataRecord(</dt><dd><p>(tweetId, simclusterEmbedding, f2vEmbedding))</p>
+</dd>
+</dl>
+</dd>
+<dt>case ((authorId, tweetId, simclusterEmbedding), None) =&gt;</dt><dd><dl class="simple">
+<dt>TweetSimclusterRecordAdapter.adaptToDataRecord(</dt><dd><p>(tweetId, simclusterEmbedding, DEFAULT_F2V_VECTOR))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>val modelPath = args.getOrElse(“model_path”, “”)
+val batchPredictor = getPredictionEngine(modelName = “tweet_model”, modelPath = modelPath)
+val tweetIdFeature = SharedFeatures.TWEET_ID
+val tweetEmbeddingName = args.getOrElse(“tweet_embedding_name”, “output”)</p>
+<dl>
+<dt>val outputPipe = batchPredictor.predict(dataRecordsPipe).map {</dt><dd><dl>
+<dt>case (originalDataRecord, predictedDataRecord) =&gt;</dt><dd><p>val tweetId = originalDataRecord.getFeatureValue(tweetIdFeature)
+val scalaPredictedDataRecord =</p>
+<blockquote>
+<div><p>ScalaToJavaDataRecordConversions.javaDataRecord2ScalaDataRecord(predictedDataRecord)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>val tweetEmbeddingTensor =</dt><dd><p>scalaPredictedDataRecord.tensors.get(FeatureUtil.featureIdForName(tweetEmbeddingName))</p>
+</dd>
+</dl>
+<p>val tweetEmbeddingWithEntity = getEmbeddingWithEntity(tweetEmbeddingTensor, tweetId)
+tweetEmbeddingWithEntity</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>buildAnnIndex(outputPipe, args)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>object TweetEmbeddingGenerationAdhocJob</dt><dd><blockquote>
+<div><p>extends TwitterExecutionApp
+with TweetEmbeddingGenerationTrait {</p>
+</div></blockquote>
+<dl>
+<dt>override def job: Execution[Unit] =</dt><dd><dl>
+<dt>Execution.withId { implicit uid =&gt;</dt><dd><dl class="simple">
+<dt>Execution.withArgs { args =&gt;</dt><dd><p>implicit val dateRange: DateRange = DateRange.parse(args.list(“dateRange”))
+run(args)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>object TweetEmbeddingGenerationBatchJob</dt><dd><blockquote>
+<div><p>extends TwitterScheduledExecutionApp
+with TweetEmbeddingGenerationTrait {</p>
+</div></blockquote>
+<dl>
+<dt>override def scheduledJob: Execution[Unit] =</dt><dd><dl>
+<dt>Execution.withId { implicit uid =&gt;</dt><dd><dl>
+<dt>Execution.withArgs { args =&gt;</dt><dd><p>implicit val tz: TimeZone = DateOps.UTC
+val batchFirstTime = BatchFirstTime(RichDate(“2021-10-28”)(tz, DateParser.default))
+val analyticsArgs = AnalyticsBatchExecutionArgs(</p>
+<blockquote>
+<div><p>batchDesc = BatchDescription(getClass.getName),
+firstTime = batchFirstTime,
+batchIncrement = BatchIncrement(Hours(updateHours)),
+batchWidth = Some(BatchWidth(Hours(updateHours)))</p>
+</div></blockquote>
+<p>)</p>
+<dl class="simple">
+<dt>AnalyticsBatchExecution(analyticsArgs) { implicit dateRange =&gt;</dt><dd><p>run(args)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>object TweetEmbeddingGenerationBatchJobAlternate</dt><dd><blockquote>
+<div><p>extends TwitterScheduledExecutionApp
+with TweetEmbeddingGenerationTrait {</p>
+</div></blockquote>
+<dl>
+<dt>override def scheduledJob: Execution[Unit] =</dt><dd><dl>
+<dt>Execution.withId { implicit uid =&gt;</dt><dd><dl>
+<dt>Execution.withArgs { args =&gt;</dt><dd><p>implicit val tz: TimeZone = DateOps.UTC
+val batchFirstTime = BatchFirstTime(RichDate(“2022-03-28”)(tz, DateParser.default))
+val analyticsArgs = AnalyticsBatchExecutionArgs(</p>
+<blockquote>
+<div><p>batchDesc = BatchDescription(getClass.getName),
+firstTime = batchFirstTime,
+batchIncrement = BatchIncrement(Hours(updateHours)),
+batchWidth = Some(BatchWidth(Hours(updateHours)))</p>
+</div></blockquote>
+<p>)</p>
+<dl class="simple">
+<dt>AnalyticsBatchExecution(analyticsArgs) { implicit dateRange =&gt;</dt><dd><p>run(args)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>object TweetEmbeddingGenerationBatchJobExperimental</dt><dd><blockquote>
+<div><p>extends TwitterScheduledExecutionApp
+with TweetEmbeddingGenerationTrait {</p>
+</div></blockquote>
+<dl>
+<dt>override def scheduledJob: Execution[Unit] =</dt><dd><dl>
+<dt>Execution.withId { implicit uid =&gt;</dt><dd><dl>
+<dt>Execution.withArgs { args =&gt;</dt><dd><p>implicit val tz: TimeZone = DateOps.UTC
+val batchFirstTime = BatchFirstTime(RichDate(“2021-12-12”)(tz, DateParser.default))
+val analyticsArgs = AnalyticsBatchExecutionArgs(</p>
+<blockquote>
+<div><p>batchDesc = BatchDescription(getClass.getName),
+firstTime = batchFirstTime,
+batchIncrement = BatchIncrement(Hours(updateHours)),
+batchWidth = Some(BatchWidth(Hours(updateHours)))</p>
+</div></blockquote>
+<p>)</p>
+<dl class="simple">
+<dt>AnalyticsBatchExecution(analyticsArgs) { implicit dateRange =&gt;</dt><dd><p>run(args)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../_sources/src/scala/com/twitter/simclusters_v2/scalding/mbcg/TweetEmbeddingGenerationJob.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

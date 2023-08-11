@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../" id="documentation_options" src="../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.timelines.data_processing.ml_util.aggregation_framework.scalding</p>
+<p>import com.twitter.algebird.ScMapMonoid
+import com.twitter.bijection.Injection
+import com.twitter.bijection.thrift.CompactThriftCodec
+import com.twitter.ml.api.util.CompactDataRecordConverter
+import com.twitter.ml.api.CompactDataRecord
+import com.twitter.ml.api.DataRecord
+import com.twitter.scalding.commons.source.VersionedKeyValSource
+import com.twitter.scalding.Args
+import com.twitter.scalding.Days
+import com.twitter.scalding.Duration
+import com.twitter.scalding.RichDate
+import com.twitter.scalding.TypedPipe
+import com.twitter.scalding.TypedTsv
+import com.twitter.scalding_internal.job.HasDateRange
+import com.twitter.scalding_internal.job.analytics_batch.AnalyticsBatchJob
+import com.twitter.summingbird.batch.BatchID
+import com.twitter.summingbird_internal.bijection.BatchPairImplicits
+import com.twitter.timelines.data_processing.ml_util.aggregation_framework.AggregationKey
+import com.twitter.timelines.data_processing.ml_util.aggregation_framework.AggregationKeyInjection
+import java.lang.{Double =&gt; JDouble}
+import java.lang.{Long =&gt; JLong}
+import scala.collection.JavaConverters._</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>The job takes four inputs:</p></li>
+<li><ul>
+<li><p>The path to a AggregateStore using the DataRecord format.</p></li>
+</ul>
+</li>
+<li><ul>
+<li><p>The path to a AggregateStore using the CompactDataRecord format.</p></li>
+</ul>
+</li>
+<li><ul>
+<li><p>A version that must be present in both sources.</p></li>
+</ul>
+</li>
+<li><ul>
+<li><p>A sink to write the comparison statistics.</p></li>
+</ul>
+</li>
+<li></li>
+<li><p>The job reads in the two stores, converts the second one to DataRecords and</p></li>
+<li><p>then compared each key to see if the two stores have identical DataRecords,</p></li>
+<li><p>modulo the loss in precision on converting the Double to Float.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>class AggregatesStoreComparisonJob(args: Args)</dt><dd><blockquote>
+<div><p>extends AnalyticsBatchJob(args)
+with BatchPairImplicits
+with HasDateRange {</p>
+</div></blockquote>
+<p>import AggregatesStoreComparisonJob._
+override def batchIncrement: Duration = Days(1)
+override def firstTime: RichDate = RichDate(args(“firstTime”))</p>
+<p>private val dataRecordSourcePath = args(“dataRecordSource”)
+private val compactDataRecordSourcePath = args(“compactDataRecordSource”)</p>
+<p>private val version = args.long(“version”)</p>
+<p>private val statsSink = args(“sink”)</p>
+<p>require(dataRecordSourcePath != compactDataRecordSourcePath)</p>
+<dl>
+<dt>private val dataRecordSource =</dt><dd><dl class="simple">
+<dt>VersionedKeyValSource[AggregationKey, (BatchID, DataRecord)](</dt><dd><p>path = dataRecordSourcePath,
+sourceVersion = Some(version)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>private val compactDataRecordSource =</dt><dd><dl class="simple">
+<dt>VersionedKeyValSource[AggregationKey, (BatchID, CompactDataRecord)](</dt><dd><p>path = compactDataRecordSourcePath,
+sourceVersion = Some(version)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>private val dataRecordPipe: TypedPipe[((AggregationKey, BatchID), DataRecord)] = TypedPipe</dt><dd><p>.from(dataRecordSource)
+.map { case (key, (batchId, record)) =&gt; ((key, batchId), record) }</p>
+</dd>
+<dt>private val compactDataRecordPipe: TypedPipe[((AggregationKey, BatchID), DataRecord)] = TypedPipe</dt><dd><p>.from(compactDataRecordSource)
+.map {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case (key, (batchId, compactRecord)) =&gt;</dt><dd><p>val record = compactConverter.compactDataRecordToDataRecord(compactRecord)
+((key, batchId), record)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+<dt>dataRecordPipe</dt><dd><p>.outerJoin(compactDataRecordPipe)
+.mapValues { case (leftOpt, rightOpt) =&gt; compareDataRecords(leftOpt, rightOpt) }
+.values
+.sum(mapMonoid)
+.flatMap(_.toList)
+.write(TypedTsv(statsSink))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<p>object AggregatesStoreComparisonJob {</p>
+<blockquote>
+<div><p>val mapMonoid: ScMapMonoid[String, Long] = new ScMapMonoid[String, Long]()</p>
+<dl class="simple">
+<dt>implicit private val aggregationKeyInjection: Injection[AggregationKey, Array[Byte]] =</dt><dd><p>AggregationKeyInjection</p>
+</dd>
+</dl>
+<p>implicit private val aggregationKeyOrdering: Ordering[AggregationKey] = AggregationKeyOrdering
+implicit private val dataRecordCodec: Injection[DataRecord, Array[Byte]] =</p>
+<blockquote>
+<div><p>CompactThriftCodec[DataRecord]</p>
+</div></blockquote>
+<dl class="simple">
+<dt>implicit private val compactDataRecordCodec: Injection[CompactDataRecord, Array[Byte]] =</dt><dd><p>CompactThriftCodec[CompactDataRecord]</p>
+</dd>
+</dl>
+<p>private val compactConverter = new CompactDataRecordConverter</p>
+<p>val missingRecordFromLeft = “missingRecordFromLeft”
+val missingRecordFromRight = “missingRecordFromRight”
+val nonContinuousFeaturesDidNotMatch = “nonContinuousFeaturesDidNotMatch”
+val missingFeaturesFromLeft = “missingFeaturesFromLeft”
+val missingFeaturesFromRight = “missingFeaturesFromRight”
+val recordsWithUnmatchedKeys = “recordsWithUnmatchedKeys”
+val featureValuesMatched = “featureValuesMatched”
+val featureValuesThatDidNotMatch = “featureValuesThatDidNotMatch”
+val equalRecords = “equalRecords”
+val keyCount = “keyCount”</p>
+<dl>
+<dt>def compareDataRecords(</dt><dd><p>leftOpt: Option[DataRecord],
+rightOpt: Option[DataRecord]</p>
+</dd>
+<dt>): collection.Map[String, Long] = {</dt><dd><p>val stats = collection.Map((keyCount, 1L))
+(leftOpt, rightOpt) match {</p>
+<blockquote>
+<div><dl>
+<dt>case (Some(left), Some(right)) =&gt;</dt><dd><dl class="simple">
+<dt>if (isIdenticalNonContinuousFeatureSet(left, right)) {</dt><dd><p>getContinuousFeaturesStats(left, right).foldLeft(stats)(mapMonoid.add)</p>
+</dd>
+<dt>} else {</dt><dd><p>mapMonoid.add(stats, (nonContinuousFeaturesDidNotMatch, 1L))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>case (Some(_), None) =&gt; mapMonoid.add(stats, (missingRecordFromRight, 1L))
+case (None, Some(_)) =&gt; mapMonoid.add(stats, (missingRecordFromLeft, 1L))
+case (None, None) =&gt; throw new IllegalArgumentException(“Should never be possible”)</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>For Continuous features.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>private def getContinuousFeaturesStats(</dt><dd><p>left: DataRecord,
+right: DataRecord</p>
+</dd>
+<dt>): Seq[(String, Long)] = {</dt><dd><dl class="simple">
+<dt>val leftFeatures = Option(left.getContinuousFeatures)</dt><dd><p>.map(_.asScala.toMap)
+.getOrElse(Map.empty[JLong, JDouble])</p>
+</dd>
+<dt>val rightFeatures = Option(right.getContinuousFeatures)</dt><dd><p>.map(_.asScala.toMap)
+.getOrElse(Map.empty[JLong, JDouble])</p>
+</dd>
+</dl>
+<p>val numMissingFeaturesLeft = (rightFeatures.keySet diff leftFeatures.keySet).size
+val numMissingFeaturesRight = (leftFeatures.keySet diff rightFeatures.keySet).size</p>
+<dl>
+<dt>if (numMissingFeaturesLeft == 0 &amp;&amp; numMissingFeaturesRight == 0) {</dt><dd><p>val Epsilon = 1e-5
+val numUnmatchedValues = leftFeatures.map {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case (id, lValue) =&gt;</dt><dd><p>val rValue = rightFeatures(id)
+// The approximate match is to account for the precision loss due to
+// the Double -&gt; Float -&gt; Double conversion.
+if (math.abs(lValue - rValue) &lt;= Epsilon) 0L else 1L</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}.sum</p>
+<dl>
+<dt>if (numUnmatchedValues == 0) {</dt><dd><dl class="simple">
+<dt>Seq(</dt><dd><p>(equalRecords, 1L),
+(featureValuesMatched, leftFeatures.size.toLong)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>} else {</dt><dd><dl>
+<dt>Seq(</dt><dd><p>(featureValuesThatDidNotMatch, numUnmatchedValues),
+(</p>
+<blockquote>
+<div><p>featureValuesMatched,
+math.max(leftFeatures.size, rightFeatures.size) - numUnmatchedValues)</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>} else {</dt><dd><dl class="simple">
+<dt>Seq(</dt><dd><p>(recordsWithUnmatchedKeys, 1L),
+(missingFeaturesFromLeft, numMissingFeaturesLeft.toLong),
+(missingFeaturesFromRight, numMissingFeaturesRight.toLong)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>For feature types that are not Feature.Continuous. We expect these to match exactly in the two stores.</p></li>
+<li><p>Mutable change</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>private def isIdenticalNonContinuousFeatureSet(left: DataRecord, right: DataRecord): Boolean = {</dt><dd><p>val booleanMatched = safeEquals(left.binaryFeatures, right.binaryFeatures)
+val discreteMatched = safeEquals(left.discreteFeatures, right.discreteFeatures)
+val stringMatched = safeEquals(left.stringFeatures, right.stringFeatures)
+val sparseBinaryMatched = safeEquals(left.sparseBinaryFeatures, right.sparseBinaryFeatures)
+val sparseContinuousMatched =</p>
+<blockquote>
+<div><p>safeEquals(left.sparseContinuousFeatures, right.sparseContinuousFeatures)</p>
+</div></blockquote>
+<p>val blobMatched = safeEquals(left.blobFeatures, right.blobFeatures)
+val tensorsMatched = safeEquals(left.tensors, right.tensors)
+val sparseTensorsMatched = safeEquals(left.sparseTensors, right.sparseTensors)</p>
+<p>booleanMatched &amp;&amp; discreteMatched &amp;&amp; stringMatched &amp;&amp; sparseBinaryMatched &amp;&amp;
+sparseContinuousMatched &amp;&amp; blobMatched &amp;&amp; tensorsMatched &amp;&amp; sparseTensorsMatched</p>
+</dd>
+</dl>
+<p>}</p>
+<p>def safeEquals[T](l: T, r: T): Boolean = Option(l).equals(Option(r))</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../_sources/timelines/data_processing/ml_util/aggregation_framework/scalding/AggregatesStoreComparisonJob.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

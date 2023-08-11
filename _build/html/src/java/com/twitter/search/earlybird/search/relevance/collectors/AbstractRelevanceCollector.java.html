@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.earlybird.search.relevance.collectors;</p>
+<p>import java.io.IOException;</p>
+<p>import com.google.common.base.Preconditions;</p>
+<p>import com.twitter.common.util.Clock;
+import com.twitter.search.common.schema.base.ImmutableSchemaInterface;
+import com.twitter.search.common.schema.earlybird.EarlybirdCluster;
+import com.twitter.search.common.schema.earlybird.EarlybirdFieldConstants.EarlybirdFieldConstant;
+import com.twitter.search.core.earlybird.facets.LanguageHistogram;
+import com.twitter.search.earlybird.common.userupdates.UserTable;
+import com.twitter.search.earlybird.search.AbstractResultsCollector;
+import com.twitter.search.earlybird.search.relevance.RelevanceSearchRequestInfo;
+import com.twitter.search.earlybird.search.relevance.RelevanceSearchResults;
+import com.twitter.search.earlybird.search.relevance.scoring.ScoringFunction;
+import com.twitter.search.earlybird.stats.EarlybirdSearcherStats;
+import com.twitter.search.earlybird.thrift.ThriftSearchResultMetadata;
+import com.twitter.search.earlybird.thrift.ThriftSearchResultMetadataOptions;
+import com.twitter.search.earlybird.thrift.ThriftSearchResultsRelevanceStats;</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>AbstractRelevanceCollector is a results collector that collects RelevanceHit results</p></li>
+<li><p>which include more detailed information than a normal Hit.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>public abstract class AbstractRelevanceCollector</dt><dd><blockquote>
+<div><p>extends AbstractResultsCollector&lt;RelevanceSearchRequestInfo, RelevanceSearchResults&gt; {</p>
+</div></blockquote>
+<p>protected final ScoringFunction scoringFunction;
+private final ThriftSearchResultsRelevanceStats relevanceStats;
+private final EarlybirdCluster cluster;
+private final UserTable userTable;</p>
+<p>// Per-language result counts.
+private final LanguageHistogram languageHistogram = new LanguageHistogram();</p>
+<p>// Accumulated time spend on relevance scoring across all collected hits, including batch scoring.
+private long scoringTimeNanos = 0;</p>
+<dl>
+<dt>public AbstractRelevanceCollector(</dt><dd><blockquote>
+<div><p>ImmutableSchemaInterface schema,
+RelevanceSearchRequestInfo searchRequestInfo,
+ScoringFunction scoringFunction,
+EarlybirdSearcherStats searcherStats,
+EarlybirdCluster cluster,
+UserTable userTable,
+Clock clock,
+int requestDebugMode) {</p>
+</div></blockquote>
+<p>super(schema, searchRequestInfo, clock, searcherStats, requestDebugMode);
+this.scoringFunction = scoringFunction;
+this.relevanceStats = new ThriftSearchResultsRelevanceStats();
+this.cluster = cluster;
+this.userTable = userTable;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Subclasses must implement this method to actually collect a scored relevance hit.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+</dl>
+<p>protected abstract void doCollectWithScore(long tweetID, float score) throws IOException;</p>
+<p>&#64;Override
+public final void startSegment() throws IOException {</p>
+<blockquote>
+<div><p>scoringFunction.setNextReader(currTwitterReader);</p>
+<dl class="simple">
+<dt>ThriftSearchResultMetadataOptions options =</dt><dd><p>searchRequestInfo.getSearchQuery().getResultMetadataOptions();</p>
+</dd>
+</dl>
+<p>featuresRequested = options != null &amp;&amp; options.isReturnSearchResultFeatures();</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+protected final void doCollect(long tweetID) throws IOException {</p>
+<blockquote>
+<div><p>final long scoringStartNanos = getClock().nowNanos();
+float luceneSore = scorer.score();
+final float score = scoringFunction.score(curDocId, luceneSore);
+final long scoringEndNanos = getClock().nowNanos();
+addToOverallScoringTimeNanos(scoringStartNanos, scoringEndNanos);</p>
+<p>scoringFunction.updateRelevanceStats(relevanceStats);</p>
+<p>updateHitCounts(tweetID);</p>
+<p>doCollectWithScore(tweetID, score);</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>protected final void addToOverallScoringTimeNanos(long scoringStartNanos, long scoringEndNanos) {</dt><dd><p>scoringTimeNanos += scoringEndNanos - scoringStartNanos;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>protected final ThriftSearchResultMetadata collectMetadata() throws IOException {</dt><dd><dl class="simple">
+<dt>ThriftSearchResultMetadataOptions options =</dt><dd><p>searchRequestInfo.getSearchQuery().getResultMetadataOptions();</p>
+</dd>
+</dl>
+<p>Preconditions.checkNotNull(options);
+ThriftSearchResultMetadata metadata =</p>
+<blockquote>
+<div><p>Preconditions.checkNotNull(scoringFunction.getResultMetadata(options));</p>
+</div></blockquote>
+<dl class="simple">
+<dt>if (metadata.isSetLanguage()) {</dt><dd><p>languageHistogram.increment(metadata.getLanguage().getValue());</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// Some additional metadata which is not provided by the scoring function, but
+// by accessing the reader directly.
+if (currTwitterReader != null) {</p>
+<blockquote>
+<div><p>fillResultGeoLocation(metadata);
+if (searchRequestInfo.isCollectConversationId()) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>long conversationId =</dt><dd><p>documentFeatures.getFeatureValue(EarlybirdFieldConstant.CONVERSATION_ID_CSF);</p>
+</dd>
+<dt>if (conversationId != 0) {</dt><dd><p>ensureExtraMetadataIsSet(metadata);
+metadata.getExtraMetadata().setConversationId(conversationId);</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>// Check and collect hit attribution data, if it’s available.
+fillHitAttributionMetadata(metadata);</p>
+<p>long fromUserId = documentFeatures.getFeatureValue(EarlybirdFieldConstant.FROM_USER_ID_CSF);
+if (searchRequestInfo.isGetFromUserId()) {</p>
+<blockquote>
+<div><p>metadata.setFromUserId(fromUserId);</p>
+</div></blockquote>
+<p>}</p>
+<p>collectExclusiveConversationAuthorId(metadata);
+collectFacets(metadata);
+collectFeatures(metadata);
+collectIsProtected(metadata, cluster, userTable);</p>
+<p>return metadata;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>protected final ThriftSearchResultsRelevanceStats getRelevanceStats() {</dt><dd><p>return relevanceStats;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public final LanguageHistogram getLanguageHistogram() {</dt><dd><p>return languageHistogram;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;Override
+protected final RelevanceSearchResults doGetResults() throws IOException {</p>
+<blockquote>
+<div><p>final RelevanceSearchResults results = doGetRelevanceResults();
+results.setScoringTimeNanos(scoringTimeNanos);
+return results;</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>For subclasses to process and aggregate collected hits.</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+</dl>
+<p>protected abstract RelevanceSearchResults doGetRelevanceResults() throws IOException;</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/src/java/com/twitter/search/earlybird/search/relevance/collectors/AbstractRelevanceCollector.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

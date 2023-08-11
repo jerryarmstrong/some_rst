@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../../../" id="documentation_options" src="../../../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.follow_recommendations.common.transforms.weighted_sampling
+import com.twitter.follow_recommendations.common.base.GatedTransform
+import com.twitter.stitch.Stitch
+import com.twitter.timelines.configapi.HasParams
+import com.twitter.follow_recommendations.common.models.CandidateUser
+import com.twitter.follow_recommendations.common.models.HasDebugOptions
+import com.twitter.follow_recommendations.common.models.Score
+import com.twitter.follow_recommendations.common.models.Scores
+import com.twitter.follow_recommendations.common.rankers.common.RankerId
+import com.twitter.follow_recommendations.common.rankers.utils.Utils
+import com.twitter.product_mixer.core.model.marshalling.request.HasClientContext
+import javax.inject.Inject
+import javax.inject.Singleton</p>
+<p>&#64;Singleton
+class SamplingTransform &#64;Inject() ()</p>
+<blockquote>
+<div><blockquote>
+<div><p>extends GatedTransform[HasClientContext with HasParams with HasDebugOptions, CandidateUser] {</p>
+</div></blockquote>
+<p>val name: String = this.getClass.getSimpleName</p>
+<p>/*
+Description: This function takes in a set of candidate users and ranks them for a who-to-follow
+request by sampling from the Placket-Luce distribution
+(<a class="reference external" href="https://cran.rstudio.com/web/packages/PlackettLuce/vignettes/Overview.html">https://cran.rstudio.com/web/packages/PlackettLuce/vignettes/Overview.html</a>) with a three
+variations. The first variation is that the scores of the candidates are multiplied by
+multiplicativeFactor before sampling. The second variation is that the scores are
+exponentiated before sampling. The third variation is that depending on how many who-to-follow
+positions are being requested, the first k positions are reserved for the candidates with the
+highest scores (and they are sorted in decreasing order of score) and the remaining positions
+are sampled from a Placket-Luce. We use the efficient algorithm proposed in this blog
+<a class="reference external" href="https://medium.com/swlh/going-old-school-designing-algorithms-for-fast-weighted-sampling-in-production-c48fc1f40051">https://medium.com/swlh/going-old-school-designing-algorithms-for-fast-weighted-sampling-in-production-c48fc1f40051</a>
+to sample from a Plackett-Luce. Because of numerical stability reasons, before sampling from this
+distribution, (1) we subtract off the maximum score from all the scores and (2) if after
+this subtraction and multiplication by the multiplicative factor the resulting score is &lt;= -10,
+we force the candidate’s transformed score under the above algorithm to be 0 (so r^(1/w) = 0)
+where r is a random number and w is the transformed score.</p>
+<p>inputs:
+- target: HasClientContext (WTF request)
+- candidates: sequence of CandidateUsers (users that need to be ranked from a who-to-follow</p>
+<blockquote>
+<div><p>request) each of which has a score</p>
+</div></blockquote>
+<p>inputs accessed through feature switches, i.e. through target.params (see the following file:
+“follow-recommendations-service/common/src/main/scala/com/twitter/follow_recommendations/common/
+transforms/weighted_sampling/SamplingTransformParams.scala”):
+- topKFixed: the first k positions of the who-to-follow ranking correspond to the users with the k</p>
+<blockquote>
+<div><p>highest scores and are not sampled from the Placket-Luce distribution</p>
+</div></blockquote>
+<ul class="simple">
+<li><dl class="simple">
+<dt>multiplicativeFactor: multiplicativeFactor is used to transform the scores of each candidate by</dt><dd><p>multiplying that user’s score by multiplicativeFactor</p>
+</dd>
+</dl>
+</li>
+</ul>
+<p>output:
+- Sequence of CandidateUser whose order represents the ranking of users in a who-to-follow request</p>
+<blockquote>
+<div><blockquote>
+<div><p>This ranking is sampled from a Placket-Luce distribution.</p>
+</div></blockquote>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</div></blockquote>
+<dl class="simple">
+<dt>override def transform(</dt><dd><p>target: HasClientContext with HasParams with HasDebugOptions,
+candidates: Seq[CandidateUser]</p>
+</dd>
+</dl>
+<p>): Stitch[Seq[CandidateUser]] = {</p>
+<blockquote>
+<div><p>// the first k positions of the who-to-follow ranking correspond to the users with the k
+// highest scores and are not sampled from the Placket-Luce distribution
+val topKFixed = target.params(SamplingTransformParams.TopKFixed)</p>
+<p>// multiplicativeFactor is used to transform the scores of each candidate by
+// multiplying that user’s score by multiplicativeFactor
+val multiplicativeFactor = target.params(SamplingTransformParams.MultiplicativeFactor)</p>
+<p>// sort candidates by their score
+val candidatesSorted = candidates.sortBy(-1 * _.score.getOrElse(0.0))</p>
+<p>// pick the top K candidates by score and the remaining candidates
+val (topKFixedCandidates, candidatesOutsideOfTopK) =</p>
+<blockquote>
+<div><p>candidatesSorted.zipWithIndex.partition { case (value, index) =&gt; index &lt; topKFixed }</p>
+</div></blockquote>
+<dl class="simple">
+<dt>val randomNumGenerator =</dt><dd><p>new scala.util.Random(target.getRandomizationSeed.getOrElse(System.currentTimeMillis))</p>
+</dd>
+</dl>
+<p>// we need to subtract the maximum score off the scores for numerical stability reasons
+// subtracting the max score off does not effect the underlying distribution we are sampling
+// the candidates from
+// we need the if statement since you cannot take the max of an empty sequence
+val maximum_score = if (candidatesOutsideOfTopK.nonEmpty) {</p>
+<blockquote>
+<div><p>candidatesOutsideOfTopK.map(x =&gt; x._1.score.getOrElse(0.0)).max</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>0.0</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// for candidates in candidatesOutsideOfTopK, we transform their score by subtracting off
+// maximum_score and then multiply by multiplicativeFactor
+val candidatesOutsideOfTopKTransformedScore = candidatesOutsideOfTopK.map(x =&gt;</p>
+<blockquote>
+<div><p>(x._1, multiplicativeFactor * (x._1.score.getOrElse(0.0) - maximum_score)))</p>
+</div></blockquote>
+<p>// for each candidate with score transformed and clip score w, sample a random number r,
+// create a new score r^(1/w) and sort the candidates to get the final ranking.
+// for numerical stability reasons if the score is &lt;=-10, we force r^(1/w) = 0.
+// this samples the candidates from the modified Plackett-Luce distribution. See
+// <a class="reference external" href="https://medium.com/swlh/going-old-school-designing-algorithms-for-fast-weighted-sampling-in-production-c48fc1f40051">https://medium.com/swlh/going-old-school-designing-algorithms-for-fast-weighted-sampling-in-production-c48fc1f40051</a></p>
+<dl>
+<dt>val candidatesOutsideOfTopKSampled = candidatesOutsideOfTopKTransformedScore</dt><dd><dl>
+<dt>.map(x =&gt;</dt><dd><dl>
+<dt>(</dt><dd><p>x._1,
+if (x._2 &lt;= -10.0)</p>
+<blockquote>
+<div><p>0.0</p>
+</div></blockquote>
+<dl>
+<dt>else</dt><dd><dl>
+<dt>scala.math.pow(</dt><dd><p>randomNumGenerator.nextFloat(),
+1 / (scala.math</p>
+<blockquote>
+<div><p>.exp(x._2))))).sortBy(-1 * _._2)</p>
+</div></blockquote>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>val topKCandidates: Seq[CandidateUser] = topKFixedCandidates.map(_._1)</p>
+<dl>
+<dt>val scribeRankingInfo: Boolean =</dt><dd><p>target.params(SamplingTransformParams.ScribeRankingInfoInSamplingTransform)</p>
+</dd>
+<dt>val transformedCandidates: Seq[CandidateUser] = if (scribeRankingInfo) {</dt><dd><dl>
+<dt>val topKCandidatesWithRankingInfo: Seq[CandidateUser] =</dt><dd><p>Utils.addRankingInfo(topKCandidates, name)</p>
+</dd>
+<dt>val candidatesOutsideOfTopKSampledWithRankingInfo: Seq[CandidateUser] =</dt><dd><dl>
+<dt>candidatesOutsideOfTopKSampled.zipWithIndex.map {</dt><dd><dl>
+<dt>case ((candidate, score), rank) =&gt;</dt><dd><p>val newScore = Seq(Score(score, Some(RankerId.PlacketLuceSamplingTransformer)))
+val newScores: Option[Scores] = candidate.scores</p>
+<blockquote>
+<div><dl class="simple">
+<dt>.map { scores =&gt;</dt><dd><p>scores.copy(scores = scores.scores ++ newScore)</p>
+</dd>
+</dl>
+<p>}.orElse(Some(Scores(newScore, Some(RankerId.PlacketLuceSamplingTransformer))))</p>
+</div></blockquote>
+<p>val globalRank = rank + topKFixed + 1
+candidate.addInfoPerRankingStage(name, newScores, globalRank)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>topKCandidatesWithRankingInfo ++ candidatesOutsideOfTopKSampledWithRankingInfo</p>
+</dd>
+<dt>} else {</dt><dd><p>topKCandidates ++ candidatesOutsideOfTopKSampled.map(_._1)</p>
+</dd>
+</dl>
+<p>}</p>
+<p>Stitch.value(transformedCandidates)</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../../../_sources/follow-recommendations-service/common/src/main/scala/com/twitter/follow_recommendations/common/transforms/weighted_sampling/SamplingTransform.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../" id="documentation_options" src="../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.earlybird;</p>
+<p>import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;</p>
+<p>import scala.Function0;</p>
+<p>import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Preconditions;
+import com.google.common.util.concurrent.ThreadFactoryBuilder;</p>
+<p>import com.twitter.search.common.concurrent.ThreadPoolExecutorStats;
+import com.twitter.search.common.metrics.SearchRateCounter;
+import com.twitter.search.earlybird.common.config.EarlybirdProperty;
+import com.twitter.util.ExecutorServiceFuturePool;
+import com.twitter.util.Future;
+import com.twitter.util.FuturePool;</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>A future pool that delegates all calls to an underlying futurePool, which can be recreated.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>public class EarlybirdFuturePoolManager implements FuturePool {</dt><dd><p>private volatile ExecutorServiceFuturePool pool = null;</p>
+<p>private final String threadName;
+private final ThreadPoolExecutorStats threadPoolExecutorStats;</p>
+<dl class="simple">
+<dt>public EarlybirdFuturePoolManager(String threadName) {</dt><dd><p>this.threadName = threadName;
+this.threadPoolExecutorStats = new ThreadPoolExecutorStats(threadName);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>final synchronized void createUnderlyingFuturePool(int threadCount) {</dt><dd><p>Preconditions.checkState(pool == null, “Cannot create a new pool before stopping the old one”);</p>
+<dl class="simple">
+<dt>ExecutorService executorService =</dt><dd><p>createExecutorService(threadCount, getMaxQueueSize());</p>
+</dd>
+<dt>if (executorService instanceof ThreadPoolExecutor) {</dt><dd><p>threadPoolExecutorStats.setUnderlyingExecutorForStats((ThreadPoolExecutor) executorService);</p>
+</dd>
+</dl>
+<p>}</p>
+<p>pool = new ExecutorServiceFuturePool(executorService);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>final synchronized void stopUnderlyingFuturePool(long timeout, TimeUnit timeunit)</dt><dd><blockquote>
+<div><p>throws InterruptedException {</p>
+</div></blockquote>
+<p>Preconditions.checkNotNull(pool);
+pool.executor().shutdown();
+pool.executor().awaitTermination(timeout, timeunit);
+pool = null;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>boolean isPoolReady() {</dt><dd><p>return pool != null;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;Override
+public final &lt;T&gt; Future&lt;T&gt; apply(Function0&lt;T&gt; f) {</p>
+<blockquote>
+<div><p>return Preconditions.checkNotNull(pool).apply(f);</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;VisibleForTesting
+protected ExecutorService createExecutorService(int threadCount, int maxQueueSize) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (maxQueueSize &lt;= 0) {</dt><dd><p>return Executors.newFixedThreadPool(threadCount, createThreadFactory(threadName));</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>SearchRateCounter rejectedTaskCounter =</dt><dd><p>SearchRateCounter.export(threadName + “_rejected_task_count”);</p>
+</dd>
+<dt>return new ThreadPoolExecutor(</dt><dd><p>threadCount, threadCount, 0, TimeUnit.MILLISECONDS,
+new ArrayBlockingQueue&lt;&gt;(maxQueueSize),
+createThreadFactory(threadName),
+(runnable, executor) -&gt; {</p>
+<blockquote>
+<div><p>rejectedTaskCounter.increment();
+throw new RejectedExecutionException(threadName + “ queue is full”);</p>
+</div></blockquote>
+<p>});</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<p>&#64;VisibleForTesting
+protected int getMaxQueueSize() {</p>
+<blockquote>
+<div><p>return EarlybirdProperty.MAX_QUEUE_SIZE.get(0);</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;VisibleForTesting
+static ThreadFactory createThreadFactory(String threadName) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>return new ThreadFactoryBuilder()</dt><dd><p>.setNameFormat(threadName + “-%d”)
+.setDaemon(true)
+.build();</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public int poolSize() {</p>
+<blockquote>
+<div><p>return Preconditions.checkNotNull(pool).poolSize();</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public int numActiveTasks() {</p>
+<blockquote>
+<div><p>return Preconditions.checkNotNull(pool).numActiveTasks();</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+public long numCompletedTasks() {</p>
+<blockquote>
+<div><p>return Preconditions.checkNotNull(pool).numCompletedTasks();</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../_sources/src/java/com/twitter/search/earlybird/EarlybirdFuturePoolManager.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

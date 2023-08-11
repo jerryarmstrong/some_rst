@@ -1,0 +1,450 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.timelineranker.server</p>
+<p>import com.twitter.abdecider.LoggingABDecider
+import com.twitter.finagle.TimeoutException
+import com.twitter.finagle.stats.Stat
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.servo.util.FunctionArrow
+import com.twitter.timelineranker.entity_tweets.EntityTweetsRepository
+import com.twitter.timelineranker.in_network_tweets.InNetworkTweetRepository
+import com.twitter.timelineranker.model._
+import com.twitter.timelineranker.observe.ObservedRequests
+import com.twitter.timelineranker.recap_author.RecapAuthorRepository
+import com.twitter.timelineranker.recap_hydration.RecapHydrationRepository
+import com.twitter.timelineranker.repository._
+import com.twitter.timelineranker.uteg_liked_by_tweets.UtegLikedByTweetsRepository
+import com.twitter.timelineranker.{thriftscala =&gt; thrift}
+import com.twitter.timelines.authorization.TimelinesClientRequestAuthorizer
+import com.twitter.timelines.observe.DebugObserver
+import com.twitter.timelines.observe.ObservedAndValidatedRequests
+import com.twitter.timelines.observe.QueryWidth
+import com.twitter.timelines.observe.ServiceObserver
+import com.twitter.util.Future
+import com.twitter.util.Return
+import com.twitter.util.Throw
+import com.twitter.util.Try</p>
+<dl>
+<dt>object TimelineRanker {</dt><dd><dl>
+<dt>def toTimelineErrorThriftResponse(</dt><dd><p>ex: Throwable,
+reason: Option[thrift.ErrorReason] = None</p>
+</dd>
+<dt>): thrift.GetTimelineResponse = {</dt><dd><dl class="simple">
+<dt>thrift.GetTimelineResponse(</dt><dd><p>error = Some(thrift.TimelineError(message = ex.toString, reason))</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def getTimelinesExceptionHandler: PartialFunction[</dt><dd><p>Throwable,
+Future[thrift.GetTimelineResponse]</p>
+</dd>
+<dt>] = {</dt><dd><dl class="simple">
+<dt>case e: TimeoutException =&gt;</dt><dd><p>Future.value(toTimelineErrorThriftResponse(e, Some(thrift.ErrorReason.UpstreamTimeout)))</p>
+</dd>
+<dt>case e: Throwable if ObservedAndValidatedRequests.isOverCapacityException(e) =&gt;</dt><dd><p>Future.value(toTimelineErrorThriftResponse(e, Some(thrift.ErrorReason.OverCapacity)))</p>
+</dd>
+</dl>
+<p>case e =&gt; Future.value(toTimelineErrorThriftResponse(e))</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def toErrorThriftResponse(</dt><dd><p>ex: Throwable,
+reason: Option[thrift.ErrorReason] = None</p>
+</dd>
+<dt>): thrift.GetCandidateTweetsResponse = {</dt><dd><dl class="simple">
+<dt>thrift.GetCandidateTweetsResponse(</dt><dd><p>error = Some(thrift.TimelineError(message = ex.toString, reason))</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def exceptionHandler: PartialFunction[Throwable, Future[thrift.GetCandidateTweetsResponse]] = {</dt><dd><dl class="simple">
+<dt>case e: TimeoutException =&gt;</dt><dd><p>Future.value(toErrorThriftResponse(e, Some(thrift.ErrorReason.UpstreamTimeout)))</p>
+</dd>
+<dt>case e: Throwable if ObservedAndValidatedRequests.isOverCapacityException(e) =&gt;</dt><dd><p>Future.value(toErrorThriftResponse(e, Some(thrift.ErrorReason.OverCapacity)))</p>
+</dd>
+</dl>
+<p>case e =&gt; Future.value(toErrorThriftResponse(e))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>class TimelineRanker(</dt><dd><p>routingRepository: RoutingTimelineRepository,
+inNetworkTweetRepository: InNetworkTweetRepository,
+recapHydrationRepository: RecapHydrationRepository,
+recapAuthorRepository: RecapAuthorRepository,
+entityTweetsRepository: EntityTweetsRepository,
+utegLikedByTweetsRepository: UtegLikedByTweetsRepository,
+serviceObserver: ServiceObserver,
+val abdecider: Option[LoggingABDecider],
+override val clientRequestAuthorizer: TimelinesClientRequestAuthorizer,
+override val debugObserver: DebugObserver,
+queryParamInitializer: FunctionArrow[RecapQuery, Future[RecapQuery]],
+statsReceiver: StatsReceiver)</p>
+<blockquote>
+<div><p>extends thrift.TimelineRanker.MethodPerEndpoint
+with ObservedRequests {</p>
+</div></blockquote>
+<p>override val requestWidthStats: Stat = statsReceiver.stat(“TimelineRanker/requestWidth”)</p>
+<dl class="simple">
+<dt>private[this] val getTimelinesStats = serviceObserver.readMethodStats(</dt><dd><p>“getTimelines”,
+QueryWidth.one[TimelineQuery]</p>
+</dd>
+</dl>
+<p>)</p>
+<dl class="simple">
+<dt>private[this] val getInNetworkTweetCandidatesStats = serviceObserver.readMethodStats(</dt><dd><p>“getInNetworkTweetCandidates”,
+QueryWidth.one[RecapQuery]</p>
+</dd>
+</dl>
+<p>)</p>
+<dl class="simple">
+<dt>private[this] val hydrateTweetCandidatesStats = serviceObserver.readMethodStats(</dt><dd><p>“hydrateTweetCandidates”,
+QueryWidth.one[RecapQuery]</p>
+</dd>
+</dl>
+<p>)</p>
+<dl class="simple">
+<dt>private[this] val getRecapCandidatesFromAuthorsStats = serviceObserver.readMethodStats(</dt><dd><p>“getRecapCandidatesFromAuthors”,
+QueryWidth.one[RecapQuery]</p>
+</dd>
+</dl>
+<p>)</p>
+<dl class="simple">
+<dt>private[this] val getEntityTweetCandidatesStats = serviceObserver.readMethodStats(</dt><dd><p>“getEntityTweetCandidates”,
+QueryWidth.one[RecapQuery]</p>
+</dd>
+</dl>
+<p>)</p>
+<dl class="simple">
+<dt>private[this] val getUtegLikedByTweetCandidatesStats = serviceObserver.readMethodStats(</dt><dd><p>“getUtegLikedByTweetCandidates”,
+QueryWidth.one[RecapQuery]</p>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>def getTimelines(</dt><dd><p>thriftQueries: Seq[thrift.TimelineQuery]</p>
+</dd>
+<dt>): Future[Seq[thrift.GetTimelineResponse]] = {</dt><dd><dl>
+<dt>Future.collect(</dt><dd><dl>
+<dt>thriftQueries.map { thriftQuery =&gt;</dt><dd><dl>
+<dt>Try(TimelineQuery.fromThrift(thriftQuery)) match {</dt><dd><dl>
+<dt>case Return(query) =&gt;</dt><dd><dl>
+<dt>observeAndValidate(</dt><dd><p>query,
+Seq(query.userId),
+getTimelinesStats,
+TimelineRanker.getTimelinesExceptionHandler) { validatedQuery =&gt;
+routingRepository.get(validatedQuery).map { timeline =&gt;</p>
+<blockquote>
+<div><p>thrift.GetTimelineResponse(Some(timeline.toThrift))</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>case Throw(e) =&gt; Future.value(TimelineRanker.toTimelineErrorThriftResponse(e))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def getRecycledTweetCandidates(</dt><dd><p>thriftQueries: Seq[thrift.RecapQuery]</p>
+</dd>
+<dt>): Future[Seq[thrift.GetCandidateTweetsResponse]] = {</dt><dd><dl>
+<dt>Future.collect(</dt><dd><dl>
+<dt>thriftQueries.map { thriftQuery =&gt;</dt><dd><dl>
+<dt>Try(RecapQuery.fromThrift(thriftQuery)) match {</dt><dd><dl>
+<dt>case Return(query) =&gt;</dt><dd><dl>
+<dt>observeAndValidate(</dt><dd><p>query,
+Seq(query.userId),
+getInNetworkTweetCandidatesStats,
+TimelineRanker.exceptionHandler</p>
+</dd>
+<dt>) { validatedQuery =&gt;</dt><dd><dl class="simple">
+<dt>Future(queryParamInitializer(validatedQuery)).flatten.liftToTry.flatMap {</dt><dd><p>case Return(q) =&gt; inNetworkTweetRepository.get(q).map(_.toThrift)
+case Throw(e) =&gt; Future.value(TimelineRanker.toErrorThriftResponse(e))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>case Throw(e) =&gt; Future.value(TimelineRanker.toErrorThriftResponse(e))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def hydrateTweetCandidates(</dt><dd><p>thriftQueries: Seq[thrift.RecapHydrationQuery]</p>
+</dd>
+<dt>): Future[Seq[thrift.GetCandidateTweetsResponse]] = {</dt><dd><dl>
+<dt>Future.collect(</dt><dd><dl>
+<dt>thriftQueries.map { thriftQuery =&gt;</dt><dd><dl>
+<dt>Try(RecapQuery.fromThrift(thriftQuery)) match {</dt><dd><dl>
+<dt>case Return(query) =&gt;</dt><dd><dl>
+<dt>observeAndValidate(</dt><dd><p>query,
+Seq(query.userId),
+hydrateTweetCandidatesStats,
+TimelineRanker.exceptionHandler</p>
+</dd>
+<dt>) { validatedQuery =&gt;</dt><dd><dl class="simple">
+<dt>Future(queryParamInitializer(validatedQuery)).flatten.liftToTry.flatMap {</dt><dd><p>case Return(q) =&gt; recapHydrationRepository.hydrate(q).map(_.toThrift)
+case Throw(e) =&gt; Future.value(TimelineRanker.toErrorThriftResponse(e))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>case Throw(e) =&gt; Future.value(TimelineRanker.toErrorThriftResponse(e))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def getRecapCandidatesFromAuthors(</dt><dd><p>thriftQueries: Seq[thrift.RecapQuery]</p>
+</dd>
+<dt>): Future[Seq[thrift.GetCandidateTweetsResponse]] = {</dt><dd><dl>
+<dt>Future.collect(</dt><dd><dl>
+<dt>thriftQueries.map { thriftQuery =&gt;</dt><dd><dl>
+<dt>Try(RecapQuery.fromThrift(thriftQuery)) match {</dt><dd><dl>
+<dt>case Return(query) =&gt;</dt><dd><dl>
+<dt>observeAndValidate(</dt><dd><p>query,
+Seq(query.userId),
+getRecapCandidatesFromAuthorsStats,
+TimelineRanker.exceptionHandler</p>
+</dd>
+<dt>) { validatedQuery =&gt;</dt><dd><dl class="simple">
+<dt>Future(queryParamInitializer(validatedQuery)).flatten.liftToTry.flatMap {</dt><dd><p>case Return(q) =&gt; recapAuthorRepository.get(q).map(_.toThrift)
+case Throw(e) =&gt; Future.value(TimelineRanker.toErrorThriftResponse(e))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>case Throw(e) =&gt; Future.value(TimelineRanker.toErrorThriftResponse(e))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def getEntityTweetCandidates(</dt><dd><p>thriftQueries: Seq[thrift.EntityTweetsQuery]</p>
+</dd>
+<dt>): Future[Seq[thrift.GetCandidateTweetsResponse]] = {</dt><dd><dl>
+<dt>Future.collect(</dt><dd><dl>
+<dt>thriftQueries.map { thriftQuery =&gt;</dt><dd><dl>
+<dt>Try(RecapQuery.fromThrift(thriftQuery)) match {</dt><dd><dl>
+<dt>case Return(query) =&gt;</dt><dd><dl>
+<dt>observeAndValidate(</dt><dd><p>query,
+Seq(query.userId),
+getEntityTweetCandidatesStats,
+TimelineRanker.exceptionHandler</p>
+</dd>
+<dt>) { validatedQuery =&gt;</dt><dd><dl class="simple">
+<dt>Future(queryParamInitializer(validatedQuery)).flatten.liftToTry.flatMap {</dt><dd><p>case Return(q) =&gt; entityTweetsRepository.get(q).map(_.toThrift)
+case Throw(e) =&gt; Future.value(TimelineRanker.toErrorThriftResponse(e))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>case Throw(e) =&gt; Future.value(TimelineRanker.toErrorThriftResponse(e))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def getUtegLikedByTweetCandidates(</dt><dd><p>thriftQueries: Seq[thrift.UtegLikedByTweetsQuery]</p>
+</dd>
+<dt>): Future[Seq[thrift.GetCandidateTweetsResponse]] = {</dt><dd><dl>
+<dt>Future.collect(</dt><dd><dl>
+<dt>thriftQueries.map { thriftQuery =&gt;</dt><dd><dl>
+<dt>Try(RecapQuery.fromThrift(thriftQuery)) match {</dt><dd><dl>
+<dt>case Return(query) =&gt;</dt><dd><dl>
+<dt>observeAndValidate(</dt><dd><p>query,
+Seq(query.userId),
+getUtegLikedByTweetCandidatesStats,
+TimelineRanker.exceptionHandler</p>
+</dd>
+<dt>) { validatedQuery =&gt;</dt><dd><dl class="simple">
+<dt>Future(queryParamInitializer(validatedQuery)).flatten.liftToTry.flatMap {</dt><dd><p>case Return(q) =&gt; utegLikedByTweetsRepository.get(q).map(_.toThrift)
+case Throw(e) =&gt; Future.value(TimelineRanker.toErrorThriftResponse(e))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>case Throw(e) =&gt; Future.value(TimelineRanker.toErrorThriftResponse(e))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/timelineranker/server/src/main/scala/com/twitter/timelineranker/server/TimelineRanker.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

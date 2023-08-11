@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../" id="documentation_options" src="../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.simclusters_v2.scalding.evaluation</p>
+<p>import com.twitter.core_workflows.user_model.thriftscala.CondensedUserState
+import com.twitter.core_workflows.user_model.thriftscala.UserState
+import com.twitter.pluck.source.core_workflows.user_model.CondensedUserStateScalaDataset
+import com.twitter.scalding._
+import com.twitter.scalding.source.TypedText
+import com.twitter.scalding_internal.dalv2.DAL
+import com.twitter.scalding_internal.job.TwitterExecutionApp
+import com.twitter.simclusters_v2.thriftscala.CandidateTweets
+import com.twitter.simclusters_v2.thriftscala.ReferenceTweets
+import scala.util.Random</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Helper functions to provide user samples by sampling across user states.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>object UserStateUserSampler {</dt><dd><dl>
+<dt>def getSampleUsersByUserState(</dt><dd><p>userStateSource: TypedPipe[CondensedUserState],
+validStates: Seq[UserState],
+samplePercentage: Double</p>
+</dd>
+<dt>): TypedPipe[(UserState, Long)] = {</dt><dd><p>assert(samplePercentage &gt;= 0 &amp;&amp; samplePercentage &lt;= 1)
+val validStateSet = validStates.toSet</p>
+<dl>
+<dt>userStateSource</dt><dd><dl class="simple">
+<dt>.collect {</dt><dd><dl class="simple">
+<dt>case data if data.userState.isDefined &amp;&amp; validStateSet.contains(data.userState.get) =&gt;</dt><dd><p>(data.userState.get, data.uid)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+.filter(_ =&gt; Random.nextDouble() &lt;= samplePercentage)
+.forceToDisk</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Given a list of string corresponding to user states, convert them to the UserState type.</p></li>
+<li><p>If the input is empty, default to return all available user states</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>def parseUserStates(strStates: Seq[String]): Seq[UserState] = {</dt><dd><dl>
+<dt>if (strStates.isEmpty) {</dt><dd><p>UserState.list</p>
+</dd>
+<dt>} else {</dt><dd><dl>
+<dt>strStates.map { str =&gt;</dt><dd><dl>
+<dt>UserState</dt><dd><dl>
+<dt>.valueOf(str).getOrElse(</dt><dd><dl class="simple">
+<dt>throw new IllegalArgumentException(</dt><dd><p>s”Input user_states $str is invalid. Valid states are: “ + UserState.list</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>A variation of the evaluation base where target users are sampled by user states.</p></li>
+<li><p>For each user state of interest (e.x. HEAVY_TWEETER), we run a separate evaluation call, and</p></li>
+<li><p>output the evaluation results per user state. This is helpful when we want to horizontally</p></li>
+<li><p>compare how users in different user states respond to the candidate tweets.</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>trait UserStateBasedEvaluationExecutionBase</dt><dd><blockquote>
+<div><p>extends CandidateEvaluationBase
+with TwitterExecutionApp {</p>
+</div></blockquote>
+<p>def referenceTweets: TypedPipe[ReferenceTweets]
+def candidateTweets: TypedPipe[CandidateTweets]</p>
+<dl>
+<dt>override def job: Execution[Unit] = {</dt><dd><dl>
+<dt>Execution.withId { implicit uniqueId =&gt;</dt><dd><dl>
+<dt>Execution.withArgs { args =&gt;</dt><dd><dl class="simple">
+<dt>implicit val dateRange: DateRange =</dt><dd><p>DateRange.parse(args.list(“date”))(DateOps.UTC, DateParser.default)</p>
+</dd>
+</dl>
+<p>val outputRootDir = args(“outputDir”)
+val userStates: Seq[UserState] =</p>
+<blockquote>
+<div><p>UserStateUserSampler.parseUserStates(args.list(“user_states”))</p>
+</div></blockquote>
+<p>val sampleRate = args.double(“sample_rate”)</p>
+<p>// For each user state we are interested in, run separate executions and write
+// the output into individual sub directories
+val userStateSource = DAL.read(CondensedUserStateScalaDataset).toTypedPipe
+val userIdsByState =</p>
+<blockquote>
+<div><p>UserStateUserSampler.getSampleUsersByUserState(userStateSource, userStates, sampleRate)</p>
+</div></blockquote>
+<dl>
+<dt>val executionsPerUserState = userStates.map { userState =&gt;</dt><dd><p>val sampleUsers = userIdsByState.collect { case data if data._1 == userState =&gt; data._2 }
+val outputPath = outputRootDir + “/” + userState + “/”</p>
+<dl class="simple">
+<dt>super</dt><dd><p>.runSampledEvaluation(sampleUsers, referenceTweets, candidateTweets)
+.writeExecution(TypedText.csv(outputPath))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+// Run evaluation for each user state in parallel
+Execution.sequence(executionsPerUserState).unit</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>A basic flow for evaluating the quality of a set of candidate tweets, typically generated by an</p></li>
+<li><p>algorithm (ex. SimClusters), by comparing its engagement rates against a set of reference tweets</p></li>
+<li><p>The job goes through the following steps:</p></li>
+<li><ol class="arabic simple">
+<li><p>Generate a group of target users on which we measure tweet engagements</p></li>
+</ol>
+</li>
+<li><ol class="arabic simple" start="2">
+<li><p>Collect tweets impressed by these users and their engagements on tweets from a labeled</p></li>
+</ol>
+</li>
+<li><p>tweet source (ex. Home Timeline engagement data), and form a reference set</p></li>
+<li><ol class="arabic simple" start="3">
+<li><p>For each candidate tweet, collect the engagement rates from the reference set</p></li>
+</ol>
+</li>
+<li><ol class="arabic simple" start="4">
+<li><p>Run evaluation calculations (ex. percentage of intersection, engagement rate, etc)</p></li>
+</ol>
+</li>
+<li></li>
+<li><p>Each sub class is expected to provide 3 sets of data sources, which are the sample users,</p></li>
+<li><p>candidate tweet sources, and reference tweet sources.</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+<dt>trait CandidateEvaluationBase {</dt><dd><dl class="simple">
+<dt>private def getSampledReferenceTweets(</dt><dd><p>referenceTweetEngagements: TypedPipe[ReferenceTweets],
+sampleUsers: TypedPipe[Long]</p>
+</dd>
+<dt>): TypedPipe[ReferenceTweets] = {</dt><dd><dl class="simple">
+<dt>referenceTweetEngagements</dt><dd><p>.groupBy(_.targetUserId)
+.join(sampleUsers.asKeys)
+.map { case (targetUserId, (referenceEngagements, _)) =&gt; referenceEngagements }</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private def getSampledCandidateTweets(</dt><dd><p>candidateTweets: TypedPipe[CandidateTweets],
+sampleUsers: TypedPipe[Long]</p>
+</dd>
+<dt>): TypedPipe[CandidateTweets] = {</dt><dd><dl class="simple">
+<dt>candidateTweets</dt><dd><p>.groupBy(_.targetUserId)
+.join(sampleUsers.asKeys)
+.map { case (_, (tweets, _)) =&gt; tweets }</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Evaluation function, should be overridden by implementing sub classes to suit individual</p></li>
+<li><p>objectives, such as like engagement rates, CRT, etc.</p></li>
+<li><p>&#64;param sampledReference</p></li>
+<li><p>&#64;param sampledCandidate</p></li>
+</ul>
+<p><a href="#id9"><span class="problematic" id="id10">*</span></a>/</p>
+</dd>
+<dt>def evaluateResults(</dt><dd><p>sampledReference: TypedPipe[ReferenceTweets],
+sampledCandidate: TypedPipe[CandidateTweets]</p>
+</dd>
+</dl>
+<p>): TypedPipe[String]</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Given a list of target users, the reference tweet set, and the candidate tweet set,</p></li>
+<li><p>calculate the engagement rates on the reference set and the candidate set by these users.</p></li>
+<li><p>The evaluation result should be converted into an itemized format</p></li>
+<li><p>these users.</p></li>
+<li><p>&#64;param referenceTweets</p></li>
+<li><p>&#64;param candidateTweets</p></li>
+<li><p>&#64;return</p></li>
+</ul>
+<p><a href="#id11"><span class="problematic" id="id12">*</span></a>/</p>
+</dd>
+<dt>def runSampledEvaluation(</dt><dd><p>targetUserSamples: TypedPipe[Long],
+referenceTweets: TypedPipe[ReferenceTweets],
+candidateTweets: TypedPipe[CandidateTweets]</p>
+</dd>
+<dt>): TypedPipe[String] = {</dt><dd><p>val sampledCandidate = getSampledCandidateTweets(candidateTweets, targetUserSamples)
+val referencePerUser = getSampledReferenceTweets(referenceTweets, targetUserSamples)</p>
+<p>evaluateResults(referencePerUser, sampledCandidate)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../_sources/src/scala/com/twitter/simclusters_v2/scalding/evaluation/CandidateEvaluationBase.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

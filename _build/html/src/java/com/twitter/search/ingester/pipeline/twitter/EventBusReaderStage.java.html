@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../" id="documentation_options" src="../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.ingester.pipeline.twitter;</p>
+<p>import java.util.concurrent.TimeUnit;</p>
+<p>import javax.naming.NamingException;</p>
+<p>import scala.runtime.BoxedUnit;</p>
+<p>import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Preconditions;</p>
+<p>import org.apache.commons.pipeline.Pipeline;
+import org.apache.commons.pipeline.StageDriver;
+import org.apache.thrift.TBase;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;</p>
+<p>import com.twitter.eventbus.client.EventBusSubscriber;
+import com.twitter.search.common.decider.SearchDecider;
+import com.twitter.search.common.metrics.SearchCounter;
+import com.twitter.search.ingester.model.PromiseContainer;
+import com.twitter.search.ingester.pipeline.util.PipelineUtil;
+import com.twitter.util.Await;
+import com.twitter.util.Function;
+import com.twitter.util.Future;
+import com.twitter.util.Promise;</p>
+<dl>
+<dt>public abstract class EventBusReaderStage&lt;T extends TBase&lt;?, ?&gt;&gt; extends TwitterBaseStage</dt><dd><blockquote>
+<div><p>&lt;Void, Void&gt; {</p>
+</div></blockquote>
+<p>private static final Logger LOG = LoggerFactory.getLogger(EventBusReaderStage.class);</p>
+<p>private static final int DECIDER_POLL_INTERVAL_IN_SECS = 5;</p>
+<p>private SearchCounter totalEventsCount;</p>
+<p>private String environment = null;
+private String eventBusReaderEnabledDeciderKey;</p>
+<p>private StageDriver stageDriver;</p>
+<p>private EventBusSubscriber&lt;T&gt; eventBusSubscriber = null;</p>
+<p>// XML configuration options
+private String eventBusSubscriberId;
+private int maxConcurrentEvents;
+private SearchDecider searchDecider;</p>
+<p>protected EventBusReaderStage() {
+}</p>
+<p>&#64;Override
+protected void initStats() {</p>
+<blockquote>
+<div><p>super.initStats();
+totalEventsCount = SearchCounter.export(getStageNamePrefix() + “_total_events_count”);</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;Override
+protected void doInnerPreprocess() throws NamingException {</p>
+<blockquote>
+<div><p>searchDecider = new SearchDecider(decider);</p>
+<dl class="simple">
+<dt>if (stageDriver == null) {</dt><dd><p>stageDriver = ((Pipeline) stageContext).getStageDriver(this);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>eventBusReaderEnabledDeciderKey = String.format(</dt><dd><p>getDeciderKeyTemplate(),
+earlybirdCluster.getNameForStats(),
+environment);</p>
+</dd>
+</dl>
+<p>PipelineUtil.feedStartObjectToStage(this);</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>protected abstract PromiseContainer&lt;BoxedUnit, T&gt; eventAndPromiseToContainer(</dt><dd><p>T incomingEvent,
+Promise&lt;BoxedUnit&gt; p);</p>
+</dd>
+<dt>private Future&lt;BoxedUnit&gt; processEvent(T incomingEvent) {</dt><dd><p>Promise&lt;BoxedUnit&gt; p = new Promise&lt;&gt;();
+PromiseContainer&lt;BoxedUnit, T&gt; promiseContainer = eventAndPromiseToContainer(incomingEvent, p);
+totalEventsCount.increment();
+emitAndCount(promiseContainer);
+return p;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private void closeEventBusSubscriber() throws Exception {</dt><dd><dl class="simple">
+<dt>if (eventBusSubscriber != null) {</dt><dd><p>Await.result(eventBusSubscriber.close());
+eventBusSubscriber = null;</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>protected abstract Class&lt;T&gt; getThriftClass();</p>
+<p>protected abstract String getDeciderKeyTemplate();</p>
+<dl>
+<dt>private void startUpEventBusSubscriber() {</dt><dd><p>// Start reading from eventbus if it is null
+if (eventBusSubscriber == null) {</p>
+<blockquote>
+<div><p>//noinspection unchecked
+eventBusSubscriber = wireModule.createEventBusSubscriber(</p>
+<blockquote>
+<div><p>Function.func(this::processEvent),
+getThriftClass(),
+eventBusSubscriberId,
+maxConcurrentEvents);</p>
+</div></blockquote>
+</div></blockquote>
+<p>}
+Preconditions.checkNotNull(eventBusSubscriber);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>This is only kicked off once with a start object which is ignored. Then we loop</p></li>
+<li><p>checking the decider. If it turns off then we close the eventbus reader,</p></li>
+<li><p>and if it turns on, then we create a new eventbus reader.</p></li>
+<li></li>
+<li><p>&#64;param obj ignored</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+</dl>
+<p>&#64;Override
+public void innerProcess(Object obj) {</p>
+<blockquote>
+<div><p>boolean interrupted = false;</p>
+<p>Preconditions.checkNotNull(“The environment is not set.”, environment);</p>
+<p>int previousEventBusReaderEnabledAvailability = 0;
+while (stageDriver.getState() == StageDriver.State.RUNNING) {</p>
+<blockquote>
+<div><dl>
+<dt>int eventBusReaderEnabledAvailability =</dt><dd><p>searchDecider.getAvailability(eventBusReaderEnabledDeciderKey);</p>
+</dd>
+<dt>if (previousEventBusReaderEnabledAvailability != eventBusReaderEnabledAvailability) {</dt><dd><dl class="simple">
+<dt>LOG.info(“EventBusReaderStage availability decider changed from {} to {}.”,</dt><dd><p>previousEventBusReaderEnabledAvailability, eventBusReaderEnabledAvailability);</p>
+</dd>
+</dl>
+<p>// If the availability is 0 then disable the reader, otherwise read from EventBus.
+if (eventBusReaderEnabledAvailability == 0) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>try {</dt><dd><p>closeEventBusSubscriber();</p>
+</dd>
+<dt>} catch (Exception e) {</dt><dd><p>LOG.warn(“Exception while closing eventbus subscriber”, e);</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>startUpEventBusSubscriber();</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}
+previousEventBusReaderEnabledAvailability = eventBusReaderEnabledAvailability;</p>
+<dl class="simple">
+<dt>try {</dt><dd><p>clock.waitFor(TimeUnit.SECONDS.toMillis(DECIDER_POLL_INTERVAL_IN_SECS));</p>
+</dd>
+<dt>} catch (InterruptedException e) {</dt><dd><p>interrupted = true;</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}
+LOG.info(“StageDriver is not RUNNING anymore, closing EventBus subscriber”);
+try {</p>
+<blockquote>
+<div><p>closeEventBusSubscriber();</p>
+</div></blockquote>
+<dl>
+<dt>} catch (InterruptedException e) {</dt><dd><p>interrupted = true;</p>
+</dd>
+<dt>} catch (Exception e) {</dt><dd><p>LOG.warn(“Exception while closing eventbus subscriber”, e);</p>
+</dd>
+<dt>} finally {</dt><dd><dl class="simple">
+<dt>if (interrupted) {</dt><dd><p>Thread.currentThread().interrupt();</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>// This is needed to set the value from XML config.
+public void setEventBusSubscriberId(String eventBusSubscriberId) {</p>
+<blockquote>
+<div><p>this.eventBusSubscriberId = eventBusSubscriberId;
+LOG.info(“EventBusReaderStage with eventBusSubscriberId: {}”, eventBusSubscriberId);</p>
+</div></blockquote>
+<p>}</p>
+<p>// This is needed to set the value from XML config.
+public void setEnvironment(String environment) {</p>
+<blockquote>
+<div><p>this.environment = environment;
+LOG.info(“Ingester is running in {}”, environment);</p>
+</div></blockquote>
+<p>}</p>
+<p>// This is needed to set the value from XML config.
+public void setMaxConcurrentEvents(int maxConcurrentEvents) {</p>
+<blockquote>
+<div><p>this.maxConcurrentEvents = maxConcurrentEvents;</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;VisibleForTesting
+public void setStageDriver(StageDriver stageDriver) {</p>
+<blockquote>
+<div><p>this.stageDriver = stageDriver;</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../_sources/src/java/com/twitter/search/ingester/pipeline/twitter/EventBusReaderStage.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

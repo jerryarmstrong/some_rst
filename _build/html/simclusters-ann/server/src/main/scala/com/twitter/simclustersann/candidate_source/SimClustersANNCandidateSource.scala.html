@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.simclustersann.candidate_source</p>
+<p>import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.frigate.common.base.Stats
+import com.twitter.simclusters_v2.common.ClusterId
+import com.twitter.simclusters_v2.common.SimClustersEmbedding
+import com.twitter.simclusters_v2.common.TweetId
+import com.twitter.simclusters_v2.thriftscala.SimClustersEmbeddingId
+import com.twitter.simclustersann.thriftscala.SimClustersANNConfig
+import com.twitter.simclustersann.thriftscala.SimClustersANNTweetCandidate
+import com.twitter.storehaus.ReadableStore
+import com.twitter.util.Future</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>This store looks for tweets whose similarity is close to a Source SimClustersEmbeddingId.</p></li>
+<li></li>
+<li><p>Approximate cosine similarity is the core algorithm to drive this store.</p></li>
+<li></li>
+<li><p>Step 1 - 4 are in “fetchCandidates” method.</p></li>
+<li><ol class="arabic simple">
+<li><p>Retrieve the SimClusters Embedding by the SimClustersEmbeddingId</p></li>
+</ol>
+</li>
+<li><ol class="arabic simple" start="2">
+<li><p>Fetch top N clusters’ top tweets from the clusterTweetCandidatesStore (TopTweetsPerCluster index).</p></li>
+</ol>
+</li>
+<li><ol class="arabic simple" start="3">
+<li><p>Calculate all the tweet candidates’ dot-product or approximate cosine similarity to source tweets.</p></li>
+</ol>
+</li>
+<li><ol class="arabic simple" start="4">
+<li><p>Take top M tweet candidates by the step 3’s score</p></li>
+</ol>
+</li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>case class SimClustersANNCandidateSource(</dt><dd><p>approximateCosineSimilarity: ApproximateCosineSimilarity,
+clusterTweetCandidatesStore: ReadableStore[ClusterId, Seq[(TweetId, Double)]],
+simClustersEmbeddingStore: ReadableStore[SimClustersEmbeddingId, SimClustersEmbedding],
+statsReceiver: StatsReceiver) {
+private val stats = statsReceiver.scope(this.getClass.getName)
+private val fetchSourceEmbeddingStat = stats.scope(“fetchSourceEmbedding”)
+private val fetchCandidatesStat = stats.scope(“fetchCandidates”)
+private val candidateScoresStat = stats.stat(“candidateScoresMap”)</p>
+<dl>
+<dt>def get(</dt><dd><p>query: SimClustersANNCandidateSource.Query</p>
+</dd>
+<dt>): Future[Option[Seq[SimClustersANNTweetCandidate]]] = {</dt><dd><p>val sourceEmbeddingId = query.sourceEmbeddingId
+val config = query.config
+for {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>maybeSimClustersEmbedding &lt;- Stats.track(fetchSourceEmbeddingStat) {</dt><dd><p>simClustersEmbeddingStore.get(query.sourceEmbeddingId)</p>
+</dd>
+</dl>
+<p>}
+maybeFilteredCandidates &lt;- maybeSimClustersEmbedding match {</p>
+<blockquote>
+<div><dl>
+<dt>case Some(sourceEmbedding) =&gt;</dt><dd><dl>
+<dt>for {</dt><dd><dl class="simple">
+<dt>candidates &lt;- Stats.trackSeq(fetchCandidatesStat) {</dt><dd><p>fetchCandidates(sourceEmbeddingId, sourceEmbedding, config)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>} yield {</dt><dd><dl class="simple">
+<dt>fetchCandidatesStat</dt><dd><dl class="simple">
+<dt>.stat(sourceEmbeddingId.embeddingType.name, sourceEmbeddingId.modelVersion.name).add(</dt><dd><p>candidates.size)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>Some(candidates)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>case None =&gt;</dt><dd><dl class="simple">
+<dt>fetchCandidatesStat</dt><dd><p>.stat(sourceEmbeddingId.embeddingType.name, sourceEmbeddingId.modelVersion.name).add(0)</p>
+</dd>
+</dl>
+<p>Future.None</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} yield {</dt><dd><p>maybeFilteredCandidates</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private def fetchCandidates(</dt><dd><p>sourceEmbeddingId: SimClustersEmbeddingId,
+sourceEmbedding: SimClustersEmbedding,
+config: SimClustersANNConfig</p>
+</dd>
+</dl>
+<p>): Future[Seq[SimClustersANNTweetCandidate]] = {</p>
+<blockquote>
+<div><dl>
+<dt>val clusterIds =</dt><dd><dl class="simple">
+<dt>sourceEmbedding</dt><dd><p>.truncate(config.maxScanClusters).getClusterIds()
+.toSet</p>
+</dd>
+</dl>
+</dd>
+<dt>Future</dt><dd><dl>
+<dt>.collect {</dt><dd><p>clusterTweetCandidatesStore.multiGet(clusterIds)</p>
+</dd>
+<dt>}.map { clusterTweetsMap =&gt;</dt><dd><dl>
+<dt>approximateCosineSimilarity(</dt><dd><p>sourceEmbedding = sourceEmbedding,
+sourceEmbeddingId = sourceEmbeddingId,
+config = config,
+candidateScoresStat = (i: Int) =&gt; candidateScoresStat.add(i),
+clusterTweetsMap = clusterTweetsMap</p>
+</dd>
+<dt>).map {</dt><dd><dl>
+<dt>case (tweetId, score) =&gt;</dt><dd><dl class="simple">
+<dt>SimClustersANNTweetCandidate(</dt><dd><p>tweetId = tweetId,
+score = score</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>object SimClustersANNCandidateSource {</dt><dd><dl class="simple">
+<dt>case class Query(</dt><dd><p>sourceEmbeddingId: SimClustersEmbeddingId,
+config: SimClustersANNConfig)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/simclusters-ann/server/src/main/scala/com/twitter/simclustersann/candidate_source/SimClustersANNCandidateSource.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

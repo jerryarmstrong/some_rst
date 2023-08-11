@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../" id="documentation_options" src="../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.simclusters_v2.scalding.embedding.common</p>
+<p>import com.twitter.scalding.{Args, DateRange, Execution, TypedPipe, UniqueID}
+import com.twitter.simclusters_v2.common.ModelVersions
+import com.twitter.simclusters_v2.scalding.common.matrix.{SparseMatrix, SparseRowMatrix}
+import com.twitter.simclusters_v2.scalding.embedding.common.EmbeddingUtil._
+import com.twitter.simclusters_v2.thriftscala._
+import java.util.TimeZone</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>This is the base job for computing SimClusters Embedding for any Noun Type on Twitter, such as</p></li>
+<li><p>Users, Tweets, Topics, Entities, Channels, etc.</p></li>
+<li></li>
+<li><p>The most straightforward way to understand the SimClusters Embeddings for a Noun is that it is</p></li>
+<li><p>a weighted sum of SimClusters InterestedIn vectors from users who are interested in the Noun.</p></li>
+<li><p>So for a noun type, you only need to define <cite>prepareNounToUserMatrix</cite> to pass in a matrix which</p></li>
+<li><p>represents how much each user is interested in this noun.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+</dl>
+<p>trait SimClustersEmbeddingBaseJob[NounType] {</p>
+<blockquote>
+<div><p>def numClustersPerNoun: Int</p>
+<p>def numNounsPerClusters: Int</p>
+<p>def thresholdForEmbeddingScores: Double</p>
+<p>def numReducersOpt: Option[Int] = None</p>
+<dl class="simple">
+<dt>def prepareNounToUserMatrix(</dt><dd><p>implicit dateRange: DateRange,
+timeZone: TimeZone,
+uniqueID: UniqueID</p>
+</dd>
+</dl>
+<p>): SparseMatrix[NounType, UserId, Double]</p>
+<dl class="simple">
+<dt>def prepareUserToClusterMatrix(</dt><dd><p>implicit dateRange: DateRange,
+timeZone: TimeZone,
+uniqueID: UniqueID</p>
+</dd>
+</dl>
+<p>): SparseRowMatrix[UserId, ClusterId, Double]</p>
+<dl class="simple">
+<dt>def writeNounToClustersIndex(</dt><dd><p>output: TypedPipe[(NounType, Seq[(ClusterId, Double)])]</p>
+</dd>
+<dt>)(</dt><dd><p>implicit dateRange: DateRange,
+timeZone: TimeZone,
+uniqueID: UniqueID</p>
+</dd>
+</dl>
+<p>): Execution[Unit]</p>
+<dl class="simple">
+<dt>def writeClusterToNounsIndex(</dt><dd><p>output: TypedPipe[(ClusterId, Seq[(NounType, Double)])]</p>
+</dd>
+<dt>)(</dt><dd><p>implicit dateRange: DateRange,
+timeZone: TimeZone,
+uniqueID: UniqueID</p>
+</dd>
+</dl>
+<p>): Execution[Unit]</p>
+<dl class="simple">
+<dt>def runOnDateRange(</dt><dd><p>args: Args</p>
+</dd>
+<dt>)(</dt><dd><p>implicit dateRange: DateRange,
+timeZone: TimeZone,
+uniqueID: UniqueID</p>
+</dd>
+</dl>
+<p>): Execution[Unit] = {</p>
+<blockquote>
+<div><dl>
+<dt>val embeddingMatrix: SparseRowMatrix[NounType, ClusterId, Double] =</dt><dd><dl>
+<dt>prepareNounToUserMatrix.rowL2Normalize</dt><dd><dl class="simple">
+<dt>.multiplySkinnySparseRowMatrix(</dt><dd><p>prepareUserToClusterMatrix.colL2Normalize,
+numReducersOpt</p>
+</dd>
+</dl>
+<p>)
+.filter((_, _, v) =&gt; v &gt; thresholdForEmbeddingScores)</p>
+</dd>
+</dl>
+</dd>
+<dt>Execution</dt><dd><dl>
+<dt>.zip(</dt><dd><dl class="simple">
+<dt>writeNounToClustersIndex(</dt><dd><p>embeddingMatrix.sortWithTakePerRow(numClustersPerNoun)(Ordering.by(-_._2))</p>
+</dd>
+</dl>
+<p>),
+writeClusterToNounsIndex(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>embeddingMatrix.sortWithTakePerCol(numNounsPerClusters)(</dt><dd><p>Ordering.by(-_._2)</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>)
+.unit</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>object SimClustersEmbeddingJob {</p>
+<blockquote>
+<div><dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Multiply the [user, cluster] and [user, T] matrices, and return the cross product.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>def computeEmbeddings[T](</dt><dd><p>simClustersSource: TypedPipe[(UserId, ClustersUserIsInterestedIn)],
+normalizedInputMatrix: TypedPipe[(UserId, (T, Double))],
+scoreExtractors: Seq[UserToInterestedInClusterScores =&gt; (Double, ScoreType.ScoreType)],
+modelVersion: ModelVersion,
+toSimClustersEmbeddingId: (T, ScoreType.ScoreType) =&gt; SimClustersEmbeddingId,
+numReducers: Option[Int] = None</p>
+</dd>
+<dt>): TypedPipe[(SimClustersEmbeddingId, (ClusterId, Double))] = {</dt><dd><dl class="simple">
+<dt>val userSimClustersMatrix =</dt><dd><p>getUserSimClustersMatrix(simClustersSource, scoreExtractors, modelVersion)</p>
+</dd>
+<dt>multiplyMatrices(</dt><dd><p>normalizedInputMatrix,
+userSimClustersMatrix,
+toSimClustersEmbeddingId,
+numReducers)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def getL2Norm[T](</dt><dd><p>inputMatrix: TypedPipe[(T, (UserId, Double))],
+numReducers: Option[Int] = None</p>
+</dd>
+<dt>)(</dt><dd><p>implicit ordering: Ordering[T]</p>
+</dd>
+<dt>): TypedPipe[(T, Double)] = {</dt><dd><dl>
+<dt>val l2Norm = inputMatrix</dt><dd><dl class="simple">
+<dt>.mapValues {</dt><dd><p>case (_, score) =&gt; score * score</p>
+</dd>
+</dl>
+<p>}
+.sumByKey
+.mapValues(math.sqrt)</p>
+</dd>
+<dt>numReducers match {</dt><dd><p>case Some(reducers) =&gt; l2Norm.withReducers(reducers)
+case _ =&gt; l2Norm</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def getNormalizedTransposeInputMatrix[T](</dt><dd><p>inputMatrix: TypedPipe[(T, (UserId, Double))],
+numReducers: Option[Int] = None</p>
+</dd>
+<dt>)(</dt><dd><p>implicit ordering: Ordering[T]</p>
+</dd>
+<dt>): TypedPipe[(UserId, (T, Double))] = {</dt><dd><p>val inputWithNorm = inputMatrix.join(getL2Norm(inputMatrix, numReducers))</p>
+<dl class="simple">
+<dt>(numReducers match {</dt><dd><p>case Some(reducers) =&gt; inputWithNorm.withReducers(reducers)
+case _ =&gt; inputWithNorm</p>
+</dd>
+<dt>}).map {</dt><dd><dl class="simple">
+<dt>case (inputId, ((userId, favScore), norm)) =&gt;</dt><dd><p>(userId, (inputId, favScore / norm))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Matrix multiplication with the ability to tune the reducer size for better performance</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+</dl>
+<p>&#64;Deprecated
+def legacyMultiplyMatrices[T](</p>
+<blockquote>
+<div><p>normalizedTransposeInputMatrix: TypedPipe[(UserId, (T, Double))],
+userSimClustersMatrix: TypedPipe[(UserId, Seq[(ClusterId, Double)])],
+numReducers: Int // Matrix multiplication is expensive. Use this to tune performance</p>
+</div></blockquote>
+<dl>
+<dt>)(</dt><dd><p>implicit ordering: Ordering[T]</p>
+</dd>
+<dt>): TypedPipe[((ClusterId, T), Double)] = {</dt><dd><dl>
+<dt>normalizedTransposeInputMatrix</dt><dd><p>.join(userSimClustersMatrix)
+.withReducers(numReducers)
+.flatMap {</p>
+<blockquote>
+<div><dl>
+<dt>case (_, ((inputId, score), clustersWithScores)) =&gt;</dt><dd><dl class="simple">
+<dt>clustersWithScores.map {</dt><dd><dl class="simple">
+<dt>case (clusterId, clusterScore) =&gt;</dt><dd><p>((clusterId, inputId), score * clusterScore)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}
+.sumByKey
+.withReducers(numReducers + 1) // +1 to distinguish this step from above in Dr. Scalding</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def multiplyMatrices[T](</dt><dd><p>normalizedTransposeInputMatrix: TypedPipe[(UserId, (T, Double))],
+userSimClustersMatrix: TypedPipe[(UserId, Seq[((ClusterId, ScoreType.ScoreType), Double)])],
+toSimClustersEmbeddingId: (T, ScoreType.ScoreType) =&gt; SimClustersEmbeddingId,
+numReducers: Option[Int] = None</p>
+</dd>
+<dt>): TypedPipe[(SimClustersEmbeddingId, (ClusterId, Double))] = {</dt><dd><dl class="simple">
+<dt>val inputJoinedWithSimClusters = numReducers match {</dt><dd><dl class="simple">
+<dt>case Some(reducers) =&gt;</dt><dd><dl class="simple">
+<dt>normalizedTransposeInputMatrix</dt><dd><p>.join(userSimClustersMatrix)
+.withReducers(reducers)</p>
+</dd>
+</dl>
+</dd>
+<dt>case _ =&gt;</dt><dd><p>normalizedTransposeInputMatrix.join(userSimClustersMatrix)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>val matrixMultiplicationResult = inputJoinedWithSimClusters.flatMap {</dt><dd><dl>
+<dt>case (_, ((inputId, inputScore), clustersWithScores)) =&gt;</dt><dd><dl class="simple">
+<dt>clustersWithScores.map {</dt><dd><dl class="simple">
+<dt>case ((clusterId, scoreType), clusterScore) =&gt;</dt><dd><p>((clusterId, toSimClustersEmbeddingId(inputId, scoreType)), inputScore * clusterScore)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}.sumByKey</p>
+<dl>
+<dt>(numReducers match {</dt><dd><dl class="simple">
+<dt>case Some(reducers) =&gt;</dt><dd><p>matrixMultiplicationResult.withReducers(reducers + 1)</p>
+</dd>
+</dl>
+<p>case _ =&gt; matrixMultiplicationResult</p>
+</dd>
+<dt>}).map {</dt><dd><dl class="simple">
+<dt>case ((clusterId, embeddingId), score) =&gt;</dt><dd><p>(embeddingId, (clusterId, score))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def getUserSimClustersMatrix(</dt><dd><p>simClustersSource: TypedPipe[(UserId, ClustersUserIsInterestedIn)],
+scoreExtractors: Seq[UserToInterestedInClusterScores =&gt; (Double, ScoreType.ScoreType)],
+modelVersion: ModelVersion</p>
+</dd>
+<dt>): TypedPipe[(UserId, Seq[((ClusterId, ScoreType.ScoreType), Double)])] = {</dt><dd><dl>
+<dt>simClustersSource.map {</dt><dd><dl>
+<dt>case (userId, clusters)</dt><dd><blockquote>
+<div><p>if ModelVersions.toModelVersion(clusters.knownForModelVersion) == modelVersion =&gt;</p>
+</div></blockquote>
+<dl>
+<dt>userId -&gt; clusters.clusterIdToScores.flatMap {</dt><dd><dl>
+<dt>case (clusterId, clusterScores) =&gt;</dt><dd><dl>
+<dt>scoreExtractors.map { scoreExtractor =&gt;</dt><dd><dl class="simple">
+<dt>scoreExtractor(clusterScores) match {</dt><dd><p>case (score, scoreType) =&gt; ((clusterId, scoreType), score)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}.toSeq</p>
+</dd>
+</dl>
+<p>case (userId, _) =&gt; userId -&gt; Nil</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def toReverseIndexSimClusterEmbedding(</dt><dd><p>embeddings: TypedPipe[(SimClustersEmbeddingId, (ClusterId, EmbeddingScore))],
+topK: Int</p>
+</dd>
+<dt>): TypedPipe[(SimClustersEmbeddingId, InternalIdEmbedding)] = {</dt><dd><dl>
+<dt>embeddings</dt><dd><dl>
+<dt>.map {</dt><dd><dl>
+<dt>case (embeddingId, (clusterId, score)) =&gt;</dt><dd><dl>
+<dt>(</dt><dd><dl class="simple">
+<dt>SimClustersEmbeddingId(</dt><dd><p>embeddingId.embeddingType,
+embeddingId.modelVersion,
+InternalId.ClusterId(clusterId)),</p>
+</dd>
+</dl>
+<p>(embeddingId.internalId, score))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}
+.group
+.sortedReverseTake(topK)(Ordering.by(_._2))
+.mapValues { topInternalIdsWithScore =&gt;</p>
+<blockquote>
+<div><dl class="simple">
+<dt>val internalIdsWithScore = topInternalIdsWithScore.map {</dt><dd><p>case (internalId, score) =&gt; InternalIdWithScore(internalId, score)</p>
+</dd>
+</dl>
+<p>}
+InternalIdEmbedding(internalIdsWithScore)</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../_sources/src/scala/com/twitter/simclusters_v2/scalding/embedding/common/SimClustersEmbeddingJob.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

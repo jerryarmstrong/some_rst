@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../" id="documentation_options" src="../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>from datetime import datetime
+from functools import partial
+import os</p>
+<p>from twitter.cortex.ml.embeddings.common.helpers import decode_str_or_unicode
+import twml
+from twml.trainers import DataRecordTrainer</p>
+<p>from ..libs.get_feat_config import get_feature_config_light_ranking, LABELS_LR
+from ..libs.graph_utils import get_trainable_variables
+from ..libs.group_metrics import (</p>
+<blockquote>
+<div><p>run_group_metrics_light_ranking,
+run_group_metrics_light_ranking_in_bq,</p>
+</div></blockquote>
+<p>)
+from ..libs.metric_fn_utils import get_metric_fn
+from ..libs.model_args import get_arg_parser_light_ranking
+from ..libs.model_utils import read_config
+from ..libs.warm_start_utils import get_feature_list_for_light_ranking
+from .model_pools_mlp import light_ranking_mlp_ngbdt</p>
+<p>import tensorflow.compat.v1 as tf
+from tensorflow.compat.v1 import logging</p>
+<p># checkstyle: noqa</p>
+<dl>
+<dt>def build_graph(</dt><dd><p>features, label, mode, params, config=None, run_light_ranking_group_metrics_in_bq=False</p>
+</dd>
+<dt>):</dt><dd><p>is_training = mode == tf.estimator.ModeKeys.TRAIN
+this_model_func = light_ranking_mlp_ngbdt
+model_output = this_model_func(features, is_training, params, label)</p>
+<p>logits = model_output[“output”]
+graph_output = {}
+# ——————————————————–
+#            define graph output dict
+# ——————————————————–
+if mode == tf.estimator.ModeKeys.PREDICT:</p>
+<blockquote>
+<div><p>loss = None
+output_label = “prediction”
+if params.task_name in LABELS_LR:</p>
+<blockquote>
+<div><p>output = tf.nn.sigmoid(logits)
+output = tf.clip_by_value(output, 0, 1)</p>
+<dl class="simple">
+<dt>if run_light_ranking_group_metrics_in_bq:</dt><dd><p>graph_output[“trace_id”] = features[“meta.trace_id”]
+graph_output[“target”] = features[“meta.ranking.weighted_oonc_model_score”]</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl class="simple">
+<dt>else:</dt><dd><p>raise ValueError(“Invalid Task Name !”)</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl>
+<dt>else:</dt><dd><p>output_label = “output”
+weights = tf.cast(features[“weights”], dtype=tf.float32, name=”RecordWeights”)</p>
+<dl>
+<dt>if params.task_name in LABELS_LR:</dt><dd><dl>
+<dt>if params.use_record_weight:</dt><dd><dl class="simple">
+<dt>weights = tf.clip_by_value(</dt><dd><p>1.0 / (1.0 + weights + params.smooth_weight), params.min_record_weight, 1.0</p>
+</dd>
+</dl>
+<p>)</p>
+<dl class="simple">
+<dt>loss = tf.reduce_sum(</dt><dd><p>tf.nn.sigmoid_cross_entropy_with_logits(labels=label, logits=logits) * weights</p>
+</dd>
+</dl>
+<p>) / (tf.reduce_sum(weights))</p>
+</dd>
+<dt>else:</dt><dd><p>loss = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(labels=label, logits=logits))</p>
+</dd>
+</dl>
+<p>output = tf.nn.sigmoid(logits)</p>
+</dd>
+<dt>else:</dt><dd><p>raise ValueError(“Invalid Task Name !”)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>train_op = None
+if mode == tf.estimator.ModeKeys.TRAIN:</p>
+<blockquote>
+<div><p># ——————————————————–
+#                get train_op
+# ——————————————————–
+optimizer = tf.train.GradientDescentOptimizer(learning_rate=params.learning_rate)
+update_ops = set(tf.get_collection(tf.GraphKeys.UPDATE_OPS))
+variables = get_trainable_variables(</p>
+<blockquote>
+<div><p>all_trainable_variables=tf.trainable_variables(), trainable_regexes=params.trainable_regexes</p>
+</div></blockquote>
+<p>)
+with tf.control_dependencies(update_ops):</p>
+<blockquote>
+<div><dl class="simple">
+<dt>train_op = twml.optimizers.optimize_loss(</dt><dd><p>loss=loss,
+variables=variables,
+global_step=tf.train.get_global_step(),
+optimizer=optimizer,
+learning_rate=params.learning_rate,
+learning_rate_decay_fn=twml.learning_rate_decay.get_learning_rate_decay_fn(params),</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+</div></blockquote>
+<p>graph_output[output_label] = output
+graph_output[“loss”] = loss
+graph_output[“train_op”] = train_op
+return graph_output</p>
+</dd>
+<dt>def get_params(args=None):</dt><dd><p>parser = get_arg_parser_light_ranking()
+if args is None:</p>
+<blockquote>
+<div><p>return parser.parse_args()</p>
+</div></blockquote>
+<dl class="simple">
+<dt>else:</dt><dd><p>return parser.parse_args(args)</p>
+</dd>
+</dl>
+</dd>
+<dt>def _main():</dt><dd><p>opt = get_params()
+logging.info(“parse is: “)
+logging.info(opt)</p>
+<p>feature_list = read_config(opt.feature_list).items()
+feature_config = get_feature_config_light_ranking(</p>
+<blockquote>
+<div><p>data_spec_path=opt.data_spec,
+feature_list_provided=feature_list,
+opt=opt,
+add_gbdt=opt.use_gbdt_features,
+run_light_ranking_group_metrics_in_bq=opt.run_light_ranking_group_metrics_in_bq,</p>
+</div></blockquote>
+<p>)
+feature_list_path = opt.feature_list</p>
+<p># ——————————————————–
+#               Create Trainer
+# ——————————————————–
+trainer = DataRecordTrainer(</p>
+<blockquote>
+<div><p>name=opt.model_trainer_name,
+params=opt,
+build_graph_fn=build_graph,
+save_dir=opt.save_dir,
+run_config=None,
+feature_config=feature_config,
+metric_fn=get_metric_fn(opt.task_name, use_stratify_metrics=False),</p>
+</div></blockquote>
+<p>)
+if opt.directly_export_best:</p>
+<blockquote>
+<div><p>logging.info(“Directly exporting the model without training”)</p>
+</div></blockquote>
+<dl>
+<dt>else:</dt><dd><p># —————————————————-
+#        Model Training &amp; Evaluation
+# —————————————————-
+eval_input_fn = trainer.get_eval_input_fn(repeat=False, shuffle=False)
+train_input_fn = trainer.get_train_input_fn(shuffle=True)</p>
+<dl class="simple">
+<dt>if opt.distributed or opt.num_workers is not None:</dt><dd><p>learn = trainer.train_and_evaluate</p>
+</dd>
+<dt>else:</dt><dd><p>learn = trainer.learn</p>
+</dd>
+</dl>
+<p>logging.info(“Training…”)
+start = datetime.now()</p>
+<p>early_stop_metric = “<a href="#id1"><span class="problematic" id="id2">rce_unweighted_</span></a>” + opt.task_name
+learn(</p>
+<blockquote>
+<div><p>early_stop_minimize=False,
+early_stop_metric=early_stop_metric,
+early_stop_patience=opt.early_stop_patience,
+early_stop_tolerance=opt.early_stop_tolerance,
+eval_input_fn=eval_input_fn,
+train_input_fn=train_input_fn,</p>
+</div></blockquote>
+<p>)</p>
+<p>end = datetime.now()
+logging.info(“Training time: “ + str(end - start))</p>
+<p>logging.info(“Exporting the models…”)</p>
+</dd>
+</dl>
+<p># ——————————————————–
+#      Do the model exporting
+# ——————————————————–
+start = datetime.now()
+if not opt.export_dir:</p>
+<blockquote>
+<div><p>opt.export_dir = os.path.join(opt.save_dir, “exported_models”)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>raw_model_path = twml.contrib.export.export_fn.export_all_models(</dt><dd><p>trainer=trainer,
+export_dir=opt.export_dir,
+parse_fn=feature_config.get_parse_fn(),
+serving_input_receiver_fn=feature_config.get_serving_input_receiver_fn(),
+export_output_fn=twml.export_output_fns.batch_prediction_continuous_output_fn,</p>
+</dd>
+</dl>
+<p>)
+export_model_dir = decode_str_or_unicode(raw_model_path)</p>
+<p>logging.info(“Model export time: “ + str(datetime.now() - start))
+logging.info(“The saved model directory is: “ + opt.save_dir)</p>
+<p>tf.logging.info(“getting default continuous_feature_list”)
+continuous_feature_list = get_feature_list_for_light_ranking(feature_list_path, opt.data_spec)
+continous_feature_list_save_path = os.path.join(opt.save_dir, “continuous_feature_list.json”)
+twml.util.write_file(continous_feature_list_save_path, continuous_feature_list, encode=”json”)
+tf.logging.info(f”Finish writting files to {continous_feature_list_save_path}”)</p>
+<dl>
+<dt>if opt.run_light_ranking_group_metrics:</dt><dd><p># ——————————————–
+# Run Light Ranking Group Metrics
+# ——————————————–
+run_group_metrics_light_ranking(</p>
+<blockquote>
+<div><p>trainer=trainer,
+data_dir=os.path.join(opt.eval_data_dir, opt.eval_start_datetime),
+model_path=export_model_dir,
+parse_fn=feature_config.get_parse_fn(),</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+<dt>if opt.run_light_ranking_group_metrics_in_bq:</dt><dd><p># —————————————————————————————-
+# Get Light/Heavy Ranker Predictions for Light Ranking Group Metrics in BigQuery
+# —————————————————————————————-
+trainer_pred = DataRecordTrainer(</p>
+<blockquote>
+<div><p>name=opt.model_trainer_name,
+params=opt,
+build_graph_fn=partial(build_graph, run_light_ranking_group_metrics_in_bq=True),
+save_dir=opt.save_dir + “/tmp/”,
+run_config=None,
+feature_config=feature_config,
+metric_fn=get_metric_fn(opt.task_name, use_stratify_metrics=False),</p>
+</div></blockquote>
+<p>)
+checkpoint_folder = os.path.join(opt.save_dir, “best_checkpoint”)
+checkpoint = tf.train.latest_checkpoint(checkpoint_folder, latest_filename=None)
+tf.logging.info(”nnPrediction from Checkpoint: {:}.nn”.format(checkpoint))
+run_group_metrics_light_ranking_in_bq(</p>
+<blockquote>
+<div><p>trainer=trainer_pred, params=opt, checkpoint_path=checkpoint</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>tf.logging.info(“Done Training &amp; Prediction.”)</p>
+</dd>
+<dt>if __name__ == “__main__”:</dt><dd><p>_main()</p>
+</dd>
+</dl>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../_sources/pushservice/src/main/python/models/light_ranking/deep_norm.py.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../" id="documentation_options" src="../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.tweetypie.storage</p>
+<p>import com.twitter.servo.util.FutureEffect
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.logging._
+import com.twitter.scrooge.BinaryThriftStructSerializer
+import com.twitter.servo.util.{Scribe =&gt; ServoScribe}
+import com.twitter.tweetypie.storage_internal.thriftscala._
+import com.twitter.tbird.thriftscala.Added
+import com.twitter.tbird.thriftscala.Removed
+import com.twitter.tbird.thriftscala.Scrubbed
+import com.twitter.util.Time</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Scribe is used to log tweet writes which are used to generate /tables/statuses in HDFS.</p></li>
+<li></li>
+<li><p>Write   Scribe Category      Message</p></li>
+<li><p>—–   —————      ——-</p></li>
+<li><p>add     tbird_add_status     [[com.twitter.tbird.thriftscala.Added]]</p></li>
+<li><p>remove  tbird_remove_status  [[com.twitter.tbird.thriftscala.Removed]]</p></li>
+<li><p>scrub   tbird_scrub_status   [[com.twitter.tbird.thriftscala.Scrubbed]]</p></li>
+<li></li>
+<li><p>The thrift representation is encoded using binary thrift protocol format, followed by base64</p></li>
+<li><p>encoding and converted to string using default character set (utf8). The logger uses BareFormatter.</p></li>
+<li></li>
+<li><p>The thrift ops are scribed only after the write API call has succeeded.</p></li>
+<li></li>
+<li><p>The class is thread safe except initial configuration and registration routines,</p></li>
+<li><p>and no exception is expected unless java heap is out of memory.</p></li>
+<li></li>
+<li><p>If exception does get thrown, add/remove/scrub operations will fail and</p></li>
+<li><p>client will have to retry</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>class Scribe(factory: Scribe.ScribeHandlerFactory, statsReceiver: StatsReceiver) {</dt><dd><p>import Scribe._</p>
+<p>private val AddedSerializer = BinaryThriftStructSerializer(Added)
+private val RemovedSerializer = BinaryThriftStructSerializer(Removed)
+private val ScrubbedSerializer = BinaryThriftStructSerializer(Scrubbed)</p>
+<p>private val addCounter = statsReceiver.counter(“scribe/add/count”)
+private val removeCounter = statsReceiver.counter(“scribe/remove/count”)
+private val scrubCounter = statsReceiver.counter(“scribe/scrub/count”)</p>
+<p>val addHandler: FutureEffect[String] = ServoScribe(factory(scribeAddedCategory)())
+val removeHandler: FutureEffect[String] = ServoScribe(factory(scribeRemovedCategory)())
+val scrubHandler: FutureEffect[String] = ServoScribe(factory(scribeScrubbedCategory)())</p>
+<dl>
+<dt>private def addedToString(tweet: StoredTweet): String =</dt><dd><dl class="simple">
+<dt>AddedSerializer.toString(</dt><dd><p>Added(StatusConversions.toTBirdStatus(tweet), Time.now.inMilliseconds, Some(false))</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>private def removedToString(id: Long, at: Time, isSoftDeleted: Boolean): String =</dt><dd><p>RemovedSerializer.toString(Removed(id, at.inMilliseconds, Some(isSoftDeleted)))</p>
+</dd>
+<dt>private def scrubbedToString(id: Long, cols: Seq[Int], at: Time): String =</dt><dd><p>ScrubbedSerializer.toString(Scrubbed(id, cols, at.inMilliseconds))</p>
+</dd>
+<dt>def logAdded(tweet: StoredTweet): Unit = {</dt><dd><p>addHandler(addedToString(tweet))
+addCounter.incr()</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>def logRemoved(id: Long, at: Time, isSoftDeleted: Boolean): Unit = {</dt><dd><p>removeHandler(removedToString(id, at, isSoftDeleted))
+removeCounter.incr()</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>def logScrubbed(id: Long, cols: Seq[Int], at: Time): Unit = {</dt><dd><p>scrubHandler(scrubbedToString(id, cols, at))
+scrubCounter.incr()</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>object Scribe {</dt><dd><p>type ScribeHandlerFactory = (String) =&gt; HandlerFactory</p>
+<dl>
+<dt>/** WARNING: These categories are white-listed. If you are changing them, the new categories should be white-listed.</dt><dd><ul class="simple">
+<li><p>You should followup with CoreWorkflows team (CW) for that.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+</dl>
+<p>private val scribeAddedCategory = “tbird_add_status”
+private val scribeRemovedCategory = “tbird_remove_status”
+private val scribeScrubbedCategory = “tbird_scrub_status”</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../_sources/tweetypie/common/src/scala/com/twitter/tweetypie/storage/Scribe.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

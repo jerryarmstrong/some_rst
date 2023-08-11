@@ -1,0 +1,1216 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../" id="documentation_options" src="../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.earlybird.factory;</p>
+<p>import java.io.IOException;
+import java.lang.management.ManagementFactory;
+import java.util.Optional;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;</p>
+<p>import com.google.common.base.Preconditions;
+import com.google.common.collect.Lists;
+import com.sun.management.OperatingSystemMXBean;</p>
+<p>import org.apache.directory.api.util.Strings;
+import org.apache.hadoop.fs.FileSystem;
+import org.apache.kafka.clients.consumer.KafkaConsumer;
+import org.apache.kafka.common.TopicPartition;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;</p>
+<p>import com.twitter.common.util.Clock;
+import com.twitter.common_internal.text.version.PenguinVersion;
+import com.twitter.decider.Decider;
+import com.twitter.finagle.stats.MetricsStatsReceiver;
+import com.twitter.finagle.stats.StatsReceiver;
+import com.twitter.search.common.aurora.AuroraSchedulerClient;
+import com.twitter.search.common.concurrent.ScheduledExecutorServiceFactory;
+import com.twitter.search.common.decider.DeciderUtil;
+import com.twitter.search.common.decider.SearchDecider;
+import com.twitter.search.common.file.FileUtils;
+import com.twitter.search.common.indexing.thriftjava.ThriftVersionedEvents;
+import com.twitter.search.common.metrics.SearchStatsReceiver;
+import com.twitter.search.common.metrics.SearchStatsReceiverImpl;
+import com.twitter.search.common.partitioning.zookeeper.SearchZkClient;
+import com.twitter.search.common.schema.earlybird.EarlybirdCluster;
+import com.twitter.search.common.schema.earlybird.EarlybirdFieldConstants.EarlybirdFieldConstant;
+import com.twitter.search.common.search.termination.QueryTimeoutFactory;
+import com.twitter.search.common.util.io.kafka.FinagleKafkaClientUtils;
+import com.twitter.search.common.util.io.kafka.ThriftDeserializer;
+import com.twitter.search.common.util.ml.tensorflow_engine.TensorflowModelsManager;
+import com.twitter.search.common.util.zktrylock.ZooKeeperTryLockFactory;
+import com.twitter.search.common.util.zookeeper.ZooKeeperProxy;
+import com.twitter.search.earlybird.EarlybirdCPUQualityFactor;
+import com.twitter.search.earlybird.EarlybirdDarkProxy;
+import com.twitter.search.earlybird.EarlybirdFinagleServerManager;
+import com.twitter.search.earlybird.EarlybirdFuturePoolManager;
+import com.twitter.search.earlybird.EarlybirdIndexConfig;
+import com.twitter.search.earlybird.EarlybirdProductionFinagleServerManager;
+import com.twitter.search.earlybird.EarlybirdServerSetManager;
+import com.twitter.search.earlybird.EarlybirdWarmUpManager;
+import com.twitter.search.earlybird.QualityFactor;
+import com.twitter.search.earlybird.ServerSetMember;
+import com.twitter.search.earlybird.UpdateableEarlybirdStateManager;
+import com.twitter.search.earlybird.archive.ArchiveEarlybirdIndexConfig;
+import com.twitter.search.earlybird.archive.ArchiveSearchPartitionManager;
+import com.twitter.search.earlybird.common.CaughtUpMonitor;
+import com.twitter.search.earlybird.common.config.EarlybirdConfig;
+import com.twitter.search.earlybird.common.config.EarlybirdProperty;
+import com.twitter.search.earlybird.common.userupdates.UserScrubGeoMap;
+import com.twitter.search.earlybird.common.userupdates.UserUpdatesChecker;
+import com.twitter.search.earlybird.common.userupdates.UserTable;
+import com.twitter.search.earlybird.exception.MissingKafkaTopicException;
+import com.twitter.search.earlybird.exception.CriticalExceptionHandler;
+import com.twitter.search.earlybird.index.EarlybirdSegmentFactory;
+import com.twitter.search.earlybird.ml.ScoringModelsManager;
+import com.twitter.search.earlybird.partition.AudioSpaceEventsStreamIndexer;
+import com.twitter.search.earlybird.partition.AudioSpaceTable;
+import com.twitter.search.earlybird.partition.DynamicPartitionConfig;
+import com.twitter.search.earlybird.partition.EarlybirdIndexFlusher;
+import com.twitter.search.earlybird.partition.EarlybirdIndexLoader;
+import com.twitter.search.earlybird.partition.EarlybirdKafkaConsumer;
+import com.twitter.search.earlybird.partition.EarlybirdStartup;
+import com.twitter.search.earlybird.partition.OptimizationAndFlushingCoordinationLock;
+import com.twitter.search.earlybird.partition.TimeLimitedHadoopExistsCall;
+import com.twitter.search.earlybird.partition.UserScrubGeoEventStreamIndexer;
+import com.twitter.search.earlybird.partition.freshstartup.FreshStartupHandler;
+import com.twitter.search.earlybird.partition.HdfsUtil;
+import com.twitter.search.earlybird.partition.KafkaStartup;
+import com.twitter.search.earlybird.partition.MultiSegmentTermDictionaryManager;
+import com.twitter.search.earlybird.partition.PartitionManager;
+import com.twitter.search.earlybird.partition.PartitionManagerStartup;
+import com.twitter.search.earlybird.partition.PartitionWriter;
+import com.twitter.search.earlybird.partition.SearchIndexingMetricSet;
+import com.twitter.search.earlybird.partition.SegmentManager;
+import com.twitter.search.earlybird.partition.SegmentSyncConfig;
+import com.twitter.search.earlybird.partition.StartupUserEventIndexer;
+import com.twitter.search.earlybird.partition.TweetCreateHandler;
+import com.twitter.search.earlybird.partition.TweetUpdateHandler;
+import com.twitter.search.earlybird.partition.UserUpdatesStreamIndexer;
+import com.twitter.search.earlybird.querycache.QueryCacheConfig;
+import com.twitter.search.earlybird.querycache.QueryCacheManager;
+import com.twitter.search.earlybird.stats.EarlybirdSearcherStats;
+import com.twitter.search.earlybird.util.CoordinatedEarlybirdAction;
+import com.twitter.search.earlybird.util.EarlybirdDecider;
+import com.twitter.search.earlybird.util.TermCountMonitor;
+import com.twitter.search.earlybird.util.TweetCountMonitor;
+import com.twitter.ubs.thriftjava.AudioSpaceBaseEvent;</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Production module that provides Earlybird components.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>public class EarlybirdWireModule {</dt><dd><p>private static final Logger LOG = LoggerFactory.getLogger(EarlybirdWireModule.class);
+private static final int MAX_POLL_RECORDS = 1000;</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>How many threads we will use for building up the query cache during startup.</p></li>
+<li><p>The number of threads will be set to 1 after this earlybird is current.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>private static final int QUERY_CACHE_NUM_WORKER_THREADS_AT_STARTUP =</dt><dd><p>EarlybirdConfig.getInt(“query_cache_updater_startup_threads”, 1);</p>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Scheduled executor service factory can be re-used in production.</p></li>
+<li><p>All the managers can share the same executor service factory.</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>private final ScheduledExecutorServiceFactory sharedExecutorServiceFactory =</dt><dd><p>new ScheduledExecutorServiceFactory();</p>
+</dd>
+</dl>
+<p>private final SearchStatsReceiver sharedSearchStatsReceiver = new SearchStatsReceiverImpl();
+private final StatsReceiver sharedFinagleStatsReceiver = new MetricsStatsReceiver();</p>
+<dl class="simple">
+<dt>private final SearchIndexingMetricSet searchIndexingMetricSet =</dt><dd><p>new SearchIndexingMetricSet(sharedSearchStatsReceiver);</p>
+</dd>
+<dt>private final EarlybirdSearcherStats tweetsSearcherStats =</dt><dd><p>new EarlybirdSearcherStats(sharedSearchStatsReceiver);</p>
+</dd>
+</dl>
+<p>private final CaughtUpMonitor indexCaughtUpMonitor = new CaughtUpMonitor(“dl_index”);</p>
+<dl class="simple">
+<dt>public CaughtUpMonitor provideIndexCaughtUpMonitor() {</dt><dd><p>return indexCaughtUpMonitor;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>private final CaughtUpMonitor kafkaIndexCaughtUpMonitor = new CaughtUpMonitor(“kafka_index”);</p>
+<dl class="simple">
+<dt>public CaughtUpMonitor provideKafkaIndexCaughtUpMonitor() {</dt><dd><p>return kafkaIndexCaughtUpMonitor;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private final OptimizationAndFlushingCoordinationLock optimizationAndFlushingCoordinationLock =</dt><dd><p>new OptimizationAndFlushingCoordinationLock();</p>
+</dd>
+<dt>public OptimizationAndFlushingCoordinationLock provideOptimizationAndFlushingCoordinationLock() {</dt><dd><p>return optimizationAndFlushingCoordinationLock;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public QueryTimeoutFactory provideQueryTimeoutFactory() {</dt><dd><p>return new QueryTimeoutFactory();</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>public static class ZooKeeperClients {</dt><dd><p>public ZooKeeperProxy discoveryClient;
+public ZooKeeperProxy stateClient;</p>
+<dl class="simple">
+<dt>public ZooKeeperClients() {</dt><dd><dl class="simple">
+<dt>this(</dt><dd><p>SearchZkClient.getServiceDiscoveryZooKeeperClient(),
+SearchZkClient.getSZooKeeperClient());</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public ZooKeeperClients(ZooKeeperProxy discoveryClient, ZooKeeperProxy stateClient) {</dt><dd><p>this.discoveryClient = discoveryClient;
+this.stateClient = stateClient;</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Provides the earlybird decider.</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+<dt>public Decider provideDecider() {</dt><dd><p>return EarlybirdDecider.initialize();</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Provides the set of ZooKeeper clients to be used by earlybird.</p></li>
+</ul>
+<p><a href="#id9"><span class="problematic" id="id10">*</span></a>/</p>
+</dd>
+<dt>public ZooKeeperClients provideZooKeeperClients() {</dt><dd><p>return new ZooKeeperClients();</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Provides the query cache config.</p></li>
+</ul>
+<p><a href="#id11"><span class="problematic" id="id12">*</span></a>/</p>
+</dd>
+<dt>public QueryCacheConfig provideQueryCacheConfig(SearchStatsReceiver searchStatsReceiver) {</dt><dd><p>return new QueryCacheConfig(searchStatsReceiver);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Provides the earlybird index config.</p></li>
+</ul>
+<p><a href="#id13"><span class="problematic" id="id14">*</span></a>/</p>
+</dd>
+<dt>public EarlybirdIndexConfig provideEarlybirdIndexConfig(</dt><dd><blockquote>
+<div><p>Decider decider, SearchIndexingMetricSet indexingMetricSet,
+CriticalExceptionHandler criticalExceptionHandler) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>return EarlybirdIndexConfigUtil.createEarlybirdIndexConfig(decider, indexingMetricSet,</dt><dd><p>criticalExceptionHandler);</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public DynamicPartitionConfig provideDynamicPartitionConfig() {</dt><dd><p>return new DynamicPartitionConfig(PartitionConfigUtil.initPartitionConfig());</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Provides the segment manager to be used by this earlybird.</p></li>
+</ul>
+<p><a href="#id15"><span class="problematic" id="id16">*</span></a>/</p>
+</dd>
+<dt>public SegmentManager provideSegmentManager(</dt><dd><blockquote>
+<div><p>DynamicPartitionConfig dynamicPartitionConfig,
+EarlybirdIndexConfig earlybirdIndexConfig,
+SearchIndexingMetricSet partitionIndexingMetricSet,
+EarlybirdSearcherStats searcherStats,
+SearchStatsReceiver earlybirdServerStats,
+UserUpdatesChecker userUpdatesChecker,
+SegmentSyncConfig segmentSyncConfig,
+UserTable userTable,
+UserScrubGeoMap userScrubGeoMap,
+Clock clock,
+CriticalExceptionHandler criticalExceptionHandler) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>return new SegmentManager(</dt><dd><p>dynamicPartitionConfig,
+earlybirdIndexConfig,
+partitionIndexingMetricSet,
+searcherStats,
+earlybirdServerStats,
+userUpdatesChecker,
+segmentSyncConfig,
+userTable,
+userScrubGeoMap,
+clock,
+EarlybirdConfig.getMaxSegmentSize(),
+criticalExceptionHandler,
+provideKafkaIndexCaughtUpMonitor());</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>public QueryCacheManager provideQueryCacheManager(</dt><dd><blockquote>
+<div><p>QueryCacheConfig config,
+EarlybirdIndexConfig indexConfig,
+int maxEnabledSegments,
+UserTable userTable,
+UserScrubGeoMap userScrubGeoMap,
+ScheduledExecutorServiceFactory queryCacheUpdaterScheduledExecutorFactory,
+SearchStatsReceiver searchStatsReceiver,
+EarlybirdSearcherStats searcherStats,
+Decider decider,
+CriticalExceptionHandler criticalExceptionHandler,
+Clock clock) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>return new QueryCacheManager(config, indexConfig, maxEnabledSegments, userTable,</dt><dd><p>userScrubGeoMap, queryCacheUpdaterScheduledExecutorFactory, searchStatsReceiver,
+searcherStats, decider, criticalExceptionHandler, clock);</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>public TermCountMonitor provideTermCountMonitor(</dt><dd><blockquote>
+<div><p>SegmentManager segmentManager, ScheduledExecutorServiceFactory executorServiceFactory,
+SearchStatsReceiver searchStatsReceiver,
+CriticalExceptionHandler criticalExceptionHandler) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>return new TermCountMonitor(segmentManager, executorServiceFactory, 500, TimeUnit.MILLISECONDS,</dt><dd><p>searchStatsReceiver, criticalExceptionHandler);</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>public TweetCountMonitor provideTweetCountMonitor(</dt><dd><blockquote>
+<div><p>SegmentManager segmentManager,
+ScheduledExecutorServiceFactory executorServiceFactory,
+SearchStatsReceiver searchStatsReceiver,
+CriticalExceptionHandler criticalExceptionHandler) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>return new TweetCountMonitor(segmentManager, executorServiceFactory, 500,</dt><dd><p>TimeUnit.MILLISECONDS, searchStatsReceiver, criticalExceptionHandler);</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Returns a manager that keeps track of earlybird’s global state while it runs.</p></li>
+</ul>
+<p><a href="#id17"><span class="problematic" id="id18">*</span></a>/</p>
+</dd>
+<dt>public UpdateableEarlybirdStateManager provideUpdateableEarlybirdStateManager(</dt><dd><blockquote>
+<div><p>EarlybirdIndexConfig earlybirdIndexConfig,
+DynamicPartitionConfig dynamicPartitionConfig,
+ZooKeeperProxy zooKeeperClient,
+AuroraSchedulerClient schedulerClient,
+ScheduledExecutorServiceFactory executorServiceFactory,
+ScoringModelsManager scoringModelsManager,
+TensorflowModelsManager tensorflowModelsManager,
+SearchStatsReceiver searchStatsReceiver,
+SearchDecider searchDecider,
+CriticalExceptionHandler criticalExceptionHandler) {</p>
+</div></blockquote>
+<p>Clock clock = provideClockForStateManager();</p>
+<dl class="simple">
+<dt>return new UpdateableEarlybirdStateManager(</dt><dd><p>earlybirdIndexConfig, dynamicPartitionConfig, zooKeeperClient, schedulerClient,
+executorServiceFactory, scoringModelsManager, tensorflowModelsManager, searchStatsReceiver,
+searchDecider, criticalExceptionHandler,
+clock);</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public Clock provideClockForStateManager() {</dt><dd><p>return this.provideClock();</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public ScheduledExecutorServiceFactory providePartitionManagerExecutorFactory() {</dt><dd><p>return sharedExecutorServiceFactory;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public ScheduledExecutorServiceFactory provideStateUpdateManagerExecutorFactory() {</dt><dd><p>return sharedExecutorServiceFactory;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public ScheduledExecutorServiceFactory provideTermCountMonitorScheduledExecutorFactory() {</dt><dd><p>return sharedExecutorServiceFactory;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public ScheduledExecutorServiceFactory provideTweetCountMonitorScheduledExecutorFactory() {</dt><dd><p>return sharedExecutorServiceFactory;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Provides the ScheduledExecutorServiceFactory that will be used to schedule all query cache</p></li>
+<li><p>update tasks.</p></li>
+</ul>
+<p><a href="#id19"><span class="problematic" id="id20">*</span></a>/</p>
+</dd>
+<dt>public ScheduledExecutorServiceFactory provideQueryCacheUpdateTaskScheduledExecutorFactory() {</dt><dd><dl>
+<dt>return new ScheduledExecutorServiceFactory() {</dt><dd><p>&#64;Override
+public QueryCacheUpdaterScheduledExecutorService&lt;ScheduledThreadPoolExecutor&gt; build(</p>
+<blockquote>
+<div><blockquote>
+<div><p>String threadNameFormat, boolean isDaemon) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>ScheduledThreadPoolExecutor threadpoolExecutor =</dt><dd><dl class="simple">
+<dt>new ScheduledThreadPoolExecutor(QUERY_CACHE_NUM_WORKER_THREADS_AT_STARTUP,</dt><dd><p>buildThreadFactory(threadNameFormat, isDaemon));</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>threadpoolExecutor.setMaximumPoolSize(QUERY_CACHE_NUM_WORKER_THREADS_AT_STARTUP);
+threadpoolExecutor.setCorePoolSize(QUERY_CACHE_NUM_WORKER_THREADS_AT_STARTUP);
+threadpoolExecutor.setExecuteExistingDelayedTasksAfterShutdownPolicy(false);
+threadpoolExecutor.setContinueExistingPeriodicTasksAfterShutdownPolicy(false);
+threadpoolExecutor.setRemoveOnCancelPolicy(true);
+LOG.info(“Starting query cache executor with {} thread.”,</p>
+<blockquote>
+<div><p>QUERY_CACHE_NUM_WORKER_THREADS_AT_STARTUP);</p>
+</div></blockquote>
+<dl>
+<dt>return new QueryCacheUpdaterScheduledExecutorService&lt;ScheduledThreadPoolExecutor&gt;(</dt><dd><blockquote>
+<div><p>threadpoolExecutor) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>&#64;Override public void setWorkerPoolSizeAfterStartup() {</dt><dd><p>delegate.setCorePoolSize(1);
+delegate.setMaximumPoolSize(1);
+LOG.info(“Reset query cache executor to be single threaded.”);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>};</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>};</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public ScheduledExecutorServiceFactory provideSimpleUserUpdateIndexerScheduledExecutorFactory() {</dt><dd><p>return sharedExecutorServiceFactory;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Returns the manager that manages the pool of searcher threads.</p></li>
+</ul>
+<p><a href="#id21"><span class="problematic" id="id22">*</span></a>/</p>
+</dd>
+<dt>public EarlybirdFuturePoolManager provideFuturePoolManager() {</dt><dd><p>return new EarlybirdFuturePoolManager(“SearcherWorker”);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Returns the manager that manages all earlybird finagle servers (warm up and production).</p></li>
+</ul>
+<p><a href="#id23"><span class="problematic" id="id24">*</span></a>/</p>
+</dd>
+<dt>public EarlybirdFinagleServerManager provideFinagleServerManager(</dt><dd><blockquote>
+<div><p>CriticalExceptionHandler criticalExceptionHandler) {</p>
+</div></blockquote>
+<p>return new EarlybirdProductionFinagleServerManager(criticalExceptionHandler);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Creates the production serverset manager.</p></li>
+</ul>
+<p><a href="#id25"><span class="problematic" id="id26">*</span></a>/</p>
+</dd>
+<dt>public EarlybirdServerSetManager provideServerSetManager(</dt><dd><blockquote>
+<div><p>ZooKeeperProxy discoveryClient,
+DynamicPartitionConfig dynamicPartitionConfig,
+SearchStatsReceiver searchStatsReceiver,
+int port,
+String serverSetNamePrefix) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>return new EarlybirdServerSetManager(</dt><dd><p>searchStatsReceiver,
+discoveryClient,
+dynamicPartitionConfig.getCurrentPartitionConfig(),
+port,
+serverSetNamePrefix);</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Creates the warm up serverset manager.</p></li>
+</ul>
+<p><a href="#id27"><span class="problematic" id="id28">*</span></a>/</p>
+</dd>
+<dt>public EarlybirdWarmUpManager provideWarmUpManager(</dt><dd><blockquote>
+<div><p>ZooKeeperProxy discoveryClient,
+DynamicPartitionConfig dynamicPartitionConfig,
+SearchStatsReceiver searchStatsReceiver,
+Decider decider,
+Clock clock,
+int port,
+String serverSetNamePrefix) {</p>
+</div></blockquote>
+<dl>
+<dt>return new EarlybirdWarmUpManager(</dt><dd><dl class="simple">
+<dt>new EarlybirdServerSetManager(</dt><dd><p>searchStatsReceiver,
+discoveryClient,
+dynamicPartitionConfig.getCurrentPartitionConfig(),
+port,
+serverSetNamePrefix),</p>
+</dd>
+</dl>
+<p>dynamicPartitionConfig.getCurrentPartitionConfig(),
+searchIndexingMetricSet,
+decider,
+clock);</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Returns a dark proxy that knows how to send dark traffic to the warm up earlybird serverset.</p></li>
+</ul>
+<p><a href="#id29"><span class="problematic" id="id30">*</span></a>/</p>
+</dd>
+<dt>public EarlybirdDarkProxy provideEarlybirdDarkProxy(</dt><dd><blockquote>
+<div><p>SearchDecider searchDecider,
+StatsReceiver finagleStatsReceiver,
+EarlybirdServerSetManager earlybirdServerSetManager,
+EarlybirdWarmUpManager earlybirdWarmUpManager,
+String clusterName) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>return new EarlybirdDarkProxy(searchDecider,</dt><dd><p>finagleStatsReceiver.scope(“dark_proxy”),
+earlybirdServerSetManager,
+earlybirdWarmUpManager,
+clusterName);</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Returns the manager for all (non-Tensorflow) scoring models.</p></li>
+</ul>
+<p><a href="#id31"><span class="problematic" id="id32">*</span></a>/</p>
+</dd>
+<dt>public ScoringModelsManager provideScoringModelsManager(</dt><dd><blockquote>
+<div><p>SearchStatsReceiver serverStats,
+EarlybirdIndexConfig earlybirdIndexConfig) {</p>
+</div></blockquote>
+<p>boolean modelsEnabled = EarlybirdConfig.getBool(“scoring_models_enabled”, false);
+if (!modelsEnabled) {</p>
+<blockquote>
+<div><p>LOG.info(“Scoring Models - Disabled in the config. Not loading any models.”);
+serverStats.getCounter(“scoring_models_disabled_in_config”).increment();
+return ScoringModelsManager.NO_OP_MANAGER;</p>
+</div></blockquote>
+<p>}</p>
+<p>String hdfsNameNode = EarlybirdConfig.getString(“scoring_models_namenode”);
+String hdfsModelsPath = EarlybirdConfig.getString(“scoring_models_basedir”);
+try {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>return ScoringModelsManager.create(</dt><dd><p>serverStats, hdfsNameNode, hdfsModelsPath, earlybirdIndexConfig.getSchema());</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl class="simple">
+<dt>} catch (IOException e) {</dt><dd><p>LOG.error(“Scoring Models - Error creating ScoringModelsManager”, e);
+serverStats.getCounter(“scoring_models_initialization_errors”).increment();
+return ScoringModelsManager.NO_OP_MANAGER;</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Provides the manager for all Tensorflow models.</p></li>
+</ul>
+<p><a href="#id33"><span class="problematic" id="id34">*</span></a>/</p>
+</dd>
+<dt>public TensorflowModelsManager provideTensorflowModelsManager(</dt><dd><blockquote>
+<div><p>SearchStatsReceiver serverStats,
+String statsPrefix,
+Decider decider,
+EarlybirdIndexConfig earlybirdIndexConfig) {</p>
+</div></blockquote>
+<p>boolean modelsEnabled = EarlybirdProperty.TF_MODELS_ENABLED.get(false);</p>
+<dl class="simple">
+<dt>if (!modelsEnabled) {</dt><dd><p>LOG.info(“Tensorflow Models - Disabled in the config. Not loading any models.”);
+serverStats.getCounter(“tf_models_disabled_in_config”).increment();
+return TensorflowModelsManager.createNoOp(statsPrefix);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>String modelsConfigPath =</dt><dd><p>Preconditions.checkNotNull(EarlybirdProperty.TF_MODELS_CONFIG_PATH.get());</p>
+</dd>
+</dl>
+<p>int intraOpThreads = Preconditions.checkNotNull(EarlybirdProperty.TF_INTRA_OP_THREADS.get(0));
+int interOpThreads = Preconditions.checkNotNull(EarlybirdProperty.TF_INTER_OP_THREADS.get(0));</p>
+<p>TensorflowModelsManager.initTensorflowThreadPools(intraOpThreads, interOpThreads);</p>
+<dl>
+<dt>return TensorflowModelsManager.createUsingConfigFile(</dt><dd><p>FileUtils.getFileHandle(modelsConfigPath),
+true,
+statsPrefix,
+() -&gt; DeciderUtil.isAvailableForRandomRecipient(</p>
+<blockquote>
+<div><p>decider, “enable_tf_serve_models”),</p>
+</div></blockquote>
+<p>() -&gt; decider.isAvailable(“enable_tf_load_models”),
+earlybirdIndexConfig.getSchema());</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public SearchStatsReceiver provideEarlybirdServerStatsReceiver() {</dt><dd><p>return sharedSearchStatsReceiver;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public StatsReceiver provideFinagleStatsReceiver() {</dt><dd><p>return sharedFinagleStatsReceiver;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public SearchIndexingMetricSet provideSearchIndexingMetricSet() {</dt><dd><p>return searchIndexingMetricSet;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public EarlybirdSearcherStats provideTweetsSearcherStats() {</dt><dd><p>return tweetsSearcherStats;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Provides the clock to be used by this earlybird.</p></li>
+</ul>
+<p><a href="#id35"><span class="problematic" id="id36">*</span></a>/</p>
+</dd>
+<dt>public Clock provideClock() {</dt><dd><p>return Clock.SYSTEM_CLOCK;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Provides the config for the multi-segment term dictionary manager.</p></li>
+</ul>
+<p><a href="#id37"><span class="problematic" id="id38">*</span></a>/</p>
+</dd>
+<dt>public MultiSegmentTermDictionaryManager.Config provideMultiSegmentTermDictionaryManagerConfig() {</dt><dd><dl class="simple">
+<dt>return new MultiSegmentTermDictionaryManager.Config(</dt><dd><dl class="simple">
+<dt>Lists.newArrayList(</dt><dd><p>EarlybirdFieldConstant.FROM_USER_ID_FIELD.getFieldName()));</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Provides the manager for the term dictionary that spans all segments.</p></li>
+</ul>
+<p><a href="#id39"><span class="problematic" id="id40">*</span></a>/</p>
+</dd>
+<dt>public MultiSegmentTermDictionaryManager provideMultiSegmentTermDictionaryManager(</dt><dd><blockquote>
+<div><p>MultiSegmentTermDictionaryManager.Config termDictionaryConfig,
+SegmentManager segmentManager,
+SearchStatsReceiver statsReceiver,
+Decider decider,
+EarlybirdCluster earlybirdCluster) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>return new MultiSegmentTermDictionaryManager(</dt><dd><p>termDictionaryConfig, segmentManager, statsReceiver, decider, earlybirdCluster);</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Returns the partition manager to be used by the archive earlybirds.</p></li>
+</ul>
+<p><a href="#id41"><span class="problematic" id="id42">*</span></a>/</p>
+</dd>
+<dt>public PartitionManager provideFullArchivePartitionManager(</dt><dd><blockquote>
+<div><p>ZooKeeperTryLockFactory zooKeeperTryLockFactory,
+QueryCacheManager queryCacheManager,
+SegmentManager segmentManager,
+DynamicPartitionConfig dynamicPartitionConfig,
+UserUpdatesStreamIndexer userUpdatesStreamIndexer,
+UserScrubGeoEventStreamIndexer userScrubGeoEventStreamIndexer,
+SearchStatsReceiver searchStatsReceiver,
+ArchiveEarlybirdIndexConfig earlybirdIndexConfig,
+ServerSetMember serverSetMember,
+ScheduledExecutorServiceFactory executorServiceFactory,
+ScheduledExecutorServiceFactory userUpdateIndexerExecutorFactory,
+SearchIndexingMetricSet earlybirdSearchIndexingMetricSet,
+Clock clock,
+SegmentSyncConfig segmentSyncConfig,
+CriticalExceptionHandler criticalExceptionHandler) throws IOException {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>return new ArchiveSearchPartitionManager(</dt><dd><p>zooKeeperTryLockFactory,
+queryCacheManager,
+segmentManager,
+dynamicPartitionConfig,
+userUpdatesStreamIndexer,
+userScrubGeoEventStreamIndexer,
+searchStatsReceiver,
+earlybirdIndexConfig,
+serverSetMember,
+executorServiceFactory,
+userUpdateIndexerExecutorFactory,
+earlybirdSearchIndexingMetricSet,
+segmentSyncConfig,
+clock,
+criticalExceptionHandler);</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Provides the SegmentSyncConfig instance to be used by earlybird.</p></li>
+</ul>
+<p><a href="#id43"><span class="problematic" id="id44">*</span></a>/</p>
+</dd>
+<dt>public SegmentSyncConfig provideSegmentSyncConfig(EarlybirdCluster cluster) {</dt><dd><p>String scrubGen = null;
+if (cluster == EarlybirdCluster.FULL_ARCHIVE) {</p>
+<blockquote>
+<div><p>scrubGen = EarlybirdProperty.EARLYBIRD_SCRUB_GEN.get();
+LOG.info(“The scrubGen provided from Aurora is: {}”, scrubGen);
+Preconditions.checkState(Strings.isNotEmpty(scrubGen));</p>
+</div></blockquote>
+<p>}
+return new SegmentSyncConfig(Optional.ofNullable(scrubGen));</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>protected void storeEarlybirdStartupProducts(</dt><dd><p>TweetCreateHandler tweetCreateHandler,
+PartitionWriter partitionWriter,
+EarlybirdIndexFlusher earlybirdIndexFlusher</p>
+</dd>
+<dt>) {</dt><dd><p>// TestWireModule wants to store these for further use.</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>What directory are we going to load segments from on startup.</p></li>
+<li></li>
+<li><p>When you’re running loadtests or stagingN instances and they don’t have a recent index</p></li>
+<li><p>flushed, it can take hours to generate a new index with a fresh startup. This slows</p></li>
+<li><p>down development. If the read_index_from_prod_location flag is set to true, we will read</p></li>
+<li><p>the index from the location where prod instances are flushing their index to.</p></li>
+<li><p>Unset it if you want to generate your own index.</p></li>
+<li></li>
+<li><p>&#64;return a string with the directory.</p></li>
+</ul>
+<p><a href="#id45"><span class="problematic" id="id46">*</span></a>/</p>
+</dd>
+<dt>public String getIndexLoadingDirectory() {</dt><dd><p>boolean readIndexFromProdLocation = EarlybirdProperty.READ_INDEX_FROM_PROD_LOCATION.get(false);
+String environment = EarlybirdProperty.ENV.get(“no_env_specified”); // default value for tests.
+String readIndexDir = EarlybirdProperty.HDFS_INDEX_SYNC_DIR.get();</p>
+<dl class="simple">
+<dt>if (readIndexFromProdLocation) {</dt><dd><p>LOG.info(“Will attempt to read index from prod locations”);
+LOG.info(“Index directory provided: {}”, readIndexDir);
+// Replacing the path is a bit hacky, but it works ok.
+readIndexDir = readIndexDir.replace(“/” + environment + “/”, “/prod/”);
+LOG.info(“Will instead use index directory: {}”, readIndexDir);</p>
+</dd>
+</dl>
+<p>}</p>
+<p>return readIndexDir;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Indexer for audio space events.</p></li>
+</ul>
+<p><a href="#id47"><span class="problematic" id="id48">*</span></a>/</p>
+</dd>
+<dt>public AudioSpaceEventsStreamIndexer provideAudioSpaceEventsStreamIndexer(</dt><dd><blockquote>
+<div><p>AudioSpaceTable audioSpaceTable,
+Clock clock) {</p>
+</div></blockquote>
+<dl>
+<dt>try {</dt><dd><dl>
+<dt>return new AudioSpaceEventsStreamIndexer(</dt><dd><dl class="simple">
+<dt>FinagleKafkaClientUtils.newKafkaConsumerForAssigning(</dt><dd><p>“”,
+new ThriftDeserializer&lt;&gt;(AudioSpaceBaseEvent.class),
+“”,
+20</p>
+</dd>
+</dl>
+<p>), audioSpaceTable, clock);</p>
+</dd>
+</dl>
+</dd>
+<dt>} catch (MissingKafkaTopicException ex) {</dt><dd><p>LOG.error(“Missing kafka stream”, ex);
+return null;</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Returns a class to start the Earlybird. See <a class="reference external" href="mailto:{&#37;&#52;&#48;link">{<span>&#64;</span>link</a> EarlybirdStartup}.</p></li>
+</ul>
+<p><a href="#id49"><span class="problematic" id="id50">*</span></a>/</p>
+</dd>
+<dt>public EarlybirdStartup provideEarlybirdStartup(</dt><dd><blockquote>
+<div><p>PartitionManager partitionManager,
+UserUpdatesStreamIndexer userUpdatesStreamIndexer,
+UserScrubGeoEventStreamIndexer userScrubGeoEventStreamIndexer,
+AudioSpaceEventsStreamIndexer audioSpaceEventsStreamIndexer,
+DynamicPartitionConfig dynamicPartitionConfig,
+CriticalExceptionHandler criticalExceptionHandler,
+SegmentManager segmentManager,
+MultiSegmentTermDictionaryManager multiSegmentTermDictionaryManager,
+QueryCacheManager queryCacheManager,
+ZooKeeperTryLockFactory zooKeeperTryLockFactory,
+ServerSetMember serverSetMember,
+Clock clock,
+SegmentSyncConfig segmentSyncConfig,
+EarlybirdSegmentFactory earlybirdSegmentFactory,
+EarlybirdCluster cluster,
+SearchDecider decider) throws IOException {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>if (cluster == EarlybirdCluster.FULL_ARCHIVE) {</dt><dd><p>return new PartitionManagerStartup(clock, partitionManager);</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// Check that the earlybird name is what we’re expecting so we can build the kafka topics.
+String earlybirdName = EarlybirdProperty.EARLYBIRD_NAME.get();
+Preconditions.checkArgument(“earlybird-realtime”.equals(earlybirdName)</p>
+<blockquote>
+<div><p>|| “earlybird-protected”.equals(earlybirdName)
+|| “earlybird-realtime-exp0”.equals(earlybirdName)
+|| “earlybird-realtime_cg”.equals(earlybirdName));</p>
+</div></blockquote>
+<dl class="simple">
+<dt>StartupUserEventIndexer startupUserEventIndexer = new StartupUserEventIndexer(</dt><dd><p>provideSearchIndexingMetricSet(),
+userUpdatesStreamIndexer,
+userScrubGeoEventStreamIndexer,
+segmentManager,
+clock);</p>
+</dd>
+</dl>
+<p>// Coordinate leaving the serverset to flush segments to HDFS.
+CoordinatedEarlybirdAction actionCoordinator = new CoordinatedEarlybirdAction(</p>
+<blockquote>
+<div><p>zooKeeperTryLockFactory,
+“segment_flusher”,
+dynamicPartitionConfig,
+serverSetMember,
+criticalExceptionHandler,
+segmentSyncConfig);</p>
+</div></blockquote>
+<p>actionCoordinator.setShouldSynchronize(true);</p>
+<p>FileSystem hdfsFileSystem = HdfsUtil.getHdfsFileSystem();
+EarlybirdIndexFlusher earlybirdIndexFlusher = new EarlybirdIndexFlusher(</p>
+<blockquote>
+<div><p>actionCoordinator,
+hdfsFileSystem,
+EarlybirdProperty.HDFS_INDEX_SYNC_DIR.get(),
+segmentManager,
+dynamicPartitionConfig.getCurrentPartitionConfig(),
+clock,
+new TimeLimitedHadoopExistsCall(hdfsFileSystem),
+provideOptimizationAndFlushingCoordinationLock());</p>
+</div></blockquote>
+<p>String baseTopicName = “search_ingester_%s_events_%s_%s”;</p>
+<p>String earlybirdType;</p>
+<dl class="simple">
+<dt>if (“earlybird-protected”.equals(earlybirdName)) {</dt><dd><p>earlybirdType = “protected”;</p>
+</dd>
+<dt>} else if (“earlybird-realtime_cg”.equals(earlybirdName)) {</dt><dd><p>earlybirdType = “realtime_cg”;</p>
+</dd>
+<dt>} else {</dt><dd><p>earlybirdType = “realtime”;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>String tweetTopicName = String.format(</dt><dd><p>baseTopicName,
+“indexing”,
+earlybirdType,
+EarlybirdProperty.KAFKA_ENV.get());</p>
+</dd>
+<dt>String updateTopicName = String.format(</dt><dd><p>baseTopicName,
+“update”,
+earlybirdType,
+EarlybirdProperty.KAFKA_ENV.get());</p>
+</dd>
+</dl>
+<p>LOG.info(“Tweet topic: {}”, tweetTopicName);
+LOG.info(“Update topic: {}”, updateTopicName);</p>
+<dl class="simple">
+<dt>TopicPartition tweetTopic = new TopicPartition(</dt><dd><p>tweetTopicName,
+dynamicPartitionConfig.getCurrentPartitionConfig().getIndexingHashPartitionID());</p>
+</dd>
+<dt>TopicPartition updateTopic = new TopicPartition(</dt><dd><p>updateTopicName,
+dynamicPartitionConfig.getCurrentPartitionConfig().getIndexingHashPartitionID());</p>
+</dd>
+<dt>EarlybirdKafkaConsumersFactory earlybirdKafkaConsumersFactory =</dt><dd><p>provideEarlybirdKafkaConsumersFactory();</p>
+</dd>
+<dt>FreshStartupHandler freshStartupHandler = new FreshStartupHandler(</dt><dd><p>clock,
+earlybirdKafkaConsumersFactory,
+tweetTopic,
+updateTopic,
+segmentManager,
+EarlybirdConfig.getMaxSegmentSize(),
+EarlybirdConfig.getLateTweetBuffer(),
+criticalExceptionHandler</p>
+</dd>
+</dl>
+<p>);</p>
+<p>TweetUpdateHandler updateHandler = new TweetUpdateHandler(segmentManager);</p>
+<dl class="simple">
+<dt>CoordinatedEarlybirdAction postOptimizationRebuilds = new CoordinatedEarlybirdAction(</dt><dd><p>zooKeeperTryLockFactory,
+“post_optimization_rebuilds”,
+dynamicPartitionConfig,
+serverSetMember,
+criticalExceptionHandler,
+segmentSyncConfig</p>
+</dd>
+</dl>
+<p>);
+postOptimizationRebuilds.setShouldSynchronize(true);
+CoordinatedEarlybirdAction gcAction = new CoordinatedEarlybirdAction(</p>
+<blockquote>
+<div><p>zooKeeperTryLockFactory,
+“gc_before_optimization”,
+dynamicPartitionConfig,
+serverSetMember,
+criticalExceptionHandler,
+segmentSyncConfig</p>
+</div></blockquote>
+<p>);
+gcAction.setShouldSynchronize(true);</p>
+<dl class="simple">
+<dt>TweetCreateHandler createHandler = new TweetCreateHandler(</dt><dd><p>segmentManager,
+provideSearchIndexingMetricSet(),
+criticalExceptionHandler,
+multiSegmentTermDictionaryManager,
+queryCacheManager,
+postOptimizationRebuilds,
+gcAction,
+EarlybirdConfig.getLateTweetBuffer(),
+EarlybirdConfig.getMaxSegmentSize(),
+provideKafkaIndexCaughtUpMonitor(),
+provideOptimizationAndFlushingCoordinationLock());</p>
+</dd>
+<dt>PartitionWriter partitionWriter = new PartitionWriter(</dt><dd><p>createHandler,
+updateHandler,
+criticalExceptionHandler,
+PenguinVersion.versionFromByteValue(EarlybirdConfig.getPenguinVersionByte()),
+clock);</p>
+</dd>
+<dt>KafkaConsumer&lt;Long, ThriftVersionedEvents&gt; rawKafkaConsumer =</dt><dd><dl class="simple">
+<dt>earlybirdKafkaConsumersFactory.createKafkaConsumer(</dt><dd><p>“earlybird_tweet_kafka_consumer”);</p>
+</dd>
+</dl>
+</dd>
+<dt>EarlybirdKafkaConsumer earlybirdKafkaConsumer = provideKafkaConsumer(</dt><dd><p>criticalExceptionHandler,
+rawKafkaConsumer,
+tweetTopic,
+updateTopic,
+partitionWriter,
+earlybirdIndexFlusher);</p>
+</dd>
+<dt>EarlybirdIndexLoader earlybirdIndexLoader = new EarlybirdIndexLoader(</dt><dd><p>hdfsFileSystem,
+getIndexLoadingDirectory(), // See SEARCH-32839
+EarlybirdProperty.ENV.get(“default_env_value”),
+dynamicPartitionConfig.getCurrentPartitionConfig(),
+earlybirdSegmentFactory,
+segmentSyncConfig,
+clock);</p>
+</dd>
+<dt>this.storeEarlybirdStartupProducts(</dt><dd><p>createHandler,
+partitionWriter,
+earlybirdIndexFlusher</p>
+</dd>
+</dl>
+<p>);</p>
+<dl class="simple">
+<dt>return new KafkaStartup(</dt><dd><p>segmentManager,
+earlybirdKafkaConsumer,
+startupUserEventIndexer,
+userUpdatesStreamIndexer,
+userScrubGeoEventStreamIndexer,
+audioSpaceEventsStreamIndexer,
+queryCacheManager,
+earlybirdIndexLoader,
+freshStartupHandler,
+provideSearchIndexingMetricSet(),
+multiSegmentTermDictionaryManager,
+criticalExceptionHandler,
+decider</p>
+</dd>
+</dl>
+<p>);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>public QualityFactor provideQualityFactor(</dt><dd><p>Decider decider,
+SearchStatsReceiver searchStatsReceiver</p>
+</dd>
+<dt>) {</dt><dd><dl class="simple">
+<dt>return new EarlybirdCPUQualityFactor(decider,</dt><dd><p>ManagementFactory.getPlatformMXBean(OperatingSystemMXBean.class),
+searchStatsReceiver);</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Returns a new UserUpdatesKafkaConsumer to read user updates.</p></li>
+</ul>
+<p><a href="#id51"><span class="problematic" id="id52">*</span></a>/</p>
+</dd>
+<dt>public UserUpdatesStreamIndexer provideUserUpdatesKafkaConsumer(</dt><dd><blockquote>
+<div><p>SegmentManager segmentManager) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>try {</dt><dd><dl class="simple">
+<dt>return new UserUpdatesStreamIndexer(</dt><dd><p>UserUpdatesStreamIndexer.provideKafkaConsumer(),
+EarlybirdProperty.USER_UPDATES_KAFKA_TOPIC.get(),
+provideSearchIndexingMetricSet(),
+segmentManager);</p>
+</dd>
+</dl>
+</dd>
+<dt>} catch (MissingKafkaTopicException ex) {</dt><dd><p>// Yes, it will crash the server. We’ve never seen this topic missing, but
+// we’ve seen some others, so we had to build this functionality in the
+// constructor. If one day this one goes missing, we’ll have to figure out
+// how to handle it. For now, we crash.
+throw new RuntimeException(ex);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Returns a new UserScrubGeosKafkaConsumer to read geo scrubbing events.</p></li>
+</ul>
+<p><a href="#id53"><span class="problematic" id="id54">*</span></a>/</p>
+</dd>
+<dt>public UserScrubGeoEventStreamIndexer provideUserScrubGeoEventKafkaConsumer(</dt><dd><blockquote>
+<div><p>SegmentManager segmentManager) {</p>
+</div></blockquote>
+<dl>
+<dt>try {</dt><dd><dl class="simple">
+<dt>return new UserScrubGeoEventStreamIndexer(</dt><dd><p>UserScrubGeoEventStreamIndexer.provideKafkaConsumer(),
+EarlybirdProperty.USER_SCRUB_GEO_KAFKA_TOPIC.get(),
+provideSearchIndexingMetricSet(),
+segmentManager);</p>
+</dd>
+</dl>
+</dd>
+<dt>} catch (MissingKafkaTopicException ex) {</dt><dd><dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>See <a class="reference external" href="mailto:{&#37;&#52;&#48;link">{<span>&#64;</span>link</a> #provideUserUpdatesKafkaConsumer}</p></li>
+</ul>
+<p><a href="#id55"><span class="problematic" id="id56">*</span></a>/</p>
+</dd>
+</dl>
+<p>throw new RuntimeException(ex);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Returns a new ProductionEarlybirdKafkaConsumer to read ThriftVersionedEvents.</p></li>
+</ul>
+<p><a href="#id57"><span class="problematic" id="id58">*</span></a>/</p>
+</dd>
+<dt>public EarlybirdKafkaConsumersFactory provideEarlybirdKafkaConsumersFactory() {</dt><dd><dl class="simple">
+<dt>return new ProductionEarlybirdKafkaConsumersFactory(</dt><dd><p>EarlybirdProperty.KAFKA_PATH.get(),
+MAX_POLL_RECORDS</p>
+</dd>
+</dl>
+<p>);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Returns a class to read Tweets in the Earlybird. See <a class="reference external" href="mailto:{&#37;&#52;&#48;link">{<span>&#64;</span>link</a> EarlybirdKafkaConsumer}.</p></li>
+</ul>
+<p><a href="#id59"><span class="problematic" id="id60">*</span></a>/</p>
+</dd>
+<dt>public EarlybirdKafkaConsumer provideKafkaConsumer(</dt><dd><p>CriticalExceptionHandler criticalExceptionHandler,
+KafkaConsumer&lt;Long, ThriftVersionedEvents&gt; rawKafkaConsumer,
+TopicPartition tweetTopic,
+TopicPartition updateTopic,
+PartitionWriter partitionWriter,
+EarlybirdIndexFlusher earlybirdIndexFlusher</p>
+</dd>
+<dt>) {</dt><dd><dl class="simple">
+<dt>return new EarlybirdKafkaConsumer(</dt><dd><p>rawKafkaConsumer,
+provideSearchIndexingMetricSet(),
+criticalExceptionHandler,
+partitionWriter,
+tweetTopic,
+updateTopic,
+earlybirdIndexFlusher,
+provideKafkaIndexCaughtUpMonitor());</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../_sources/src/java/com/twitter/search/earlybird/factory/EarlybirdWireModule.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

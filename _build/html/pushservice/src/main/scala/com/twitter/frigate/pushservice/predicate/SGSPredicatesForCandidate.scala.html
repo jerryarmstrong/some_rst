@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.frigate.pushservice.predicate</p>
+<p>import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.frigate.common.base.SocialGraphServiceRelationshipMap
+import com.twitter.frigate.common.base.TweetAuthor
+import com.twitter.frigate.pushservice.model.PushTypes.PushCandidate
+import com.twitter.frigate.pushservice.params.PushFeatureSwitchParams
+import com.twitter.frigate.pushservice.params.PushParams
+import com.twitter.gizmoduck.thriftscala.UserType
+import com.twitter.hermit.predicate.NamedPredicate
+import com.twitter.hermit.predicate.Predicate
+import com.twitter.hermit.predicate.socialgraph.Edge
+import com.twitter.hermit.predicate.socialgraph.RelationEdge
+import com.twitter.socialgraph.thriftscala.RelationshipType
+import com.twitter.util.Future</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Refactor SGS predicates so that predicates can use relationshipMap we generate in hydrate step</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+</dl>
+<p>object SGSPredicatesForCandidate {</p>
+<blockquote>
+<div><p>case class RelationshipMapEdge(edge: Edge, relationshipMap: Map[RelationEdge, Boolean])</p>
+<dl>
+<dt>private def relationshipMapEdgeFromCandidate(</dt><dd><p>candidate: PushCandidate with TweetAuthor with SocialGraphServiceRelationshipMap</p>
+</dd>
+<dt>): Option[RelationshipMapEdge] = {</dt><dd><dl class="simple">
+<dt>candidate.authorId map { authorId =&gt;</dt><dd><p>RelationshipMapEdge(Edge(candidate.target.targetId, authorId), candidate.relationshipMap)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def authorBeingFollowed(</dt><dd><p>implicit statsReceiver: StatsReceiver</p>
+</dd>
+<dt>): NamedPredicate[PushCandidate with TweetAuthor with SocialGraphServiceRelationshipMap] = {</dt><dd><p>val name = “author_not_being_followed”
+val stats = statsReceiver.scope(name)
+val softUserCounter = stats.counter(“soft_user”)</p>
+<dl>
+<dt>val sgsAuthorBeingFollowedPredicate = Predicate</dt><dd><dl class="simple">
+<dt>.from { relationshipMapEdge: RelationshipMapEdge =&gt;</dt><dd><p>anyRelationExist(relationshipMapEdge, Set(RelationshipType.Following))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>Predicate</dt><dd><dl>
+<dt>.fromAsync {</dt><dd><dl>
+<dt>candidate: PushCandidate with TweetAuthor with SocialGraphServiceRelationshipMap =&gt;</dt><dd><p>val target = candidate.target
+target.targetUser.flatMap {</p>
+<blockquote>
+<div><dl>
+<dt>case Some(gizmoduckUser) if gizmoduckUser.userType == UserType.Soft =&gt;</dt><dd><p>softUserCounter.incr()
+target.seedsWithWeight.map { followedUsersWithWeightOpt =&gt;</p>
+<blockquote>
+<div><dl>
+<dt>candidate.authorId match {</dt><dd><dl class="simple">
+<dt>case Some(authorId) =&gt;</dt><dd><p>val followedUsers = followedUsersWithWeightOpt.getOrElse(Map.empty).keys
+followedUsers.toSet.contains(authorId)</p>
+</dd>
+</dl>
+<p>case None =&gt; false</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+<dt>case _ =&gt;</dt><dd><dl class="simple">
+<dt>sgsAuthorBeingFollowedPredicate</dt><dd><p>.optionalOn(relationshipMapEdgeFromCandidate, missingResult = false)
+.apply(Seq(candidate))
+.map(_.head)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}.withStats(stats)
+.withName(name)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def authorNotBeingDeviceFollowed(</dt><dd><p>implicit statsReceiver: StatsReceiver</p>
+</dd>
+<dt>): NamedPredicate[PushCandidate with TweetAuthor with SocialGraphServiceRelationshipMap] = {</dt><dd><p>val name = “author_being_device_followed”
+Predicate</p>
+<blockquote>
+<div><dl>
+<dt>.from { relationshipMapEdge: RelationshipMapEdge =&gt;</dt><dd><dl class="simple">
+<dt>{</dt><dd><p>anyRelationExist(relationshipMapEdge, Set(RelationshipType.DeviceFollowing))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}
+.optionalOn(relationshipMapEdgeFromCandidate, missingResult = false)
+.flip
+.withStats(statsReceiver.scope(name))
+.withName(name)</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def recommendedTweetAuthorAcceptableToTargetUser(</dt><dd><p>implicit statsReceiver: StatsReceiver</p>
+</dd>
+<dt>): NamedPredicate[PushCandidate with TweetAuthor with SocialGraphServiceRelationshipMap] = {</dt><dd><p>val name = “recommended_tweet_author_not_acceptable_to_target_user”
+Predicate</p>
+<blockquote>
+<div><dl>
+<dt>.from { relationshipMapEdge: RelationshipMapEdge =&gt;</dt><dd><dl>
+<dt>{</dt><dd><dl>
+<dt>anyRelationExist(</dt><dd><p>relationshipMapEdge,
+Set(</p>
+<blockquote>
+<div><p>RelationshipType.Blocking,
+RelationshipType.BlockedBy,
+RelationshipType.HideRecommendations,
+RelationshipType.Muting</p>
+</div></blockquote>
+<p>))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}
+.flip
+.optionalOn(relationshipMapEdgeFromCandidate, missingResult = false)
+.withStats(statsReceiver.scope(name))
+.withName(name)</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def authorNotBeingFollowed(</dt><dd><p>implicit statsReceiver: StatsReceiver</p>
+</dd>
+<dt>): NamedPredicate[PushCandidate with TweetAuthor with SocialGraphServiceRelationshipMap] = {</dt><dd><dl>
+<dt>Predicate</dt><dd><dl>
+<dt>.from { relationshipMapEdge: RelationshipMapEdge =&gt;</dt><dd><dl class="simple">
+<dt>{</dt><dd><p>anyRelationExist(relationshipMapEdge, Set(RelationshipType.Following))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}
+.optionalOn(relationshipMapEdgeFromCandidate, missingResult = false)
+.flip
+.withStats(statsReceiver.scope(“predicate_author_not_being_followed_pre_ranking”))
+.withName(“author_not_being_followed”)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def disableInNetworkTweetPredicate(</dt><dd><p>implicit statsReceiver: StatsReceiver</p>
+</dd>
+<dt>): NamedPredicate[PushCandidate with TweetAuthor with SocialGraphServiceRelationshipMap] = {</dt><dd><p>val name = “enable_in_network_tweet”
+Predicate</p>
+<blockquote>
+<div><dl>
+<dt>.fromAsync {</dt><dd><dl>
+<dt>candidate: PushCandidate with TweetAuthor with SocialGraphServiceRelationshipMap =&gt;</dt><dd><dl class="simple">
+<dt>if (candidate.target.params(PushParams.DisableInNetworkTweetCandidatesParam)) {</dt><dd><dl class="simple">
+<dt>authorNotBeingFollowed</dt><dd><p>.apply(Seq(candidate))
+.map(_.head)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>} else Future.True</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}.withStats(statsReceiver.scope(name))
+.withName(name)</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def disableOutNetworkTweetPredicate(</dt><dd><p>implicit statsReceiver: StatsReceiver</p>
+</dd>
+<dt>): NamedPredicate[PushCandidate with TweetAuthor with SocialGraphServiceRelationshipMap] = {</dt><dd><p>val name = “enable_out_network_tweet”
+Predicate</p>
+<blockquote>
+<div><dl>
+<dt>.fromAsync {</dt><dd><dl>
+<dt>candidate: PushCandidate with TweetAuthor with SocialGraphServiceRelationshipMap =&gt;</dt><dd><dl class="simple">
+<dt>if (candidate.target.params(PushFeatureSwitchParams.DisableOutNetworkTweetCandidatesFS)) {</dt><dd><dl class="simple">
+<dt>authorBeingFollowed</dt><dd><p>.apply(Seq(candidate))
+.map(_.head)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>} else Future.True</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}.withStats(statsReceiver.scope(name))
+.withName(name)</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Returns true if the provided relationshipEdge exists among</p></li>
+<li><p>&#64;param candidate candidate</p></li>
+<li><p>&#64;param relationships relaionships</p></li>
+<li><p>&#64;return Boolean result</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>private def anyRelationExist(</dt><dd><p>relationshipMapEdge: RelationshipMapEdge,
+relationships: Set[RelationshipType]</p>
+</dd>
+<dt>): Boolean = {</dt><dd><dl class="simple">
+<dt>val resultSeq = relationships.map { relationship =&gt;</dt><dd><dl class="simple">
+<dt>relationshipMapEdge.relationshipMap.getOrElse(</dt><dd><p>RelationEdge(relationshipMapEdge.edge, relationship),
+false)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}.toSeq
+resultSeq.contains(true)</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/pushservice/src/main/scala/com/twitter/frigate/pushservice/predicate/SGSPredicatesForCandidate.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

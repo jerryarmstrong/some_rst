@@ -1,0 +1,1038 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../" id="documentation_options" src="../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p># pylint: disable=arguments-differ, invalid-name
+“””
+This module contains the <code class="docutils literal notranslate"><span class="pre">DataRecordTrainer</span></code>.
+Unlike the parent <code class="docutils literal notranslate"><span class="pre">Trainer</span></code> class, the <code class="docutils literal notranslate"><span class="pre">DataRecordTrainer</span></code>
+is used specifically for processing data records.
+It abstracts away a lot of the intricacies of working with DataRecords.
+<a class="reference external" href="http://go/datarecord">DataRecord</a> is the main piping format for data samples.
+The <cite>DataRecordTrainer</cite> assumes training data and production responses and requests
+to be organized as the <a href="#id1"><span class="problematic" id="id2">`</span></a>Thrift prediction service API</p>
+<p>A <code class="docutils literal notranslate"><span class="pre">DataRecord</span></code> is a Thrift struct that defines how to encode the data:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">struct</span> <span class="n">DataRecord</span> <span class="p">{</span>
+  <span class="mi">1</span><span class="p">:</span> <span class="n">optional</span> <span class="nb">set</span><span class="o">&lt;</span><span class="n">i64</span><span class="o">&gt;</span> <span class="n">binaryFeatures</span><span class="p">;</span>                     <span class="o">//</span> <span class="n">stores</span> <span class="n">BINARY</span> <span class="n">features</span>
+  <span class="mi">2</span><span class="p">:</span> <span class="n">optional</span> <span class="nb">map</span><span class="o">&lt;</span><span class="n">i64</span><span class="p">,</span> <span class="n">double</span><span class="o">&gt;</span> <span class="n">continuousFeatures</span><span class="p">;</span>         <span class="o">//</span> <span class="n">stores</span> <span class="n">CONTINUOUS</span> <span class="n">features</span>
+  <span class="mi">3</span><span class="p">:</span> <span class="n">optional</span> <span class="nb">map</span><span class="o">&lt;</span><span class="n">i64</span><span class="p">,</span> <span class="n">i64</span><span class="o">&gt;</span> <span class="n">discreteFeatures</span><span class="p">;</span>              <span class="o">//</span> <span class="n">stores</span> <span class="n">DISCRETE</span> <span class="n">features</span>
+  <span class="mi">4</span><span class="p">:</span> <span class="n">optional</span> <span class="nb">map</span><span class="o">&lt;</span><span class="n">i64</span><span class="p">,</span> <span class="n">string</span><span class="o">&gt;</span> <span class="n">stringFeatures</span><span class="p">;</span>             <span class="o">//</span> <span class="n">stores</span> <span class="n">STRING</span> <span class="n">features</span>
+  <span class="mi">5</span><span class="p">:</span> <span class="n">optional</span> <span class="nb">map</span><span class="o">&lt;</span><span class="n">i64</span><span class="p">,</span> <span class="nb">set</span><span class="o">&lt;</span><span class="n">string</span><span class="o">&gt;&gt;</span> <span class="n">sparseBinaryFeatures</span><span class="p">;</span>  <span class="o">//</span> <span class="n">stores</span> <span class="n">sparse</span> <span class="n">BINARY</span> <span class="n">features</span>
+  <span class="mi">6</span><span class="p">:</span> <span class="n">optional</span> <span class="nb">map</span><span class="o">&lt;</span><span class="n">i64</span><span class="p">,</span> <span class="nb">map</span><span class="o">&lt;</span><span class="n">string</span><span class="p">,</span> <span class="n">double</span><span class="o">&gt;&gt;</span> <span class="n">sparseContinuousFeatures</span><span class="p">;</span> <span class="o">//</span> <span class="n">sparse</span> <span class="n">CONTINUOUS</span> <span class="n">feature</span>
+  <span class="mi">7</span><span class="p">:</span> <span class="n">optional</span> <span class="nb">map</span><span class="o">&lt;</span><span class="n">i64</span><span class="p">,</span> <span class="n">binary</span><span class="o">&gt;</span> <span class="n">blobFeatures</span><span class="p">;</span> <span class="o">//</span> <span class="n">stores</span> <span class="n">features</span> <span class="k">as</span> <span class="n">BLOBs</span> <span class="p">(</span><span class="n">binary</span> <span class="n">large</span> <span class="n">objects</span><span class="p">)</span>
+  <span class="mi">8</span><span class="p">:</span> <span class="n">optional</span> <span class="nb">map</span><span class="o">&lt;</span><span class="n">i64</span><span class="p">,</span> <span class="n">tensor</span><span class="o">.</span><span class="n">GeneralTensor</span><span class="o">&gt;</span> <span class="n">tensors</span><span class="p">;</span> <span class="o">//</span> <span class="n">stores</span> <span class="n">TENSOR</span> <span class="n">features</span>
+  <span class="mi">9</span><span class="p">:</span> <span class="n">optional</span> <span class="nb">map</span><span class="o">&lt;</span><span class="n">i64</span><span class="p">,</span> <span class="n">tensor</span><span class="o">.</span><span class="n">SparseTensor</span><span class="o">&gt;</span> <span class="n">sparseTensors</span><span class="p">;</span> <span class="o">//</span> <span class="n">stores</span> <span class="n">SPARSE_TENSOR</span> <span class="n">features</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+<p>A significant portion of Twitter data is hydrated
+and then temporarily stored on HDFS as DataRecords.
+The files are compressed (.gz or .lzo) partitions of data records.
+These form supervised datasets. Each sample captures the relationship
+between input and output (cause and effect).
+To create your own dataset, please see <a class="reference external" href="https://github.com/twitter/elephant-bird">https://github.com/twitter/elephant-bird</a>.</p>
+<p>The default <code class="docutils literal notranslate"><span class="pre">DataRecordTrainer.[train,evaluate,learn]()</span></code> reads these datarecords.
+The data is a read from multiple <code class="docutils literal notranslate"><span class="pre">part-*.[compression]</span></code> files.
+The default behavior of <code class="docutils literal notranslate"><span class="pre">DataRecordTrainer</span></code> is to read sparse features from <code class="docutils literal notranslate"><span class="pre">DataRecords</span></code>.
+This is a legacy default piping format at Twitter.
+The <code class="docutils literal notranslate"><span class="pre">DataRecordTrainer</span></code> is flexible enough for research and yet simple enough
+for a new beginner ML practioner.</p>
+<p>By means of the feature string to key hashing function,
+the <code class="docutils literal notranslate"><span class="pre">[train,eval]_feature_config</span></code> constructor arguments
+control which features can be used as sample labels, sample weights,
+or sample features.
+Samples ids, and feature keys, feature values and feature weights
+can be skipped, included, excluded or used as labels, weights, or features.
+This allows you to easily define and control sparse distributions of
+named features.</p>
+<p>Yet sparse data is difficult to work with. We are currently working to
+optimize the sparse operations due to inefficiencies in the gradient descent
+and parameter update processes. There are efforts underway
+to minimize the footprint of sparse data as it is inefficient to process.
+CPUs and GPUs much prefer dense tensor data.
+“””</p>
+<p>import datetime</p>
+<p>import tensorflow.compat.v1 as tf
+from twitter.deepbird.io.dal import dal_to_hdfs_path, is_dal_path
+import twml
+from twml.trainers import Trainer
+from twml.contrib.feature_importances.feature_importances import (</p>
+<blockquote>
+<div><p>compute_feature_importances,
+TREE,
+write_feature_importances_to_hdfs,
+write_feature_importances_to_ml_dash)</p>
+</div></blockquote>
+<p>from absl import logging</p>
+<dl>
+<dt>class DataRecordTrainer(Trainer):  # pylint: disable=abstract-method</dt><dd><p>“””
+The <code class="docutils literal notranslate"><span class="pre">DataRecordTrainer</span></code> implementation is intended to satisfy the most common use cases
+at Twitter where only the build_graph methods needs to be overridden.
+For this reason, <code class="docutils literal notranslate"><span class="pre">Trainer.[train,eval]_input_fn</span></code> methods
+assume a DataRecord dataset partitioned into part files stored in compressed (e.g. gzip) format.</p>
+<p>For use-cases that differ from this common Twitter use-case,
+further Trainer methods can be overridden.
+If that still doesn’t provide enough flexibility, the user can always
+use the tf.estimator.Esimator or tf.session.run directly.
+“””</p>
+<dl>
+<dt>def __init__(</dt><dd><blockquote>
+<div><p>self, name, params,
+build_graph_fn,
+feature_config=None,
+<a href="#id3"><span class="problematic" id="id4">**</span></a>kwargs):</p>
+</div></blockquote>
+<p>“””
+The DataRecordTrainer constructor builds a
+<code class="docutils literal notranslate"><span class="pre">tf.estimator.Estimator</span></code> and stores it in self.estimator.
+For this reason, DataRecordTrainer accepts the same Estimator constructor arguments.
+It also accepts additional arguments to facilitate metric evaluation and multi-phase training
+(init_from_dir, init_map).</p>
+<dl>
+<dt>Args:</dt><dd><dl>
+<dt>parent arguments:</dt><dd><p>See the <a href="#id32"><span class="problematic" id="id33">`Trainer constructor &lt;#twml.trainers.Trainer.__init__&gt;`_</span></a> documentation
+for a full list of arguments accepted by the parent class.</p>
+</dd>
+<dt>name, params, build_graph_fn (and other parent class args):</dt><dd><p>see documentation for twml.Trainer doc.</p>
+</dd>
+<dt>feature_config:</dt><dd><p>An object of type FeatureConfig describing what features to decode.
+Defaults to None. But it is needed in the following cases:</p>
+<blockquote>
+<div><ul class="simple">
+<li><p><cite>get_train_input_fn()</cite> / <cite>get_eval_input_fn()</cite> is called without a <cite>parse_fn</cite></p></li>
+<li><p><cite>learn()</cite>, <cite>train()</cite>, <cite>eval()</cite>, <cite>calibrate()</cite> are called without providing <cite>*input_fn</cite>.</p></li>
+</ul>
+</div></blockquote>
+</dd>
+<dt><a href="#id5"><span class="problematic" id="id6">**</span></a>kwargs:</dt><dd><p>further kwargs can be specified and passed to the Estimator constructor.</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>“””</p>
+<p># NOTE: DO NOT MODIFY <cite>params</cite> BEFORE THIS CALL.
+super(DataRecordTrainer, self).__init__(</p>
+<blockquote>
+<div><p>name=name, params=params, build_graph_fn=build_graph_fn, <a href="#id7"><span class="problematic" id="id8">**</span></a>kwargs)</p>
+</div></blockquote>
+<p>self._feature_config = feature_config</p>
+<p># date range parameters common to both training and evaluation data:
+hour_resolution = self.params.get(“hour_resolution”, 1)
+data_threads = self.params.get(“data_threads”, 4)
+datetime_format = self.params.get(“datetime_format”, “%Y/%m/%d”)</p>
+<p># retrieve the desired training dataset files
+self._train_files = self.build_files_list(</p>
+<blockquote>
+<div><p>files_list_path=self.params.get(“train_files_list”, None),
+data_dir=self.params.get(“train_data_dir”, None),
+start_datetime=self.params.get(“train_start_datetime”, None),
+end_datetime=self.params.get(“train_end_datetime”, None),
+datetime_format=datetime_format, data_threads=data_threads,
+hour_resolution=hour_resolution, maybe_save=self.is_chief(),
+overwrite=self.params.get(“train_overwrite_files_list”, False),</p>
+</div></blockquote>
+<p>)</p>
+<p># retrieve the desired evaluation dataset files
+eval_name = self.params.get(“eval_name”, None)</p>
+<dl>
+<dt>if eval_name == “train”:</dt><dd><p>self._eval_files = self._train_files</p>
+</dd>
+<dt>else:</dt><dd><dl class="simple">
+<dt>self._eval_files = self.build_files_list(</dt><dd><p>files_list_path=self.params.get(“eval_files_list”, None),
+data_dir=self.params.get(“eval_data_dir”, None),
+start_datetime=self.params.get(“eval_start_datetime”, None),
+end_datetime=self.params.get(“eval_end_datetime”, None),
+datetime_format=datetime_format, data_threads=data_threads,
+hour_resolution=hour_resolution, maybe_save=self.is_chief(),
+overwrite=self.params.get(“eval_overwrite_files_list”, False),</p>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>if not self.params.get(“allow_train_eval_overlap”):</dt><dd><p># if there is overlap between train and eval, error out!
+if self._train_files and self._eval_files:</p>
+<blockquote>
+<div><p>overlap_files = set(self._train_files) &amp; set(self._eval_files)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>else:</dt><dd><p>overlap_files = set()</p>
+</dd>
+<dt>if overlap_files:</dt><dd><dl class="simple">
+<dt>raise ValueError(“There is an overlap between train and eval files:n %s” %</dt><dd><p>(overlap_files))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>&#64;staticmethod
+def build_hdfs_files_list(</p>
+<blockquote>
+<div><blockquote>
+<div><p>files_list_path, data_dir,
+start_datetime, end_datetime, datetime_format,
+data_threads, hour_resolution, maybe_save, overwrite):</p>
+</div></blockquote>
+<dl class="simple">
+<dt>if files_list_path:</dt><dd><p>files_list_path = twml.util.preprocess_path(files_list_path)</p>
+</dd>
+<dt>if isinstance(start_datetime, datetime.datetime):</dt><dd><p>start_datetime = start_datetime.strftime(datetime_format)</p>
+</dd>
+<dt>if isinstance(end_datetime, datetime.datetime):</dt><dd><p>end_datetime = end_datetime.strftime(datetime_format)</p>
+</dd>
+<dt>list_files_by_datetime_args = {</dt><dd><p>“base_path”: data_dir,
+“start_datetime”: start_datetime,
+“end_datetime”: end_datetime,
+“datetime_prefix_format”: datetime_format,
+“extension”: “lzo”,
+“parallelism”: data_threads,
+“hour_resolution”: hour_resolution,
+“sort”: True,</p>
+</dd>
+</dl>
+<p>}</p>
+<p># no cache of data file paths, just get the list by scraping the directory
+if not files_list_path or not tf.io.gfile.exists(files_list_path):</p>
+<blockquote>
+<div><p># twml.util.list_files_by_datetime returns None if data_dir is None.
+# twml.util.list_files_by_datetime passes through data_dir if data_dir is a list
+files_list = twml.util.list_files_by_datetime(<a href="#id9"><span class="problematic" id="id10">**</span></a>list_files_by_datetime_args)</p>
+</div></blockquote>
+<dl>
+<dt>else:</dt><dd><p># the cached data file paths file exists.
+files_info = twml.util.read_file(files_list_path, decode=”json”)
+# use the cached list if data params match current params,
+#  or if current params are None
+# Not including None checks for datetime_format and hour_resolution,
+#  since those are shared between eval and training.
+if (all(param is None for param in [data_dir, start_datetime, end_datetime]) or</p>
+<blockquote>
+<div><blockquote>
+<div><dl class="simple">
+<dt>(files_info[“data_dir”] == data_dir and</dt><dd><p>files_info[“start_datetime”] == start_datetime and
+files_info[“end_datetime”] == end_datetime and
+files_info[“datetime_format”] == datetime_format and
+files_info[“hour_resolution”] == hour_resolution)):</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>files_list = files_info[“files”]</p>
+</div></blockquote>
+<dl>
+<dt>elif overwrite:</dt><dd><p># current params are not none and don’t match saved params
+# <cite>overwrite</cite> indicates we should thus update the list
+files_list = twml.util.list_files_by_datetime(<a href="#id11"><span class="problematic" id="id12">**</span></a>list_files_by_datetime_args)</p>
+</dd>
+<dt>else:</dt><dd><p># dont update the cached list
+raise ValueError(“Information in files_list is inconsistent with provided args.n”</p>
+<blockquote>
+<div><p>“Did you intend to overwrite files_list using ”
+“–train.overwrite_files_list or –eval.overwrite_files_list?n”
+“If you instead want to use the paths in files_list, ensure that ”
+“data_dir, start_datetime, and end_datetime are None.”)</p>
+</div></blockquote>
+</dd>
+</dl>
+</dd>
+<dt>if maybe_save and files_list_path and (overwrite or not tf.io.gfile.exists(files_list_path)):</dt><dd><p>save_dict = {}
+save_dict[“files”] = files_list
+save_dict[“data_dir”] = data_dir
+save_dict[“start_datetime”] = start_datetime
+save_dict[“end_datetime”] = end_datetime
+save_dict[“datetime_format”] = datetime_format
+save_dict[“hour_resolution”] = hour_resolution
+twml.util.write_file(files_list_path, save_dict, encode=”json”)</p>
+</dd>
+</dl>
+<p>return files_list</p>
+</div></blockquote>
+<p>&#64;staticmethod
+def build_files_list(files_list_path, data_dir,</p>
+<blockquote>
+<div><blockquote>
+<div><p>start_datetime, end_datetime, datetime_format,
+data_threads, hour_resolution, maybe_save, overwrite):</p>
+</div></blockquote>
+<p>‘’’
+When specifying DAL datasets, only data_dir, start_dateime, and end_datetime
+should be given with the format:</p>
+<p>dal://{cluster}/{role}/{dataset_name}/{env}</p>
+<p>‘’’
+if not data_dir or not is_dal_path(data_dir):</p>
+<blockquote>
+<div><p>logging.warn(f”Please consider specifying a dal:// dataset rather than passing a physical hdfs path.”)
+return DataRecordTrainer.build_hdfs_files_list(</p>
+<blockquote>
+<div><p>files_list_path, data_dir,
+start_datetime, end_datetime, datetime_format,
+data_threads, hour_resolution, maybe_save, overwrite)</p>
+</div></blockquote>
+</div></blockquote>
+<p>del datetime_format
+del data_threads
+del hour_resolution
+del maybe_save
+del overwrite</p>
+<dl class="simple">
+<dt>return dal_to_hdfs_path(</dt><dd><p>path=data_dir,
+start_datetime=start_datetime,
+end_datetime=end_datetime,</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<p>&#64;property
+def train_files(self):</p>
+<blockquote>
+<div><p>return self._train_files</p>
+</div></blockquote>
+<p>&#64;property
+def eval_files(self):</p>
+<blockquote>
+<div><p>return self._eval_files</p>
+</div></blockquote>
+<p>&#64;staticmethod
+def add_parser_arguments():</p>
+<blockquote>
+<div><p>“””
+Add common commandline args to parse for the Trainer class.
+Typically, the user calls this function and then parses cmd-line arguments
+into an argparse.Namespace object which is then passed to the Trainer constructor
+via the params argument.</p>
+<p>See the <a class="reference external" href="_modules/twml/trainers/trainer.html#Trainer.add_parser_arguments">Trainer code</a>
+and <a class="reference external" href="_modules/twml/trainers/trainer.html#DataRecordTrainer.add_parser_arguments">DataRecordTrainer code</a>
+for a list and description of all cmd-line arguments.</p>
+<dl class="simple">
+<dt>Args:</dt><dd><dl class="simple">
+<dt>learning_rate_decay:</dt><dd><p>Defaults to False. When True, parses learning rate decay arguments.</p>
+</dd>
+</dl>
+</dd>
+<dt>Returns:</dt><dd><p>argparse.ArgumentParser instance with some useful args already added.</p>
+</dd>
+</dl>
+<p>“””
+parser = super(DataRecordTrainer, DataRecordTrainer).add_parser_arguments()
+parser.add_argument(</p>
+<blockquote>
+<div><p>“–train.files_list”, “–train_files_list”, type=str, default=None,
+dest=”train_files_list”,
+help=”Path for a json file storing information on training data.n”</p>
+<blockquote>
+<div><p>“Specifically, the file at files_list should contain the dataset parameters ”
+“for constructing the list of data files, and the list of data file paths.n”
+“If the json file does not exist, other args are used to construct the ”
+“training files list, and that list will be saved to the indicated json file.n”
+“If the json file does exist, and current args are consistent with ”
+“saved args, or are all None, then the saved files list will be used.n”
+“If current args are not consistent with the saved args, then error out ”
+“if train_overwrite_files_list==False, else overwrite files_list with ”
+“a newly constructed list.”)</p>
+</div></blockquote>
+</div></blockquote>
+<dl>
+<dt>parser.add_argument(</dt><dd><p>“–train.overwrite_files_list”, “–train_overwrite_files_list”, action=”store_true”, default=False,
+dest=”train_overwrite_files_list”,
+help=”When the –train.files_list param is used, indicates whether to “</p>
+<blockquote>
+<div><p>“overwrite the existing –train.files_list when there are differences ”
+“between the current and saved dataset args. Default (False) is to ”
+“error out if files_list exists and differs from current params.”)</p>
+</div></blockquote>
+</dd>
+<dt>parser.add_argument(</dt><dd><p>“–train.data_dir”, “–train_data_dir”, type=str, default=None,
+dest=”train_data_dir”,
+help=”Path to the training data directory.”</p>
+<blockquote>
+<div><p>“Supports local, dal://{cluster}-{region}/{role}/{dataset_name}/{environment}, ”
+“and HDFS (hdfs://default/&lt;path&gt; ) paths.”)</p>
+</div></blockquote>
+</dd>
+<dt>parser.add_argument(</dt><dd><p>“–train.start_date”, “–train_start_datetime”,
+type=str, default=None,
+dest=”train_start_datetime”,
+help=”Starting date for training inside the train data dir.”</p>
+<blockquote>
+<div><p>“The start datetime is inclusive.”
+“e.g. 2019/01/15”)</p>
+</div></blockquote>
+</dd>
+<dt>parser.add_argument(</dt><dd><p>“–train.end_date”, “–train_end_datetime”, type=str, default=None,
+dest=”train_end_datetime”,
+help=”Ending date for training inside the train data dir.”</p>
+<blockquote>
+<div><p>“The end datetime is inclusive.”
+“e.g. 2019/01/15”)</p>
+</div></blockquote>
+</dd>
+<dt>parser.add_argument(</dt><dd><p>“–eval.files_list”, “–eval_files_list”, type=str, default=None,
+dest=”eval_files_list”,
+help=”Path for a json file storing information on evaluation data.n”</p>
+<blockquote>
+<div><p>“Specifically, the file at files_list should contain the dataset parameters ”
+“for constructing the list of data files, and the list of data file paths.n”
+“If the json file does not exist, other args are used to construct the ”
+“evaluation files list, and that list will be saved to the indicated json file.n”
+“If the json file does exist, and current args are consistent with ”
+“saved args, or are all None, then the saved files list will be used.n”
+“If current args are not consistent with the saved args, then error out ”
+“if eval_overwrite_files_list==False, else overwrite files_list with ”
+“a newly constructed list.”)</p>
+</div></blockquote>
+</dd>
+<dt>parser.add_argument(</dt><dd><p>“–eval.overwrite_files_list”, “–eval_overwrite_files_list”, action=”store_true”, default=False,
+dest=”eval_overwrite_files_list”,
+help=”When the –eval.files_list param is used, indicates whether to “</p>
+<blockquote>
+<div><p>“overwrite the existing –eval.files_list when there are differences ”
+“between the current and saved dataset args. Default (False) is to ”
+“error out if files_list exists and differs from current params.”)</p>
+</div></blockquote>
+</dd>
+<dt>parser.add_argument(</dt><dd><p>“–eval.data_dir”, “–eval_data_dir”, type=str, default=None,
+dest=”eval_data_dir”,
+help=”Path to the cross-validation data directory.”</p>
+<blockquote>
+<div><p>“Supports local, dal://{cluster}-{region}/{role}/{dataset_name}/{environment}, ”
+“and HDFS (hdfs://default/&lt;path&gt; ) paths.”)</p>
+</div></blockquote>
+</dd>
+<dt>parser.add_argument(</dt><dd><p>“–eval.start_date”, “–eval_start_datetime”,
+type=str, default=None,
+dest=”eval_start_datetime”,
+help=”Starting date for evaluating inside the eval data dir.”</p>
+<blockquote>
+<div><p>“The start datetime is inclusive.”
+“e.g. 2019/01/15”)</p>
+</div></blockquote>
+</dd>
+<dt>parser.add_argument(</dt><dd><p>“–eval.end_date”, “–eval_end_datetime”, type=str, default=None,
+dest=”eval_end_datetime”,
+help=”Ending date for evaluating inside the eval data dir.”</p>
+<blockquote>
+<div><p>“The end datetime is inclusive.”
+“e.g. 2019/01/15”)</p>
+</div></blockquote>
+</dd>
+<dt>parser.add_argument(</dt><dd><p>“–datetime_format”, type=str, default=”%Y/%m/%d”,
+help=”Date format for training and evaluation datasets.”</p>
+<blockquote>
+<div><p>“Has to be a format that is understood by python datetime.”
+“e.g. %%Y/%%m/%%d for 2019/01/15.”
+“Used only if {train/eval}.{start/end}_date are provided.”)</p>
+</div></blockquote>
+</dd>
+<dt>parser.add_argument(</dt><dd><p>“–hour_resolution”, type=int, default=None,
+help=”Specify the hourly resolution of the stored data.”)</p>
+</dd>
+<dt>parser.add_argument(</dt><dd><p>“–data_spec”, type=str, required=True,
+help=”Path to data specification JSON file. This file is used to decode DataRecords”)</p>
+</dd>
+<dt>parser.add_argument(</dt><dd><p>“–train.keep_rate”, “–train_keep_rate”, type=float, default=None,
+dest=”train_keep_rate”,
+help=”A float value in (0.0, 1.0] that indicates to drop records according to the Bernoulli distribution with p = 1 - keep_rate.”)</p>
+</dd>
+<dt>parser.add_argument(</dt><dd><p>“–eval.keep_rate”, “–eval_keep_rate”, type=float, default=None,
+dest=”eval_keep_rate”,
+help=”A float value in (0.0, 1.0] that indicates to drop records according to the Bernoulli distribution with p = 1 - keep_rate.”)</p>
+</dd>
+<dt>parser.add_argument(</dt><dd><p>“–train.parts_downsampling_rate”, “–train_parts_downsampling_rate”,
+dest=”train_parts_downsampling_rate”,
+type=float, default=None,
+help=”A float value in (0.0, 1.0] that indicates the factor by which to downsample part files. For example, a value of 0.2 means only 20 percent of part files become part of the dataset.”)</p>
+</dd>
+<dt>parser.add_argument(</dt><dd><p>“–eval.parts_downsampling_rate”, “–eval_parts_downsampling_rate”,
+dest=”eval_parts_downsampling_rate”,
+type=float, default=None,
+help=”A float value in (0.0, 1.0] that indicates the factor by which to downsample part files. For example, a value of 0.2 means only 20 percent of part files become part of the dataset.”)</p>
+</dd>
+<dt>parser.add_argument(</dt><dd><p>“–allow_train_eval_overlap”,
+dest=”allow_train_eval_overlap”,
+action=”store_true”,
+help=”Allow overlap between train and eval datasets.”</p>
+</dd>
+</dl>
+<p>)
+parser.add_argument(</p>
+<blockquote>
+<div><p>“–eval_name”, type=str, default=None,
+help=”String denoting what we want to name the eval. If this is <cite>train</cite>, then we eval on the training dataset.”</p>
+</div></blockquote>
+<p>)
+return parser</p>
+</div></blockquote>
+<dl>
+<dt>def contrib_run_feature_importances(self, feature_importances_parse_fn=None, write_to_hdfs=True, extra_groups=None, datarecord_filter_fn=None, datarecord_filter_run_name=None):</dt><dd><p>“””Compute feature importances on a trained model (this is a contrib feature)
+Args:</p>
+<blockquote>
+<div><dl class="simple">
+<dt>feature_importances_parse_fn (fn): The same parse_fn that we use for training/evaluation.</dt><dd><p>Defaults to feature_config.get_parse_fn()</p>
+</dd>
+</dl>
+<p>write_to_hdfs (bool): Setting this to True writes the feature importance metrics to HDFS</p>
+</div></blockquote>
+<dl class="simple">
+<dt>extra_groups (dict&lt;str, list&lt;str&gt;&gt;): A dictionary mapping the name of extra feature groups to the list of</dt><dd><p>the names of the features in the group</p>
+</dd>
+<dt>datarecord_filter_fn (function): a function takes a single data sample in com.twitter.ml.api.ttypes.DataRecord format</dt><dd><p>and return a boolean value, to indicate if this data record should be kept in feature importance module or not.</p>
+</dd>
+</dl>
+<p>“””
+logging.info(“Computing feature importance”)
+algorithm = self._params.feature_importance_algorithm</p>
+<p>kwargs = {}
+if algorithm == TREE:</p>
+<blockquote>
+<div><p>kwargs[“split_feature_group_on_period”] = self._params.split_feature_group_on_period
+kwargs[“stopping_metric”] = self._params.feature_importance_metric
+kwargs[“sensitivity”] = self._params.feature_importance_sensitivity
+kwargs[“dont_build_tree”] = self._params.dont_build_tree
+kwargs[“extra_groups”] = extra_groups
+if self._params.feature_importance_is_metric_larger_the_better:</p>
+<blockquote>
+<div><p># The user has specified that the stopping metric is one where larger values are better (e.g. ROC_AUC)
+kwargs[“is_metric_larger_the_better”] = True</p>
+</div></blockquote>
+<dl class="simple">
+<dt>elif self._params.feature_importance_is_metric_smaller_the_better:</dt><dd><p># The user has specified that the stopping metric is one where smaller values are better (e.g. LOSS)
+kwargs[“is_metric_larger_the_better”] = False</p>
+</dd>
+<dt>else:</dt><dd><p># The user has not specified which direction is better for the stopping metric
+kwargs[“is_metric_larger_the_better”] = None</p>
+</dd>
+</dl>
+<p>logging.info(“Using the tree algorithm with kwargs {}”.format(kwargs))</p>
+</div></blockquote>
+<dl>
+<dt>feature_importances = compute_feature_importances(</dt><dd><p>trainer=self,
+data_dir=self._params.get(‘feature_importance_data_dir’),
+feature_config=self._feature_config,
+algorithm=algorithm,
+record_count=self._params.feature_importance_example_count,
+parse_fn=feature_importances_parse_fn,
+datarecord_filter_fn=datarecord_filter_fn,
+<a href="#id13"><span class="problematic" id="id14">**</span></a>kwargs)</p>
+</dd>
+<dt>if not feature_importances:</dt><dd><p>logging.info(“Feature importances returned None”)</p>
+</dd>
+<dt>else:</dt><dd><dl>
+<dt>if write_to_hdfs:</dt><dd><p>logging.info(“Writing feature importance to HDFS”)
+write_feature_importances_to_hdfs(</p>
+<blockquote>
+<div><p>trainer=self,
+feature_importances=feature_importances,
+output_path=datarecord_filter_run_name,
+metric=self._params.get(‘feature_importance_metric’))</p>
+</div></blockquote>
+</dd>
+<dt>else:</dt><dd><p>logging.info(“Not writing feature importance to HDFS”)</p>
+</dd>
+</dl>
+<p>logging.info(“Writing feature importance to ML Metastore”)
+write_feature_importances_to_ml_dash(</p>
+<blockquote>
+<div><p>trainer=self, feature_importances=feature_importances)</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>return feature_importances</p>
+</dd>
+<dt>def export_model(self, serving_input_receiver_fn=None,</dt><dd><blockquote>
+<div><p>export_output_fn=None,
+export_dir=None, checkpoint_path=None,
+feature_spec=None):</p>
+</div></blockquote>
+<p>“””
+Export the model for prediction. Typically, the exported model
+will later be run in production servers. This method is called
+by the user to export the PREDICT graph to disk.</p>
+<p>Internally, this method calls <a class="reference external" href="https://www.tensorflow.org/api_docs/python/tf/estimator/Estimator#export_savedmodel">tf.estimator.Estimator.export_savedmodel</a>.</p>
+<dl class="simple">
+<dt>Args:</dt><dd><dl class="simple">
+<dt>serving_input_receiver_fn (Function):</dt><dd><p>function preparing the model for inference requests.
+If not set; defaults to the the serving input receiver fn set by the FeatureConfig.</p>
+</dd>
+<dt>export_output_fn (Function):</dt><dd><p>Function to export the graph_output (output of build_graph) for
+prediction. Takes a graph_output dict as sole argument and returns
+the export_output_fns dict.
+Defaults to <code class="docutils literal notranslate"><span class="pre">twml.export_output_fns.batch_prediction_continuous_output_fn</span></code>.</p>
+</dd>
+<dt>export_dir:</dt><dd><p>directory to export a SavedModel for prediction servers.
+Defaults to <code class="docutils literal notranslate"><span class="pre">[save_dir]/exported_models</span></code>.</p>
+</dd>
+<dt>checkpoint_path:</dt><dd><p>the checkpoint path to export. If None (the default), the most recent checkpoint
+found within the model directory <code class="docutils literal notranslate"><span class="pre">save_dir</span></code> is chosen.</p>
+</dd>
+</dl>
+</dd>
+<dt>Returns:</dt><dd><p>The export directory where the PREDICT graph is saved.</p>
+</dd>
+</dl>
+<p>“””
+if serving_input_receiver_fn is None:</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if self._feature_config is None:</dt><dd><p>raise ValueError(”<cite>feature_config</cite> was not passed to <cite>DataRecordTrainer</cite>”)</p>
+</dd>
+</dl>
+<p>serving_input_receiver_fn = self._feature_config.get_serving_input_receiver_fn()</p>
+</div></blockquote>
+<dl class="simple">
+<dt>if feature_spec is None:</dt><dd><dl class="simple">
+<dt>if self._feature_config is None:</dt><dd><dl class="simple">
+<dt>raise ValueError(“feature_spec can not be inferred.”</dt><dd><p>“Please pass feature_spec=feature_config.get_feature_spec() to the trainer.export_model method”)</p>
+</dd>
+</dl>
+</dd>
+<dt>else:</dt><dd><p>feature_spec = self._feature_config.get_feature_spec()</p>
+</dd>
+</dl>
+</dd>
+<dt>if isinstance(serving_input_receiver_fn, twml.feature_config.FeatureConfig):</dt><dd><p>raise ValueError(“Cannot pass FeatureConfig as a parameter to serving_input_receiver_fn”)</p>
+</dd>
+<dt>elif not callable(serving_input_receiver_fn):</dt><dd><p>raise ValueError(“Expecting Function for serving_input_receiver_fn”)</p>
+</dd>
+<dt>if export_output_fn is None:</dt><dd><p>export_output_fn = twml.export_output_fns.batch_prediction_continuous_output_fn</p>
+</dd>
+<dt>return super(DataRecordTrainer, self).export_model(</dt><dd><p>export_dir=export_dir,
+serving_input_receiver_fn=serving_input_receiver_fn,
+checkpoint_path=checkpoint_path,
+export_output_fn=export_output_fn,
+feature_spec=feature_spec,</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>def get_train_input_fn(</dt><dd><blockquote>
+<div><p>self, parse_fn=None, repeat=None, shuffle=True, interleave=True, shuffle_files=None,
+initializable=False, log_tf_data_summaries=False, <a href="#id15"><span class="problematic" id="id16">**</span></a>kwargs):</p>
+</div></blockquote>
+<p>“””
+This method is used to create input function used by estimator.train().</p>
+<dl>
+<dt>Args:</dt><dd><dl>
+<dt>parse_fn:</dt><dd><p>Function to parse a data record into a set of features.
+Defaults to the parser returned by the FeatureConfig selected</p>
+</dd>
+<dt>repeat (optional):</dt><dd><p>Specifies if the dataset is to be repeated. Defaults to <cite>params.train_steps &gt; 0</cite>.
+This ensures the training is run for atleast <cite>params.train_steps</cite>.
+Toggling this to <cite>False</cite> results in training finishing when one of the following happens:</p>
+<blockquote>
+<div><ul class="simple">
+<li><p>The entire dataset has been trained upon once.</p></li>
+<li><p><cite>params.train_steps</cite> has been reached.</p></li>
+</ul>
+</div></blockquote>
+</dd>
+<dt>shuffle (optional):</dt><dd><p>Specifies if the files and records in the files need to be shuffled.
+When <cite>True</cite>,  files are shuffled, and records of each files are shuffled.
+When <cite>False</cite>, files are read in alpha-numerical order. Also when <cite>False</cite>
+the dataset is sharded among workers for Hogwild and distributed training
+if no sharding configuration is provided in <cite>params.train_dataset_shards</cite>.
+Defaults to <cite>True</cite>.</p>
+</dd>
+<dt>interleave (optional):</dt><dd><p>Specifies if records from multiple files need to be interleaved in parallel.
+Defaults to <cite>True</cite>.</p>
+</dd>
+<dt>shuffle_files (optional):</dt><dd><p>Shuffle the list of files. Defaults to ‘Shuffle’ if not provided.</p>
+</dd>
+<dt>initializable (optional):</dt><dd><p>A boolean indicator. When the parsing function depends on some resource, e.g. a HashTable or
+a Tensor, i.e. it’s an initializable iterator, set it to True. Otherwise, default value
+(false) is used for most plain iterators.</p>
+</dd>
+<dt>log_tf_data_summaries (optional):</dt><dd><p>A boolean indicator denoting whether to add a <cite>tf.data.experimental.StatsAggregator</cite> to the
+tf.data pipeline. This adds summaries of pipeline utilization and buffer sizes to the output
+events files. This requires that <cite>initializable</cite> is <cite>True</cite> above.</p>
+</dd>
+</dl>
+</dd>
+<dt>Returns:</dt><dd><p>An input_fn that can be consumed by <cite>estimator.train()</cite>.</p>
+</dd>
+</dl>
+<p>“””
+if parse_fn is None:</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if self._feature_config is None:</dt><dd><p>raise ValueError(”<cite>feature_config</cite> was not passed to <cite>DataRecordTrainer</cite>”)</p>
+</dd>
+</dl>
+<p>parse_fn = self._feature_config.get_parse_fn()</p>
+</div></blockquote>
+<dl class="simple">
+<dt>if not callable(parse_fn):</dt><dd><p>raise ValueError(“Expecting parse_fn to be a function.”)</p>
+</dd>
+<dt>if log_tf_data_summaries and not initializable:</dt><dd><p>raise ValueError(“Require <cite>initializable</cite> if <cite>log_tf_data_summaries</cite>.”)</p>
+</dd>
+<dt>if repeat is None:</dt><dd><p>repeat = self.params.train_steps &gt; 0 or self.params.get(‘distributed’, False)</p>
+</dd>
+<dt>if not shuffle and self.num_workers &gt; 1 and self.params.train_dataset_shards is None:</dt><dd><p>num_shards = self.num_workers
+shard_index = self.worker_index</p>
+</dd>
+<dt>else:</dt><dd><p>num_shards = self.params.train_dataset_shards
+shard_index = self.params.train_dataset_shard_index</p>
+</dd>
+<dt>return lambda: twml.input_fns.default_input_fn(</dt><dd><p>files=self._train_files,
+batch_size=self.params.train_batch_size,
+parse_fn=parse_fn,
+num_threads=self.params.num_threads,
+repeat=repeat,
+keep_rate=self.params.train_keep_rate,
+parts_downsampling_rate=self.params.train_parts_downsampling_rate,
+shards=num_shards,
+shard_index=shard_index,
+shuffle=shuffle,
+shuffle_files=(shuffle if shuffle_files is None else shuffle_files),
+interleave=interleave,
+initializable=initializable,
+log_tf_data_summaries=log_tf_data_summaries,
+<a href="#id17"><span class="problematic" id="id18">**</span></a>kwargs)</p>
+</dd>
+</dl>
+</dd>
+<dt>def get_eval_input_fn(</dt><dd><blockquote>
+<div><p>self, parse_fn=None, repeat=None,
+shuffle=True, interleave=True,
+shuffle_files=None, initializable=False, log_tf_data_summaries=False, <a href="#id19"><span class="problematic" id="id20">**</span></a>kwargs):</p>
+</div></blockquote>
+<p>“””
+This method is used to create input function used by estimator.eval().</p>
+<dl>
+<dt>Args:</dt><dd><dl>
+<dt>parse_fn:</dt><dd><p>Function to parse a data record into a set of features.
+Defaults to twml.parsers.get_sparse_parse_fn(feature_config).</p>
+</dd>
+<dt>repeat (optional):</dt><dd><p>Specifies if the dataset is to be repeated. Defaults to <cite>params.eval_steps &gt; 0</cite>.
+This ensures the evaluation is run for atleast <cite>params.eval_steps</cite>.
+Toggling this to <cite>False</cite> results in evaluation finishing when one of the following happens:</p>
+<blockquote>
+<div><ul class="simple">
+<li><p>The entire dataset has been evaled upon once.</p></li>
+<li><p><cite>params.eval_steps</cite> has been reached.</p></li>
+</ul>
+</div></blockquote>
+</dd>
+<dt>shuffle (optional):</dt><dd><p>Specifies if the files and records in the files need to be shuffled.
+When <cite>False</cite>, files are read in alpha-numerical order.
+When <cite>True</cite>,  files are shuffled, and records of each files are shuffled.
+Defaults to <cite>True</cite>.</p>
+</dd>
+<dt>interleave (optional):</dt><dd><p>Specifies if records from multiple files need to be interleaved in parallel.
+Defaults to <cite>True</cite>.</p>
+</dd>
+<dt>shuffle_files (optional):</dt><dd><p>Shuffles the list of files. Defaults to ‘Shuffle’ if not provided.</p>
+</dd>
+<dt>initializable (optional):</dt><dd><p>A boolean indicator. When the parsing function depends on some resource, e.g. a HashTable or
+a Tensor, i.e. it’s an initializable iterator, set it to True. Otherwise, default value
+(false) is used for most plain iterators.</p>
+</dd>
+<dt>log_tf_data_summaries (optional):</dt><dd><p>A boolean indicator denoting whether to add a <cite>tf.data.experimental.StatsAggregator</cite> to the
+tf.data pipeline. This adds summaries of pipeline utilization and buffer sizes to the output
+events files. This requires that <cite>initializable</cite> is <cite>True</cite> above.</p>
+</dd>
+</dl>
+</dd>
+<dt>Returns:</dt><dd><p>An input_fn that can be consumed by <cite>estimator.eval()</cite>.</p>
+</dd>
+</dl>
+<p>“””
+if parse_fn is None:</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if self._feature_config is None:</dt><dd><p>raise ValueError(”<cite>feature_config</cite> was not passed to <cite>DataRecordTrainer</cite>”)</p>
+</dd>
+</dl>
+<p>parse_fn = self._feature_config.get_parse_fn()</p>
+</div></blockquote>
+<dl class="simple">
+<dt>if not self._eval_files:</dt><dd><p>raise ValueError(”<cite>eval_files</cite> was not present in <cite>params</cite> passed to <cite>DataRecordTrainer</cite>”)</p>
+</dd>
+<dt>if not callable(parse_fn):</dt><dd><p>raise ValueError(“Expecting parse_fn to be a function.”)</p>
+</dd>
+<dt>if log_tf_data_summaries and not initializable:</dt><dd><p>raise ValueError(“Require <cite>initializable</cite> if <cite>log_tf_data_summaries</cite>.”)</p>
+</dd>
+<dt>if repeat is None:</dt><dd><p>repeat = self.params.eval_steps &gt; 0</p>
+</dd>
+<dt>return lambda: twml.input_fns.default_input_fn(</dt><dd><p>files=self._eval_files,
+batch_size=self.params.eval_batch_size,
+parse_fn=parse_fn,
+num_threads=self.params.num_threads,
+repeat=repeat,
+keep_rate=self.params.eval_keep_rate,
+parts_downsampling_rate=self.params.eval_parts_downsampling_rate,
+shuffle=shuffle,
+shuffle_files=(shuffle if shuffle_files is None else shuffle_files),
+interleave=interleave,
+initializable=initializable,
+log_tf_data_summaries=log_tf_data_summaries,
+<a href="#id21"><span class="problematic" id="id22">**</span></a>kwargs</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>def _assert_train_files(self):</dt><dd><dl class="simple">
+<dt>if not self._train_files:</dt><dd><p>raise ValueError(“train.data_dir was not set in params passed to DataRecordTrainer.”)</p>
+</dd>
+</dl>
+</dd>
+<dt>def _assert_eval_files(self):</dt><dd><dl class="simple">
+<dt>if not self._eval_files:</dt><dd><p>raise ValueError(“eval.data_dir was not set in params passed to DataRecordTrainer.”)</p>
+</dd>
+</dl>
+</dd>
+<dt>def train(self, input_fn=None, steps=None, hooks=None):</dt><dd><p>“””
+Makes input functions optional. input_fn defaults to self.get_train_input_fn().
+See Trainer for more detailed documentation documentation.
+“””
+if input_fn is None:</p>
+<blockquote>
+<div><p>self._assert_train_files()</p>
+</div></blockquote>
+<p>input_fn = input_fn if input_fn else self.get_train_input_fn()
+super(DataRecordTrainer, self).train(input_fn=input_fn, steps=steps, hooks=hooks)</p>
+</dd>
+<dt>def evaluate(self, input_fn=None, steps=None, hooks=None, name=None):</dt><dd><p>“””
+Makes input functions optional. input_fn defaults to self.get_eval_input_fn().
+See Trainer for more detailed documentation.
+“””
+if input_fn is None:</p>
+<blockquote>
+<div><p>self._assert_eval_files()</p>
+</div></blockquote>
+<p>input_fn = input_fn if input_fn else self.get_eval_input_fn(repeat=False)
+return super(DataRecordTrainer, self).evaluate(</p>
+<blockquote>
+<div><p>input_fn=input_fn,
+steps=steps,
+hooks=hooks,
+name=name</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+<dt>def learn(self, train_input_fn=None, eval_input_fn=None, <a href="#id23"><span class="problematic" id="id24">**</span></a>kwargs):</dt><dd><p>“””
+Overrides <code class="docutils literal notranslate"><span class="pre">Trainer.learn</span></code> to make <code class="docutils literal notranslate"><span class="pre">input_fn</span></code> functions optional.
+Respectively, <code class="docutils literal notranslate"><span class="pre">train_input_fn</span></code> and <code class="docutils literal notranslate"><span class="pre">eval_input_fn</span></code> default to
+<code class="docutils literal notranslate"><span class="pre">self.train_input_fn</span></code> and <code class="docutils literal notranslate"><span class="pre">self.eval_input_fn</span></code>.
+See <code class="docutils literal notranslate"><span class="pre">Trainer.learn</span></code> for more detailed documentation.
+“””
+if train_input_fn is None:</p>
+<blockquote>
+<div><p>self._assert_train_files()</p>
+</div></blockquote>
+<dl class="simple">
+<dt>if eval_input_fn is None:</dt><dd><p>self._assert_eval_files()</p>
+</dd>
+</dl>
+<p>train_input_fn = train_input_fn if train_input_fn else self.get_train_input_fn()
+eval_input_fn = eval_input_fn if eval_input_fn else self.get_eval_input_fn()</p>
+<dl class="simple">
+<dt>super(DataRecordTrainer, self).learn(</dt><dd><p>train_input_fn=train_input_fn,
+eval_input_fn=eval_input_fn,
+<a href="#id25"><span class="problematic" id="id26">**</span></a>kwargs</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>def train_and_evaluate(self,</dt><dd><blockquote>
+<div><dl class="simple">
+<dt>train_input_fn=None, eval_input_fn=None,</dt><dd><p><a href="#id27"><span class="problematic" id="id28">**</span></a>kwargs):</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>“””
+Overrides <code class="docutils literal notranslate"><span class="pre">Trainer.train_and_evaluate</span></code> to make <code class="docutils literal notranslate"><span class="pre">input_fn</span></code> functions optional.
+Respectively, <code class="docutils literal notranslate"><span class="pre">train_input_fn</span></code> and <code class="docutils literal notranslate"><span class="pre">eval_input_fn</span></code> default to
+<code class="docutils literal notranslate"><span class="pre">self.train_input_fn</span></code> and <code class="docutils literal notranslate"><span class="pre">self.eval_input_fn</span></code>.
+See <code class="docutils literal notranslate"><span class="pre">Trainer.train_and_evaluate</span></code> for detailed documentation.
+“””
+if train_input_fn is None:</p>
+<blockquote>
+<div><p>self._assert_train_files()</p>
+</div></blockquote>
+<dl class="simple">
+<dt>if eval_input_fn is None:</dt><dd><p>self._assert_eval_files()</p>
+</dd>
+</dl>
+<p>train_input_fn = train_input_fn if train_input_fn else self.get_train_input_fn()
+eval_input_fn = eval_input_fn if eval_input_fn else self.get_eval_input_fn()</p>
+<dl class="simple">
+<dt>super(DataRecordTrainer, self).train_and_evaluate(</dt><dd><p>train_input_fn=train_input_fn,
+eval_input_fn=eval_input_fn,
+<a href="#id29"><span class="problematic" id="id30">**</span></a>kwargs</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>def _model_fn(self, features, labels, mode, params, config=None):</dt><dd><p>“””
+Overrides the _model_fn to correct for the features shape of the sparse features
+extracted with the contrib.FeatureConfig
+“””
+if isinstance(self._feature_config, twml.contrib.feature_config.FeatureConfig):</p>
+<blockquote>
+<div><p># Fix the shape of the features. The features dictionary will be modified to
+# contain the shape changes.
+twml.util.fix_shape_sparse(features, self._feature_config)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>return super(DataRecordTrainer, self)._model_fn(</dt><dd><p>features=features,
+labels=labels,
+mode=mode,
+params=params,
+config=config</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>def calibrate(self,</dt><dd><blockquote>
+<div><p>calibrator,
+input_fn=None,
+steps=None,
+save_calibrator=True,
+hooks=None):</p>
+</div></blockquote>
+<p>“””
+Makes input functions optional. input_fn defaults to self.train_input_fn.
+See Trainer for more detailed documentation.
+“””
+if input_fn is None:</p>
+<blockquote>
+<div><p>self._assert_train_files()</p>
+</div></blockquote>
+<p>input_fn = input_fn if input_fn else self.get_train_input_fn()
+super(DataRecordTrainer, self).calibrate(calibrator=calibrator,</p>
+<blockquote>
+<div><p>input_fn=input_fn,
+steps=steps,
+save_calibrator=save_calibrator,
+hooks=hooks)</p>
+</div></blockquote>
+</dd>
+<dt>def save_checkpoints_and_export_model(self,</dt><dd><blockquote>
+<div><p>serving_input_receiver_fn,
+export_output_fn=None,
+export_dir=None,
+checkpoint_path=None,
+input_fn=None):</p>
+</div></blockquote>
+<p>“””
+Exports saved module after saving checkpoint to save_dir.
+Please note that to use this method, you need to assign a loss to the output
+of the build_graph (for the train mode).
+See export_model for more detailed information.
+“””
+self.train(input_fn=input_fn, steps=1)
+self.export_model(serving_input_receiver_fn, export_output_fn, export_dir, checkpoint_path)</p>
+</dd>
+<dt>def save_checkpoints_and_evaluate(self,</dt><dd><blockquote>
+<div><p>input_fn=None,
+steps=None,
+hooks=None,
+name=None):</p>
+</div></blockquote>
+<p>“””
+Evaluates model after saving checkpoint to save_dir.
+Please note that to use this method, you need to assign a loss to the output
+of the build_graph (for the train mode).
+See evaluate for more detailed information.
+“””
+self.train(input_fn=input_fn, steps=1)
+self.evaluate(input_fn, steps, hooks, name)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../_sources/twml/twml/trainers/data_record_trainer.py.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

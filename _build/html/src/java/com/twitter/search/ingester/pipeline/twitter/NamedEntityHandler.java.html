@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../" id="documentation_options" src="../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.ingester.pipeline.twitter;</p>
+<p>import java.util.Set;</p>
+<p>import scala.Option;</p>
+<p>import com.google.common.collect.ImmutableSet;</p>
+<p>import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;</p>
+<p>import com.twitter.cuad.ner.plain.thriftjava.NamedEntities;
+import com.twitter.cuad.ner.plain.thriftjava.NamedEntity;
+import com.twitter.decider.Decider;
+import com.twitter.search.common.decider.DeciderUtil;
+import com.twitter.search.common.metrics.SearchRateCounter;
+import com.twitter.search.ingester.model.IngesterTwitterMessage;
+import com.twitter.search.ingester.pipeline.strato_fetchers.NamedEntityFetcher;
+import com.twitter.search.ingester.pipeline.util.IngesterStageTimer;
+import com.twitter.strato.catalog.Fetch;
+import com.twitter.util.Future;</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Handles the retrieval and population of named entities in TwitterMessages performed</p></li>
+<li><p>by ingesters.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>class NamedEntityHandler {</dt><dd><p>private static final Logger LOG = LoggerFactory.getLogger(NamedEntityHandler.class);</p>
+<dl class="simple">
+<dt>private static final String RETRIEVE_NAMED_ENTITIES_DECIDER_KEY =</dt><dd><p>“ingester_all_retrieve_named_entities_%s”;</p>
+</dd>
+</dl>
+<p>// Named entities are only extracted in English, Spanish, and Japanese
+private static final Set&lt;String&gt; NAMED_ENTITY_LANGUAGES = ImmutableSet.of(“en”, “es”, “ja”);</p>
+<p>private final NamedEntityFetcher namedEntityFetcher;
+private final Decider decider;
+private final String deciderKey;</p>
+<p>private SearchRateCounter lookupStat;
+private SearchRateCounter successStat;
+private SearchRateCounter namedEntityCountStat;
+private SearchRateCounter errorStat;
+private SearchRateCounter emptyResponseStat;
+private SearchRateCounter deciderSkippedStat;
+private IngesterStageTimer retrieveNamedEntitiesTimer;</p>
+<dl>
+<dt>NamedEntityHandler(</dt><dd><blockquote>
+<div><p>NamedEntityFetcher namedEntityFetcher, Decider decider, String statsPrefix,
+String deciderSuffix) {</p>
+</div></blockquote>
+<p>this.namedEntityFetcher = namedEntityFetcher;
+this.decider = decider;
+this.deciderKey = String.format(RETRIEVE_NAMED_ENTITIES_DECIDER_KEY, deciderSuffix);</p>
+<p>lookupStat = SearchRateCounter.export(statsPrefix + “_lookups”);
+successStat = SearchRateCounter.export(statsPrefix + “_success”);
+namedEntityCountStat = SearchRateCounter.export(statsPrefix + “_named_entity_count”);
+errorStat = SearchRateCounter.export(statsPrefix + “_error”);
+emptyResponseStat = SearchRateCounter.export(statsPrefix + “_empty_response”);
+deciderSkippedStat = SearchRateCounter.export(statsPrefix + “_decider_skipped”);
+retrieveNamedEntitiesTimer = new IngesterStageTimer(statsPrefix + “_request_timer”);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>Future&lt;Fetch.Result&lt;NamedEntities&gt;&gt; retrieve(IngesterTwitterMessage message) {</dt><dd><p>lookupStat.increment();
+return namedEntityFetcher.fetch(message.getTweetId());</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>void addEntitiesToMessage(IngesterTwitterMessage message, Fetch.Result&lt;NamedEntities&gt; result) {</dt><dd><p>retrieveNamedEntitiesTimer.start();
+Option&lt;NamedEntities&gt; response = result.v();
+if (response.isDefined()) {</p>
+<blockquote>
+<div><p>successStat.increment();
+for (NamedEntity namedEntity : response.get().getEntities()) {</p>
+<blockquote>
+<div><p>namedEntityCountStat.increment();
+message.addNamedEntity(namedEntity);</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>emptyResponseStat.increment();
+LOG.debug(“Empty NERResponse for named entity query on tweet {}”, message.getId());</p>
+</dd>
+</dl>
+<p>}
+retrieveNamedEntitiesTimer.stop();</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>void incrementErrorCount() {</dt><dd><p>errorStat.increment();</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>boolean shouldRetrieve(IngesterTwitterMessage message) {</dt><dd><p>// Use decider to control retrieval of named entities. This allows us to shut off retrieval
+// if it causes problems.
+if (!DeciderUtil.isAvailableForRandomRecipient(decider, deciderKey)) {</p>
+<blockquote>
+<div><p>deciderSkippedStat.increment();
+return false;</p>
+</div></blockquote>
+<p>}</p>
+<p>// Named entities are only extracted in certain languages, so we can skip tweets
+// in other languages
+return NAMED_ENTITY_LANGUAGES.contains(message.getLanguage());</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../_sources/src/java/com/twitter/search/ingester/pipeline/twitter/NamedEntityHandler.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

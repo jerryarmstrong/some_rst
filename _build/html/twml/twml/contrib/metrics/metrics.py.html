@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../" id="documentation_options" src="../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>“””
+Module containing extra tensorflow metrics used at Twitter.
+This module conforms to conventions used by tf.metrics.*.
+In particular, each metric constructs two subgraphs: value_op and update_op:</p>
+<blockquote>
+<div><ul class="simple">
+<li><p>The value op is used to fetch the current metric value.</p></li>
+<li><p>The update_op is used to accumulate into the metric.</p></li>
+</ul>
+</div></blockquote>
+<p>Note: similar to tf.metrics.*, metrics in here do not support multi-label learning.
+We will have to write wrapper classes to create one metric per label.</p>
+<p>Note: similar to tf.metrics.*, batches added into a metric via its update_op are cumulative!</p>
+<p>“””</p>
+<p>from collections import OrderedDict</p>
+<p>import tensorflow.compat.v1 as tf
+from twml.metrics import get_multi_binary_class_metric_fn</p>
+<p># checkstyle: noqa
+def get_partial_multi_binary_class_metric_fn(metrics, classes=None, class_dim=1, predcols=None):</p>
+<blockquote>
+<div><dl>
+<dt>def get_eval_metric_ops(graph_output, labels, weights):</dt><dd><dl>
+<dt>if predcols is None:</dt><dd><p>preds = graph_output[‘output’]</p>
+</dd>
+<dt>else:</dt><dd><dl class="simple">
+<dt>if isinstance(predcols, int):</dt><dd><p>predcol_list=[predcols]</p>
+</dd>
+<dt>else:</dt><dd><p>predcol_list=list(predcols)</p>
+</dd>
+<dt>for col in predcol_list:</dt><dd><p>assert 0 &lt;= col &lt; graph_output[‘output’].shape[class_dim], ‘Invalid Prediction Column Index !’</p>
+</dd>
+</dl>
+<p>preds  = tf.gather(graph_output[‘output’], indices=predcol_list, axis=class_dim)     # [batchSz, num_col]
+labels = tf.gather(labels, indices=predcol_list, axis=class_dim)                     # [batchSz, num_col]</p>
+</dd>
+</dl>
+<p>predInfo = {‘output’: preds}
+if ‘threshold’ in graph_output:</p>
+<blockquote>
+<div><p>predInfo[‘threshold’] = graph_output[‘threshold’]</p>
+</div></blockquote>
+<dl class="simple">
+<dt>if ‘hard_output’ in graph_output:</dt><dd><p>predInfo[‘hard_output’] = graph_output[‘hard_output’]</p>
+</dd>
+</dl>
+<p>metrics_op = get_multi_binary_class_metric_fn(metrics, classes, class_dim)
+metrics_op_res = metrics_op(predInfo, labels, weights)
+return metrics_op_res</p>
+</dd>
+</dl>
+<p>return get_eval_metric_ops</p>
+</div></blockquote>
+<p># Numeric Prediction Performance among TopK Predictions
+def mean_numeric_label_topK(labels, predictions, weights, name, topK_id):</p>
+<blockquote>
+<div><p>top_k_labels  = tf.gather(params=labels, indices=topK_id, axis=0)                # [topK, 1]
+return tf.metrics.mean(values=top_k_labels, name=name)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>def mean_gated_numeric_label_topK(labels, predictions, weights, name, topK_id, bar=2.0):</dt><dd><p>assert isinstance(bar, int) or isinstance(bar, float), “bar must be int or float”
+top_k_labels  = tf.gather(params=labels, indices=topK_id, axis=0)                # [topK, 1]
+gated_top_k_labels  = tf.cast(top_k_labels &gt; bar*1.0, tf.int32)
+return tf.metrics.mean(values=gated_top_k_labels, name=name)</p>
+</dd>
+<dt>SUPPORTED_NUMERIC_METRICS = {</dt><dd><p>‘mean_numeric_label_topk’: mean_numeric_label_topK,
+‘mean_gated_numeric_label_topk’: mean_gated_numeric_label_topK</p>
+</dd>
+</dl>
+<p>}
+DEFAULT_NUMERIC_METRICS = [‘mean_numeric_label_topk’, ‘mean_gated_numeric_label_topk’]</p>
+<dl>
+<dt>def get_metric_topK_fn_helper(targetMetrics, supportedMetrics_op, metrics=None, topK=(5,5,5), predcol=None, labelcol=None):</dt><dd><p>“””
+:param targetMetrics:        Target Metric List
+:param supportedMetrics_op:  Supported Metric Operators             Dict
+:param metrics:              Metric Set to evaluate
+:param topK:                 (topK_min, topK_max, topK_delta)       Tuple
+:param predcol:              Prediction Column Index
+:param labelcol:             Label Column Index
+:return:
+“””
+# pylint: disable=dict-keys-not-iterating
+if targetMetrics is None or supportedMetrics_op is None:</p>
+<blockquote>
+<div><p>raise ValueError(“Invalid Target Metric List/op !”)</p>
+</div></blockquote>
+<p>targetMetrics = set([m.lower() for m in targetMetrics])
+if metrics is None:</p>
+<blockquote>
+<div><p>metrics = list(targetMetrics)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>else:</dt><dd><p>metrics = [m.lower() for m in metrics if m.lower() in targetMetrics]</p>
+</dd>
+</dl>
+<p>num_k     = int((topK[1]-topK[0])/topK[2]+1)
+topK_list = [topK[0]+d*topK[2] for d in range(num_k)]
+if 1 not in topK_list:</p>
+<blockquote>
+<div><p>topK_list = [1] + topK_list</p>
+</div></blockquote>
+<dl>
+<dt>def get_eval_metric_ops(graph_output, labels, weights):</dt><dd><p>“””
+graph_output:</p>
+<blockquote>
+<div><p>dict that is returned by build_graph given input features.</p>
+</div></blockquote>
+<dl class="simple">
+<dt>labels:</dt><dd><p>target labels associated to batch.</p>
+</dd>
+<dt>weights:</dt><dd><p>weights of the samples..</p>
+</dd>
+</dl>
+<p>“””
+eval_metric_ops = OrderedDict()</p>
+<dl class="simple">
+<dt>if predcol is None:</dt><dd><p>pred = graph_output[‘output’]</p>
+</dd>
+<dt>else:</dt><dd><p>assert 0 &lt;= predcol &lt; graph_output[‘output’].shape[1], ‘Invalid Prediction Column Index !’
+assert labelcol is not None
+pred   = tf.reshape(graph_output[‘output’][:, predcol], shape=[-1, 1])
+labels = tf.reshape(labels[:, labelcol], shape=[-1, 1])</p>
+</dd>
+</dl>
+<p>numOut = graph_output[‘output’].shape[1]
+pred_score = tf.reshape(graph_output[‘output’][:, numOut-1], shape=[-1, 1])</p>
+<p># add metrics to eval_metric_ops dict
+for metric_name in metrics:</p>
+<blockquote>
+<div><p>metric_name = metric_name.lower()  # metric name are case insensitive.</p>
+<dl>
+<dt>if metric_name in supportedMetrics_op:</dt><dd><p>metric_factory = supportedMetrics_op.get(metric_name)</p>
+<dl>
+<dt>if ‘topk’ not in metric_name:</dt><dd><dl class="simple">
+<dt>value_op, update_op = metric_factory(</dt><dd><p>labels=labels,
+predictions=pred,
+weights=weights,
+name=metric_name)</p>
+</dd>
+</dl>
+<p>eval_metric_ops[metric_name] = (value_op, update_op)</p>
+</dd>
+<dt>else:</dt><dd><dl>
+<dt>for K in topK_list:</dt><dd><p>K_min = tf.minimum(K, tf.shape(pred_score)[0])
+topK_id = tf.nn.top_k(tf.reshape(pred_score, shape=[-1]), k=K_min)[1]           # [topK]
+value_op, update_op = metric_factory(</p>
+<blockquote>
+<div><p>labels=labels,
+predictions=pred,
+weights=weights,
+name=metric_name+’__k_’+str(K),
+topK_id=topK_id)</p>
+</div></blockquote>
+<p>eval_metric_ops[metric_name+’__k_’+str(K)] = (value_op, update_op)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+<dt>else:</dt><dd><p>raise ValueError(‘Cannot find the metric named ‘ + metric_name)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>return eval_metric_ops</p>
+</dd>
+</dl>
+<p>return get_eval_metric_ops</p>
+</dd>
+<dt>def get_numeric_metric_fn(metrics=None, topK=(5,5,5), predcol=None, labelcol=None):</dt><dd><dl class="simple">
+<dt>if metrics is None:</dt><dd><p>metrics = list(DEFAULT_NUMERIC_METRICS)</p>
+</dd>
+</dl>
+<p>metrics   = list(set(metrics))</p>
+<dl class="simple">
+<dt>metric_op = get_metric_topK_fn_helper(targetMetrics=list(DEFAULT_NUMERIC_METRICS),</dt><dd><p>supportedMetrics_op=SUPPORTED_NUMERIC_METRICS,
+metrics=metrics, topK=topK, predcol=predcol, labelcol=labelcol)</p>
+</dd>
+</dl>
+<p>return metric_op</p>
+</dd>
+<dt>def get_single_binary_task_metric_fn(metrics, classnames, topK=(5,5,5), use_topK=False):</dt><dd><p>“””
+graph_output[‘output’]:        [BatchSz, 1]        [pred_Task1]
+labels:                        [BatchSz, 2]        [Task1, NumericLabel]
+“””
+def get_eval_metric_ops(graph_output, labels, weights):</p>
+<blockquote>
+<div><p>metric_op_base = get_partial_multi_binary_class_metric_fn(metrics, predcols=0, classes=classnames)
+classnames_unw = [’<a href="#id1"><span class="problematic" id="id2">unweighted_</span></a>’+cs for cs in classnames]
+metric_op_unw = get_partial_multi_binary_class_metric_fn(metrics, predcols=0, classes=classnames_unw)</p>
+<p>metrics_base_res = metric_op_base(graph_output, labels, weights)
+metrics_unw_res = metric_op_unw(graph_output, labels, None)
+metrics_base_res.update(metrics_unw_res)</p>
+<dl class="simple">
+<dt>if use_topK:</dt><dd><p>metric_op_numeric = get_numeric_metric_fn(metrics=None, topK=topK, predcol=0, labelcol=1)
+metrics_numeric_res = metric_op_numeric(graph_output, labels, weights)
+metrics_base_res.update(metrics_numeric_res)</p>
+</dd>
+</dl>
+<p>return metrics_base_res</p>
+</div></blockquote>
+<p>return get_eval_metric_ops</p>
+</dd>
+<dt>def get_dual_binary_tasks_metric_fn(metrics, classnames, topK=(5,5,5), use_topK=False):</dt><dd><p>“””
+graph_output[‘output’]:        [BatchSz, 3]        [pred_Task1, pred_Task2, Score]
+labels:                        [BatchSz, 3]        [Task1, Task2, NumericLabel]
+“””
+def get_eval_metric_ops(graph_output, labels, weights):</p>
+<blockquote>
+<div><p>metric_op_base = get_partial_multi_binary_class_metric_fn(metrics, predcols=[0, 1], classes=classnames)
+classnames_unw = [’<a href="#id3"><span class="problematic" id="id4">unweighted_</span></a>’+cs for cs in classnames]
+metric_op_unw = get_partial_multi_binary_class_metric_fn(metrics, predcols=[0, 1], classes=classnames_unw)</p>
+<p>metrics_base_res = metric_op_base(graph_output, labels, weights)
+metrics_unw_res = metric_op_unw(graph_output, labels, None)
+metrics_base_res.update(metrics_unw_res)</p>
+<dl class="simple">
+<dt>if use_topK:</dt><dd><p>metric_op_numeric = get_numeric_metric_fn(metrics=None, topK=topK, predcol=2, labelcol=2)
+metrics_numeric_res = metric_op_numeric(graph_output, labels, weights)
+metrics_base_res.update(metrics_numeric_res)</p>
+</dd>
+</dl>
+<p>return metrics_base_res</p>
+</div></blockquote>
+<p>return get_eval_metric_ops</p>
+</dd>
+</dl>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../_sources/twml/twml/contrib/metrics/metrics.py.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

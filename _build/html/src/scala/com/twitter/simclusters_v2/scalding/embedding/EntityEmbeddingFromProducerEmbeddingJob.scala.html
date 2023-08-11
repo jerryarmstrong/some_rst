@@ -1,0 +1,407 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../" id="documentation_options" src="../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.simclusters_v2.scalding.embedding</p>
+<p>import com.twitter.onboarding.relevance.candidates.thriftscala.InterestBasedUserRecommendations
+import com.twitter.onboarding.relevance.candidates.thriftscala.UTTInterest
+import com.twitter.onboarding.relevance.source.UttAccountRecommendationsScalaDataset
+import com.twitter.scalding.Args
+import com.twitter.scalding.DateRange
+import com.twitter.scalding.Days
+import com.twitter.scalding.Duration
+import com.twitter.scalding.Execution
+import com.twitter.scalding.RichDate
+import com.twitter.scalding.UniqueID
+import com.twitter.scalding.typed.TypedPipe
+import com.twitter.scalding.typed.UnsortedGrouped
+import com.twitter.scalding_internal.dalv2.DAL
+import com.twitter.scalding_internal.dalv2.DALWrite._
+import com.twitter.scalding_internal.dalv2.remote_access.ExplicitLocation
+import com.twitter.scalding_internal.dalv2.remote_access.ProcAtla
+import com.twitter.scalding_internal.multiformat.format.keyval.KeyVal
+import com.twitter.simclusters_v2.common.ModelVersions
+import com.twitter.simclusters_v2.common.SimClustersEmbedding
+import com.twitter.simclusters_v2.hdfs_sources.AdhocKeyValSources
+import com.twitter.simclusters_v2.hdfs_sources.ProducerEmbeddingSources
+import com.twitter.simclusters_v2.hdfs_sources.SemanticCoreEmbeddingsFromProducerScalaDataset
+import com.twitter.simclusters_v2.scalding.embedding.common.EmbeddingUtil._
+import com.twitter.simclusters_v2.thriftscala
+import com.twitter.simclusters_v2.thriftscala.EmbeddingType
+import com.twitter.simclusters_v2.thriftscala.InternalId
+import com.twitter.simclusters_v2.thriftscala.ModelVersion
+import com.twitter.simclusters_v2.thriftscala.SimClusterWithScore
+import com.twitter.simclusters_v2.thriftscala.SimClustersEmbeddingId
+import com.twitter.simclusters_v2.thriftscala.TopSimClustersWithScore
+import com.twitter.wtf.scalding.jobs.common.AdhocExecutionApp
+import com.twitter.wtf.scalding.jobs.common.ScheduledExecutionApp
+import com.twitter.wtf.scalding.jobs.common.StatsUtil._
+import java.util.TimeZone</p>
+<dl>
+<dt>/*</dt><dd><blockquote>
+<div><p>$ ./bazel bundle src/scala/com/twitter/simclusters_v2/scalding/embedding:entity_embedding_from_producer_embedding-adhoc</p>
+<p>$ scalding remote run –main-class com.twitter.simclusters_v2.scalding.embedding.EntityEmbeddingFromProducerEmbeddingAdhocJob –target src/scala/com/twitter/simclusters_v2/scalding/embedding:entity_embedding_from_producer_embedding-adhoc –user recos-platform – –date 2019-10-23 –model_version 20M_145K_updated</p>
+</div></blockquote>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>object EntityEmbeddingFromProducerEmbeddingAdhocJob extends AdhocExecutionApp {</dt><dd><dl>
+<dt>override def runOnDateRange(</dt><dd><p>args: Args</p>
+</dd>
+<dt>)(</dt><dd><p>implicit dateRange: DateRange,
+timeZone: TimeZone,
+uniqueID: UniqueID</p>
+</dd>
+<dt>): Execution[Unit] = {</dt><dd><p>// step 1: read in (entity, producer) pairs and remove duplicates
+val topK = args.getOrElse(“top_k”, “100”).toInt</p>
+<dl>
+<dt>val modelVersion = ModelVersions.toModelVersion(</dt><dd><p>args.getOrElse(“model_version”, ModelVersions.Model20M145KUpdated))</p>
+</dd>
+<dt>val entityKnownForProducers =</dt><dd><dl>
+<dt>EntityEmbeddingFromProducerEmbeddingJob</dt><dd><p>.getNormalizedEntityProducerMatrix(dateRange.embiggen(Days(7)))
+.count(“num unique entity producer pairs”).map {</p>
+<blockquote>
+<div><p>case (entityId, producerId, score) =&gt; (producerId, (entityId, score))</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>// step 2: read in producer to simclusters embeddings</p>
+<dl class="simple">
+<dt>val producersEmbeddingsFollowBased =</dt><dd><dl class="simple">
+<dt>ProducerEmbeddingSources.producerEmbeddingSourceLegacy(</dt><dd><p>EmbeddingType.ProducerFollowBasedSemanticCoreEntity,
+modelVersion)(dateRange.embiggen(Days(7)))</p>
+</dd>
+</dl>
+</dd>
+<dt>val producersEmbeddingsFavBased =</dt><dd><dl class="simple">
+<dt>ProducerEmbeddingSources.producerEmbeddingSourceLegacy(</dt><dd><p>EmbeddingType.ProducerFavBasedSemanticCoreEntity,
+modelVersion)(dateRange.embiggen(Days(7)))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>// step 3: join producer embedding with entity, producer pairs and reformat result into format [SimClustersEmbeddingId, SimClustersEmbedding]
+val producerBasedEntityEmbeddingsFollowBased =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>EntityEmbeddingFromProducerEmbeddingJob</dt><dd><dl class="simple">
+<dt>.computeEmbedding(</dt><dd><p>producersEmbeddingsFollowBased,
+entityKnownForProducers,
+topK,
+modelVersion,
+EmbeddingType.ProducerFollowBasedSemanticCoreEntity).toTypedPipe.count(
+“follow_based_entity_count”)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</div></blockquote>
+<dl class="simple">
+<dt>val producerBasedEntityEmbeddingsFavBased =</dt><dd><dl class="simple">
+<dt>EntityEmbeddingFromProducerEmbeddingJob</dt><dd><dl class="simple">
+<dt>.computeEmbedding(</dt><dd><p>producersEmbeddingsFavBased,
+entityKnownForProducers,
+topK,
+modelVersion,
+EmbeddingType.ProducerFavBasedSemanticCoreEntity).toTypedPipe.count(
+“fav_based_entity_count”)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+<dt>val producerBasedEntityEmbeddings =</dt><dd><p>producerBasedEntityEmbeddingsFollowBased ++ producerBasedEntityEmbeddingsFavBased</p>
+</dd>
+</dl>
+<p>// step 4 write results to file
+producerBasedEntityEmbeddings</p>
+<blockquote>
+<div><dl class="simple">
+<dt>.count(“total_count”).writeExecution(</dt><dd><dl class="simple">
+<dt>AdhocKeyValSources.entityToClustersSource(</dt><dd><p>getHdfsPath(isAdhoc = true, isManhattanKeyVal = true, modelVersion, “producer”)))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/*</dt><dd><p>$ ./bazel bundle src/scala/com/twitter/simclusters_v2/scalding/embedding:entity_embedding_from_producer_embedding_job
+$ capesospy-v2 update </p>
+<blockquote>
+<div><p>–build_locally –start_cron entity_embedding_from_producer_embedding_job src/scala/com/twitter/simclusters_v2/capesos_config/atla_proc3.yaml</p>
+</div></blockquote>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>object EntityEmbeddingFromProducerEmbeddingScheduledJob extends ScheduledExecutionApp {</dt><dd><p>override def firstTime: RichDate = RichDate(“2019-10-16”)</p>
+<p>override def batchIncrement: Duration = Days(7)</p>
+<dl>
+<dt>override def runOnDateRange(</dt><dd><p>args: Args</p>
+</dd>
+<dt>)(</dt><dd><p>implicit dateRange: DateRange,
+timeZone: TimeZone,
+uniqueID: UniqueID</p>
+</dd>
+<dt>): Execution[Unit] = {</dt><dd><p>// parse args: modelVersion, topK
+val topK = args.getOrElse(“top_k”, “100”).toInt
+// only support dec11 now since updated model is not productionized for producer embedding
+val modelVersion =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>ModelVersions.toModelVersion(</dt><dd><p>args.getOrElse(“model_version”, ModelVersions.Model20M145KUpdated))</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl>
+<dt>val entityKnownForProducers =</dt><dd><dl>
+<dt>EntityEmbeddingFromProducerEmbeddingJob</dt><dd><p>.getNormalizedEntityProducerMatrix(dateRange.embiggen(Days(7)))
+.count(“num unique entity producer pairs”).map {</p>
+<blockquote>
+<div><p>case (entityId, producerId, score) =&gt; (producerId, (entityId, score))</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+<dt>val favBasedEmbeddings = EntityEmbeddingFromProducerEmbeddingJob</dt><dd><dl>
+<dt>.computeEmbedding(</dt><dd><dl class="simple">
+<dt>ProducerEmbeddingSources.producerEmbeddingSourceLegacy(</dt><dd><p>EmbeddingType.ProducerFavBasedSemanticCoreEntity,
+modelVersion)(dateRange.embiggen(Days(7))),</p>
+</dd>
+</dl>
+<p>entityKnownForProducers,
+topK,
+modelVersion,
+EmbeddingType.ProducerFavBasedSemanticCoreEntity</p>
+</dd>
+</dl>
+<p>).toTypedPipe.count(“follow_based_entity_count”)</p>
+</dd>
+<dt>val followBasedEmbeddings = EntityEmbeddingFromProducerEmbeddingJob</dt><dd><dl>
+<dt>.computeEmbedding(</dt><dd><dl class="simple">
+<dt>ProducerEmbeddingSources.producerEmbeddingSourceLegacy(</dt><dd><p>EmbeddingType.ProducerFollowBasedSemanticCoreEntity,
+modelVersion)(dateRange.embiggen(Days(7))),</p>
+</dd>
+</dl>
+<p>entityKnownForProducers,
+topK,
+modelVersion,
+EmbeddingType.ProducerFollowBasedSemanticCoreEntity</p>
+</dd>
+</dl>
+<p>).toTypedPipe.count(“fav_based_entity_count”)</p>
+</dd>
+</dl>
+<p>val embedding = favBasedEmbeddings ++ followBasedEmbeddings</p>
+<dl>
+<dt>embedding</dt><dd><p>.count(“total_count”)
+.map {</p>
+<blockquote>
+<div><p>case (embeddingId, embedding) =&gt; KeyVal(embeddingId, embedding)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>}.writeDALVersionedKeyValExecution(</dt><dd><p>SemanticCoreEmbeddingsFromProducerScalaDataset,
+D.Suffix(getHdfsPath(isAdhoc = false, isManhattanKeyVal = true, modelVersion, “producer”))</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private object EntityEmbeddingFromProducerEmbeddingJob {</dt><dd><dl>
+<dt>def computeEmbedding(</dt><dd><p>producersEmbeddings: TypedPipe[(Long, TopSimClustersWithScore)],
+entityKnownForProducers: TypedPipe[(Long, (Long, Double))],
+topK: Int,
+modelVersion: ModelVersion,
+embeddingType: EmbeddingType</p>
+</dd>
+<dt>): UnsortedGrouped[SimClustersEmbeddingId, thriftscala.SimClustersEmbedding] = {</dt><dd><dl>
+<dt>producersEmbeddings</dt><dd><dl>
+<dt>.hashJoin(entityKnownForProducers).flatMap {</dt><dd><dl>
+<dt>case (_, (topSimClustersWithScore, (entityId, producerScore))) =&gt; {</dt><dd><p>val entityEmbedding = topSimClustersWithScore.topClusters
+entityEmbedding.map {</p>
+<blockquote>
+<div><dl>
+<dt>case SimClusterWithScore(clusterId, score) =&gt;</dt><dd><dl>
+<dt>(</dt><dd><dl>
+<dt>(</dt><dd><dl class="simple">
+<dt>SimClustersEmbeddingId(</dt><dd><p>embeddingType,
+modelVersion,
+InternalId.EntityId(entityId)),</p>
+</dd>
+</dl>
+<p>clusterId),</p>
+</dd>
+</dl>
+<p>score * producerScore)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>}.sumByKey.map {</dt><dd><dl class="simple">
+<dt>case ((embeddingId, clusterId), clusterScore) =&gt;</dt><dd><p>(embeddingId, (clusterId, clusterScore))</p>
+</dd>
+</dl>
+</dd>
+<dt>}.group.sortedReverseTake(topK)(Ordering.by(_._2)).mapValues(SimClustersEmbedding</dt><dd><p>.apply(_).toThrift)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def getNormalizedEntityProducerMatrix(</dt><dd><p>implicit dateRange: DateRange</p>
+</dd>
+<dt>): TypedPipe[(Long, Long, Double)] = {</dt><dd><dl>
+<dt>val uttRecs: TypedPipe[(UTTInterest, InterestBasedUserRecommendations)] =</dt><dd><dl>
+<dt>DAL</dt><dd><dl class="simple">
+<dt>.readMostRecentSnapshot(UttAccountRecommendationsScalaDataset).withRemoteReadPolicy(</dt><dd><p>ExplicitLocation(ProcAtla)).toTypedPipe.map {
+case KeyVal(interest, candidates) =&gt; (interest, candidates)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+<dt>uttRecs</dt><dd><dl>
+<dt>.flatMap {</dt><dd><dl>
+<dt>case (interest, candidates) =&gt; {</dt><dd><p>// current populated features
+val top20Producers = candidates.recommendations.sortBy(-_.score.getOrElse(0.0d)).take(20)
+val producerScorePairs = top20Producers.map { producer =&gt;</p>
+<blockquote>
+<div><p>(producer.candidateUserID, producer.score.getOrElse(0.0))</p>
+</div></blockquote>
+<p>}
+val scoreSum = producerScorePairs.map(_._2).sum
+producerScorePairs.map {</p>
+<blockquote>
+<div><p>case (producerId, score) =&gt; (interest.uttID, producerId, score / scoreSum)</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../_sources/src/scala/com/twitter/simclusters_v2/scalding/embedding/EntityEmbeddingFromProducerEmbeddingJob.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

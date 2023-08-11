@@ -1,0 +1,687 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.ann.dataflow.offline</p>
+<p>import com.spotify.scio.ScioContext
+import com.spotify.scio.ScioMetrics
+import com.twitter.ann.annoy.TypedAnnoyIndex
+import com.twitter.ann.brute_force.SerializableBruteForceIndex
+import com.twitter.ann.common.thriftscala.AnnIndexMetadata
+import com.twitter.ann.common.Distance
+import com.twitter.ann.common.Cosine
+import com.twitter.ann.common.EntityEmbedding
+import com.twitter.ann.common.IndexOutputFile
+import com.twitter.ann.common.Metric
+import com.twitter.ann.common.ReadWriteFuturePool
+import com.twitter.ann.faiss.FaissIndexer
+import com.twitter.ann.hnsw.TypedHnswIndex
+import com.twitter.ann.serialization.PersistedEmbeddingInjection
+import com.twitter.ann.serialization.ThriftIteratorIO
+import com.twitter.ann.serialization.thriftscala.PersistedEmbedding
+import com.twitter.ann.util.IndexBuilderUtils
+import com.twitter.beam.io.bigquery.BigQueryIO
+import com.twitter.beam.io.dal.DalObservedDatasetRegistration
+import com.twitter.beam.job.DateRange
+import com.twitter.beam.job.DateRangeOptions
+import com.twitter.cortex.ml.embeddings.common._
+import com.twitter.ml.api.embedding.Embedding
+import com.twitter.ml.api.embedding.EmbeddingMath
+import com.twitter.ml.api.embedding.EmbeddingSerDe
+import com.twitter.ml.api.thriftscala.{Embedding =&gt; TEmbedding}
+import com.twitter.ml.featurestore.lib.EntityId
+import com.twitter.ml.featurestore.lib.SemanticCoreId
+import com.twitter.ml.featurestore.lib.TfwId
+import com.twitter.ml.featurestore.lib.TweetId
+import com.twitter.ml.featurestore.lib.UserId
+import com.twitter.scalding.DateOps
+import com.twitter.scalding.RichDate
+import com.twitter.scio_internal.job.ScioBeamJob
+import com.twitter.statebird.v2.thriftscala.{Environment =&gt; StatebirdEnvironment}
+import com.twitter.util.Await
+import com.twitter.util.FuturePool
+import com.twitter.wtf.beam.bq_embedding_export.BQQueryUtils
+import java.time.Instant
+import java.util.TimeZone
+import java.util.concurrent.Executors
+import org.apache.beam.sdk.io.FileSystems
+import org.apache.beam.sdk.io.fs.ResolveOptions
+import org.apache.beam.sdk.io.fs.ResourceId
+import org.apache.beam.sdk.io.gcp.bigquery.BigQueryIO.TypedRead
+import org.apache.beam.sdk.options.Default
+import org.apache.beam.sdk.options.Description
+import org.apache.beam.sdk.transforms.DoFn
+import org.apache.beam.sdk.transforms.DoFn._
+import org.apache.beam.sdk.transforms.PTransform
+import org.apache.beam.sdk.transforms.ParDo
+import org.apache.beam.sdk.values.KV
+import org.apache.beam.sdk.values.PCollection
+import org.apache.beam.sdk.values.PDone
+import org.slf4j.Logger
+import org.slf4j.LoggerFactory</p>
+<dl>
+<dt>trait ANNOptions extends DateRangeOptions {</dt><dd><p>&#64;Description(“Output GCS path for the generated index”)
+def getOutputPath(): String
+def setOutputPath(value: String): Unit</p>
+<p>&#64;Description(“If set, the index is grouped”)
+&#64;Default.Boolean(false)
+def getGrouped: Boolean
+def setGrouped(value: Boolean): Unit</p>
+<dl class="simple">
+<dt>&#64;Description(</dt><dd><dl class="simple">
+<dt>“If set, a segment will be registered for the provided DAL dataset module which will trigger “ +</dt><dd><p>“DAL registration.”)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>&#64;Default.Boolean(false)
+def getEnableDalRegistration: Boolean
+def setEnableDalRegistration(value: Boolean): Unit</p>
+<dl class="simple">
+<dt>&#64;Description(</dt><dd><dl class="simple">
+<dt>“Output GCS path for the generated index. The OutputPath should be of the format “ +</dt><dd><p>“‘gs://user.{{user_name}}.dp.gcp.twttr.net/subDir/outputDir’ and OutputDALPath will be “ +
+“‘subDir/outputDir’ for this to work”)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>def getOutputDALPath: String
+def setOutputDALPath(value: String): Unit</p>
+<p>&#64;Description(“Get ANN index dataset name”)
+def getDatasetModuleName: String
+def setDatasetModuleName(value: String): Unit</p>
+<p>&#64;Description(“Get ANN index dataset owner role”)
+def getDatasetOwnerRole: String
+def setDatasetOwnerRole(value: String): Unit</p>
+<p>&#64;Description(“If set, index is written in &lt;output&gt;/&lt;timestamp&gt;”)
+&#64;Default.Boolean(false)
+def getOutputWithTimestamp: Boolean
+def setOutputWithTimestamp(value: Boolean): Unit</p>
+<p>&#64;Description(“File which contains a SQL query to retrieve embeddings from BQ”)
+def getDatasetSqlPath: String
+def setDatasetSqlPath(value: String): Unit</p>
+<p>&#64;Description(“Dimension of embedding in the input data. See go/ann”)
+def getDimension: Int
+def setDimension(value: Int): Unit</p>
+<p>&#64;Description(“The type of entity ID that is used with the embeddings. See go/ann”)
+def getEntityKind: String
+def setEntityKind(value: String): Unit</p>
+<p>&#64;Description(“The kind of index you want to generate (HNSW/Annoy/Brute Force/faiss). See go/ann”)
+def getAlgo: String
+def setAlgo(value: String): Unit</p>
+<p>&#64;Description(“Distance metric (InnerProduct/Cosine/L2). See go/ann”)
+def getMetric: String
+def setMetric(value: String): Unit</p>
+<p>&#64;Description(“Specifies how many parallel inserts happen to the index. See go/ann”)
+def getConcurrencyLevel: Int
+def setConcurrencyLevel(value: Int): Unit</p>
+<dl class="simple">
+<dt>&#64;Description(</dt><dd><p>“Used by HNSW algo. Larger value increases build time but will give better recall. See go/ann”)</p>
+</dd>
+</dl>
+<p>def getEfConstruction: Int
+def setEfConstruction(value: Int): Unit</p>
+<dl class="simple">
+<dt>&#64;Description(</dt><dd><dl class="simple">
+<dt>“Used by HNSW algo. Larger value increases the index size but will give better recall. “ +</dt><dd><p>“See go/ann”)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>def getMaxM: Int
+def setMaxM(value: Int): Unit</p>
+<p>&#64;Description(“Used by HNSW algo. Approximate number of elements that will be indexed. See go/ann”)
+def getExpectedElements: Int
+def setExpectedElements(value: Int): Unit</p>
+<dl class="simple">
+<dt>&#64;Description(</dt><dd><dl class="simple">
+<dt>“Used by Annoy. num_trees is provided during build time and affects the build time and the “ +</dt><dd><p>“index size. A larger value will give more accurate results, but larger indexes. See go/ann”)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>def getAnnoyNumTrees: Int
+def setAnnoyNumTrees(value: Int): Unit</p>
+<dl class="simple">
+<dt>&#64;Description(</dt><dd><dl class="simple">
+<dt>“FAISS factory string determines the ANN algorithm and compression. “ +</dt><dd><p>“See <a class="reference external" href="https://github.com/facebookresearch/faiss/wiki/The-index-factory">https://github.com/facebookresearch/faiss/wiki/The-index-factory</a>”)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>def getFAISSFactoryString: String
+def setFAISSFactoryString(value: String): Unit</p>
+<p>&#64;Description(“Sample rate for training during creation of FAISS index. Default is 0.05f”)
+&#64;Default.Float(0.05f)
+def getTrainingSampleRate: Float
+def setTrainingSampleRate(value: Float): Unit</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Builds ANN index.</p></li>
+<li></li>
+<li><p>The input embeddings are read from BigQuery using the input SQL query. The output from this SQL</p></li>
+<li><p>query needs to have two columns, “entityID” [Long] and “embedding” [List[Double]]</p></li>
+<li></li>
+<li><p>Output directory supported is GCS bucket</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>object ANNIndexBuilderBeamJob extends ScioBeamJob[ANNOptions] {</dt><dd><p>val counterNameSpace = “ANNIndexBuilderBeamJob”
+val LOG: Logger = LoggerFactory.getLogger(this.getClass)
+implicit val timeZone: TimeZone = DateOps.UTC</p>
+<dl>
+<dt>def configurePipeline(sc: ScioContext, opts: ANNOptions): Unit = {</dt><dd><p>val startDate: RichDate = RichDate(opts.interval.getStart.toDate)
+val endDate: RichDate = RichDate(opts.interval.getEnd.toDate)
+val instant = Instant.now()
+val out = {</p>
+<blockquote>
+<div><p>val base = FileSystems.matchNewResource(opts.getOutputPath, /<em>isDirectory=</em>/ true)
+if (opts.getOutputWithTimestamp) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>base.resolve(</dt><dd><p>instant.toEpochMilli.toString,
+ResolveOptions.StandardResolveOptions.RESOLVE_DIRECTORY)</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>base</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>// Define template variables which we would like to be replaced in the corresponding sql file
+val templateVariables =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>Map(</dt><dd><p>“START_DATE” -&gt; startDate.toString(DateOps.DATETIME_HMS_WITH_DASH),
+“END_DATE” -&gt; endDate.toString(DateOps.DATETIME_HMS_WITH_DASH)</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<dl>
+<dt>val embeddingFetchQuery =</dt><dd><p>BQQueryUtils.getBQQueryFromSqlFile(opts.getDatasetSqlPath, templateVariables)</p>
+</dd>
+<dt>val sCollection = if (opts.getGrouped) {</dt><dd><dl>
+<dt>sc.customInput(</dt><dd><p>“Read grouped data from BQ”,
+BigQueryIO</p>
+<blockquote>
+<div><p>.readClass[GroupedEmbeddingData]()
+.fromQuery(embeddingFetchQuery).usingStandardSql()
+.withMethod(TypedRead.Method.DIRECT_READ)</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>} else {</dt><dd><dl>
+<dt>sc.customInput(</dt><dd><p>“Read flat data from BQ”,
+BigQueryIO</p>
+<blockquote>
+<div><p>.readClass[FlatEmbeddingData]().fromQuery(embeddingFetchQuery).usingStandardSql()
+.withMethod(TypedRead.Method.DIRECT_READ)</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>val processedCollection =</dt><dd><dl>
+<dt>sCollection</dt><dd><p>.flatMap(transformTableRowToKeyVal)
+.groupBy(_.getKey)
+.map {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>case (groupName, groupValue) =&gt;</dt><dd><p>Map(groupName -&gt; groupValue.map(_.getValue))</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+<dt>val annIndexMetadata =</dt><dd><p>AnnIndexMetadata(timestamp = Some(instant.getEpochSecond), withGroups = Some(opts.getGrouped))</p>
+</dd>
+</dl>
+<p>// Count the number of groups and output the ANN index metadata
+processedCollection.count.map(count =&gt; {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>val annGroupedIndexMetadata = annIndexMetadata.copy(</dt><dd><p>numGroups = Some(count.intValue())</p>
+</dd>
+</dl>
+<p>)
+val indexOutDir = new IndexOutputFile(out)
+indexOutDir.writeIndexMetadata(annGroupedIndexMetadata)</p>
+</div></blockquote>
+<p>})</p>
+<p>// Generate Index
+processedCollection.saveAsCustomOutput(</p>
+<blockquote>
+<div><p>“Serialise to Disk”,
+OutputSink(</p>
+<blockquote>
+<div><p>out,
+opts.getAlgo.equals(“faiss”),
+opts.getOutputDALPath,
+opts.getEnableDalRegistration,
+opts.getDatasetModuleName,
+opts.getDatasetOwnerRole,
+instant,
+opts.getDate(),
+counterNameSpace</p>
+</div></blockquote>
+<p>)</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def transformTableRowToKeyVal(</dt><dd><p>data: BaseEmbeddingData</p>
+</dd>
+<dt>): Option[KV[String, KV[Long, TEmbedding]]] = {</dt><dd><p>val transformTable = ScioMetrics.counter(counterNameSpace, “transform_table_row_to_kv”)
+for {</p>
+<blockquote>
+<div><p>id &lt;- data.entityId</p>
+</div></blockquote>
+<dl>
+<dt>} yield {</dt><dd><p>transformTable.inc()
+val groupName: String = if (data.isInstanceOf[GroupedEmbeddingData]) {</p>
+<blockquote>
+<div><p>(data.asInstanceOf[GroupedEmbeddingData]).groupId.get</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>“”</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>KV.of[String, KV[Long, TEmbedding]](</dt><dd><p>groupName,
+KV.of[Long, TEmbedding](</p>
+<blockquote>
+<div><p>id,
+EmbeddingSerDe.toThrift(Embedding(data.embedding.map(_.toFloat).toArray)))</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>case class OutputSink(</dt><dd><p>outDir: ResourceId,
+isFaiss: Boolean,
+outputDALPath: String,
+enableDalRegistration: Boolean,
+datasetModuleName: String,
+datasetOwnerRole: String,
+instant: Instant,
+date: DateRange,
+counterNameSpace: String)</p>
+<blockquote>
+<div><p>extends PTransform[PCollection[Map[String, Iterable[KV[Long, TEmbedding]]]], PDone] {</p>
+</div></blockquote>
+<dl>
+<dt>override def expand(input: PCollection[Map[String, Iterable[KV[Long, TEmbedding]]]]): PDone = {</dt><dd><dl>
+<dt>PDone.in {</dt><dd><dl>
+<dt>val dummyOutput = {</dt><dd><dl>
+<dt>if (isFaiss) {</dt><dd><dl>
+<dt>input</dt><dd><dl class="simple">
+<dt>.apply(</dt><dd><p>“Build&amp;WriteFaissANNIndex”,
+ParDo.of(new BuildFaissANNIndex(outDir, counterNameSpace))</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+<dt>} else {</dt><dd><dl>
+<dt>input</dt><dd><dl class="simple">
+<dt>.apply(</dt><dd><p>“Build&amp;WriteANNIndex”,
+ParDo.of(new BuildANNIndex(outDir, counterNameSpace))</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>if (enableDalRegistration) {</dt><dd><dl>
+<dt>input</dt><dd><dl>
+<dt>.apply(</dt><dd><p>“Register DAL Dataset”,
+DalObservedDatasetRegistration(</p>
+<blockquote>
+<div><p>datasetModuleName,
+datasetOwnerRole,
+outputDALPath,
+instant,
+Some(StatebirdEnvironment.Prod),
+Some(“ANN Index Data Files”))</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>)
+.getPipeline</p>
+</dd>
+</dl>
+</dd>
+<dt>} else {</dt><dd><p>dummyOutput.getPipeline</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>class BuildANNIndex(outDir: ResourceId, counterNameSpace: String)</dt><dd><blockquote>
+<div><p>extends DoFn[Map[String, Iterable[KV[Long, TEmbedding]]], Unit] {</p>
+</div></blockquote>
+<dl>
+<dt>def transformKeyValToEmbeddingWithEntity[T &lt;: EntityId](</dt><dd><p>entityKind: EntityKind[T]</p>
+</dd>
+<dt>)(</dt><dd><p>keyVal: KV[Long, TEmbedding]</p>
+</dd>
+<dt>): EntityEmbedding[T] = {</dt><dd><dl class="simple">
+<dt>val entityId = entityKind match {</dt><dd><p>case UserKind =&gt; UserId(keyVal.getKey).toThrift
+case TweetKind =&gt; TweetId(keyVal.getKey).toThrift
+case TfwKind =&gt; TfwId(keyVal.getKey).toThrift
+case SemanticCoreKind =&gt; SemanticCoreId(keyVal.getKey).toThrift
+case _ =&gt; throw new IllegalArgumentException(s”Unsupported embedding kind: $entityKind”)</p>
+</dd>
+</dl>
+<p>}
+EntityEmbedding[T](</p>
+<blockquote>
+<div><p>EntityId.fromThrift(entityId).asInstanceOf[T],
+EmbeddingSerDe.fromThrift(keyVal.getValue))</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;ProcessElement
+def processElement[T &lt;: EntityId, D &lt;: Distance[D]](</p>
+<blockquote>
+<div><p>&#64;Element dataGrouped: Map[String, Iterable[KV[Long, TEmbedding]]],
+context: ProcessContext</p>
+</div></blockquote>
+<dl>
+<dt>): Unit = {</dt><dd><p>val opts = context.getPipelineOptions.as(classOf[ANNOptions])
+val uncastEntityKind = EntityKind.getEntityKind(opts.getEntityKind)
+val entityKind = uncastEntityKind.asInstanceOf[EntityKind[T]]
+val transformKVtoEmbeddings =</p>
+<blockquote>
+<div><p>ScioMetrics.counter(counterNameSpace, “transform_kv_to_embeddings”)</p>
+</div></blockquote>
+<dl>
+<dt>val _ = dataGrouped.map {</dt><dd><dl>
+<dt>case (groupName, data) =&gt;</dt><dd><dl class="simple">
+<dt>val annEmbeddings = data.map { kv =&gt;</dt><dd><p>transformKVtoEmbeddings.inc()
+transformKeyValToEmbeddingWithEntity(entityKind)(kv)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>val out = {</dt><dd><dl class="simple">
+<dt>if (opts.getGrouped &amp;&amp; groupName != “”) {</dt><dd><p>outDir.resolve(groupName, ResolveOptions.StandardResolveOptions.RESOLVE_DIRECTORY)</p>
+</dd>
+<dt>} else {</dt><dd><p>outDir</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}
+LOG.info(s”Writing output to ${out}”)</p>
+<p>val metric = Metric.fromString(opts.getMetric).asInstanceOf[Metric[D]]
+val concurrencyLevel = opts.getConcurrencyLevel
+val dimension = opts.getDimension
+val threadPool = Executors.newFixedThreadPool(concurrencyLevel)</p>
+<p>LOG.info(s”Building ANN index of type ${opts.getAlgo}”)
+val serialization = opts.getAlgo match {</p>
+<blockquote>
+<div><dl>
+<dt>case “brute_force” =&gt;</dt><dd><dl class="simple">
+<dt>val PersistedEmbeddingIO =</dt><dd><p>new ThriftIteratorIO[PersistedEmbedding](PersistedEmbedding)</p>
+</dd>
+<dt>SerializableBruteForceIndex(</dt><dd><p>metric,
+FuturePool.apply(threadPool),
+new PersistedEmbeddingInjection(entityKind.byteInjection),
+PersistedEmbeddingIO</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>case “annoy” =&gt;</dt><dd><dl class="simple">
+<dt>TypedAnnoyIndex.indexBuilder(</dt><dd><p>dimension,
+opts.getAnnoyNumTrees,
+metric,
+entityKind.byteInjection,
+FuturePool.apply(threadPool)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>case “hnsw” =&gt;</dt><dd><p>val efConstruction = opts.getEfConstruction
+val maxM = opts.getMaxM
+val expectedElements = opts.getExpectedElements
+TypedHnswIndex.serializableIndex(</p>
+<blockquote>
+<div><p>dimension,
+metric,
+efConstruction,
+maxM,
+expectedElements,
+entityKind.byteInjection,
+ReadWriteFuturePool(FuturePool.apply(threadPool))</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>val future =</dt><dd><p>IndexBuilderUtils.addToIndex(serialization, annEmbeddings.toSeq, concurrencyLevel)</p>
+</dd>
+<dt>Await.result(future.map { _ =&gt;</dt><dd><p>serialization.toDirectory(out)</p>
+</dd>
+</dl>
+<p>})</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>class BuildFaissANNIndex(outDir: ResourceId, counterNameSpace: String)</dt><dd><blockquote>
+<div><p>extends DoFn[Map[String, Iterable[KV[Long, TEmbedding]]], Unit] {</p>
+</div></blockquote>
+<p>&#64;ProcessElement
+def processElement[D &lt;: Distance[D]](</p>
+<blockquote>
+<div><p>&#64;Element dataGrouped: Map[String, Iterable[KV[Long, TEmbedding]]],
+context: ProcessContext</p>
+</div></blockquote>
+<dl>
+<dt>): Unit = {</dt><dd><p>val opts = context.getPipelineOptions.as(classOf[ANNOptions])
+val transformKVtoEmbeddings =</p>
+<blockquote>
+<div><p>ScioMetrics.counter(counterNameSpace, “transform_kv_to_embeddings”)</p>
+</div></blockquote>
+<dl>
+<dt>val _ = dataGrouped.map {</dt><dd><dl>
+<dt>case (groupName, data) =&gt;</dt><dd><dl>
+<dt>val out = {</dt><dd><dl class="simple">
+<dt>if (opts.getGrouped &amp;&amp; groupName != “”) {</dt><dd><p>outDir.resolve(groupName, ResolveOptions.StandardResolveOptions.RESOLVE_DIRECTORY)</p>
+</dd>
+<dt>} else {</dt><dd><p>outDir</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}
+LOG.info(s”Writing output to ${out}”)</p>
+<p>val metric = Metric.fromString(opts.getMetric).asInstanceOf[Metric[D]]
+val maybeNormalizedPipe = data.map { kv =&gt;</p>
+<blockquote>
+<div><p>transformKVtoEmbeddings.inc()
+val embedding = EmbeddingSerDe.floatEmbeddingSerDe.fromThrift(kv.getValue)
+EntityEmbedding[Long](</p>
+<blockquote>
+<div><p>kv.getKey,
+if (metric == Cosine) {</p>
+<blockquote>
+<div><p>EmbeddingMath.Float.normalize(embedding)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>embedding</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>)</p>
+</div></blockquote>
+<p>}</p>
+<p>// Generate Index
+FaissIndexer.buildAndWriteFaissIndex(</p>
+<blockquote>
+<div><p>maybeNormalizedPipe,
+opts.getTrainingSampleRate,
+opts.getFAISSFactoryString,
+metric,
+new IndexOutputFile(out))</p>
+</div></blockquote>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/ann/src/main/scala/com/twitter/ann/dataflow/offline/ANNIndexBuilderBeamJob.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

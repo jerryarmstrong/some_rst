@@ -1,0 +1,663 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.frigate.pushservice.util</p>
+<p>import com.twitter.channels.common.thriftscala.ApiList
+import com.twitter.escherbird.common.thriftscala.Domains
+import com.twitter.escherbird.metadata.thriftscala.EntityMegadata
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.frigate.common.base._
+import com.twitter.frigate.common.store.interests.InterestsLookupRequestWithContext
+import com.twitter.frigate.magic_events.thriftscala.FanoutEvent
+import com.twitter.frigate.magic_events.thriftscala.MagicEventsReason
+import com.twitter.frigate.magic_events.thriftscala.TargetID
+import com.twitter.frigate.pushservice.model.PushTypes.RawCandidate
+import com.twitter.frigate.pushservice.model._
+import com.twitter.frigate.pushservice.model.FanoutReasonEntities
+import com.twitter.frigate.pushservice.ml.PushMLModelScorer
+import com.twitter.frigate.pushservice.model.candidate.CopyIds
+import com.twitter.frigate.pushservice.store.EventRequest
+import com.twitter.frigate.pushservice.store.UttEntityHydrationStore
+import com.twitter.gizmoduck.thriftscala.User
+import com.twitter.hermit.predicate.socialgraph.RelationEdge
+import com.twitter.hermit.store.semantic_core.SemanticEntityForQuery
+import com.twitter.interests.thriftscala.UserInterests
+import com.twitter.livevideo.timeline.domain.v2.{Event =&gt; LiveEvent}
+import com.twitter.simclusters_v2.thriftscala.SimClustersInferredEntities
+import com.twitter.storehaus.FutureOps
+import com.twitter.storehaus.ReadableStore
+import com.twitter.strato.client.UserId
+import com.twitter.ubs.thriftscala.AudioSpace
+import com.twitter.util.Future</p>
+<p>object CandidateHydrationUtil {</p>
+<blockquote>
+<div><dl>
+<dt>def getAuthorIdFromTweetCandidate(tweetCandidate: TweetCandidate): Option[Long] = {</dt><dd><dl>
+<dt>tweetCandidate match {</dt><dd><dl class="simple">
+<dt>case candidate: TweetCandidate with TweetAuthor =&gt;</dt><dd><p>candidate.authorId</p>
+</dd>
+</dl>
+<p>case _ =&gt; None</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def getCandidateAuthorFromUserMap(</dt><dd><p>tweetCandidate: TweetCandidate,
+userMap: Map[Long, User]</p>
+</dd>
+<dt>): Option[User] = {</dt><dd><dl class="simple">
+<dt>getAuthorIdFromTweetCandidate(tweetCandidate) match {</dt><dd><dl class="simple">
+<dt>case Some(id) =&gt;</dt><dd><p>userMap.get(id)</p>
+</dd>
+<dt>case _ =&gt;</dt><dd><p>None</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def getRelationshipMapForInNetworkCandidate(</dt><dd><p>candidate: RawCandidate with TweetAuthor,
+relationshipMap: Map[RelationEdge, Boolean]</p>
+</dd>
+<dt>): Map[RelationEdge, Boolean] = {</dt><dd><dl class="simple">
+<dt>val relationEdges =</dt><dd><p>RelationshipUtil.getPreCandidateRelationshipsForInNetworkTweets(candidate).toSet</p>
+</dd>
+<dt>relationEdges.map { relationEdge =&gt;</dt><dd><p>(relationEdge, relationshipMap(relationEdge))</p>
+</dd>
+</dl>
+<p>}.toMap</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private def getTweetCandidateSocialContextUsers(</dt><dd><p>candidate: RawCandidate with SocialContextActions,
+userMap: Map[Long, User]</p>
+</dd>
+<dt>): Map[Long, Option[User]] = {</dt><dd><p>candidate.socialContextUserIds.map { userId =&gt; userId -&gt; userMap.get(userId) }.toMap</p>
+</dd>
+</dl>
+<p>}</p>
+<p>type TweetWithSocialContextTraits = TweetCandidate with TweetDetails with SocialContextActions</p>
+<dl>
+<dt>def getHydratedCandidateForTweetRetweet(</dt><dd><p>candidate: RawCandidate with TweetWithSocialContextTraits,
+userMap: Map[Long, User],
+copyIds: CopyIds</p>
+</dd>
+<dt>)(</dt><dd><p>implicit stats: StatsReceiver,
+pushModelScorer: PushMLModelScorer</p>
+</dd>
+<dt>): TweetRetweetPushCandidate = {</dt><dd><dl class="simple">
+<dt>new TweetRetweetPushCandidate(</dt><dd><p>candidate = candidate,
+socialContextUserMap = Future.value(getTweetCandidateSocialContextUsers(candidate, userMap)),
+author = Future.value(getCandidateAuthorFromUserMap(candidate, userMap)),
+copyIds: CopyIds</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def getHydratedCandidateForTweetFavorite(</dt><dd><p>candidate: RawCandidate with TweetWithSocialContextTraits,
+userMap: Map[Long, User],
+copyIds: CopyIds</p>
+</dd>
+<dt>)(</dt><dd><p>implicit stats: StatsReceiver,
+pushModelScorer: PushMLModelScorer</p>
+</dd>
+<dt>): TweetFavoritePushCandidate = {</dt><dd><dl class="simple">
+<dt>new TweetFavoritePushCandidate(</dt><dd><p>candidate = candidate,
+socialContextUserMap = Future.value(getTweetCandidateSocialContextUsers(candidate, userMap)),
+author = Future.value(getCandidateAuthorFromUserMap(candidate, userMap)),
+copyIds = copyIds</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def getHydratedCandidateForF1FirstDegreeTweet(</dt><dd><p>candidate: RawCandidate with F1FirstDegree,
+userMap: Map[Long, User],
+relationshipMap: Map[RelationEdge, Boolean],
+copyIds: CopyIds</p>
+</dd>
+<dt>)(</dt><dd><p>implicit stats: StatsReceiver,
+pushModelScorer: PushMLModelScorer</p>
+</dd>
+<dt>): F1TweetPushCandidate = {</dt><dd><dl>
+<dt>new F1TweetPushCandidate(</dt><dd><p>candidate = candidate,
+author = Future.value(getCandidateAuthorFromUserMap(candidate, userMap)),
+socialGraphServiceResultMap =</p>
+<blockquote>
+<div><p>getRelationshipMapForInNetworkCandidate(candidate, relationshipMap),</p>
+</div></blockquote>
+<p>copyIds = copyIds</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}
+def getHydratedTopicProofTweetCandidate(</p>
+<blockquote>
+<div><p>candidate: RawCandidate with TopicProofTweetCandidate,
+userMap: Map[Long, User],
+copyIds: CopyIds</p>
+</div></blockquote>
+<dl>
+<dt>)(</dt><dd><p>implicit stats: StatsReceiver,
+pushMLModelScorer: PushMLModelScorer</p>
+</dd>
+<dt>): TopicProofTweetPushCandidate =</dt><dd><dl class="simple">
+<dt>new TopicProofTweetPushCandidate(</dt><dd><p>candidate,
+getCandidateAuthorFromUserMap(candidate, userMap),
+copyIds</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>def getHydratedSubscribedSearchTweetCandidate(</dt><dd><p>candidate: RawCandidate with SubscribedSearchTweetCandidate,
+userMap: Map[Long, User],
+copyIds: CopyIds</p>
+</dd>
+<dt>)(</dt><dd><p>implicit stats: StatsReceiver,
+pushMLModelScorer: PushMLModelScorer</p>
+</dd>
+<dt>): SubscribedSearchTweetPushCandidate =</dt><dd><dl class="simple">
+<dt>new SubscribedSearchTweetPushCandidate(</dt><dd><p>candidate,
+getCandidateAuthorFromUserMap(candidate, userMap),
+copyIds)</p>
+</dd>
+</dl>
+</dd>
+<dt>def getHydratedListCandidate(</dt><dd><p>apiListStore: ReadableStore[Long, ApiList],
+candidate: RawCandidate with ListPushCandidate,
+copyIds: CopyIds</p>
+</dd>
+<dt>)(</dt><dd><p>implicit stats: StatsReceiver,
+pushMLModelScorer: PushMLModelScorer</p>
+</dd>
+<dt>): ListRecommendationPushCandidate = {</dt><dd><p>new ListRecommendationPushCandidate(apiListStore, candidate, copyIds)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def getHydratedCandidateForOutOfNetworkTweetCandidate(</dt><dd><p>candidate: RawCandidate with OutOfNetworkTweetCandidate with TopicCandidate,
+userMap: Map[Long, User],
+copyIds: CopyIds</p>
+</dd>
+<dt>)(</dt><dd><p>implicit stats: StatsReceiver,
+pushModelScorer: PushMLModelScorer</p>
+</dd>
+<dt>): OutOfNetworkTweetPushCandidate = {</dt><dd><dl class="simple">
+<dt>new OutOfNetworkTweetPushCandidate(</dt><dd><p>candidate: RawCandidate with OutOfNetworkTweetCandidate with TopicCandidate,
+author = Future.value(getCandidateAuthorFromUserMap(candidate, userMap)),
+copyIds: CopyIds</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def getHydratedCandidateForTripTweetCandidate(</dt><dd><p>candidate: RawCandidate with OutOfNetworkTweetCandidate with TripCandidate,
+userMap: Map[Long, User],
+copyIds: CopyIds</p>
+</dd>
+<dt>)(</dt><dd><p>implicit stats: StatsReceiver,
+pushModelScorer: PushMLModelScorer</p>
+</dd>
+<dt>): TripTweetPushCandidate = {</dt><dd><dl class="simple">
+<dt>new TripTweetPushCandidate(</dt><dd><p>candidate: RawCandidate with OutOfNetworkTweetCandidate with TripCandidate,
+author = Future.value(getCandidateAuthorFromUserMap(candidate, userMap)),
+copyIds: CopyIds</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def getHydratedCandidateForDiscoverTwitterCandidate(</dt><dd><p>candidate: RawCandidate with DiscoverTwitterCandidate,
+copyIds: CopyIds</p>
+</dd>
+<dt>)(</dt><dd><p>implicit stats: StatsReceiver,
+pushModelScorer: PushMLModelScorer</p>
+</dd>
+<dt>): DiscoverTwitterPushCandidate = {</dt><dd><dl class="simple">
+<dt>new DiscoverTwitterPushCandidate(</dt><dd><p>candidate = candidate,
+copyIds = copyIds</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>/*</p></li>
+<li><p>This method can be reusable for hydrating event candidates</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">**</span></a>/
+* &#64;param candidate
+* &#64;param fanoutMetadataStore
+* &#64;param semanticCoreMegadataStore
+* &#64;return (hydratedEvent, hydratedFanoutEvent, hydratedSemanticEntityResults, hydratedSemanticCoreMegadata)
+<a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>private def hydrateMagicFanoutEventCandidate(</dt><dd><p>candidate: RawCandidate with MagicFanoutEventCandidate,
+fanoutMetadataStore: ReadableStore[(Long, Long), FanoutEvent],
+semanticCoreMegadataStore: ReadableStore[SemanticEntityForQuery, EntityMegadata]</p>
+</dd>
+</dl>
+<p>): Future[MagicFanoutEventHydratedInfo] = {</p>
+<blockquote>
+<div><p>val fanoutEventFut = fanoutMetadataStore.get((candidate.eventId, candidate.pushId))</p>
+<dl>
+<dt>val semanticEntityForQueries: Seq[SemanticEntityForQuery] = {</dt><dd><dl>
+<dt>val semanticCoreEntityIdQueries = candidate.candidateMagicEventsReasons match {</dt><dd><dl>
+<dt>case magicEventsReasons: Seq[MagicEventsReason] =&gt;</dt><dd><dl class="simple">
+<dt>magicEventsReasons.map(_.reason).collect {</dt><dd><dl class="simple">
+<dt>case TargetID.SemanticCoreID(scInterest) =&gt;</dt><dd><p>SemanticEntityForQuery(domainId = scInterest.domainId, entityId = scInterest.entityId)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>case _ =&gt; Seq.empty</p>
+</dd>
+</dl>
+<p>}
+val eventEntityQuery = SemanticEntityForQuery(</p>
+<blockquote>
+<div><p>domainId = Domains.EventsEntityService.value,
+entityId = candidate.eventId)</p>
+</div></blockquote>
+<p>semanticCoreEntityIdQueries :+ eventEntityQuery</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>val semanticEntityResultsFut = FutureOps.mapCollect(</dt><dd><p>semanticCoreMegadataStore.multiGet(semanticEntityForQueries.toSet)</p>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>Future</dt><dd><dl>
+<dt>.join(fanoutEventFut, semanticEntityResultsFut).map {</dt><dd><dl>
+<dt>case (fanoutEvent, semanticEntityResults) =&gt;</dt><dd><dl class="simple">
+<dt>MagicFanoutEventHydratedInfo(</dt><dd><p>fanoutEvent,
+semanticEntityResults</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>case _ =&gt;</dt><dd><dl class="simple">
+<dt>throw new IllegalArgumentException(</dt><dd><p>“event candidate hydration errors” + candidate.frigateNotification.toString)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>def getHydratedCandidateForMagicFanoutNewsEvent(</dt><dd><p>candidate: RawCandidate with MagicFanoutNewsEventCandidate,
+copyIds: CopyIds,
+lexServiceStore: ReadableStore[EventRequest, LiveEvent],
+fanoutMetadataStore: ReadableStore[(Long, Long), FanoutEvent],
+semanticCoreMegadataStore: ReadableStore[SemanticEntityForQuery, EntityMegadata],
+simClusterToEntityStore: ReadableStore[Int, SimClustersInferredEntities],
+interestsLookupStore: ReadableStore[InterestsLookupRequestWithContext, UserInterests],
+uttEntityHydrationStore: UttEntityHydrationStore</p>
+</dd>
+<dt>)(</dt><dd><p>implicit stats: StatsReceiver,
+pushModelScorer: PushMLModelScorer</p>
+</dd>
+<dt>): Future[MagicFanoutNewsEventPushCandidate] = {</dt><dd><dl class="simple">
+<dt>val magicFanoutEventHydratedInfoFut = hydrateMagicFanoutEventCandidate(</dt><dd><p>candidate,
+fanoutMetadataStore,
+semanticCoreMegadataStore</p>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>lazy val simClusterToEntityMappingFut: Future[Map[Int, Option[SimClustersInferredEntities]]] =</dt><dd><dl>
+<dt>Future.collect {</dt><dd><dl class="simple">
+<dt>simClusterToEntityStore.multiGet(</dt><dd><dl class="simple">
+<dt>FanoutReasonEntities</dt><dd><dl class="simple">
+<dt>.from(candidate.candidateMagicEventsReasons.map(_.reason)).simclusterIds.map(</dt><dd><p>_.clusterId)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>Future</dt><dd><dl>
+<dt>.join(</dt><dd><p>magicFanoutEventHydratedInfoFut,
+simClusterToEntityMappingFut</p>
+</dd>
+<dt>).map {</dt><dd><dl>
+<dt>case (magicFanoutEventHydratedInfo, simClusterToEntityMapping) =&gt;</dt><dd><dl class="simple">
+<dt>new MagicFanoutNewsEventPushCandidate(</dt><dd><p>candidate = candidate,
+copyIds = copyIds,
+fanoutEvent = magicFanoutEventHydratedInfo.fanoutEvent,
+semanticEntityResults = magicFanoutEventHydratedInfo.semanticEntityResults,
+simClusterToEntities = simClusterToEntityMapping,
+lexServiceStore = lexServiceStore,
+interestsLookupStore = interestsLookupStore,
+uttEntityHydrationStore = uttEntityHydrationStore</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def getHydratedCandidateForMagicFanoutSportsEvent(</dt><dd><dl class="simple">
+<dt>candidate: RawCandidate</dt><dd><p>with MagicFanoutSportsEventCandidate
+with MagicFanoutSportsScoreInformation,</p>
+</dd>
+</dl>
+<p>copyIds: CopyIds,
+lexServiceStore: ReadableStore[EventRequest, LiveEvent],
+fanoutMetadataStore: ReadableStore[(Long, Long), FanoutEvent],
+semanticCoreMegadataStore: ReadableStore[SemanticEntityForQuery, EntityMegadata],
+interestsLookupStore: ReadableStore[InterestsLookupRequestWithContext, UserInterests],
+uttEntityHydrationStore: UttEntityHydrationStore</p>
+</dd>
+<dt>)(</dt><dd><p>implicit stats: StatsReceiver,
+pushModelScorer: PushMLModelScorer</p>
+</dd>
+<dt>): Future[MagicFanoutSportsPushCandidate] = {</dt><dd><dl class="simple">
+<dt>val magicFanoutEventHydratedInfoFut = hydrateMagicFanoutEventCandidate(</dt><dd><p>candidate,
+fanoutMetadataStore,
+semanticCoreMegadataStore</p>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>magicFanoutEventHydratedInfoFut.map { magicFanoutEventHydratedInfo =&gt;</dt><dd><dl class="simple">
+<dt>new MagicFanoutSportsPushCandidate(</dt><dd><p>candidate = candidate,
+copyIds = copyIds,
+fanoutEvent = magicFanoutEventHydratedInfo.fanoutEvent,
+semanticEntityResults = magicFanoutEventHydratedInfo.semanticEntityResults,
+simClusterToEntities = Map.empty,
+lexServiceStore = lexServiceStore,
+interestsLookupStore = interestsLookupStore,
+uttEntityHydrationStore = uttEntityHydrationStore</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def getHydratedCandidateForMagicFanoutProductLaunch(</dt><dd><p>candidate: RawCandidate with MagicFanoutProductLaunchCandidate,
+copyIds: CopyIds</p>
+</dd>
+<dt>)(</dt><dd><p>implicit stats: StatsReceiver,
+pushModelScorer: PushMLModelScorer</p>
+</dd>
+<dt>): Future[MagicFanoutProductLaunchPushCandidate] =</dt><dd><p>Future.value(new MagicFanoutProductLaunchPushCandidate(candidate, copyIds))</p>
+</dd>
+<dt>def getHydratedCandidateForMagicFanoutCreatorEvent(</dt><dd><p>candidate: RawCandidate with MagicFanoutCreatorEventCandidate,
+safeUserStore: ReadableStore[Long, User],
+copyIds: CopyIds,
+creatorTweetCountStore: ReadableStore[UserId, Int]</p>
+</dd>
+<dt>)(</dt><dd><p>implicit stats: StatsReceiver,
+pushModelScorer: PushMLModelScorer</p>
+</dd>
+<dt>): Future[MagicFanoutCreatorEventPushCandidate] = {</dt><dd><dl class="simple">
+<dt>safeUserStore.get(candidate.creatorId).map { hydratedCreatorUser =&gt;</dt><dd><dl class="simple">
+<dt>new MagicFanoutCreatorEventPushCandidate(</dt><dd><p>candidate,
+hydratedCreatorUser,
+copyIds,
+creatorTweetCountStore)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>def getHydratedCandidateForScheduledSpaceSubscriber(</dt><dd><p>candidate: RawCandidate with ScheduledSpaceSubscriberCandidate,
+safeUserStore: ReadableStore[Long, User],
+copyIds: CopyIds,
+audioSpaceStore: ReadableStore[String, AudioSpace]</p>
+</dd>
+<dt>)(</dt><dd><p>implicit stats: StatsReceiver,
+pushModelScorer: PushMLModelScorer</p>
+</dd>
+</dl>
+<p>): Future[ScheduledSpaceSubscriberPushCandidate] = {</p>
+<blockquote>
+<div><dl>
+<dt>candidate.hostId match {</dt><dd><dl>
+<dt>case Some(spaceHostId) =&gt;</dt><dd><dl>
+<dt>safeUserStore.get(spaceHostId).map { hydratedHost =&gt;</dt><dd><dl class="simple">
+<dt>new ScheduledSpaceSubscriberPushCandidate(</dt><dd><p>candidate = candidate,
+hostUser = hydratedHost,
+copyIds = copyIds,
+audioSpaceStore = audioSpaceStore</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>case _ =&gt;</dt><dd><dl class="simple">
+<dt>Future.exception(</dt><dd><dl class="simple">
+<dt>new IllegalStateException(</dt><dd><p>“Missing Space Host Id for hydrating ScheduledSpaceSubscriberCandidate”))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>def getHydratedCandidateForScheduledSpaceSpeaker(</dt><dd><p>candidate: RawCandidate with ScheduledSpaceSpeakerCandidate,
+safeUserStore: ReadableStore[Long, User],
+copyIds: CopyIds,
+audioSpaceStore: ReadableStore[String, AudioSpace]</p>
+</dd>
+<dt>)(</dt><dd><p>implicit stats: StatsReceiver,
+pushModelScorer: PushMLModelScorer</p>
+</dd>
+</dl>
+<p>): Future[ScheduledSpaceSpeakerPushCandidate] = {</p>
+<blockquote>
+<div><dl>
+<dt>candidate.hostId match {</dt><dd><dl>
+<dt>case Some(spaceHostId) =&gt;</dt><dd><dl>
+<dt>safeUserStore.get(spaceHostId).map { hydratedHost =&gt;</dt><dd><dl class="simple">
+<dt>new ScheduledSpaceSpeakerPushCandidate(</dt><dd><p>candidate = candidate,
+hostUser = hydratedHost,
+copyIds = copyIds,
+audioSpaceStore = audioSpaceStore</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>case _ =&gt;</dt><dd><dl class="simple">
+<dt>Future.exception(</dt><dd><dl class="simple">
+<dt>new RuntimeException(</dt><dd><p>“Missing Space Host Id for hydrating ScheduledSpaceSpeakerCandidate”))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>def getHydratedCandidateForTopTweetImpressionsCandidate(</dt><dd><p>candidate: RawCandidate with TopTweetImpressionsCandidate,
+copyIds: CopyIds</p>
+</dd>
+<dt>)(</dt><dd><p>implicit stats: StatsReceiver,
+pushModelScorer: PushMLModelScorer</p>
+</dd>
+<dt>): TopTweetImpressionsPushCandidate = {</dt><dd><dl class="simple">
+<dt>new TopTweetImpressionsPushCandidate(</dt><dd><p>candidate = candidate,
+copyIds = copyIds</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>def isNsfwAccount(user: User, nsfwTokens: Seq[String]): Boolean = {</dt><dd><p>def hasNsfwToken(str: String): Boolean = nsfwTokens.exists(str.toLowerCase().contains(_))</p>
+<p>val name = user.profile.map(_.name).getOrElse(“”)
+val screenName = user.profile.map(_.screenName).getOrElse(“”)
+val location = user.profile.map(_.location).getOrElse(“”)
+val description = user.profile.map(_.description).getOrElse(“”)
+val hasNsfwFlag =</p>
+<blockquote>
+<div><p>user.safety.map(safety =&gt; safety.nsfwUser || safety.nsfwAdmin).getOrElse(false)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>hasNsfwToken(name) || hasNsfwToken(screenName) || hasNsfwToken(location) || hasNsfwToken(</dt><dd><p>description) || hasNsfwFlag</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/pushservice/src/main/scala/com/twitter/frigate/pushservice/util/CandidateHydrationUtil.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

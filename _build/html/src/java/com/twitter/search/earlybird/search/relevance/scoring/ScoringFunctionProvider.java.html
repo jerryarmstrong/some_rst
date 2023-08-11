@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.earlybird.search.relevance.scoring;</p>
+<p>import java.io.IOException;</p>
+<p>import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;</p>
+<p>import com.twitter.search.common.metrics.SearchCounter;
+import com.twitter.search.common.query.HitAttributeHelper;
+import com.twitter.search.common.ranking.thriftjava.ThriftRankingParams;
+import com.twitter.search.common.ranking.thriftjava.ThriftScoringFunctionType;
+import com.twitter.search.common.schema.base.ImmutableSchemaInterface;
+import com.twitter.search.common.util.ml.tensorflow_engine.TensorflowModelsManager;
+import com.twitter.search.earlybird.common.config.EarlybirdConfig;
+import com.twitter.search.earlybird.common.userupdates.UserTable;
+import com.twitter.search.earlybird.exception.ClientException;
+import com.twitter.search.earlybird.ml.ScoringModelsManager;
+import com.twitter.search.earlybird.search.AntiGamingFilter;
+import com.twitter.search.earlybird.thrift.EarlybirdRequest;
+import com.twitter.search.earlybird.thrift.ThriftSearchQuery;
+import com.twitter.search.earlybird.thrift.ThriftSearchResultType;
+import com.twitter.search.queryparser.query.Query;</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Returns a scoring function for a particular experiment ID.</p></li>
+<li></li>
+<li><p>Can be used for a/b testing of different scoring formulas.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>public abstract class ScoringFunctionProvider {</dt><dd><p>private static final Logger LOG = LoggerFactory.getLogger(ScoringFunctionProvider.class);</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Returns the scoring function.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+</dl>
+<p>public abstract ScoringFunction getScoringFunction() throws IOException, ClientException;</p>
+<p>public static final String RETWEETS_SCORER_NAME = “retweets”;
+public static final String NO_SPAM_SCORER_NAME = “no_spam”;
+public static final String TEST_SCORER_NAME = “test”;</p>
+<p>// Whether to avoid time decay when scoring top tweets.
+// Top archive does not need time decay.
+private static final boolean TOP_TWEET_WITH_DECAY =</p>
+<blockquote>
+<div><p>EarlybirdConfig.getBool(“top_tweet_scoring_with_decay”, true);</p>
+</div></blockquote>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Abstract class that can be used for ScoringFunctions that don’t throw a ClientException.</p></li>
+<li></li>
+<li><p>It does throw an IOException but it doesn’t throw a ClientException so the name can be a bit</p></li>
+<li><p>misleading.</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>public abstract static class NamedScoringFunctionProvider extends ScoringFunctionProvider {</dt><dd><dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Returns the scoring function.</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+</dl>
+<p>public abstract ScoringFunction getScoringFunction() throws IOException;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Returns the scoring function provider with the given name, or null if no such provider exists.</p></li>
+</ul>
+<p><a href="#id9"><span class="problematic" id="id10">*</span></a>/</p>
+</dd>
+<dt>public static NamedScoringFunctionProvider getScoringFunctionProviderByName(</dt><dd><blockquote>
+<div><p>String name, final ImmutableSchemaInterface schema) {</p>
+</div></blockquote>
+<dl>
+<dt>if (name.equals(NO_SPAM_SCORER_NAME)) {</dt><dd><dl>
+<dt>return new NamedScoringFunctionProvider() {</dt><dd><p>&#64;Override
+public ScoringFunction getScoringFunction() throws IOException {</p>
+<blockquote>
+<div><p>return new SpamVectorScoringFunction(schema);</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>};</p>
+</dd>
+<dt>} else if (name.equals(RETWEETS_SCORER_NAME)) {</dt><dd><dl>
+<dt>return new NamedScoringFunctionProvider() {</dt><dd><p>&#64;Override
+public ScoringFunction getScoringFunction() throws IOException {</p>
+<blockquote>
+<div><p>// Production top tweet actually uses this.
+if (TOP_TWEET_WITH_DECAY) {</p>
+<blockquote>
+<div><p>return new RetweetBasedTopTweetsScoringFunction(schema);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>return new RetweetBasedTopTweetsScoringFunction(schema, true);</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>};</p>
+</dd>
+<dt>} else if (name.equals(TEST_SCORER_NAME)) {</dt><dd><dl>
+<dt>return new NamedScoringFunctionProvider() {</dt><dd><p>&#64;Override
+public ScoringFunction getScoringFunction() throws IOException {</p>
+<blockquote>
+<div><p>return new TestScoringFunction(schema);</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>};</p>
+</dd>
+</dl>
+<p>}
+return null;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Returns default scoring functions for different scoring function type</p></li>
+<li><p>and provides fallback behavior if model-based scoring function fails</p></li>
+</ul>
+<p><a href="#id11"><span class="problematic" id="id12">*</span></a>/</p>
+</dd>
+<dt>public static class DefaultScoringFunctionProvider extends ScoringFunctionProvider {</dt><dd><p>private final EarlybirdRequest request;
+private final ImmutableSchemaInterface schema;
+private final ThriftSearchQuery searchQuery;
+private final AntiGamingFilter antiGamingFilter;
+private final UserTable userTable;
+private final HitAttributeHelper hitAttributeHelper;
+private final Query parsedQuery;
+private final ScoringModelsManager scoringModelsManager;
+private final TensorflowModelsManager tensorflowModelsManager;</p>
+<dl>
+<dt>private static final SearchCounter MODEL_BASED_SCORING_FUNCTION_CREATED =</dt><dd><p>SearchCounter.export(“model_based_scoring_function_created”);</p>
+</dd>
+<dt>private static final SearchCounter MODEL_BASED_FALLBACK_TO_LINEAR_SCORING_FUNCTION =</dt><dd><p>SearchCounter.export(“model_based_fallback_to_linear_scoring_function”);</p>
+</dd>
+<dt>private static final SearchCounter TENSORFLOW_BASED_SCORING_FUNCTION_CREATED =</dt><dd><p>SearchCounter.export(“tensorflow_based_scoring_function_created”);</p>
+</dd>
+<dt>private static final SearchCounter TENSORFLOW_BASED_FALLBACK_TO_LINEAR_SCORING_FUNCTION =</dt><dd><p>SearchCounter.export(“tensorflow_fallback_to_linear_function_scoring_function”);</p>
+</dd>
+<dt>public DefaultScoringFunctionProvider(</dt><dd><blockquote>
+<div><p>final EarlybirdRequest request,
+final ImmutableSchemaInterface schema,
+final ThriftSearchQuery searchQuery,
+final AntiGamingFilter antiGamingFilter,
+final UserTable userTable,
+final HitAttributeHelper hitAttributeHelper,
+final Query parsedQuery,
+final ScoringModelsManager scoringModelsManager,
+final TensorflowModelsManager tensorflowModelsManager) {</p>
+</div></blockquote>
+<p>this.request = request;
+this.schema = schema;
+this.searchQuery = searchQuery;
+this.antiGamingFilter = antiGamingFilter;
+this.userTable = userTable;
+this.hitAttributeHelper = hitAttributeHelper;
+this.parsedQuery = parsedQuery;
+this.scoringModelsManager = scoringModelsManager;
+this.tensorflowModelsManager = tensorflowModelsManager;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;Override
+public ScoringFunction getScoringFunction() throws IOException, ClientException {</p>
+<blockquote>
+<div><dl>
+<dt>if (searchQuery.isSetRelevanceOptions()</dt><dd><blockquote>
+<div><p>&amp;&amp; searchQuery.getRelevanceOptions().isSetRankingParams()) {</p>
+</div></blockquote>
+<p>ThriftRankingParams params = searchQuery.getRelevanceOptions().getRankingParams();
+ThriftScoringFunctionType type = params.isSetType()</p>
+<blockquote>
+<div><p>? params.getType() : ThriftScoringFunctionType.LINEAR;  // default type</p>
+</div></blockquote>
+<dl>
+<dt>switch (type) {</dt><dd><dl>
+<dt>case LINEAR:</dt><dd><p>return createLinear();</p>
+</dd>
+<dt>case MODEL_BASED:</dt><dd><dl class="simple">
+<dt>if (scoringModelsManager.isEnabled()) {</dt><dd><p>MODEL_BASED_SCORING_FUNCTION_CREATED.increment();
+return createModelBased();</p>
+</dd>
+<dt>} else {</dt><dd><p>// From ScoringModelsManager.NO_OP_MANAGER. Fall back to LinearScoringFunction
+MODEL_BASED_FALLBACK_TO_LINEAR_SCORING_FUNCTION.increment();
+return createLinear();</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>case TENSORFLOW_BASED:</dt><dd><dl class="simple">
+<dt>if (tensorflowModelsManager.isEnabled()) {</dt><dd><p>TENSORFLOW_BASED_SCORING_FUNCTION_CREATED.increment();
+return createTensorflowBased();</p>
+</dd>
+<dt>} else {</dt><dd><p>// Fallback to linear scoring if tf manager is disabled
+TENSORFLOW_BASED_FALLBACK_TO_LINEAR_SCORING_FUNCTION.increment();
+return createLinear();</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>case TOPTWEETS:</dt><dd><p>return createTopTweets();</p>
+</dd>
+<dt>default:</dt><dd><p>throw new IllegalArgumentException(“Unknown scoring type: in “ + searchQuery);</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>} else {</dt><dd><p>LOG.error(“No relevance options provided query = “ + searchQuery);
+return new DefaultScoringFunction(schema);</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>private ScoringFunction createLinear() throws IOException {</dt><dd><dl class="simple">
+<dt>LinearScoringFunction scoringFunction = new LinearScoringFunction(</dt><dd><p>schema, searchQuery, antiGamingFilter, ThriftSearchResultType.RELEVANCE,
+userTable);</p>
+</dd>
+</dl>
+<p>scoringFunction.setHitAttributeHelperAndQuery(hitAttributeHelper, parsedQuery);</p>
+<p>return scoringFunction;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>For model based scoring function, ClientException will be throw if client selects an</p></li>
+<li><p>unknown model for scoring manager.</p></li>
+<li><p><a class="reference external" href="mailto:{&#37;&#52;&#48;link">{<span>&#64;</span>link</a> com.twitter.search.earlybird.search.relevance.scoring.ModelBasedScoringFunction}</p></li>
+</ul>
+<p><a href="#id13"><span class="problematic" id="id14">*</span></a>/</p>
+</dd>
+<dt>private ScoringFunction createModelBased() throws IOException, ClientException {</dt><dd><dl class="simple">
+<dt>ModelBasedScoringFunction scoringFunction = new ModelBasedScoringFunction(</dt><dd><p>schema, searchQuery, antiGamingFilter, ThriftSearchResultType.RELEVANCE, userTable,
+scoringModelsManager);</p>
+</dd>
+</dl>
+<p>scoringFunction.setHitAttributeHelperAndQuery(hitAttributeHelper, parsedQuery);</p>
+<p>return scoringFunction;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private ScoringFunction createTopTweets() throws IOException {</dt><dd><dl class="simple">
+<dt>return new LinearScoringFunction(</dt><dd><p>schema, searchQuery, antiGamingFilter, ThriftSearchResultType.POPULAR, userTable);</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private TensorflowBasedScoringFunction createTensorflowBased()</dt><dd><p>throws IOException, ClientException {
+TensorflowBasedScoringFunction tfScoringFunction = new TensorflowBasedScoringFunction(</p>
+<blockquote>
+<div><p>request, schema, searchQuery, antiGamingFilter,
+ThriftSearchResultType.RELEVANCE, userTable, tensorflowModelsManager);</p>
+</div></blockquote>
+<p>tfScoringFunction.setHitAttributeHelperAndQuery(hitAttributeHelper, parsedQuery);
+return tfScoringFunction;</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/src/java/com/twitter/search/earlybird/search/relevance/scoring/ScoringFunctionProvider.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

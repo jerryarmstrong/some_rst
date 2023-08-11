@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../" id="documentation_options" src="../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" />
+   
+  <link rel="stylesheet" href="../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p># Tweetypie</p>
+<p>## Overview</p>
+<p>Tweetypie is the core Tweet service that handles the reading and writing of Tweet data. It is called by the Twitter clients (through GraphQL), as well as various internal Twitter services, to fetch, create, delete, and edit Tweets. Tweetypie calls several backends to hydrate Tweet related data to return to callers.</p>
+<p>## How It Works</p>
+<p>The next sections describe the layers involved in the read and create paths for Tweets.</p>
+<p>### Read Path</p>
+<p>In the read path, Tweetypie fetches the Tweet data from [Manhattan](<a class="reference external" href="https://blog.twitter.com/engineering/en_us/a/2014/manhattan-our-real-time-multi-tenant-distributed-database-for-twitter-scale">https://blog.twitter.com/engineering/en_us/a/2014/manhattan-our-real-time-multi-tenant-distributed-database-for-twitter-scale</a>) or [Twemcache](<a class="reference external" href="https://blog.twitter.com/engineering/en_us/a/2012/caching-with-twemcache">https://blog.twitter.com/engineering/en_us/a/2012/caching-with-twemcache</a>), and hydrates data about the Tweet from various other backend services.</p>
+<p>#### Relevant Packages</p>
+<ul class="simple">
+<li><p>[backends](src/main/scala/com/twitter/tweetypie/backends/): A “backend” is a wrapper around a thrift service that Tweetypie calls. For example [Talon.scala](src/main/scala/com/twitter/tweetypie/backends/Talon.scala) is the backend for Talon, the URL shortener.</p></li>
+<li><p>[repository](src/main/scala/com/twitter/tweetypie/repository/): A “repository” wraps a backend and provides a structured interface for retrieving data from the backend. [UrlRepository.scala](src/main/scala/com/twitter/tweetypie/repository/UrlRepository.scala) is the repository for the Talon backend.</p></li>
+<li><p>[hydrator](src/main/scala/com/twitter/tweetypie/hydrator/): Tweetypie doesn’t store all the data associated with Tweets. For example, it doesn’t store User objects, but it stores screennames in the Tweet text (as mentions). It stores media IDs, but it doesn’t store the media metadata. Hydrators take the raw Tweet data from Manhattan or Cache and return it with some additional information, along with hydration metadata that says whether the hydration took place. This information is usually fetched using a repository. For example, during the hydration process, the [UrlEntityHydrator](src/main/scala/com/twitter/tweetypie/hydrator/UrlEntityHydrator.scala) calls Talon using the [UrlRepository](src/main/scala/com/twitter/tweetypie/repository/UrlRepository.scala) and fetches the expanded URLs for the t.co links in the Tweet.</p></li>
+<li><p>[handler](src/main/scala/com/twitter/tweetypie/handler/): A handler is a function that handles requests to one of the Tweetypie endpoints. The [GetTweetsHandler](src/main/scala/com/twitter/tweetypie/handler/GetTweetsHandler.scala) handles requests to <cite>get_tweets</cite>, one of the endpoints used to fetch Tweets.</p></li>
+</ul>
+<p>#### Through the Read Path</p>
+<p>At a high level, the path a <cite>get_tweets</cite> request takes is as follows.</p>
+<ul class="simple">
+<li><p>The request is handled by [GetTweetsHandler](src/main/scala/com/twitter/tweetypie/handler/GetTweetsHandler.scala).</p></li>
+<li><p>GetTweetsHandler uses the TweetResultRepository (defined in [LogicalRepositories.scala](src/main/scala/com/twitter/tweetypie/config/LogicalRepositories#L301)). The TweetResultRepository has at its core a [ManhattanTweetRespository](src/main/scala/com/twitter/tweetypie/repository/ManhattanTweetRepository.scala) (that fetches the Tweet data from Manhattan), wrapped in a [CachingTweetRepository](src/main/scala/com/twitter/tweetypie/repository/ManhattanTweetRepository.scala) (that applies caching using Twemcache). Finally, the caching repository is wrapped in a hydration layer (provided by [TweetHydration.hydrateRepo](src/main/scala/com/twitter/tweetypie/hydrator/TweetHydration.scala#L789)). Essentially, the TweetResultRepository fetches the Tweet data from cache or Manhattan, and passes it through the hydration pipeline.</p></li>
+<li><p>The hydration pipeline is described in [TweetHydration.scala](src/main/scala/com/twitter/tweetypie/hydrator/TweetHydration.scala), where all the hydrators are combined together.</p></li>
+</ul>
+<p>### Write Path</p>
+<p>The write path follows different patterns to the read path, but reuses some of the code.</p>
+<p>#### Relevant Packages</p>
+<ul class="simple">
+<li><p>[store](src/main/scala/com/twitter/tweetypie/store/): The store package includes the code for updating backends on write, and the coordination code for describing which backends need to be updated for which endpoints. There are two types of file in this package: stores and store modules. Files that end in Store are stores and define the logic for updating a backend, for example [ManhattanTweetStore](src/main/scala/com/twitter/tweetypie/store/ManhattanTweetStore.scala) writes Tweets to Manhattan. Most of the files that don’t end in Store are store modules and define the logic for handling a write endpoint, and describe which stores are called, for example [InsertTweet](src/main/scala/com/twitter/tweetypie/store/InsertTweet.scala) which handles the <cite>post_tweet</cite> endpoint. Modules define which stores they call, and stores define which modules they handle.</p></li>
+</ul>
+<p>#### Through the Write Path</p>
+<p>The path a <cite>post_tweet</cite> request takes is as follows.</p>
+<ul class="simple">
+<li><p>The request is handled in [PostTweet.scala](src/main/scala/com/twitter/tweetypie/handler/PostTweet.scala#L338).</p></li>
+<li><p>[TweetBuilder](src/main/scala/com/twitter/tweetypie/handler/TweetBuilder.scala) creates a Tweet from the request, after performing text processing, validation, URL shortening, media processing, checking for duplicates etc.</p></li>
+<li><p>[WritePathHydration.hydrateInsertTweet](src/main/scala/com/twitter/tweetypie/config/WritePathHydration.scala#L54) passes the Tweet through the hydration pipeline to return the caller.</p></li>
+<li><p>The Tweet data is written to various stores as described in [InsertTweet.scala](src/main/scala/com/twitter/tweetypie/store/InsertTweet.scala#L84).</p></li>
+</ul>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../_sources/tweetypie/server/README.md.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

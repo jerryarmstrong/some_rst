@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.tweetypie
+package hydrator</p>
+<p>import com.twitter.stitch.NotFound
+import com.twitter.stitch.Stitch
+import com.twitter.tweetutil.TweetPermalink
+import com.twitter.tweetypie.core.FilteredState
+import com.twitter.tweetypie.core.ValueState
+import com.twitter.tweetypie.repository._
+import com.twitter.tweetypie.thriftscala._</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Adds QuotedTweet structs to tweets that contain a tweet permalink url at the end of the</p></li>
+<li><p>tweet text. After introduction of QT + Media, we stopped storing inner tweet permalinks</p></li>
+<li><p>in the outer tweet text. So this hydrator would run only for below cases:</p></li>
+<li></li>
+<li><ul>
+<li><p>historical quote tweets which have inner tweet url in the tweet text and url entities.</p></li>
+</ul>
+</li>
+<li><ul>
+<li><p>new quote tweets created with pasted tweet permalinks, going forward we want to persist</p></li>
+</ul>
+</li>
+<li><p>quoted_tweet struct in MH for these tweets</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>object QuotedTweetRefHydrator {</dt><dd><p>type Type = ValueHydrator[Option[QuotedTweet], Ctx]</p>
+<p>case class Ctx(urlEntities: Seq[UrlEntity], underlyingTweetCtx: TweetCtx) extends TweetCtx.Proxy</p>
+<p>val hydratedField: FieldByPath = fieldByPath(Tweet.QuotedTweetField)</p>
+<p>private val partial = ValueState.partial(None, hydratedField)</p>
+<dl>
+<dt>val queryOptions: TweetQuery.Options =</dt><dd><dl class="simple">
+<dt>TweetQuery.Options(</dt><dd><p>include = TweetQuery.Include(Set(Tweet.CoreDataField.id)),
+// Don’t enforce visibility filtering when loading the QuotedTweet struct because it is
+// cacheable. The filtering happens in QuoteTweetVisibilityHydrator.
+enforceVisibilityFiltering = false,
+forUserId = None</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>def once(h: Type): Type =</dt><dd><dl class="simple">
+<dt>TweetHydration.completeOnlyOnce(</dt><dd><p>queryFilter = queryFilter,
+hydrationType = HydrationType.QuotedTweetRef,
+dependsOn = Set(HydrationType.Urls),
+hydrator = h</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>case class UrlHydrationFailed(url: String) extends Exception</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Iterate through UrlEntity objects in reverse to identify a quoted-tweet ID</p></li>
+<li><p>to hydrate. Quoted tweets are indicated by a TweetPermalink in the tweet text</p></li>
+<li><p>that references an older tweet ID. If a quoted tweet permalink is found, also</p></li>
+<li><p>return the corresponding UrlEntity.</p></li>
+<li></li>
+<li><p>&#64;throws UrlHydrationFailed if we encounter a partial URL entity before</p></li>
+<li><p>finding a tweet permalink URL.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>def quotedTweetId(ctx: Ctx): Option[(UrlEntity, TweetId)] =</dt><dd><dl>
+<dt>ctx.urlEntities.reverseIterator // we want the rightmost tweet permalink</dt><dd><dl class="simple">
+<dt>.map { e: UrlEntity =&gt;</dt><dd><p>if (UrlEntityHydrator.hydrationFailed(e)) throw UrlHydrationFailed(e.url)
+else (e, e.expanded)</p>
+</dd>
+</dl>
+<p>}
+.collectFirst {</p>
+<blockquote>
+<div><p>case (e, Some(TweetPermalink(_, quotedTweetId))) =&gt; (e, quotedTweetId)</p>
+</div></blockquote>
+<p>}
+// Prevent tweet-quoting cycles
+.filter { case (_, quotedTweetId) =&gt; ctx.tweetId &gt; quotedTweetId }</p>
+</dd>
+</dl>
+</dd>
+<dt>def buildShortenedUrl(e: UrlEntity): ShortenedUrl =</dt><dd><dl class="simple">
+<dt>ShortenedUrl(</dt><dd><p>shortUrl = e.url,
+// Reading from MH will also default the following to “”.
+// QuotedTweetRefUrlsHydrator will hydrate these cases
+longUrl = e.expanded.getOrElse(“”),
+displayText = e.display.getOrElse(“”)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>We run this hydrator only if:</p></li>
+<li></li>
+<li><ul>
+<li><p>quoted_tweet struct is empty</p></li>
+</ul>
+</li>
+<li><ul>
+<li><p>quoted_tweet is present but permalink is not</p></li>
+</ul>
+</li>
+<li><ul>
+<li><p>url entities is present. QT hydration depends on urls - long term goal</p></li>
+</ul>
+</li>
+<li><p>is to entirely rely on persisted quoted_tweet struct in MH</p></li>
+<li><ul>
+<li><p>requested tweet is not a retweet</p></li>
+</ul>
+</li>
+<li></li>
+<li><p>Hydration steps:</p></li>
+<li><ul>
+<li><p>We determine the last tweet permalink from url entities</p></li>
+</ul>
+</li>
+<li><ul>
+<li><p>Extract the inner tweet Id from the permalink</p></li>
+</ul>
+</li>
+<li><ul>
+<li><p>Query tweet repo with inner tweet Id</p></li>
+</ul>
+</li>
+<li><ul>
+<li><p>Construct quoted_tweet struct from hydrated tweet object and last permalink</p></li>
+</ul>
+</li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>def apply(repo: TweetRepository.Type): Type =</dt><dd><dl>
+<dt>ValueHydrator[Option[QuotedTweet], Ctx] { (_, ctx) =&gt;</dt><dd><p>// propagate errors from quotedTweetId in Stitch
+Stitch(quotedTweetId(ctx)).liftToTry.flatMap {</p>
+<blockquote>
+<div><dl>
+<dt>case Return(Some((lastPermalinkEntity, quotedTweetId))) =&gt;</dt><dd><dl>
+<dt>repo(quotedTweetId, queryOptions).liftToTry.map {</dt><dd><dl>
+<dt>case Return(tweet) =&gt;</dt><dd><dl class="simple">
+<dt>ValueState.modified(</dt><dd><p>Some(asQuotedTweet(tweet, lastPermalinkEntity))</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>case Throw(NotFound | _: FilteredState) =&gt; ValueState.UnmodifiedNone
+case Throw(_) =&gt; partial</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>case Return(None) =&gt; Stitch(ValueState.UnmodifiedNone)
+case Throw(_) =&gt; Stitch(partial)</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+<dt>}.onlyIf { (curr, ctx) =&gt;</dt><dd><p>(curr.isEmpty || curr.exists(_.permalink.isEmpty)) &amp;&amp;
+!ctx.isRetweet &amp;&amp; ctx.urlEntities.nonEmpty</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>def queryFilter(opts: TweetQuery.Options): Boolean =</dt><dd><p>opts.include.tweetFields(Tweet.QuotedTweetField.id)</p>
+</dd>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>We construct Tweet.quoted_tweet from hydrated inner tweet.</p></li>
+<li><p>Note: if the inner tweet is a Retweet, we populate the quoted_tweet struct from source tweet.</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+<dt>def asQuotedTweet(tweet: Tweet, entity: UrlEntity): QuotedTweet = {</dt><dd><p>val shortenedUrl = Some(buildShortenedUrl(entity))
+getShare(tweet) match {</p>
+<blockquote>
+<div><p>case None =&gt; QuotedTweet(tweet.id, getUserId(tweet), shortenedUrl)
+case Some(share) =&gt; QuotedTweet(share.sourceStatusId, share.sourceUserId, shortenedUrl)</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/tweetypie/server/src/main/scala/com/twitter/tweetypie/hydrator/QuotedTweetRefHydrator.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

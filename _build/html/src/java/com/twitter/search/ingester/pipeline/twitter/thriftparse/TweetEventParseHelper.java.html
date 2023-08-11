@@ -1,0 +1,994 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.ingester.pipeline.twitter.thriftparse;</p>
+<p>import java.util.Date;
+import java.util.List;
+import java.util.Optional;
+import javax.annotation.Nonnull;
+import javax.annotation.Nullable;</p>
+<p>import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Preconditions;
+import com.google.common.collect.Lists;</p>
+<p>import org.apache.commons.lang.StringEscapeUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;</p>
+<p>import com.twitter.common_internal.text.version.PenguinVersion;
+import com.twitter.dataproducts.enrichments.thriftjava.GeoEntity;
+import com.twitter.dataproducts.enrichments.thriftjava.PotentialLocation;
+import com.twitter.dataproducts.enrichments.thriftjava.ProfileGeoEnrichment;
+import com.twitter.escherbird.thriftjava.TweetEntityAnnotation;
+import com.twitter.expandodo.thriftjava.Card2;
+import com.twitter.gizmoduck.thriftjava.User;
+import com.twitter.mediaservices.commons.tweetmedia.thrift_java.MediaInfo;
+import com.twitter.search.common.debug.thriftjava.DebugEvents;
+import com.twitter.search.common.metrics.Percentile;
+import com.twitter.search.common.metrics.PercentileUtil;
+import com.twitter.search.common.metrics.SearchCounter;
+import com.twitter.search.common.partitioning.snowflakeparser.SnowflakeIdParser;
+import com.twitter.search.common.relevance.entities.GeoObject;
+import com.twitter.search.common.relevance.entities.PotentialLocationObject;
+import com.twitter.search.common.relevance.entities.TwitterMessage;
+import com.twitter.search.common.relevance.entities.TwitterMessage.EscherbirdAnnotation;
+import com.twitter.search.common.relevance.entities.TwitterMessageUser;
+import com.twitter.search.common.relevance.entities.TwitterMessageUtil;
+import com.twitter.search.common.relevance.entities.TwitterQuotedMessage;
+import com.twitter.search.common.relevance.entities.TwitterRetweetMessage;
+import com.twitter.search.ingester.model.IngesterTwitterMessage;
+import com.twitter.search.ingester.pipeline.util.CardFieldUtil;
+import com.twitter.service.spiderduck.gen.MediaTypes;
+import com.twitter.tweetypie.thriftjava.DeviceSource;
+import com.twitter.tweetypie.thriftjava.DirectedAtUser;
+import com.twitter.tweetypie.thriftjava.EscherbirdEntityAnnotations;
+import com.twitter.tweetypie.thriftjava.ExclusiveTweetControl;
+import com.twitter.tweetypie.thriftjava.GeoCoordinates;
+import com.twitter.tweetypie.thriftjava.HashtagEntity;
+import com.twitter.tweetypie.thriftjava.MediaEntity;
+import com.twitter.tweetypie.thriftjava.MentionEntity;
+import com.twitter.tweetypie.thriftjava.Place;
+import com.twitter.tweetypie.thriftjava.QuotedTweet;
+import com.twitter.tweetypie.thriftjava.Reply;
+import com.twitter.tweetypie.thriftjava.Tweet;
+import com.twitter.tweetypie.thriftjava.TweetCoreData;
+import com.twitter.tweetypie.thriftjava.TweetCreateEvent;
+import com.twitter.tweetypie.thriftjava.TweetDeleteEvent;
+import com.twitter.tweetypie.thriftjava.UrlEntity;
+import com.twitter.tweetypie.tweettext.PartialHtmlEncoding;</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>This is an utility class for converting Thrift TweetEvent messages sent by TweetyPie</p></li>
+<li><p>into ingester internal representation, IngesterTwitterMessage.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>public final class TweetEventParseHelper {</dt><dd><p>private static final Logger LOG = LoggerFactory.getLogger(TweetEventParseHelper.class);</p>
+<p>&#64;VisibleForTesting
+static final SearchCounter NUM_TWEETS_WITH_NULL_TEXT =</p>
+<blockquote>
+<div><p>SearchCounter.export(“tweets_with_null_text_from_thrift_cnt”);</p>
+</div></blockquote>
+<p>&#64;VisibleForTesting
+static final SearchCounter TWEET_SIZE = SearchCounter.export(“tweet_size_from_thrift”);</p>
+<p>&#64;VisibleForTesting
+static final Percentile&lt;Long&gt; TWEET_SIZE_PERCENTILES =</p>
+<blockquote>
+<div><p>PercentileUtil.createPercentile(“tweet_size_from_thrift”);</p>
+</div></blockquote>
+<p>&#64;VisibleForTesting
+static final SearchCounter NUM_TWEETS_WITH_CONVERSATION_ID =</p>
+<blockquote>
+<div><p>SearchCounter.export(“tweets_with_conversation_id_from_thrift_cnt”);</p>
+</div></blockquote>
+<p>&#64;VisibleForTesting
+static final SearchCounter NUM_TWEETS_WITH_QUOTE =</p>
+<blockquote>
+<div><p>SearchCounter.export(“tweets_with_quote_from_thrift_cnt”);</p>
+</div></blockquote>
+<p>&#64;VisibleForTesting
+static final SearchCounter NUM_TWEETS_WITH_ANNOTATIONS =</p>
+<blockquote>
+<div><p>SearchCounter.export(“tweets_with_annotation_from_thrift_cnt”);</p>
+</div></blockquote>
+<p>&#64;VisibleForTesting
+static final SearchCounter NUM_ANNOTATIONS_ADDED =</p>
+<blockquote>
+<div><p>SearchCounter.export(“num_annotations_from_thrift_cnt”);</p>
+</div></blockquote>
+<p>&#64;VisibleForTesting
+static final SearchCounter NUM_TWEETS_WITH_COORDINATE_FIELD =</p>
+<blockquote>
+<div><p>SearchCounter.export(“tweets_with_coordinate_field_from_thrift_cnt”);</p>
+</div></blockquote>
+<p>&#64;VisibleForTesting
+static final SearchCounter NUM_PLACE_ADDED =</p>
+<blockquote>
+<div><p>SearchCounter.export(“num_places_from_thrift_cnt”);</p>
+</div></blockquote>
+<p>&#64;VisibleForTesting
+static final SearchCounter NUM_TWEETS_WITH_PLACE_FIELD =</p>
+<blockquote>
+<div><p>SearchCounter.export(“tweets_with_place_field_from_thrift_cnt”);</p>
+</div></blockquote>
+<p>&#64;VisibleForTesting
+static final SearchCounter NUM_TWEETS_WITH_PLACE_COUNTRY_CODE =</p>
+<blockquote>
+<div><p>SearchCounter.export(“tweets_with_place_country_code_from_thrift_cnt”);</p>
+</div></blockquote>
+<p>&#64;VisibleForTesting
+static final SearchCounter NUM_TWEETS_USE_PLACE_FIELD =</p>
+<blockquote>
+<div><p>SearchCounter.export(“tweets_use_place_field_from_thrift_cnt”);</p>
+</div></blockquote>
+<p>&#64;VisibleForTesting
+static final SearchCounter NUM_TWEETS_CANNOT_PARSE_PLACE_FIELD =</p>
+<blockquote>
+<div><p>SearchCounter.export(“tweets_cannot_parse_place_field_from_thrift_cnt”);</p>
+</div></blockquote>
+<p>&#64;VisibleForTesting
+static final SearchCounter NUM_TWEETS_WITH_PROFILE_GEO_ENRICHMENT =</p>
+<blockquote>
+<div><p>SearchCounter.export(“tweets_with_profile_geo_enrichment_from_thrift_cnt”);</p>
+</div></blockquote>
+<p>&#64;VisibleForTesting
+static final SearchCounter NUM_TWEETS_WITH_MENTIONS =</p>
+<blockquote>
+<div><p>SearchCounter.export(“tweets_with_mentions_from_thrift_cnt”);</p>
+</div></blockquote>
+<p>&#64;VisibleForTesting
+static final SearchCounter NUM_MENTIONS_ADDED =</p>
+<blockquote>
+<div><p>SearchCounter.export(“num_mentions_from_thrift_cnt”);</p>
+</div></blockquote>
+<p>&#64;VisibleForTesting
+static final SearchCounter NUM_TWEETS_WITH_HASHTAGS =</p>
+<blockquote>
+<div><p>SearchCounter.export(“tweets_with_hashtags_from_thrift_cnt”);</p>
+</div></blockquote>
+<p>&#64;VisibleForTesting
+static final SearchCounter NUM_HASHTAGS_ADDED =</p>
+<blockquote>
+<div><p>SearchCounter.export(“num_hashtags_from_thrift_cnt”);</p>
+</div></blockquote>
+<p>&#64;VisibleForTesting
+static final SearchCounter NUM_TWEETS_WITH_MEDIA_URL =</p>
+<blockquote>
+<div><p>SearchCounter.export(“tweets_with_media_url_from_thrift_cnt”);</p>
+</div></blockquote>
+<p>&#64;VisibleForTesting
+static final SearchCounter NUM_MEDIA_URLS_ADDED =</p>
+<blockquote>
+<div><p>SearchCounter.export(“num_media_urls_from_thrift_cnt”);</p>
+</div></blockquote>
+<p>&#64;VisibleForTesting
+static final SearchCounter NUM_TWEETS_WITH_PHOTO_MEDIA_URL =</p>
+<blockquote>
+<div><p>SearchCounter.export(“tweets_with_photo_media_url_from_thrift_cnt”);</p>
+</div></blockquote>
+<p>&#64;VisibleForTesting
+static final SearchCounter NUM_TWEETS_WITH_VIDEO_MEDIA_URL =</p>
+<blockquote>
+<div><p>SearchCounter.export(“tweets_with_video_media_url_from_thrift_cnt”);</p>
+</div></blockquote>
+<p>&#64;VisibleForTesting
+static final SearchCounter NUM_TWEETS_WITH_NON_MEDIA_URL =</p>
+<blockquote>
+<div><p>SearchCounter.export(“tweets_with_non_media_url_from_thrift_cnt”);</p>
+</div></blockquote>
+<p>&#64;VisibleForTesting
+static final SearchCounter NUM_NON_MEDIA_URLS_ADDED =</p>
+<blockquote>
+<div><p>SearchCounter.export(“num_non_media_urls_from_thrift_cnt”);</p>
+</div></blockquote>
+<p>&#64;VisibleForTesting
+static final SearchCounter NUM_TWEETS_MISSING_QUOTE_URLS =</p>
+<blockquote>
+<div><p>SearchCounter.export(“num_tweets_missing_quote_urls_cnt”);</p>
+</div></blockquote>
+<p>// Utility class, disallow instantiation.
+private TweetEventParseHelper() {
+}</p>
+<p>/** Builds an IngesterTwitterMessage instance from a TweetCreateEvent. <a href="#id3"><span class="problematic" id="id4">*</span></a>/
+&#64;Nonnull
+public static IngesterTwitterMessage getTwitterMessageFromCreationEvent(</p>
+<blockquote>
+<div><blockquote>
+<div><p>&#64;Nonnull TweetCreateEvent createEvent,
+&#64;Nonnull List&lt;PenguinVersion&gt; supportedPenguinVersions,
+&#64;Nullable DebugEvents debugEvents) throws ThriftTweetParsingException {</p>
+</div></blockquote>
+<p>Tweet tweet = createEvent.getTweet();
+if (tweet == null) {</p>
+<blockquote>
+<div><p>throw new ThriftTweetParsingException(“No tweet field in TweetCreateEvent”);</p>
+</div></blockquote>
+<p>}</p>
+<p>TweetCoreData coreData = tweet.getCore_data();
+if (coreData == null) {</p>
+<blockquote>
+<div><p>throw new ThriftTweetParsingException(“No core_data field in Tweet in TweetCreateEvent”);</p>
+</div></blockquote>
+<p>}</p>
+<p>User user = createEvent.getUser();
+if (user == null) {</p>
+<blockquote>
+<div><p>throw new ThriftTweetParsingException(“No user field in TweetCreateEvent”);</p>
+</div></blockquote>
+<p>}
+if (!user.isSetProfile()) {</p>
+<blockquote>
+<div><p>throw new ThriftTweetParsingException(“No profile field in User in TweetCreateEvent”);</p>
+</div></blockquote>
+<p>}
+if (!user.isSetSafety()) {</p>
+<blockquote>
+<div><p>throw new ThriftTweetParsingException(“No safety field in User in TweetCreateEvent”);</p>
+</div></blockquote>
+<p>}</p>
+<p>long twitterId = tweet.getId();
+IngesterTwitterMessage message = new IngesterTwitterMessage(</p>
+<blockquote>
+<div><p>twitterId,
+supportedPenguinVersions,
+debugEvents);</p>
+</div></blockquote>
+<p>// Set the creation time based on the tweet ID, because it has millisecond granularity,
+// and coreData.created_at_secs has only second granularity.
+message.setDate(new Date(SnowflakeIdParser.getTimestampFromTweetId(twitterId)));</p>
+<p>boolean isNsfw = coreData.isNsfw_admin() || coreData.isNsfw_user();
+boolean hasMediaOrUrlsOrCards =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>tweet.getMediaSize() &gt; 0</dt><dd><p>|| tweet.getUrlsSize() &gt; 0
+|| tweet.getCardsSize() &gt; 0
+|| tweet.isSetCard2();</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>message.setIsSensitiveContent(isNsfw &amp;&amp; hasMediaOrUrlsOrCards);</p>
+<p>message.setFromUser(getFromUser(user));
+if (user.isSetCounts()) {</p>
+<blockquote>
+<div><p>message.setFollowersCount((int) user.getCounts().getFollowers());</p>
+</div></blockquote>
+<p>}
+message.setUserProtected(user.getSafety().isIs_protected());
+message.setUserVerified(user.getSafety().isVerified());
+message.setUserBlueVerified(user.getSafety().isIs_blue_verified());</p>
+<dl class="simple">
+<dt>if (tweet.isSetLanguage()) {</dt><dd><p>message.setLanguage(tweet.getLanguage().getLanguage()); // language ID like “en”</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>if (tweet.isSetSelf_thread_metadata()) {</dt><dd><p>message.setSelfThread(true);</p>
+</dd>
+</dl>
+<p>}</p>
+<p>ExclusiveTweetControl exclusiveTweetControl = tweet.getExclusive_tweet_control();
+if (exclusiveTweetControl != null) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (exclusiveTweetControl.isSetConversation_author_id()) {</dt><dd><dl class="simple">
+<dt>message.setExclusiveConversationAuthorId(</dt><dd><p>exclusiveTweetControl.getConversation_author_id());</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>setDirectedAtUser(message, coreData);
+addMentionsToMessage(message, tweet);
+addHashtagsToMessage(message, tweet);
+addMediaEntitiesToMessage(message, tweet.getId(), tweet.getMedia());
+addUrlsToMessage(message, tweet.getUrls());
+addEscherbirdAnnotationsToMessage(message, tweet);
+message.setNullcast(coreData.isNullcast());</p>
+<dl class="simple">
+<dt>if (coreData.isSetConversation_id()) {</dt><dd><p>message.setConversationId(coreData.getConversation_id());
+NUM_TWEETS_WITH_CONVERSATION_ID.increment();</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// quotes
+if (tweet.isSetQuoted_tweet()) {</p>
+<blockquote>
+<div><p>QuotedTweet quotedTweet = tweet.getQuoted_tweet();
+if (quotedTweet.getTweet_id() &gt; 0 &amp;&amp;  quotedTweet.getUser_id() &gt; 0) {</p>
+<blockquote>
+<div><dl>
+<dt>if (quotedTweet.isSetPermalink()) {</dt><dd><p>String quotedURL = quotedTweet.getPermalink().getLong_url();
+UrlEntity quotedURLEntity = new UrlEntity();
+quotedURLEntity.setExpanded(quotedURL);
+quotedURLEntity.setUrl(quotedTweet.getPermalink().getShort_url());
+quotedURLEntity.setDisplay(quotedTweet.getPermalink().getDisplay_text());
+addUrlsToMessage(message, Lists.newArrayList(quotedURLEntity));</p>
+</dd>
+<dt>} else {</dt><dd><dl class="simple">
+<dt>LOG.warn(“Tweet {} has quoted tweet, but is missing quoted tweet URL: {}”,</dt><dd><p>tweet.getId(), quotedTweet);</p>
+</dd>
+</dl>
+<p>NUM_TWEETS_MISSING_QUOTE_URLS.increment();</p>
+</dd>
+</dl>
+<p>}
+TwitterQuotedMessage quotedMessage =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>new TwitterQuotedMessage(</dt><dd><p>quotedTweet.getTweet_id(),
+quotedTweet.getUser_id());</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>message.setQuotedMessage(quotedMessage);
+NUM_TWEETS_WITH_QUOTE.increment();</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>// card fields
+if (createEvent.getTweet().isSetCard2()) {</p>
+<blockquote>
+<div><p>Card2 card = createEvent.getTweet().getCard2();
+message.setCardName(card.getName());
+message.setCardTitle(</p>
+<blockquote>
+<div><p>CardFieldUtil.extractBindingValue(CardFieldUtil.TITLE_BINDING_KEY, card));</p>
+</div></blockquote>
+<dl class="simple">
+<dt>message.setCardDescription(</dt><dd><p>CardFieldUtil.extractBindingValue(CardFieldUtil.DESCRIPTION_BINDING_KEY, card));</p>
+</dd>
+</dl>
+<p>CardFieldUtil.deriveCardLang(message);
+message.setCardUrl(card.getUrl());</p>
+</div></blockquote>
+<p>}</p>
+<p>// Some fields should be set based on the “original” tweet. So if this tweet is a retweet,
+// we want to extract those fields from the retweeted tweet.
+Tweet retweetOrTweet = tweet;
+TweetCoreData retweetOrTweetCoreData = coreData;
+User retweetOrTweetUser = user;</p>
+<p>// retweets
+boolean isRetweet = coreData.isSetShare();
+if (isRetweet) {</p>
+<blockquote>
+<div><p>retweetOrTweet = createEvent.getSource_tweet();
+retweetOrTweetCoreData = retweetOrTweet.getCore_data();
+retweetOrTweetUser = createEvent.getSource_user();</p>
+<p>TwitterRetweetMessage retweetMessage = new TwitterRetweetMessage();
+retweetMessage.setRetweetId(twitterId);</p>
+<dl>
+<dt>if (retweetOrTweetUser != null) {</dt><dd><dl class="simple">
+<dt>if (retweetOrTweetUser.isSetProfile()) {</dt><dd><p>retweetMessage.setSharedUserDisplayName(retweetOrTweetUser.getProfile().getName());</p>
+</dd>
+</dl>
+<p>}
+retweetMessage.setSharedUserTwitterId(retweetOrTweetUser.getId());</p>
+</dd>
+</dl>
+<p>}</p>
+<p>retweetMessage.setSharedDate(new Date(retweetOrTweetCoreData.getCreated_at_secs() * 1000));
+retweetMessage.setSharedId(retweetOrTweet.getId());</p>
+<p>addMediaEntitiesToMessage(message, retweetOrTweet.getId(), retweetOrTweet.getMedia());
+addUrlsToMessage(message, retweetOrTweet.getUrls());</p>
+<p>// If a tweet’s text is longer than 140 characters, the text for any retweet of that tweet
+// will be truncated. And if the original tweet has hashtags or mentions after character 140,
+// the Tweetypie event for the retweet will not include those hashtags/mentions, which will
+// make the retweet unsearchable by those hashtags/mentions. So in order to avoid this
+// problem, we add to the retweet all hashtags/mentions set on the original tweet.
+addMentionsToMessage(message, retweetOrTweet);
+addHashtagsToMessage(message, retweetOrTweet);</p>
+<p>message.setRetweetMessage(retweetMessage);</p>
+</div></blockquote>
+<p>}</p>
+<p>// Some fields should be set based on the “original” tweet.
+// Only set geo fields if this is not a retweet
+if (!isRetweet) {</p>
+<blockquote>
+<div><p>setGeoFields(message, retweetOrTweetCoreData, retweetOrTweetUser);
+setPlacesFields(message, retweetOrTweet);</p>
+</div></blockquote>
+<p>}
+setText(message, retweetOrTweetCoreData);
+setInReplyTo(message, retweetOrTweetCoreData, isRetweet);
+setDeviceSourceField(message, retweetOrTweet);</p>
+<p>// Profile geo enrichment fields should be set based on this tweet, even if it’s a retweet.
+setProfileGeoEnrichmentFields(message, tweet);</p>
+<p>// The composer used to create this tweet: standard tweet creator or the camera flow.
+setComposerSource(message, tweet);</p>
+<p>return message;</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>private static void setGeoFields(</dt><dd><blockquote>
+<div><p>TwitterMessage message, TweetCoreData coreData, User user) {</p>
+</div></blockquote>
+<dl>
+<dt>if (coreData.isSetCoordinates()) {</dt><dd><p>NUM_TWEETS_WITH_COORDINATE_FIELD.increment();
+GeoCoordinates coords = coreData.getCoordinates();
+message.setGeoTaggedLocation(</p>
+<blockquote>
+<div><p>GeoObject.createForIngester(coords.getLatitude(), coords.getLongitude()));</p>
+</div></blockquote>
+<dl class="simple">
+<dt>String location =</dt><dd><p>String.format(“GeoAPI:%.4f,%.4f”, coords.getLatitude(), coords.getLongitude());</p>
+</dd>
+</dl>
+<p>TwitterMessageUtil.setAndTruncateLocationOnMessage(message, location);</p>
+</dd>
+</dl>
+<p>}</p>
+<p>// If the location was not set from the coordinates.
+if ((message.getOrigLocation() == null) &amp;&amp; (user != null) &amp;&amp; user.isSetProfile()) {</p>
+<blockquote>
+<div><p>TwitterMessageUtil.setAndTruncateLocationOnMessage(message, user.getProfile().getLocation());</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private static void setPlacesFields(TwitterMessage message, Tweet tweet) {</dt><dd><dl class="simple">
+<dt>if (!tweet.isSetPlace()) {</dt><dd><p>return;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>Place place = tweet.getPlace();</p>
+<dl>
+<dt>if (place.isSetContainers() &amp;&amp; place.getContainersSize() &gt; 0) {</dt><dd><p>NUM_TWEETS_WITH_PLACE_FIELD.increment();
+NUM_PLACE_ADDED.add(place.getContainersSize());</p>
+<dl class="simple">
+<dt>for (String placeId<span class="classifier">place.getContainers()) {</span></dt><dd><p>message.addPlace(placeId);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>Preconditions.checkArgument(place.isSetId(), “Tweet.Place without id.”);
+message.setPlaceId(place.getId());
+Preconditions.checkArgument(place.isSetFull_name(), “Tweet.Place without full_name.”);
+message.setPlaceFullName(place.getFull_name());
+if (place.isSetCountry_code()) {</p>
+<blockquote>
+<div><p>message.setPlaceCountryCode(place.getCountry_code());
+NUM_TWEETS_WITH_PLACE_COUNTRY_CODE.increment();</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>if (message.getGeoTaggedLocation() == null) {</dt><dd><p>Optional&lt;GeoObject&gt; location = GeoObject.fromPlace(place);</p>
+<dl class="simple">
+<dt>if (location.isPresent()) {</dt><dd><p>NUM_TWEETS_USE_PLACE_FIELD.increment();
+message.setGeoTaggedLocation(location.get());</p>
+</dd>
+<dt>} else {</dt><dd><p>NUM_TWEETS_CANNOT_PARSE_PLACE_FIELD.increment();</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private static void setText(TwitterMessage message, TweetCoreData coreData) {</dt><dd><dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>TweetyPie doesn’t do a full HTML escaping of the text, only a partial escaping</p></li>
+<li><p>so we use their code to unescape it first, then we do</p></li>
+<li><p>a second unescaping because when the tweet text itself has HTML escape</p></li>
+<li><p>sequences, we want to index the unescaped version, not the escape sequence itself.</p></li>
+<li><p>–</p></li>
+<li><p>Yes, we <em>double</em> unescape html. About 1-2 tweets per second are double escaped,</p></li>
+<li><p>and we probably want to index the real text and not things like ‘&amp;#9733;’.</p></li>
+<li><p>Unescaping already unescaped text seems safe in practice.</p></li>
+<li><p>–</p></li>
+<li></li>
+<li><p>This may seem wrong, because one thinks we should index whatever the user posts,</p></li>
+<li><p>but given punctuation stripping this creates odd behavior:</p></li>
+<li></li>
+<li><p>If someone tweets &amp;amp; they won’t be able to find it by searching for ‘&amp;amp;’ because</p></li>
+<li><p>the tweet will be indexed as ‘amp’</p></li>
+<li></li>
+<li><p>It would also prevent some tweets from surfacing for certain searches, for example:</p></li>
+<li></li>
+<li><p>User Tweets: John Mayer &amp;amp; Dave Chappelle</p></li>
+<li><p>We Unescape To: John Mayer &amp; Dave Chappelle</p></li>
+<li><p>We Strip/Normalize To: john mayer dave chappelle</p></li>
+<li></li>
+<li><p>A user searching for ‘John Mayer Dave Chappelle’ would get the above tweet.</p></li>
+<li></li>
+<li><p>If we didn’t double unescape</p></li>
+<li></li>
+<li><p>User Tweets: John Mayer &amp;amp; Dave Chappelle</p></li>
+<li><p>We Strip/Normalize To: john mayer amp dave chappelle</p></li>
+<li></li>
+<li><p>A user searching for ‘John Mayer Dave Chappelle’ would miss the above tweet.</p></li>
+<li></li>
+<li><p>Second example</p></li>
+<li></li>
+<li><p>User Tweets: L’Humanit&amp;eacute;</p></li>
+<li><p>We Unescape To: L’Humanité</p></li>
+<li><p>We Strip/Normalize To: l humanite</p></li>
+<li></li>
+<li><p>If we didn’t double escape</p></li>
+<li></li>
+<li><p>User Tweets: L’Humanit&amp;eacute;</p></li>
+<li><p>We Strip/Normalize To: l humanit eacute</p></li>
+<li></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>String text = coreData.isSetText()</dt><dd><p>? StringEscapeUtils.unescapeHtml(PartialHtmlEncoding.decode(coreData.getText()))
+: coreData.getText();</p>
+</dd>
+</dl>
+<p>message.setText(text);
+if (text != null) {</p>
+<blockquote>
+<div><p>long tweetLength = text.length();
+TWEET_SIZE.add(tweetLength);
+TWEET_SIZE_PERCENTILES.record(tweetLength);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>NUM_TWEETS_WITH_NULL_TEXT.increment();</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private static void setInReplyTo(</dt><dd><blockquote>
+<div><p>TwitterMessage message, TweetCoreData coreData, boolean isRetweet) {</p>
+</div></blockquote>
+<p>Reply reply = coreData.getReply();
+if (!isRetweet &amp;&amp; reply != null) {</p>
+<blockquote>
+<div><p>String inReplyToScreenName = reply.getIn_reply_to_screen_name();
+long inReplyToUserId = reply.getIn_reply_to_user_id();
+message.replaceToUserWithInReplyToUserIfNeeded(inReplyToScreenName, inReplyToUserId);</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>if ((reply != null) &amp;&amp; reply.isSetIn_reply_to_status_id()) {</dt><dd><p>message.setInReplyToStatusId(reply.getIn_reply_to_status_id());</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private static void setProfileGeoEnrichmentFields(TwitterMessage message, Tweet tweet) {</dt><dd><dl class="simple">
+<dt>if (!tweet.isSetProfile_geo_enrichment()) {</dt><dd><p>return;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>ProfileGeoEnrichment profileGeoEnrichment = tweet.getProfile_geo_enrichment();
+List&lt;PotentialLocation&gt; thriftPotentialLocations =</p>
+<blockquote>
+<div><p>profileGeoEnrichment.getPotential_locations();</p>
+</div></blockquote>
+<dl>
+<dt>if (!thriftPotentialLocations.isEmpty()) {</dt><dd><p>NUM_TWEETS_WITH_PROFILE_GEO_ENRICHMENT.increment();
+List&lt;PotentialLocationObject&gt; potentialLocations = Lists.newArrayList();
+for (PotentialLocation potentialLocation : thriftPotentialLocations) {</p>
+<blockquote>
+<div><p>GeoEntity geoEntity = potentialLocation.getGeo_entity();
+potentialLocations.add(new PotentialLocationObject(geoEntity.getCountry_code(),</p>
+<blockquote>
+<div><p>geoEntity.getRegion(),
+geoEntity.getLocality()));</p>
+</div></blockquote>
+</div></blockquote>
+<p>}</p>
+<p>message.setPotentialLocations(potentialLocations);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private static void setDeviceSourceField(TwitterMessage message, Tweet tweet) {</dt><dd><p>DeviceSource deviceSource = tweet.getDevice_source();
+TwitterMessageUtil.setSourceOnMessage(message, modifyDeviceSourceWithNofollow(deviceSource));</p>
+</dd>
+</dl>
+<p>}</p>
+<p>/** Builds an IngesterTwitterMessage instance from a TweetDeleteEvent. <a href="#id7"><span class="problematic" id="id8">*</span></a>/
+&#64;Nonnull
+public static IngesterTwitterMessage getTwitterMessageFromDeletionEvent(</p>
+<blockquote>
+<div><blockquote>
+<div><p>&#64;Nonnull TweetDeleteEvent deleteEvent,
+&#64;Nonnull List&lt;PenguinVersion&gt; supportedPenguinVersions,
+&#64;Nullable DebugEvents debugEvents) throws ThriftTweetParsingException {</p>
+</div></blockquote>
+<p>Tweet tweet = deleteEvent.getTweet();
+if (tweet == null) {</p>
+<blockquote>
+<div><p>throw new ThriftTweetParsingException(“No tweet field in TweetDeleteEvent”);</p>
+</div></blockquote>
+<p>}
+long tweetId = tweet.getId();</p>
+<p>TweetCoreData coreData = tweet.getCore_data();
+if (coreData == null) {</p>
+<blockquote>
+<div><p>throw new ThriftTweetParsingException(“No TweetCoreData in TweetDeleteEvent”);</p>
+</div></blockquote>
+<p>}
+long userId = coreData.getUser_id();</p>
+<dl class="simple">
+<dt>IngesterTwitterMessage message = new IngesterTwitterMessage(</dt><dd><p>tweetId,
+supportedPenguinVersions,
+debugEvents);</p>
+</dd>
+</dl>
+<p>message.setDeleted(true);
+message.setText(“delete”);
+message.setFromUser(TwitterMessageUser.createWithNamesAndId(“delete”, “delete”, userId));</p>
+<p>return message;</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>private static TwitterMessageUser getFromUser(User user) {</dt><dd><p>String screenName = user.getProfile().getScreen_name();
+long id = user.getId();
+String displayName = user.getProfile().getName();
+return TwitterMessageUser.createWithNamesAndId(screenName, displayName, id);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private static void addMentionsToMessage(IngesterTwitterMessage message, Tweet tweet) {</dt><dd><p>List&lt;MentionEntity&gt; mentions = tweet.getMentions();
+if (mentions != null) {</p>
+<blockquote>
+<div><p>NUM_TWEETS_WITH_MENTIONS.increment();
+NUM_MENTIONS_ADDED.add(mentions.size());
+for (MentionEntity mention : mentions) {</p>
+<blockquote>
+<div><p>addMention(message, mention);</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private static void addMention(IngesterTwitterMessage message, MentionEntity mention) {</dt><dd><p>// Default values. They are weird, but are consistent with JSON parsing behavior.
+Optional&lt;Long&gt; id = Optional.of(-1L);
+Optional&lt;String&gt; screenName = Optional.of(“”);
+Optional&lt;String&gt; displayName = Optional.of(“”);</p>
+<dl class="simple">
+<dt>if (mention.isSetUser_id()) {</dt><dd><p>id = Optional.of(mention.getUser_id());</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>if (mention.isSetScreen_name()) {</dt><dd><p>screenName = Optional.of(mention.getScreen_name());</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>if (mention.isSetName()) {</dt><dd><p>displayName = Optional.of(mention.getName());</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>TwitterMessageUser mentionedUser = TwitterMessageUser</dt><dd><p>.createWithOptionalNamesAndId(screenName, displayName, id);</p>
+</dd>
+<dt>if (isToUser(mention, message.getToUserObject())) {</dt><dd><p>message.setToUserObject(mentionedUser);</p>
+</dd>
+</dl>
+<p>}
+message.addUserToMentions(mentionedUser);</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private static boolean isToUser(</dt><dd><blockquote>
+<div><p>MentionEntity mention, Optional&lt;TwitterMessageUser&gt; optionalToUser) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>if (mention.getFrom_index() == 0) {</dt><dd><p>return true;</p>
+</dd>
+</dl>
+<p>}
+if (optionalToUser.isPresent()) {</p>
+<blockquote>
+<div><p>TwitterMessageUser toUser = optionalToUser.get();
+if (toUser.getId().isPresent()) {</p>
+<blockquote>
+<div><p>long toUserId = toUser.getId().get();
+return mention.getUser_id() == toUserId;</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}
+return false;</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private static void addHashtagsToMessage(IngesterTwitterMessage message, Tweet tweet) {</dt><dd><p>List&lt;HashtagEntity&gt; hashtags = tweet.getHashtags();
+if (hashtags != null) {</p>
+<blockquote>
+<div><p>NUM_TWEETS_WITH_HASHTAGS.increment();
+NUM_HASHTAGS_ADDED.add(hashtags.size());
+for (HashtagEntity hashtag : hashtags) {</p>
+<blockquote>
+<div><p>addHashtag(message, hashtag);</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private static void addHashtag(IngesterTwitterMessage message, HashtagEntity hashtag) {</dt><dd><p>String hashtagString = hashtag.getText();
+message.addHashtag(hashtagString);</p>
+</dd>
+</dl>
+<p>}</p>
+<p>/** Add the given media entities to the given message. <a href="#id9"><span class="problematic" id="id10">*</span></a>/
+public static void addMediaEntitiesToMessage(</p>
+<blockquote>
+<div><blockquote>
+<div><p>IngesterTwitterMessage message,
+long photoStatusId,
+&#64;Nullable List&lt;MediaEntity&gt; medias) {</p>
+</div></blockquote>
+<dl>
+<dt>if (medias != null) {</dt><dd><p>NUM_TWEETS_WITH_MEDIA_URL.increment();
+NUM_MEDIA_URLS_ADDED.add(medias.size());</p>
+<p>boolean hasPhotoMediaUrl = false;
+boolean hasVideoMediaUrl = false;
+for (MediaEntity media : medias) {</p>
+<blockquote>
+<div><p>MediaTypes mediaType = null;
+if (media.isSetMedia_info()) {</p>
+<blockquote>
+<div><p>MediaInfo mediaInfo = media.getMedia_info();
+if (mediaInfo != null) {</p>
+<blockquote>
+<div><dl>
+<dt>if (mediaInfo.isSet(MediaInfo._Fields.IMAGE_INFO)) {</dt><dd><p>mediaType = MediaTypes.NATIVE_IMAGE;
+String mediaUrl = media.getMedia_url_https();
+if (mediaUrl != null) {</p>
+<blockquote>
+<div><p>hasPhotoMediaUrl = true;
+message.addPhotoUrl(photoStatusId, mediaUrl);
+// Add this link to the expanded URLs too, so that the HAS_NATIVE_IMAGE_FLAG is set
+// correctly too. See EncodedFeatureBuilder.updateLinkEncodedFeatures().</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+<dt>} else if (mediaInfo.isSet(MediaInfo._Fields.VIDEO_INFO)) {</dt><dd><p>mediaType = MediaTypes.VIDEO;
+hasVideoMediaUrl = true;</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}
+String originalUrl = media.getUrl();
+String expandedUrl = media.getExpanded_url();
+message.addExpandedMediaUrl(originalUrl, expandedUrl, mediaType);</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>if (hasPhotoMediaUrl) {</dt><dd><p>NUM_TWEETS_WITH_PHOTO_MEDIA_URL.increment();</p>
+</dd>
+</dl>
+<p>}
+if (hasVideoMediaUrl) {</p>
+<blockquote>
+<div><p>NUM_TWEETS_WITH_VIDEO_MEDIA_URL.increment();</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>/** Adds the given urls to the given message. <a href="#id11"><span class="problematic" id="id12">*</span></a>/
+public static void addUrlsToMessage(</p>
+<blockquote>
+<div><blockquote>
+<div><p>IngesterTwitterMessage message,
+&#64;Nullable List&lt;UrlEntity&gt; urls) {</p>
+</div></blockquote>
+<dl>
+<dt>if (urls != null) {</dt><dd><p>NUM_TWEETS_WITH_NON_MEDIA_URL.increment();
+NUM_NON_MEDIA_URLS_ADDED.add(urls.size());
+for (UrlEntity url : urls) {</p>
+<blockquote>
+<div><p>String originalUrl = url.getUrl();
+String expandedUrl = url.getExpanded();
+message.addExpandedNonMediaUrl(originalUrl, expandedUrl);</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>private static void addEscherbirdAnnotationsToMessage(</dt><dd><blockquote>
+<div><p>IngesterTwitterMessage message, Tweet tweet) {</p>
+</div></blockquote>
+<dl>
+<dt>if (tweet.isSetEscherbird_entity_annotations()) {</dt><dd><p>EscherbirdEntityAnnotations entityAnnotations = tweet.getEscherbird_entity_annotations();
+if (entityAnnotations.isSetEntity_annotations()) {</p>
+<blockquote>
+<div><p>NUM_TWEETS_WITH_ANNOTATIONS.increment();
+NUM_ANNOTATIONS_ADDED.add(entityAnnotations.getEntity_annotationsSize());
+for (TweetEntityAnnotation entityAnnotation : entityAnnotations.getEntity_annotations()) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>EscherbirdAnnotation escherbirdAnnotation =</dt><dd><dl class="simple">
+<dt>new EscherbirdAnnotation(entityAnnotation.getGroupId(),</dt><dd><p>entityAnnotation.getDomainId(),
+entityAnnotation.getEntityId());</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>message.addEscherbirdAnnotation(escherbirdAnnotation);</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private static void setComposerSource(IngesterTwitterMessage message, Tweet tweet) {</dt><dd><dl class="simple">
+<dt>if (tweet.isSetComposer_source()) {</dt><dd><p>message.setComposerSource(tweet.getComposer_source());</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private static String modifyDeviceSourceWithNofollow(&#64;Nullable DeviceSource deviceSource) {</dt><dd><dl>
+<dt>if (deviceSource != null) {</dt><dd><p>String source = deviceSource.getDisplay();
+int i = source.indexOf(”&quot;&gt;”);
+if (i == -1) {</p>
+<blockquote>
+<div><p>return source;</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>return source.substring(0, i) + “&quot; rel=&quot;nofollow&quot;&gt;” + source.substring(i + 2);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>} else {</dt><dd><p>return “&lt;a href=&quot;<a class="reference external" href="http://twitter.com">http://twitter.com</a>&quot; rel=&quot;nofollow&quot;&gt;Twitter&lt;/a&gt;”;</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private static void setDirectedAtUser(</dt><dd><blockquote>
+<div><p>IngesterTwitterMessage message,
+TweetCoreData tweetCoreData) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>if (!tweetCoreData.isSetDirected_at_user()) {</dt><dd><p>return;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>DirectedAtUser directedAtUser = tweetCoreData.getDirected_at_user();</p>
+<dl class="simple">
+<dt>if (!directedAtUser.isSetUser_id()) {</dt><dd><p>return;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>message.setDirectedAtUserId(Optional.of(directedAtUser.getUser_id()));</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/src/java/com/twitter/search/ingester/pipeline/twitter/thriftparse/TweetEventParseHelper.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

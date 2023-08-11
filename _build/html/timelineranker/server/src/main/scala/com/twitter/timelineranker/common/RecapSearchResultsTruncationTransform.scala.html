@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.timelineranker.common</p>
+<p>import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.servo.util.FutureArrow
+import com.twitter.timelineranker.core.CandidateEnvelope
+import com.twitter.timelineranker.model.RecapQuery.DependencyProvider
+import com.twitter.timelineranker.util.SearchResultUtil
+import com.twitter.util.Future</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Truncate the search results by score. Assumes that the search results are sorted in</p></li>
+<li><p>score-descending order unless extraSortBeforeTruncation is set to true.</p></li>
+<li></li>
+<li><p>This transform has two main use cases:</p></li>
+<li></li>
+<li><ul>
+<li><p>when returnAllResults is set to true, earlybird returns (numResultsPerShard * number of shards)</p></li>
+</ul>
+</li>
+<li><p>results. this transform is then used to further truncate the result, so that the size will be the</p></li>
+<li><p>same as when returnAllResults is set to false.</p></li>
+<li></li>
+<li><ul>
+<li><p>we retrieve extra number of results from earlybird, as specified in MaxCountMultiplierParam,</p></li>
+</ul>
+</li>
+<li><p>so that we are left with sufficient number of candidates after hydration and filtering.</p></li>
+<li><p>this transform will be used to get rid of extra results we ended up not using.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>class RecapSearchResultsTruncationTransform(</dt><dd><p>extraSortBeforeTruncationGate: DependencyProvider[Boolean],
+maxCountProvider: DependencyProvider[Int],
+statsReceiver: StatsReceiver)</p>
+<blockquote>
+<div><p>extends FutureArrow[CandidateEnvelope, CandidateEnvelope] {</p>
+</div></blockquote>
+<p>private[this] val postTruncationSizeStat = statsReceiver.stat(“postTruncationSize”)
+private[this] val earlybirdScoreX100Stat = statsReceiver.stat(“earlybirdScoreX100”)</p>
+<dl>
+<dt>override def apply(envelope: CandidateEnvelope): Future[CandidateEnvelope] = {</dt><dd><p>val sortBeforeTruncation = extraSortBeforeTruncationGate(envelope.query)
+val maxCount = maxCountProvider(envelope.query)
+val searchResults = envelope.searchResults</p>
+<p>// set aside results that are marked by isRandomTweet field
+val (randomTweetSeq, searchResultsExcludingRandom) = searchResults.partition { result =&gt;</p>
+<blockquote>
+<div><p>result.tweetFeatures.flatMap(_.isRandomTweet).getOrElse(false)</p>
+</div></blockquote>
+<p>}</p>
+<p>// sort and truncate searchResults other than the random tweet
+val maxCountExcludingRandom = Math.max(0, maxCount - randomTweetSeq.size)</p>
+<dl>
+<dt>val truncatedResultsExcludingRandom =</dt><dd><dl>
+<dt>if (sortBeforeTruncation || searchResultsExcludingRandom.size &gt; maxCountExcludingRandom) {</dt><dd><dl class="simple">
+<dt>val sorted = if (sortBeforeTruncation) {</dt><dd><dl class="simple">
+<dt>searchResultsExcludingRandom.sortWith(</dt><dd><p>SearchResultUtil.getScore(_) &gt; SearchResultUtil.getScore(_))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>} else searchResultsExcludingRandom
+sorted.take(maxCountExcludingRandom)</p>
+</dd>
+</dl>
+<p>} else searchResultsExcludingRandom</p>
+</dd>
+</dl>
+<p>// put back the random tweet set aside previously
+val allTruncatedResults = truncatedResultsExcludingRandom ++ randomTweetSeq</p>
+<p>// stats
+postTruncationSizeStat.add(allTruncatedResults.size)
+allTruncatedResults.foreach { result =&gt;</p>
+<blockquote>
+<div><dl class="simple">
+<dt>val earlybirdScoreX100 =</dt><dd><p>result.metadata.flatMap(_.score).getOrElse(0.0).toFloat * 100</p>
+</dd>
+</dl>
+<p>earlybirdScoreX100Stat.add(earlybirdScoreX100)</p>
+</div></blockquote>
+<p>}</p>
+<p>Future.value(envelope.copy(searchResults = allTruncatedResults))</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/timelineranker/server/src/main/scala/com/twitter/timelineranker/common/RecapSearchResultsTruncationTransform.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

@@ -1,0 +1,701 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.visibility.interfaces.search</p>
+<p>import com.twitter.decider.Decider
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.mediaservices.media_util.GenericMediaKey
+import com.twitter.servo.util.Gate
+import com.twitter.stitch.Stitch
+import com.twitter.strato.client.{Client =&gt; StratoClient}
+import com.twitter.tweetypie.thriftscala.Tweet
+import com.twitter.util.Return
+import com.twitter.util.Stopwatch
+import com.twitter.util.Try
+import com.twitter.visibility.VisibilityLibrary
+import com.twitter.visibility.builder.VerdictLogger
+import com.twitter.visibility.builder.VisibilityResult
+import com.twitter.visibility.builder.media.MediaFeatures
+import com.twitter.visibility.builder.media.StratoMediaLabelMaps
+import com.twitter.visibility.builder.tweets._
+import com.twitter.visibility.builder.users.AuthorFeatures
+import com.twitter.visibility.builder.users.RelationshipFeatures
+import com.twitter.visibility.builder.users.ViewerFeatures
+import com.twitter.visibility.common.MediaSafetyLabelMapSource
+import com.twitter.visibility.common.MisinformationPolicySource
+import com.twitter.visibility.common.SafetyLabelMapSource
+import com.twitter.visibility.common.TrustedFriendsSource
+import com.twitter.visibility.common.UserRelationshipSource
+import com.twitter.visibility.common.UserSource
+import com.twitter.visibility.rules.ComposableActions._
+import com.twitter.visibility.configapi.configs.VisibilityDeciderGates
+import com.twitter.visibility.features.FeatureMap
+import com.twitter.visibility.features.TweetIsInnerQuotedTweet
+import com.twitter.visibility.features.TweetIsRetweet
+import com.twitter.visibility.features.TweetIsSourceTweet
+import com.twitter.visibility.interfaces.common.search.SearchVFRequestContext
+import com.twitter.visibility.interfaces.search.SearchVisibilityLibrary.EvaluateTweet
+import com.twitter.visibility.interfaces.search.SearchVisibilityLibrary.RequestTweetId
+import com.twitter.visibility.interfaces.search.TweetType.EvaluateTweetType
+import com.twitter.visibility.logging.thriftscala.VFLibType
+import com.twitter.visibility.models.ContentId
+import com.twitter.visibility.models.ContentId.BlenderTweetId
+import com.twitter.visibility.models.ContentId.TweetId
+import com.twitter.visibility.models.SafetyLevel
+import com.twitter.visibility.models.SafetyLevel.toThrift
+import com.twitter.visibility.models.ViewerContext
+import com.twitter.visibility.rules.Action
+import com.twitter.visibility.rules.Allow
+import com.twitter.visibility.rules.Drop
+import com.twitter.visibility.rules.Interstitial
+import com.twitter.visibility.rules.TweetInterstitial</p>
+<dl class="simple">
+<dt>object TweetType extends Enumeration {</dt><dd><p>type EvaluateTweetType = Value
+val REQUEST: TweetType.Value = Value(1)
+val QUOTED: TweetType.Value = Value(2)
+val SOURCE: TweetType.Value = Value(3)</p>
+</dd>
+</dl>
+<p>}</p>
+<p>import com.twitter.visibility.interfaces.search.TweetType._</p>
+<dl>
+<dt>object SearchVisibilityLibrary {</dt><dd><p>type RequestTweetId = Long
+type EvaluateTweetId = Long
+type EvaluateTweet = Tweet</p>
+<dl class="simple">
+<dt>def buildWithStratoClient(</dt><dd><p>visibilityLibrary: VisibilityLibrary,
+decider: Decider,
+stratoClient: StratoClient,
+userSource: UserSource,
+userRelationshipSource: UserRelationshipSource</p>
+</dd>
+<dt>): SearchVisibilityLibrary = new SearchVisibilityLibrary(</dt><dd><p>visibilityLibrary,
+decider,
+stratoClient,
+userSource,
+userRelationshipSource,
+None</p>
+</dd>
+</dl>
+<p>)</p>
+<dl class="simple">
+<dt>def buildWithSafetyLabelMapSource(</dt><dd><p>visibilityLibrary: VisibilityLibrary,
+decider: Decider,
+stratoClient: StratoClient,
+userSource: UserSource,
+userRelationshipSource: UserRelationshipSource,
+safetyLabelMapSource: SafetyLabelMapSource</p>
+</dd>
+<dt>): SearchVisibilityLibrary = new SearchVisibilityLibrary(</dt><dd><p>visibilityLibrary,
+decider,
+stratoClient,
+userSource,
+userRelationshipSource,
+Some(safetyLabelMapSource)</p>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>def createVerdictLogger(</dt><dd><p>enableVerdictLogger: Gate[Unit],
+decider: Decider,
+statsReceiver: StatsReceiver</p>
+</dd>
+<dt>): VerdictLogger = {</dt><dd><dl class="simple">
+<dt>if (enableVerdictLogger()) {</dt><dd><p>VerdictLogger(statsReceiver, decider)</p>
+</dd>
+<dt>} else {</dt><dd><p>VerdictLogger.Empty</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>def scribeVisibilityVerdict(</dt><dd><p>result: CombinedVisibilityResult,
+enableVerdictScribing: Gate[Unit],
+verdictLogger: VerdictLogger,
+viewerId: Option[Long],
+safetyLevel: SafetyLevel</p>
+</dd>
+<dt>): Unit = if (enableVerdictScribing()) {</dt><dd><dl class="simple">
+<dt>verdictLogger.scribeVerdict(</dt><dd><p>visibilityResult = result.tweetVisibilityResult,
+viewerId = viewerId,
+safetyLevel = toThrift(safetyLevel),
+vfLibType = VFLibType.SearchVisibilityLibrary)</p>
+</dd>
+<dt>result.quotedTweetVisibilityResult.map(quotedTweetVisibilityResult =&gt;</dt><dd><dl class="simple">
+<dt>verdictLogger.scribeVerdict(</dt><dd><p>visibilityResult = quotedTweetVisibilityResult,
+viewerId = viewerId,
+safetyLevel = toThrift(safetyLevel),
+vfLibType = VFLibType.SearchVisibilityLibrary))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>class SearchVisibilityLibrary(</dt><dd><p>visibilityLibrary: VisibilityLibrary,
+decider: Decider,
+stratoClient: StratoClient,
+userSource: UserSource,
+userRelationshipSource: UserRelationshipSource,
+safetyLabelMapSourceOption: Option[SafetyLabelMapSource]) {</p>
+<p>val libraryStatsReceiver = visibilityLibrary.statsReceiver
+val stratoClientStatsReceiver = visibilityLibrary.statsReceiver.scope(“strato”)
+val vfEngineCounter = libraryStatsReceiver.counter(“vf_engine_requests”)
+val svlRequestCounter = libraryStatsReceiver.counter(“svl_requests”)
+val vfLatencyOverallStat = libraryStatsReceiver.stat(“vf_latency_overall”)
+val vfLatencyStitchBuildStat = libraryStatsReceiver.stat(“vf_latency_stitch_build”)
+val vfLatencyStitchRunStat = libraryStatsReceiver.stat(“vf_latency_stitch_run”)
+val visibilityDeciderGates = VisibilityDeciderGates(decider)
+val verdictLogger = SearchVisibilityLibrary.createVerdictLogger(</p>
+<blockquote>
+<div><p>visibilityDeciderGates.enableVerdictLoggerSVL,
+decider,
+libraryStatsReceiver)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>val tweetLabels = safetyLabelMapSourceOption match {</dt><dd><dl class="simple">
+<dt>case Some(safetyLabelMapSource) =&gt;</dt><dd><p>new StratoTweetLabelMaps(safetyLabelMapSource)</p>
+</dd>
+<dt>case None =&gt;</dt><dd><dl class="simple">
+<dt>new StratoTweetLabelMaps(</dt><dd><p>SafetyLabelMapSource.fromStrato(stratoClient, stratoClientStatsReceiver))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>val mediaLabelMaps = new StratoMediaLabelMaps(</dt><dd><p>MediaSafetyLabelMapSource.fromStrato(stratoClient, stratoClientStatsReceiver))</p>
+</dd>
+</dl>
+<p>val tweetFeatures = new TweetFeatures(tweetLabels, libraryStatsReceiver)
+val searchContextFeatures = new SearchContextFeatures(libraryStatsReceiver)
+val authorFeatures = new AuthorFeatures(userSource, libraryStatsReceiver)
+val viewerFeatures = new ViewerFeatures(userSource, libraryStatsReceiver)
+val relationshipFeatures =</p>
+<blockquote>
+<div><p>new RelationshipFeatures(userRelationshipSource, libraryStatsReceiver)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>val misinfoPolicySource =</dt><dd><p>MisinformationPolicySource.fromStrato(stratoClient, stratoClientStatsReceiver)</p>
+</dd>
+<dt>val misinfoPolicyFeatures =</dt><dd><p>new MisinformationPolicyFeatures(misinfoPolicySource, stratoClientStatsReceiver)</p>
+</dd>
+<dt>val exclusiveTweetFeatures =</dt><dd><p>new ExclusiveTweetFeatures(userRelationshipSource, libraryStatsReceiver)</p>
+</dd>
+</dl>
+<p>val mediaFeatures = new MediaFeatures(mediaLabelMaps, libraryStatsReceiver)
+val trustedFriendsTweetFeatures = new TrustedFriendsFeatures(</p>
+<blockquote>
+<div><p>trustedFriendsSource = TrustedFriendsSource.fromStrato(stratoClient, stratoClientStatsReceiver))</p>
+</div></blockquote>
+<p>val editTweetFeatures = new EditTweetFeatures(libraryStatsReceiver)</p>
+<dl>
+<dt>def batchProcessSearchVisibilityRequest(</dt><dd><p>batchSvRequest: BatchSearchVisibilityRequest</p>
+</dd>
+<dt>): Stitch[BatchSearchVisibilityResponse] = {</dt><dd><p>val elapsed = Stopwatch.start()
+svlRequestCounter.incr()</p>
+<dl>
+<dt>val response: Stitch[BatchSearchVisibilityResponse] =</dt><dd><dl>
+<dt>batchSvRequest.tweetContexts.groupBy(tweetContext =&gt; tweetContext.safetyLevel) map {</dt><dd><dl>
+<dt>case (safetyLevel: SafetyLevel, tweetContexts: Seq[TweetContext]) =&gt;</dt><dd><dl>
+<dt>val (contentsToBeEvaluated, contentVisResultTypes) =</dt><dd><p>extractContentsToBeEvaluated(tweetContexts, batchSvRequest.viewerContext)</p>
+</dd>
+<dt>getVisibilityResult(</dt><dd><p>contentsToBeEvaluated,
+safetyLevel,
+batchSvRequest.viewerContext,
+batchSvRequest.searchVFRequestContext)
+.map { contentVisResults: Seq[Try[VisibilityResult]] =&gt;</p>
+<blockquote>
+<div><dl>
+<dt>(contentVisResultTypes zip contentVisResults)</dt><dd><p>.map(handleVisibilityResultByTweetType)
+.groupBy {</p>
+<blockquote>
+<div><p>case (requestTweetId: RequestTweetId, (_, _)) =&gt; requestTweetId</p>
+</div></blockquote>
+<p>}.mapValues(combineVisibilityResult)</p>
+</dd>
+</dl>
+</div></blockquote>
+<dl class="simple">
+<dt>}.onSuccess(res =&gt;</dt><dd><dl class="simple">
+<dt>res.values.flatten.foreach(_ =&gt;</dt><dd><dl class="simple">
+<dt>SearchVisibilityLibrary.scribeVisibilityVerdict(</dt><dd><p>_,
+visibilityDeciderGates.enableVerdictScribingSVL,
+verdictLogger,
+batchSvRequest.viewerContext.userId,
+safetyLevel)))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+<dt>} reduceLeft { (left, right) =&gt;</dt><dd><p>Stitch.joinMap(left, right)((visResultsA, visResultsB) =&gt; visResultsA ++ visResultsB)</p>
+</dd>
+<dt>} map { visResults =&gt;</dt><dd><p>val (succeed, failed) = visResults.partition { case (_, visResult) =&gt; visResult.nonEmpty }
+val failedTweetIds: Seq[Long] = failed.keys.toSeq
+BatchSearchVisibilityResponse(</p>
+<blockquote>
+<div><p>visibilityResults = succeed.mapValues(visResult =&gt; visResult.get),
+failedTweetIds = failedTweetIds</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>val runStitchStartMs = elapsed().inMilliseconds
+val buildStitchStatMs = elapsed().inMilliseconds
+vfLatencyStitchBuildStat.add(buildStitchStatMs)</p>
+<dl>
+<dt>response</dt><dd><dl class="simple">
+<dt>.onSuccess(_ =&gt; {</dt><dd><p>val overallMs = elapsed().inMilliseconds
+vfLatencyOverallStat.add(overallMs)
+val stitchRunMs = elapsed().inMilliseconds - runStitchStartMs
+vfLatencyStitchRunStat.add(stitchRunMs)</p>
+</dd>
+</dl>
+<p>})</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def extractContentsToBeEvaluated(</dt><dd><p>tweetContexts: Seq[TweetContext],
+viewerContext: ViewerContext</p>
+</dd>
+<dt>): (</dt><dd><p>Seq[(TweetContext, EvaluateTweetType, EvaluateTweet, ContentId)],
+Seq[</p>
+<blockquote>
+<div><p>(RequestTweetId, EvaluateTweetType)</p>
+</div></blockquote>
+<p>]</p>
+</dd>
+<dt>) = {</dt><dd><dl>
+<dt>val contentsToBeEvaluated: Seq[</dt><dd><p>(TweetContext, EvaluateTweetType, EvaluateTweet, ContentId)</p>
+</dd>
+<dt>] = tweetContexts.map(tc =&gt;</dt><dd><dl>
+<dt>(</dt><dd><p>tc,
+REQUEST,
+tc.tweet,
+getContentId(</p>
+<blockquote>
+<div><p>viewerId = viewerContext.userId,
+authorId = tc.tweet.coreData.get.userId,
+tweet = tc.tweet))) ++</p>
+</div></blockquote>
+</dd>
+<dt>tweetContexts</dt><dd><dl>
+<dt>.filter(tc =&gt; tc.quotedTweet.nonEmpty).map(tc =&gt;</dt><dd><dl>
+<dt>(</dt><dd><p>tc,
+QUOTED,
+tc.quotedTweet.get,
+getContentId(</p>
+<blockquote>
+<div><p>viewerId = viewerContext.userId,
+authorId = tc.quotedTweet.get.coreData.get.userId,
+tweet = tc.quotedTweet.get))) ++</p>
+</div></blockquote>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+<dt>tweetContexts</dt><dd><dl>
+<dt>.filter(tc =&gt; tc.retweetSourceTweet.nonEmpty).map(tc =&gt;</dt><dd><dl>
+<dt>(</dt><dd><p>tc,
+SOURCE,
+tc.retweetSourceTweet.get,
+getContentId(</p>
+<blockquote>
+<div><p>viewerId = viewerContext.userId,
+authorId = tc.retweetSourceTweet.get.coreData.get.userId,
+tweet = tc.retweetSourceTweet.get)))</p>
+</div></blockquote>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+<dt>val contentVisResultTypes: Seq[(RequestTweetId, EvaluateTweetType)] = {</dt><dd><dl class="simple">
+<dt>contentsToBeEvaluated.map {</dt><dd><dl class="simple">
+<dt>case (tc: TweetContext, tweetType: EvaluateTweetType, _, _) =&gt;</dt><dd><p>(tc.tweet.id, tweetType)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>(contentsToBeEvaluated, contentVisResultTypes)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def combineVisibilityResult(</dt><dd><p>visResults: Seq[(RequestTweetId, (EvaluateTweetType, Try[VisibilityResult]))]</p>
+</dd>
+<dt>): Option[CombinedVisibilityResult] = {</dt><dd><dl>
+<dt>visResults.sortBy(_._2._1)(ValueOrdering) match {</dt><dd><dl>
+<dt>case Seq(</dt><dd><blockquote>
+<div><p>(_, (REQUEST, Return(requestTweetVisResult))),
+(_, (QUOTED, Return(quotedTweetVisResult))),
+(_, (SOURCE, Return(sourceTweetVisResult)))) =&gt;</p>
+</div></blockquote>
+<dl class="simple">
+<dt>requestTweetVisResult.verdict match {</dt><dd><dl class="simple">
+<dt>case Allow =&gt;</dt><dd><p>Some(CombinedVisibilityResult(sourceTweetVisResult, Some(quotedTweetVisResult)))</p>
+</dd>
+<dt>case _ =&gt;</dt><dd><p>Some(CombinedVisibilityResult(requestTweetVisResult, Some(quotedTweetVisResult)))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>case Seq(</dt><dd><blockquote>
+<div><p>(_, (REQUEST, Return(requestTweetVisResult))),
+(_, (QUOTED, Return(quotedTweetVisResult)))) =&gt;</p>
+</div></blockquote>
+<p>Some(CombinedVisibilityResult(requestTweetVisResult, Some(quotedTweetVisResult)))</p>
+</dd>
+<dt>case Seq(</dt><dd><blockquote>
+<div><p>(_, (REQUEST, Return(requestTweetVisResult))),
+(_, (SOURCE, Return(sourceTweetVisResult)))) =&gt;</p>
+</div></blockquote>
+<dl class="simple">
+<dt>requestTweetVisResult.verdict match {</dt><dd><dl class="simple">
+<dt>case Allow =&gt;</dt><dd><p>Some(CombinedVisibilityResult(sourceTweetVisResult, None))</p>
+</dd>
+<dt>case _ =&gt;</dt><dd><p>Some(CombinedVisibilityResult(requestTweetVisResult, None))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>case Seq((_, (REQUEST, Return(requestTweetVisResult)))) =&gt;</dt><dd><p>Some(CombinedVisibilityResult(requestTweetVisResult, None))</p>
+</dd>
+</dl>
+<p>case _ =&gt; None</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>private def getVisibilityResult(</dt><dd><p>contents: Seq[(TweetContext, EvaluateTweetType, EvaluateTweet, ContentId)],
+safetyLevel: SafetyLevel,
+viewerContext: ViewerContext,
+svRequestContext: SearchVFRequestContext</p>
+</dd>
+</dl>
+<p>): Stitch[Seq[Try[VisibilityResult]]] = {</p>
+<blockquote>
+<div><dl>
+<dt>val contentContext: Map[ContentId, (TweetContext, EvaluateTweetType, EvaluateTweet)] =</dt><dd><dl>
+<dt>contents.map {</dt><dd><dl>
+<dt>case (</dt><dd><blockquote>
+<div><p>tweetContext: TweetContext,
+tweetType: EvaluateTweetType,
+tweet: EvaluateTweet,
+contentId: ContentId) =&gt;</p>
+</div></blockquote>
+<p>contentId -&gt; ((tweetContext, tweetType, tweet))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}.toMap</p>
+</dd>
+<dt>val featureMapProvider: (ContentId, SafetyLevel) =&gt; FeatureMap = {</dt><dd><dl>
+<dt>case (contentId: ContentId, _) =&gt;</dt><dd><p>val (tweetContext, tweetType, tweet) = contentContext(contentId)
+buildFeatureMap(</p>
+<blockquote>
+<div><p>evaluatedTweet = tweet,
+tweetType = tweetType,
+tweetContext = tweetContext,
+viewerContext = viewerContext,
+svRequestContext = svRequestContext</p>
+</div></blockquote>
+<p>)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>visibilityLibrary.runRuleEngineBatch(</dt><dd><p>contentIds = contents.map { case (_, _, _, id: ContentId) =&gt; id },
+featureMapProvider = featureMapProvider,
+viewerContext = viewerContext,
+safetyLevel = safetyLevel</p>
+</dd>
+</dl>
+<p>)</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>private def getContentId(viewerId: Option[Long], authorId: Long, tweet: Tweet): ContentId = {</dt><dd><dl class="simple">
+<dt>if (viewerId.contains(authorId))</dt><dd><p>TweetId(tweet.id)</p>
+</dd>
+</dl>
+<p>else BlenderTweetId(tweet.id)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def buildFeatureMap(</dt><dd><p>evaluatedTweet: Tweet,
+tweetType: EvaluateTweetType,
+tweetContext: TweetContext,
+viewerContext: ViewerContext,
+svRequestContext: SearchVFRequestContext</p>
+</dd>
+<dt>): FeatureMap = {</dt><dd><p>val authorId = evaluatedTweet.coreData.get.userId
+val viewerId = viewerContext.userId
+val isRetweet =</p>
+<blockquote>
+<div><p>if (tweetType.equals(REQUEST)) tweetContext.retweetSourceTweet.nonEmpty else false</p>
+</div></blockquote>
+<p>val isSourceTweet = tweetType.equals(SOURCE)
+val isQuotedTweet = tweetType.equals(QUOTED)
+val tweetMediaKeys: Seq[GenericMediaKey] = evaluatedTweet.media</p>
+<blockquote>
+<div><p>.getOrElse(Seq.empty)
+.flatMap(_.mediaKey.map(GenericMediaKey.apply))</p>
+</div></blockquote>
+<dl>
+<dt>visibilityLibrary.featureMapBuilder(</dt><dd><dl>
+<dt>Seq(</dt><dd><dl class="simple">
+<dt>viewerFeatures</dt><dd><p>.forViewerSearchContext(svRequestContext, viewerContext),</p>
+</dd>
+</dl>
+<p>relationshipFeatures.forAuthorId(authorId, viewerId),
+tweetFeatures.forTweet(evaluatedTweet),
+mediaFeatures.forMediaKeys(tweetMediaKeys),
+authorFeatures.forAuthorId(authorId),
+searchContextFeatures.forSearchContext(svRequestContext),
+_.withConstantFeature(TweetIsRetweet, isRetweet),
+misinfoPolicyFeatures.forTweet(evaluatedTweet, viewerContext),
+exclusiveTweetFeatures.forTweet(evaluatedTweet, viewerContext),
+trustedFriendsTweetFeatures.forTweet(evaluatedTweet, viewerId),
+editTweetFeatures.forTweet(evaluatedTweet),
+_.withConstantFeature(TweetIsInnerQuotedTweet, isQuotedTweet),
+_.withConstantFeature(TweetIsSourceTweet, isSourceTweet),</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def handleVisibilityResultByTweetType(</dt><dd><p>zipVisResult: ((RequestTweetId, EvaluateTweetType), Try[VisibilityResult])</p>
+</dd>
+<dt>): (RequestTweetId, (EvaluateTweetType, Try[VisibilityResult])) = {</dt><dd><dl>
+<dt>zipVisResult match {</dt><dd><dl>
+<dt>case ((id: RequestTweetId, REQUEST), Return(visResult)) =&gt;</dt><dd><p>(id, (REQUEST, Return(handleComposableVisibilityResult(visResult))))</p>
+</dd>
+<dt>case ((id: RequestTweetId, QUOTED), Return(visResult)) =&gt;</dt><dd><dl>
+<dt>(</dt><dd><p>id,
+(</p>
+<blockquote>
+<div><p>QUOTED,
+Return(</p>
+<blockquote>
+<div><p>handleInnerQuotedTweetVisibilityResult(handleComposableVisibilityResult(visResult)))))</p>
+</div></blockquote>
+</div></blockquote>
+</dd>
+</dl>
+</dd>
+<dt>case ((id: RequestTweetId, SOURCE), Return(visResult)) =&gt;</dt><dd><p>(id, (SOURCE, Return(handleComposableVisibilityResult(visResult))))</p>
+</dd>
+<dt>case ((id: RequestTweetId, tweetType: EvaluateTweetType), result: Try[VisibilityResult]) =&gt;</dt><dd><p>(id, (tweetType, result))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def handleComposableVisibilityResult(result: VisibilityResult): VisibilityResult = {</dt><dd><dl class="simple">
+<dt>if (result.secondaryVerdicts.nonEmpty) {</dt><dd><p>result.copy(verdict = composeActions(result.verdict, result.secondaryVerdicts))</p>
+</dd>
+<dt>} else {</dt><dd><p>result</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def composeActions(primary: Action, secondary: Seq[Action]): Action = {</dt><dd><dl>
+<dt>if (primary.isComposable &amp;&amp; secondary.nonEmpty) {</dt><dd><p>val actions = Seq[Action] { primary } ++ secondary
+val interstitialOpt = Action.getFirstInterstitial(actions: _*)
+val softInterventionOpt = Action.getFirstSoftIntervention(actions: _*)
+val limitedEngagementsOpt = Action.getFirstLimitedEngagements(actions: _*)
+val avoidOpt = Action.getFirstAvoid(actions: _*)</p>
+<dl>
+<dt>val numActions =</dt><dd><dl class="simple">
+<dt>Seq[Option[_]](interstitialOpt, softInterventionOpt, limitedEngagementsOpt, avoidOpt)</dt><dd><p>.count(_.isDefined)</p>
+</dd>
+</dl>
+</dd>
+<dt>if (numActions &gt; 1) {</dt><dd><dl class="simple">
+<dt>TweetInterstitial(</dt><dd><p>interstitialOpt,
+softInterventionOpt,
+limitedEngagementsOpt,
+None,
+avoidOpt</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>} else {</dt><dd><p>primary</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+<dt>} else {</dt><dd><p>primary</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private def handleInnerQuotedTweetVisibilityResult(</dt><dd><p>result: VisibilityResult</p>
+</dd>
+<dt>): VisibilityResult = {</dt><dd><dl>
+<dt>val newVerdict: Action =</dt><dd><dl class="simple">
+<dt>result.verdict match {</dt><dd><p>case interstitial: Interstitial =&gt; Drop(interstitial.reason)
+case ComposableActionsWithInterstitial(tweetInterstitial) =&gt; Drop(tweetInterstitial.reason)
+case verdict =&gt; verdict</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>result.copy(verdict = newVerdict)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/visibilitylib/src/main/scala/com/twitter/visibility/interfaces/search/SearchVisibilityLibrary.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

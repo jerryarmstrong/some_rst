@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../" id="documentation_options" src="../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.tweetypie
+package handler</p>
+<p>import com.twitter.tweetypie.thriftscala.Reply
+import com.twitter.tweetypie.thriftscala.SelfThreadMetadata
+import org.apache.thrift.protocol.TField</p>
+<dl>
+<dt>trait SelfThreadBuilder {</dt><dd><dl>
+<dt>def requiredReplySourceFields: Set[TField] =</dt><dd><dl class="simple">
+<dt>Set(</dt><dd><p>Tweet.CoreDataField, // for Reply and ConversationId
+Tweet.SelfThreadMetadataField // for continuing existing self-threads</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>def build(authorUserId: UserId, replySourceTweet: Tweet): Option[SelfThreadMetadata]</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>SelfThreadBuilder is used to build metadata for self-threads (tweetstorms).</p></li>
+<li></li>
+<li><p>This builder is invoked from ReplyBuilder on tweets that pass in a inReplyToStatusId and create</p></li>
+<li><p>a Reply.  The invocation is done inside ReplyBuilder as ReplyBuilder has already loaded the</p></li>
+<li><p>“reply source tweet” which has all the information needed to determine the self-thread metadata.</p></li>
+<li></li>
+<li><p>Note that Tweet.SelfThreadMetadata schema supports representing two types of self-threads:</p></li>
+<li><ol class="arabic simple">
+<li><p>root self-thread : self-thread that begins alone and does not start with replying to another</p></li>
+</ol>
+</li>
+<li><p>tweet.  This self-thread has a self-thread ID equal to the conversation ID.</p></li>
+<li><ol class="arabic simple" start="2">
+<li><p>reply self-thread : self-thread that begins as a reply to another user’s tweet.</p></li>
+</ol>
+</li>
+<li><p>This self-thread has a self-thread ID equal to the first tweet in the</p></li>
+<li><p>current self-reply chain which will not equal the conversation ID.</p></li>
+<li></li>
+<li><p>Currently only type #1 “root self-thread” is handled.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+</dl>
+<p>object SelfThreadBuilder {</p>
+<blockquote>
+<div><dl>
+<dt>def apply(stats: StatsReceiver): SelfThreadBuilder = {</dt><dd><p>// We want to keep open the possibility for differentiation between root
+// self-threads (current functionality) and reply self-threads (possible
+// future functionality).
+val rootThreadStats = stats.scope(“root_thread”)</p>
+<p>// A tweet becomes a root of a self-thread only after the first self-reply
+// is created. root_thread/start is incr()d during the write-path of the
+// self-reply tweet, when it is known that the first/root tweet has not
+// yet been assigned a SelfThreadMetadata. The write-path of the second
+// tweet does not add the SelfThreadMetadata to the first tweet - that
+// happens asynchronously by the SelfThreadDaemon.
+val rootThreadStartCounter = rootThreadStats.counter(“start”)</p>
+<p>// root_thread/continue provides visibility into the frequency of
+// continuation tweets off leaf tweets in a tweet storm. Also incr()d in
+// the special case of a reply to the root tweet, which does not yet have a
+// SelfThreadMetadata(isLeaf=true).
+val rootThreadContinueCounter = rootThreadStats.counter(“continue”)</p>
+<p>// root_thread/branch provides visibility into how frequently self-threads
+// get branched - that is, when the author self-replies to a non-leaf tweet
+// in an existing thread. Knowing the frequency of branching will help us
+// determine the priority of accounting for branching in various
+// tweet-delete use cases. Currently we do not fix up the root tweet’s
+// SelfThreadMetadata when its reply tweets are deleted.
+val rootThreadBranchCounter = rootThreadStats.counter(“branch”)</p>
+<dl>
+<dt>def observeSelfThreadMetrics(replySourceSTM: Option[SelfThreadMetadata]): Unit = {</dt><dd><dl class="simple">
+<dt>replySourceSTM match {</dt><dd><dl class="simple">
+<dt>case Some(SelfThreadMetadata(_, isLeaf)) =&gt;</dt><dd><p>if (isLeaf) rootThreadContinueCounter.incr()
+else rootThreadBranchCounter.incr()</p>
+</dd>
+<dt>case None =&gt;</dt><dd><p>rootThreadStartCounter.incr()</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>new SelfThreadBuilder {</p>
+<blockquote>
+<div><dl>
+<dt>override def build(</dt><dd><p>authorUserId: UserId,
+replySourceTweet: Tweet</p>
+</dd>
+<dt>): Option[SelfThreadMetadata] = {</dt><dd><p>// the “reply source tweet“‘s author must match the current author
+if (getUserId(replySourceTweet) == authorUserId) {</p>
+<blockquote>
+<div><p>val replySourceSTM = getSelfThreadMetadata(replySourceTweet)</p>
+<p>observeSelfThreadMetrics(replySourceSTM)</p>
+<p>// determine if replySourceTweet stands alone (non-reply)
+getReply(replySourceTweet) match {</p>
+<blockquote>
+<div><dl>
+<dt>case None | Some(Reply(None, _, _)) =&gt;</dt><dd><p>// ‘replySourceTweet’ started a new self-thread that stands alone
+// which happens when there’s no Reply or the Reply does not have
+// inReplyToStatusId (directed-at user)</p>
+<p>// requiredReplySourceFields requires coreData and conversationId
+// is required so this would have previously thrown an exception
+// in ReplyBuilder if the read was partial
+val convoId = replySourceTweet.coreData.get.conversationId.get
+Some(SelfThreadMetadata(id = convoId, isLeaf = true))</p>
+</dd>
+<dt>case _ =&gt;</dt><dd><p>// ‘replySourceTweet’ was also a reply-to-tweet, so continue any
+// self-thread by inheriting any SelfThreadMetadata it has
+// (though always setting isLeaf to true)
+replySourceSTM.map(_.copy(isLeaf = true))</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} else {</dt><dd><p>// Replying to a different user currently never creates a self-thread
+// as all self-threads must start at the root (and match conversation
+// ID).
+//
+// In the future replying to a different user <em>might</em> be part of a
+// self-thread but we wouldn’t mark it as such until the <em>next</em> tweet
+// is created (at which time the self_thread daemon goes back and
+// marks the first tweet as in the self-thread.
+None</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../_sources/tweetypie/server/src/main/scala/com/twitter/tweetypie/handler/SelfThreadBuilder.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

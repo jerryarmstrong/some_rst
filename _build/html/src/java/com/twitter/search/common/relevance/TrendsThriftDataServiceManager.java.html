@@ -1,0 +1,534 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../" id="documentation_options" src="../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.search.common.relevance;</p>
+<p>import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.stream.Collectors;</p>
+<p>import scala.runtime.BoxedUnit;</p>
+<p>import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Preconditions;
+import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.Sets;
+import com.google.common.util.concurrent.ThreadFactoryBuilder;</p>
+<p>import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;</p>
+<p>import com.twitter.finagle.Service;
+import com.twitter.finagle.ThriftMux;
+import com.twitter.finagle.builder.ClientBuilder;
+import com.twitter.finagle.builder.ClientConfig;
+import com.twitter.finagle.mtls.authentication.ServiceIdentifier;
+import com.twitter.finagle.mtls.client.MtlsClientBuilder;
+import com.twitter.finagle.stats.DefaultStatsReceiver;
+import com.twitter.finagle.thrift.ThriftClientRequest;
+import com.twitter.search.common.metrics.RelevanceStats;
+import com.twitter.search.common.metrics.SearchCounter;
+import com.twitter.trends.plus.Module;
+import com.twitter.trends.plus.TrendsPlusRequest;
+import com.twitter.trends.plus.TrendsPlusResponse;
+import com.twitter.trends.service.gen.Location;
+import com.twitter.trends.trending_content.thriftjava.TrendingContentService;
+import com.twitter.trends.trends_metadata.thriftjava.TrendsMetadataService;
+import com.twitter.util.Duration;
+import com.twitter.util.Future;
+import com.twitter.util.Try;</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Manages trends data retrieved from trends thrift API and perform automatic refresh.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+<dt>public final class TrendsThriftDataServiceManager {</dt><dd><dl class="simple">
+<dt>private static final Logger LOG =</dt><dd><p>LoggerFactory.getLogger(TrendsThriftDataServiceManager.class.getName());</p>
+</dd>
+</dl>
+<p>private static final int DEFAULT_TIME_TO_KILL_SEC = 60;</p>
+<p>&#64;VisibleForTesting
+protected static final Map&lt;String, String&gt; DEFAULT_TRENDS_PARAMS_MAP = ImmutableMap.of(</p>
+<blockquote>
+<div><p>“MAX_ITEMS_TO_RETURN”, “10”);   // we only take top 10 for each woeid.</p>
+</div></blockquote>
+<p>&#64;VisibleForTesting
+protected static final int MAX_TRENDS_PER_WOEID = 10;</p>
+<p>private final Duration requestTimeout;
+private final Duration refreshDelayDuration;
+private final Duration reloadIntervalDuration;
+private final int numRetries;</p>
+<p>// a list of trends cache we want to update
+private final List&lt;NGramCache&gt; trendsCacheList;</p>
+<dl class="simple">
+<dt>private final SearchCounter getAvailableSuccessCounter =</dt><dd><p>RelevanceStats.exportLong(“trends_extractor_get_available_success”);</p>
+</dd>
+<dt>private final SearchCounter getAvailableFailureCounter =</dt><dd><p>RelevanceStats.exportLong(“trends_extractor_get_available_failure”);</p>
+</dd>
+<dt>private final SearchCounter getTrendsSuccessCounter =</dt><dd><p>RelevanceStats.exportLong(“trends_extractor_success_fetch”);</p>
+</dd>
+<dt>private final SearchCounter getTrendsFailureCounter =</dt><dd><p>RelevanceStats.exportLong(“trends_extractor_failed_fetch”);</p>
+</dd>
+<dt>private final SearchCounter updateFailureCounter =</dt><dd><p>RelevanceStats.exportLong(“trends_extractor_failed_update”);</p>
+</dd>
+</dl>
+<p>private final ServiceIdentifier serviceIdentifier;
+private ScheduledExecutorService scheduler;</p>
+<p>&#64;VisibleForTesting
+protected Service&lt;ThriftClientRequest, byte[]&gt; contentService;
+protected TrendingContentService.ServiceToClient contentClient;
+protected Service&lt;ThriftClientRequest, byte[]&gt; metadataService;
+protected TrendsMetadataService.ServiceToClient metadataClient;</p>
+<p>&#64;VisibleForTesting
+protected TrendsUpdater trendsUpdater;</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Returns an instance of TrendsThriftDataServiceManager.</p></li>
+<li><p>&#64;param serviceIdentifier The service that wants to call</p></li>
+<li><p>into Trend’s services.</p></li>
+<li><p>&#64;param numRetries The number of retries in the event of</p></li>
+<li><p>request failures.</p></li>
+<li><p>&#64;param requestTimeout The amount of time we wait before we consider a</p></li>
+<li><p>a request as failed.</p></li>
+<li><p>&#64;param initTrendsCacheDelay How long to wait before the initial</p></li>
+<li><p>filling of the Trends cache in milliseconds.</p></li>
+<li><p>&#64;param reloadInterval How often to refresh the cache with updated trends.</p></li>
+<li><p>&#64;param trendsCacheList The cache of trends.</p></li>
+<li><p>&#64;return An instance of TrendsThriftDataServiceManager configured</p></li>
+<li><p>with respect to the params provided.</p></li>
+</ul>
+<p><a href="#id3"><span class="problematic" id="id4">*</span></a>/</p>
+</dd>
+<dt>public static TrendsThriftDataServiceManager newInstance(</dt><dd><blockquote>
+<div><p>ServiceIdentifier serviceIdentifier,
+int numRetries,
+Duration requestTimeout,
+Duration initTrendsCacheDelay,
+Duration reloadInterval,
+List&lt;NGramCache&gt; trendsCacheList) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>return new TrendsThriftDataServiceManager(</dt><dd><p>serviceIdentifier,
+numRetries,
+requestTimeout,
+initTrendsCacheDelay,
+reloadInterval,
+trendsCacheList);</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Resume auto refresh. Always called in constructor. Can be invoked after a</p></li>
+<li><p>stopAuthRefresh call to resume auto refreshing. Invoking it after shutDown is undefined.</p></li>
+</ul>
+<p><a href="#id5"><span class="problematic" id="id6">*</span></a>/</p>
+</dd>
+<dt>public synchronized void startAutoRefresh() {</dt><dd><dl class="simple">
+<dt>if (scheduler == null) {</dt><dd><dl class="simple">
+<dt>scheduler = Executors.newSingleThreadScheduledExecutor(</dt><dd><dl class="simple">
+<dt>new ThreadFactoryBuilder().setDaemon(true).setNameFormat(</dt><dd><p>“trends-data-refresher[%d]”).build());</p>
+</dd>
+</dl>
+</dd>
+<dt>scheduler.scheduleAtFixedRate(</dt><dd><p>trendsUpdater,
+refreshDelayDuration.inSeconds(),
+reloadIntervalDuration.inSeconds(),
+TimeUnit.SECONDS);</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Stop auto refresh. Wait for the current execution thread to finish.</p></li>
+<li><p>This is a blocking call.</p></li>
+</ul>
+<p><a href="#id7"><span class="problematic" id="id8">*</span></a>/</p>
+</dd>
+<dt>public synchronized void stopAutoRefresh() {</dt><dd><dl>
+<dt>if (scheduler != null) {</dt><dd><p>scheduler.shutdown(); // Disable new tasks from being submitted
+try {</p>
+<blockquote>
+<div><p>// Wait a while for existing tasks to terminate
+if (!scheduler.awaitTermination(DEFAULT_TIME_TO_KILL_SEC, TimeUnit.SECONDS)) {</p>
+<blockquote>
+<div><p>scheduler.shutdownNow(); // Cancel currently executing tasks
+// Wait a while for tasks to respond to being cancelled
+if (!scheduler.awaitTermination(DEFAULT_TIME_TO_KILL_SEC, TimeUnit.SECONDS)) {</p>
+<blockquote>
+<div><p>LOG.info(“Executor thread pool did not terminate.”);</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<dl class="simple">
+<dt>} catch (InterruptedException ie) {</dt><dd><p>// (Re-)Cancel if current thread also interrupted
+scheduler.shutdownNow();
+// Preserve interrupt status
+Thread.currentThread().interrupt();</p>
+</dd>
+</dl>
+<p>}
+scheduler = null;</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<p>/** Shuts down the manager. <a href="#id9"><span class="problematic" id="id10">*</span></a>/
+public void shutDown() {</p>
+<blockquote>
+<div><p>stopAutoRefresh();
+// clear the cache
+for (NGramCache cache : trendsCacheList) {</p>
+<blockquote>
+<div><p>cache.clear();</p>
+</div></blockquote>
+<p>}</p>
+<dl class="simple">
+<dt>if (contentService != null) {</dt><dd><p>contentService.close();</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>if (metadataService != null) {</dt><dd><p>metadataService.close();</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>private TrendsThriftDataServiceManager(</dt><dd><blockquote>
+<div><p>ServiceIdentifier serviceIdentifier,
+int numRetries,
+Duration requestTimeoutMS,
+Duration refreshDelayDuration,
+Duration reloadIntervalDuration,
+List&lt;NGramCache&gt; trendsCacheList) {</p>
+</div></blockquote>
+<p>this.numRetries = numRetries;
+this.requestTimeout = requestTimeoutMS;
+this.refreshDelayDuration = refreshDelayDuration;
+this.reloadIntervalDuration = reloadIntervalDuration;
+this.serviceIdentifier = serviceIdentifier;
+this.trendsCacheList = Preconditions.checkNotNull(trendsCacheList);
+trendsUpdater = new TrendsUpdater();
+metadataService = buildMetadataService();
+metadataClient = buildMetadataClient(metadataService);
+contentService = buildContentService();
+contentClient = buildContentClient(contentService);</p>
+</dd>
+</dl>
+<p>}</p>
+<p>&#64;VisibleForTesting
+protected Service&lt;ThriftClientRequest, byte[]&gt; buildContentService() {</p>
+<blockquote>
+<div><dl>
+<dt>ClientBuilder&lt;</dt><dd><p>ThriftClientRequest,
+byte[], ClientConfig.Yes,
+ClientConfig.Yes,
+ClientConfig.Yes
+&gt;
+builder = ClientBuilder.get()</p>
+<blockquote>
+<div><p>.stack(ThriftMux.client())
+.name(“trends_thrift_data_service_manager_content”)
+.dest(“”)
+.retries(numRetries)
+.reportTo(DefaultStatsReceiver.get())
+.tcpConnectTimeout(requestTimeout)
+.requestTimeout(requestTimeout);</p>
+</div></blockquote>
+</dd>
+<dt>ClientBuilder mtlsBuilder =</dt><dd><p>new MtlsClientBuilder.MtlsClientBuilderSyntax&lt;&gt;(builder).mutualTls(serviceIdentifier);</p>
+</dd>
+</dl>
+<p>return ClientBuilder.safeBuild(mtlsBuilder);</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;VisibleForTesting
+protected TrendingContentService.ServiceToClient buildContentClient(</p>
+<blockquote>
+<div><blockquote>
+<div><p>Service&lt;ThriftClientRequest, byte[]&gt; service) {</p>
+</div></blockquote>
+<p>return new TrendingContentService.ServiceToClient(service);</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;VisibleForTesting
+protected Service&lt;ThriftClientRequest, byte[]&gt; buildMetadataService() {</p>
+<blockquote>
+<div><dl>
+<dt>ClientBuilder&lt;</dt><dd><p>ThriftClientRequest,
+byte[],
+ClientConfig.Yes,
+ClientConfig.Yes,
+ClientConfig.Yes
+&gt;
+builder = ClientBuilder.get()</p>
+<blockquote>
+<div><p>.stack(ThriftMux.client())
+.name(“trends_thrift_data_service_manager_metadata”)
+.dest(“”)
+.retries(numRetries)
+.reportTo(DefaultStatsReceiver.get())
+.tcpConnectTimeout(requestTimeout)
+.requestTimeout(requestTimeout);</p>
+</div></blockquote>
+</dd>
+<dt>ClientBuilder mtlsBuilder =</dt><dd><p>new MtlsClientBuilder.MtlsClientBuilderSyntax&lt;&gt;(builder).mutualTls(serviceIdentifier);</p>
+</dd>
+</dl>
+<p>return ClientBuilder.safeBuild(mtlsBuilder);</p>
+</div></blockquote>
+<p>}</p>
+<p>&#64;VisibleForTesting
+protected TrendsMetadataService.ServiceToClient buildMetadataClient(</p>
+<blockquote>
+<div><blockquote>
+<div><p>Service&lt;ThriftClientRequest, byte[]&gt; service) {</p>
+</div></blockquote>
+<p>return new TrendsMetadataService.ServiceToClient(service);</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>Updater that fetches available woeids and corresponding trending terms.</p></li>
+</ul>
+<p><a href="#id11"><span class="problematic" id="id12">*</span></a>/</p>
+</dd>
+</dl>
+<p>&#64;VisibleForTesting
+protected class TrendsUpdater implements Runnable {</p>
+<blockquote>
+<div><p>&#64;Override
+public void run() {</p>
+<blockquote>
+<div><p>populateCacheFromTrendsService();</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>private Future&lt;BoxedUnit&gt; populateCacheFromTrendsService() {</dt><dd><p>long startTime = System.currentTimeMillis();
+AtomicLong numTrendsReceived = new AtomicLong(0);
+return metadataClient.getAvailable().flatMap(locations -&gt; {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if (locations == null) {</dt><dd><p>getAvailableFailureCounter.increment();
+LOG.warn(“Failed to get woeids from trends.”);
+return Future.value(BoxedUnit.UNIT);</p>
+</dd>
+</dl>
+<p>}
+getAvailableSuccessCounter.increment();
+return populateCacheFromTrendLocations(locations, numTrendsReceived);</p>
+</div></blockquote>
+<dl class="simple">
+<dt>}).onFailure(throwable -&gt; {</dt><dd><p>LOG.info(“Update failed”, throwable);
+updateFailureCounter.increment();
+return BoxedUnit.UNIT;</p>
+</dd>
+<dt>}).ensure(() -&gt; {</dt><dd><p>logRefreshStatus(startTime, numTrendsReceived);
+return BoxedUnit.UNIT;</p>
+</dd>
+</dl>
+<p>});</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private Future&lt;BoxedUnit&gt; populateCacheFromTrendLocations(</dt><dd><blockquote>
+<div><p>List&lt;Location&gt; locations,
+AtomicLong numTrendsReceived) {</p>
+</div></blockquote>
+<dl class="simple">
+<dt>List&lt;Future&lt;TrendsPlusResponse&gt;&gt; trendsPlusFutures = locations.stream()</dt><dd><p>.map(location -&gt; makeTrendsPlusRequest(location))
+.collect(Collectors.toList());</p>
+</dd>
+<dt>Future&lt;List&lt;Try&lt;TrendsPlusResponse&gt;&gt;&gt; trendsPlusFuture =</dt><dd><p>Future.collectToTry(trendsPlusFutures);</p>
+</dd>
+<dt>return trendsPlusFuture.map(tryResponses -&gt; {</dt><dd><p>populateCacheFromResponses(tryResponses, numTrendsReceived);
+return BoxedUnit.UNIT;</p>
+</dd>
+</dl>
+<p>});</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private Future&lt;TrendsPlusResponse&gt; makeTrendsPlusRequest(Location location) {</dt><dd><dl class="simple">
+<dt>TrendsPlusRequest request = new TrendsPlusRequest()</dt><dd><p>.setWoeid(location.getWoeid())
+.setMaxTrends(MAX_TRENDS_PER_WOEID);</p>
+</dd>
+</dl>
+<p>long startTime = System.currentTimeMillis();
+return contentClient.getTrendsPlus(request)</p>
+<blockquote>
+<div><dl class="simple">
+<dt>.onSuccess(response -&gt; {</dt><dd><p>getTrendsSuccessCounter.increment();
+return BoxedUnit.UNIT;</p>
+</dd>
+<dt>}).onFailure(throwable -&gt; {</dt><dd><p>getTrendsFailureCounter.increment();
+return BoxedUnit.UNIT;</p>
+</dd>
+</dl>
+<p>});</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>private void populateCacheFromResponses(</dt><dd><blockquote>
+<div><p>List&lt;Try&lt;TrendsPlusResponse&gt;&gt; tryResponses,
+AtomicLong numTrendsReceived) {</p>
+</div></blockquote>
+<p>Set&lt;String&gt; trendStrings = Sets.newHashSet();</p>
+<dl>
+<dt>for (Try&lt;TrendsPlusResponse&gt; tryResponse<span class="classifier">tryResponses) {</span></dt><dd><dl class="simple">
+<dt>if (tryResponse.isThrow()) {</dt><dd><p>LOG.warn(“Failed to fetch trends:” + tryResponse.toString());
+continue;</p>
+</dd>
+</dl>
+<p>}</p>
+<p>TrendsPlusResponse trendsPlusResponse = tryResponse.get();
+numTrendsReceived.addAndGet(trendsPlusResponse.modules.size());
+for (Module module : trendsPlusResponse.modules) {</p>
+<blockquote>
+<div><p>trendStrings.add(module.getTrend().name);</p>
+</div></blockquote>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl class="simple">
+<dt>for (NGramCache cache<span class="classifier">trendsCacheList) {</span></dt><dd><p>cache.addAll(trendStrings);</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>private void logRefreshStatus(long startTime, AtomicLong numTrendsReceived) {</dt><dd><dl>
+<dt>LOG.info(String.format(“Refresh done in [%dms] :nfetchSuccess[%d] fetchFailure[%d] “</dt><dd><blockquote>
+<div><ul class="simple">
+<li><p>“updateFailure[%d] num trends received [%d]”,</p></li>
+</ul>
+</div></blockquote>
+<p>System.currentTimeMillis() - startTime,
+getTrendsSuccessCounter.get(),
+getTrendsFailureCounter.get(),
+updateFailureCounter.get(),
+numTrendsReceived.get()));</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../_sources/src/java/com/twitter/search/common/relevance/TrendsThriftDataServiceManager.java.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

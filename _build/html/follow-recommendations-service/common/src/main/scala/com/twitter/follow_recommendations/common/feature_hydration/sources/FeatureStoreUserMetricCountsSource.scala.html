@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../../../../../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../../../../../../../../" id="documentation_options" src="../../../../../../../../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../../../../../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../../../../../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../../../../../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../../../../../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../../../../../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>package com.twitter.follow_recommendations.common.feature_hydration.sources</p>
+<p>import com.github.benmanes.caffeine.cache.Caffeine
+import com.google.inject.Inject
+import com.twitter.finagle.TimeoutException
+import com.twitter.finagle.mtls.authentication.ServiceIdentifier
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.follow_recommendations.common.feature_hydration.common.FeatureSource
+import com.twitter.follow_recommendations.common.feature_hydration.common.FeatureSourceId
+import com.twitter.follow_recommendations.common.feature_hydration.common.HasPreFetchedFeature
+import com.twitter.follow_recommendations.common.feature_hydration.sources.Utils.adaptAdditionalFeaturesToDataRecord
+import com.twitter.follow_recommendations.common.feature_hydration.sources.Utils.randomizedTTL
+import com.twitter.follow_recommendations.common.models.CandidateUser
+import com.twitter.follow_recommendations.common.models.HasSimilarToContext
+import com.twitter.ml.api.DataRecord
+import com.twitter.ml.api.FeatureContext
+import com.twitter.ml.api.IRecordOneToOneAdapter
+import com.twitter.ml.featurestore.catalog.datasets.onboarding.MetricCenterUserCountingFeaturesDataset
+import com.twitter.ml.featurestore.catalog.entities.core.{Author =&gt; AuthorEntity}
+import com.twitter.ml.featurestore.catalog.entities.core.{AuthorTopic =&gt; AuthorTopicEntity}
+import com.twitter.ml.featurestore.catalog.entities.core.{CandidateUser =&gt; CandidateUserEntity}
+import com.twitter.ml.featurestore.catalog.entities.core.{User =&gt; UserEntity}
+import com.twitter.ml.featurestore.lib.EdgeEntityId
+import com.twitter.ml.featurestore.lib.EntityId
+import com.twitter.ml.featurestore.lib.TopicId
+import com.twitter.ml.featurestore.lib.UserId
+import com.twitter.ml.featurestore.lib.data.PredictionRecord
+import com.twitter.ml.featurestore.lib.data.PredictionRecordAdapter
+import com.twitter.ml.featurestore.lib.dataset.DatasetId
+import com.twitter.ml.featurestore.lib.dataset.online.Hydrator.HydrationResponse
+import com.twitter.ml.featurestore.lib.dataset.online.OnlineAccessDataset
+import com.twitter.ml.featurestore.lib.dynamic.ClientConfig
+import com.twitter.ml.featurestore.lib.dynamic.DynamicFeatureStoreClient
+import com.twitter.ml.featurestore.lib.dynamic.DynamicHydrationConfig
+import com.twitter.ml.featurestore.lib.dynamic.FeatureStoreParamsConfig
+import com.twitter.ml.featurestore.lib.dynamic.GatedFeatures
+import com.twitter.ml.featurestore.lib.feature.BoundFeature
+import com.twitter.ml.featurestore.lib.feature.BoundFeatureSet
+import com.twitter.ml.featurestore.lib.online.DatasetValuesCache
+import com.twitter.ml.featurestore.lib.online.FeatureStoreRequest
+import com.twitter.ml.featurestore.lib.online.OnlineFeatureGenerationStats
+import com.twitter.stitch.Stitch
+import com.twitter.timelines.configapi.HasParams
+import java.util.concurrent.TimeUnit
+import com.twitter.conversions.DurationOps._
+import com.twitter.follow_recommendations.common.models.HasDisplayLocation
+import com.twitter.product_mixer.core.model.marshalling.request.HasClientContext</p>
+<dl>
+<dt>class FeatureStoreUserMetricCountsSource &#64;Inject() (</dt><dd><p>serviceIdentifier: ServiceIdentifier,
+stats: StatsReceiver)</p>
+<blockquote>
+<div><p>extends FeatureSource {</p>
+</div></blockquote>
+<p>import FeatureStoreUserMetricCountsSource._</p>
+<p>val backupSourceStats = stats.scope(“feature_store_hydration_mc_counting”)
+val adapterStats = backupSourceStats.scope(“adapters”)
+override def id: FeatureSourceId = FeatureSourceId.FeatureStoreUserMetricCountsSourceId
+override def featureContext: FeatureContext = getFeatureContext</p>
+<dl>
+<dt>val clientConfig: ClientConfig[HasParams] = ClientConfig(</dt><dd><p>dynamicHydrationConfig = dynamicHydrationConfig,
+featureStoreParamsConfig =</p>
+<blockquote>
+<div><p>FeatureStoreParamsConfig(FeatureStoreParameters.featureStoreParams, Map.empty),</p>
+</div></blockquote>
+<dl>
+<dt>/**</dt><dd><ul class="simple">
+<li><p>The smaller one between <cite>timeoutProvider</cite> and <cite>FeatureStoreSourceParams.GlobalFetchTimeout</cite></p></li>
+<li><p>used below takes effect.</p></li>
+</ul>
+<p><a href="#id1"><span class="problematic" id="id2">*</span></a>/</p>
+</dd>
+</dl>
+<p>timeoutProvider = Function.const(800.millis),
+serviceIdentifier = serviceIdentifier</p>
+</dd>
+</dl>
+<p>)</p>
+<dl class="simple">
+<dt>private val datasetsToCache = Set(</dt><dd><p>MetricCenterUserCountingFeaturesDataset</p>
+</dd>
+</dl>
+<p>).asInstanceOf[Set[OnlineAccessDataset[_ &lt;: EntityId, _]]]</p>
+<dl>
+<dt>private val datasetValuesCache: DatasetValuesCache =</dt><dd><dl>
+<dt>DatasetValuesCache(</dt><dd><dl class="simple">
+<dt>Caffeine</dt><dd><p>.newBuilder()
+.expireAfterWrite(randomizedTTL(12.hours.inSeconds), TimeUnit.SECONDS)
+.maximumSize(DefaultCacheMaxKeys)
+.build[(_ &lt;: EntityId, DatasetId), Stitch[HydrationResponse[_]]]
+.asMap,</p>
+</dd>
+</dl>
+<p>datasetsToCache,
+DatasetCacheScope</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>private val dynamicFeatureStoreClient = DynamicFeatureStoreClient(</dt><dd><p>clientConfig,
+backupSourceStats,
+Set(datasetValuesCache)</p>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>private val adapter: IRecordOneToOneAdapter[PredictionRecord] =</dt><dd><dl class="simple">
+<dt>PredictionRecordAdapter.oneToOne(</dt><dd><p>BoundFeatureSet(allFeatures),
+OnlineFeatureGenerationStats(backupSourceStats)</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+<dt>override def hydrateFeatures(</dt><dd><dl class="simple">
+<dt>target: HasClientContext</dt><dd><p>with HasPreFetchedFeature
+with HasParams
+with HasSimilarToContext
+with HasDisplayLocation,</p>
+</dd>
+</dl>
+<p>candidates: Seq[CandidateUser]</p>
+</dd>
+<dt>): Stitch[Map[CandidateUser, DataRecord]] = {</dt><dd><dl>
+<dt>target.getOptionalUserId</dt><dd><dl>
+<dt>.map { targetUserId =&gt;</dt><dd><dl>
+<dt>val featureRequests = candidates.map { candidate =&gt;</dt><dd><p>val userEntityId = UserEntity.withId(UserId(targetUserId))
+val candidateEntityId = CandidateUserEntity.withId(UserId(candidate.id))
+val similarToUserId = target.similarToUserIds.map(id =&gt; AuthorEntity.withId(UserId(id)))
+val topicProof = candidate.reason.flatMap(_.accountProof.flatMap(_.topicProof))
+val authorTopicEntity = if (topicProof.isDefined) {</p>
+<blockquote>
+<div><p>backupSourceStats.counter(“candidates_with_topic_proof”).incr()
+Set(</p>
+<blockquote>
+<div><dl class="simple">
+<dt>AuthorTopicEntity.withId(</dt><dd><p>EdgeEntityId(UserId(candidate.id), TopicId(topicProof.get.topicId))))</p>
+</dd>
+</dl>
+</div></blockquote>
+</div></blockquote>
+<p>} else Nil</p>
+<dl class="simple">
+<dt>val entities =</dt><dd><p>Seq(userEntityId, candidateEntityId) ++ similarToUserId ++ authorTopicEntity</p>
+</dd>
+</dl>
+<p>FeatureStoreRequest(entities)</p>
+</dd>
+</dl>
+<p>}</p>
+<p>val predictionRecordsFut = dynamicFeatureStoreClient(featureRequests, target)
+val candidateFeatureMap = predictionRecordsFut.map { predictionRecords =&gt;</p>
+<blockquote>
+<div><p>// we can zip predictionRecords with candidates as the order is preserved in the client
+candidates</p>
+<blockquote>
+<div><dl class="simple">
+<dt>.zip(predictionRecords).map {</dt><dd><dl class="simple">
+<dt>case (candidate, predictionRecord) =&gt;</dt><dd><dl class="simple">
+<dt>candidate -&gt; adaptAdditionalFeaturesToDataRecord(</dt><dd><p>adapter.adaptToDataRecord(predictionRecord),
+adapterStats,
+FeatureStoreSource.featureAdapters)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}.toMap</p>
+</div></blockquote>
+</div></blockquote>
+<p>}
+Stitch</p>
+<blockquote>
+<div><p>.callFuture(candidateFeatureMap)
+.within(target.params(FeatureStoreSourceParams.GlobalFetchTimeout))(</p>
+<blockquote>
+<div><p>com.twitter.finagle.util.DefaultTimer)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>.rescue {</dt><dd><dl class="simple">
+<dt>case _: TimeoutException =&gt;</dt><dd><p>Stitch.value(Map.empty[CandidateUser, DataRecord])</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>}.getOrElse(Stitch.value(Map.empty[CandidateUser, DataRecord]))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p>}</p>
+<dl>
+<dt>object FeatureStoreUserMetricCountsSource {</dt><dd><p>private val DatasetCacheScope = “feature_store_local_cache_mc_user_counting”
+private val DefaultCacheMaxKeys = 20000</p>
+<dl>
+<dt>val allFeatures: Set[BoundFeature[_ &lt;: EntityId, _]] =</dt><dd><dl class="simple">
+<dt>FeatureStoreFeatures.candidateUserMetricCountFeatures ++</dt><dd><p>FeatureStoreFeatures.similarToUserMetricCountFeatures ++
+FeatureStoreFeatures.targetUserMetricCountFeatures</p>
+</dd>
+</dl>
+</dd>
+<dt>val getFeatureContext: FeatureContext =</dt><dd><p>BoundFeatureSet(allFeatures).toFeatureContext</p>
+</dd>
+<dt>val dynamicHydrationConfig: DynamicHydrationConfig[HasParams] =</dt><dd><dl>
+<dt>DynamicHydrationConfig(</dt><dd><dl>
+<dt>Set(</dt><dd><dl>
+<dt>GatedFeatures(</dt><dd><p>boundFeatureSet = BoundFeatureSet(FeatureStoreFeatures.targetUserMetricCountFeatures),
+gate = HasParams</p>
+<blockquote>
+<div><p>.paramGate(FeatureStoreSourceParams.EnableSeparateClientForMetricCenterUserCounting) &amp;
+HasParams.paramGate(FeatureStoreSourceParams.EnableTargetUserFeatures)</p>
+</div></blockquote>
+</dd>
+</dl>
+<p>),
+GatedFeatures(</p>
+<blockquote>
+<div><p>boundFeatureSet = BoundFeatureSet(FeatureStoreFeatures.candidateUserMetricCountFeatures),
+gate =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>HasParams</dt><dd><p>.paramGate(FeatureStoreSourceParams.EnableSeparateClientForMetricCenterUserCounting) &amp;
+HasParams.paramGate(FeatureStoreSourceParams.EnableCandidateUserFeatures)</p>
+</dd>
+</dl>
+</div></blockquote>
+</div></blockquote>
+<p>),
+GatedFeatures(</p>
+<blockquote>
+<div><p>boundFeatureSet = BoundFeatureSet(FeatureStoreFeatures.similarToUserMetricCountFeatures),
+gate =</p>
+<blockquote>
+<div><dl class="simple">
+<dt>HasParams</dt><dd><p>.paramGate(FeatureStoreSourceParams.EnableSeparateClientForMetricCenterUserCounting) &amp;
+HasParams.paramGate(FeatureStoreSourceParams.EnableSimilarToUserFeatures)</p>
+</dd>
+</dl>
+</div></blockquote>
+</div></blockquote>
+<p>),</p>
+</dd>
+</dl>
+<p>))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>}</p>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../../../../../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../../../../../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../../../../../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../../../../../../../../_sources/follow-recommendations-service/common/src/main/scala/com/twitter/follow_recommendations/common/feature_hydration/sources/FeatureStoreUserMetricCountsSource.scala.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

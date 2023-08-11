@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>&lt;no title&gt; &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../" id="documentation_options" src="../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <p>import io
+import logging
+import subprocess
+from threading import Lock</p>
+<p>“””
+This module provides a binary data record reader for EventBus data.
+It starts a EventBus subscriber in a separate process to receive EventBus streaming data.
+The subscriber is supposed to outputs received data through PIPE to this module.
+This module parses input and output binary data record to serve as a record reader.
+“””</p>
+<dl class="simple">
+<dt>class BinaryRecordReader(object):</dt><dd><dl class="simple">
+<dt>def initialize(self):</dt><dd><p>pass</p>
+</dd>
+<dt>def read(self):</dt><dd><p>“””Read raw bytes for one record
+“””
+raise NotImplementedError</p>
+</dd>
+<dt>def close(self):</dt><dd><p>pass</p>
+</dd>
+</dl>
+</dd>
+<dt>class ReadableWrapper(object):</dt><dd><dl class="simple">
+<dt>def __init__(self, internal):</dt><dd><p>self.internal = internal</p>
+</dd>
+<dt>def __getattr__(self, name):</dt><dd><p>return getattr(self.internal, name)</p>
+</dd>
+<dt>def readable(self):</dt><dd><p>return True</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<p>class EventBusPipedBinaryRecordReader(BinaryRecordReader):</p>
+<blockquote>
+<div><p>JAVA = ‘/usr/lib/jvm/java-11-twitter/bin/java’
+RECORD_SEPARATOR_HEX = [</p>
+<blockquote>
+<div><p>0x29, 0xd8, 0xd5, 0x06, 0x58, 0xcd, 0x4c, 0x29,
+0xb2, 0xbc, 0x57, 0x99, 0x21, 0x71, 0xbd, 0xff</p>
+</div></blockquote>
+<p>]
+RECORD_SEPARATOR = ‘’.join([chr(i) for i in RECORD_SEPARATOR_HEX])
+RECORD_SEPARATOR_LENGTH = len(RECORD_SEPARATOR)
+CHUNK_SIZE = 8192</p>
+<dl>
+<dt>def __init__(self, jar_file, num_eb_threads, subscriber_id,</dt><dd><blockquote>
+<div><p>filter_str=None, buffer_size=32768, debug=False):</p>
+</div></blockquote>
+<p>self.jar_file = jar_file
+self.num_eb_threads = num_eb_threads
+self.subscriber_id = subscriber_id
+self.filter_str = filter_str if filter_str else ‘””’
+self.buffer_size = buffer_size
+self.lock = Lock()
+self._pipe = None
+self._buffered_reader = None
+self._bytes_buffer = None</p>
+<p>self.debug = debug</p>
+</dd>
+<dt>def initialize(self):</dt><dd><dl>
+<dt>if not self._pipe:</dt><dd><dl>
+<dt>self._pipe = subprocess.Popen(</dt><dd><dl class="simple">
+<dt>[</dt><dd><p>self.JAVA, ‘-jar’, self.jar_file,
+‘-subscriberId’, self.subscriber_id,
+‘-numThreads’, str(self.num_eb_threads),
+‘-dataFilter’, self.filter_str,
+‘-debug’ if self.debug else ‘’</p>
+</dd>
+</dl>
+<p>],
+stdout=subprocess.PIPE</p>
+</dd>
+</dl>
+<p>)
+self._buffered_reader = io.BufferedReader(</p>
+<blockquote>
+<div><p>ReadableWrapper(self._pipe.stdout), self.buffer_size)</p>
+</div></blockquote>
+<p>self._bytes_buffer = io.BytesIO()</p>
+</dd>
+<dt>else:</dt><dd><p>logging.warning(‘Already initialized’)</p>
+</dd>
+</dl>
+</dd>
+<dt>def _find_next_record(self):</dt><dd><p>tail = [‘’]
+while True:</p>
+<blockquote>
+<div><p>chunk = tail[0] + self._buffered_reader.read(self.CHUNK_SIZE)
+index = chunk.find(self.RECORD_SEPARATOR)
+if index &lt; 0:</p>
+<blockquote>
+<div><p>self._bytes_buffer.write(chunk[:-self.RECORD_SEPARATOR_LENGTH])
+tail[0] = chunk[-self.RECORD_SEPARATOR_LENGTH:]</p>
+</div></blockquote>
+<dl class="simple">
+<dt>else:</dt><dd><p>self._bytes_buffer.write(chunk[:index])
+return chunk[(index + self.RECORD_SEPARATOR_LENGTH):]</p>
+</dd>
+</dl>
+</div></blockquote>
+</dd>
+<dt>def _read(self):</dt><dd><dl>
+<dt>with self.lock:</dt><dd><p>remaining = self._find_next_record()
+record = self._bytes_buffer.getvalue()
+# clean up buffer
+self._bytes_buffer.close()
+self._bytes_buffer = io.BytesIO()
+self._bytes_buffer.write(remaining)</p>
+<p>return record</p>
+</dd>
+</dl>
+</dd>
+<dt>def read(self):</dt><dd><dl>
+<dt>while True:</dt><dd><dl>
+<dt>try:</dt><dd><p>return self._read()</p>
+</dd>
+<dt>except Exception as e:</dt><dd><p>logging.error(“Error reading bytes for next record: {}”.format(e))
+if self.debug:</p>
+<blockquote>
+<div><p>raise</p>
+</div></blockquote>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+<dt>def close(self):</dt><dd><dl class="simple">
+<dt>try:</dt><dd><p>self._bytes_buffer.close()
+self._buffered_reader.close()
+self._pipe.terminate()</p>
+</dd>
+<dt>except Exception as e:</dt><dd><p>logging.error(“Error closing reader: {}”.format(e))</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</div></blockquote>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../index2.rst.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../index2.rst.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../_sources/twml/twml/contrib/eventbus/reader.py.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>
