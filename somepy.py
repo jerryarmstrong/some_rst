@@ -42,10 +42,11 @@ for repo in glob.glob('/tmp/repos/x/*'):
                     'last_edit_date': last_edit_date,
                     'contents': content
                 }, index=[len(df)])], ignore_index=True)
-                index_rst += f"""{file_path} \n"""
+                index_rst += f""":ref: `{file_path}` \n"""
                 index_rst += f"""{'=' * len(file_path)} \n\n"""
                 index_rst += f"""Last edited: {last_edit_date} \n\n"""
                 index_rst += f""".. code-block:: {extension.replace('.', '')} \n\n"""
+                
 
 with open('docs/index.rst', 'w') as file:
     file.write(index_rst)
