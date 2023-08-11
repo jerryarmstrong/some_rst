@@ -42,7 +42,9 @@ for repo in glob.glob('/tmp/repos/x/*'):
                     'last_edit_date': last_edit_date,
                     'contents': content
                 }, index=[len(df)])], ignore_index=True)
-                index_rst += f""":ref: `{file_path}` \n"""
+                # link to file_path in rst as :ref: 
+                index_rst += f""":ref:`{file_path} <{file_path}>` \n"""
+                
                 index_rst += f"""{'=' * len(file_path)} \n\n"""
                 index_rst += f"""Last edited: {last_edit_date} \n\n"""
                 index_rst += f""".. code-block:: {extension.replace('.', '')} \n\n"""
