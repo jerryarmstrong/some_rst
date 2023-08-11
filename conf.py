@@ -16,9 +16,8 @@ author = 'jare'
 extensions = []
 
 templates_path = ['_templates']
-exclude_patterns = ['_build', 'Thumbs.db', '.DS_Store']
+exclude_patterns = []
 
-root_doc = 'index2.rst'
 
 
 # -- Options for HTML output -------------------------------------------------
