@@ -1,0 +1,33 @@
+tests/ui/object-safety/object-safety-phantom-fn.rs
+==================================================
+
+Last edited: 2023-03-30 20:35:59
+
+Contents:
+
+.. code-block:: rs
+
+    // Check that `Self` appearing in a phantom fn does not make a trait not object safe.
+
+// build-pass (FIXME(62277): could be check-pass?)
+#![allow(dead_code)]
+
+trait Baz {
+}
+
+trait Bar<T> {
+}
+
+fn make_bar<T:Bar<u32>>(t: &T) -> &dyn Bar<u32> {
+    t
+}
+
+fn make_baz<T:Baz>(t: &T) -> &dyn Baz {
+    t
+}
+
+
+fn main() {
+}
+
+

@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>docs/04-guides/07-archived/00-architecture/00-contracts.md &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../" id="documentation_options" src="../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <section id="docs-04-guides-07-archived-00-architecture-00-contracts-md">
+<h1>docs/04-guides/07-archived/00-architecture/00-contracts.md<a class="headerlink" href="#docs-04-guides-07-archived-00-architecture-00-contracts-md" title="Permalink to this heading">¶</a></h1>
+<p>Last edited: 2023-08-08 19:56:25</p>
+<p>Contents:</p>
+<div class="highlight-md notranslate"><div class="highlight"><pre><span></span><span class="gh"># The Contracts</span>
+</pre></div>
+</div>
+<p>## Token Metadata</p>
+<p>This is the bedrock contract of the entire ecosystem. All that you need to interact with it is your own mint for which you have the mint authority. It is primarily a “mint decorator.” It allows you to decorate your mint with a Metadata PDA that gives it a name, symbol, uri, list of creators with royalty splits, and whether it’s been sold. You can do this with any mint with any supply. Phantom Wallet uses this Metadata account and its URI field, which often links to a Manifest.json file of a certain format, to display NFTs in their ‘Collections’ category on their UI.</p>
+<p>Furthermore, if your mint has one token in its supply, you can give it an additional decoration PDA, of type MasterEdition. This PDA denotes the mint as a special type of object that can mint other mints - which we call Editions (as opposed to MasterEditions because they can’t print other mints themselves). This makes this mint like the “master records” that record studios used to use to make new copies of records back in the day. The MasterEdition PDA will take away minting and freezing authority from you in the process and will contain information about total supply, maximum possible supply, etc.</p>
+<p>The existence of Metadata and its sister PDA MasterEdition makes a very powerful combination for a mint that enables the entire rest of the Metaplex contract stack. Now you can create:</p>
+<ul class="simple">
+<li><p>Normal mints that just have names (Metadata but no MasterEdition)</p></li>
+<li><p>One of a kind NFTs (Metadata + MasterEdition with <cite>max_supply</cite> of 0)</p></li>
+<li><p>NFTs that can print limited edition child NFTs (Metadata + MasterEdition with <cite>max_supply</cite> of say 10)</p></li>
+<li><p>NFTs that can print unlimited open edition NFTs (Metadata + MasterEdition with unlimited <cite>max_supply</cite>)</p></li>
+</ul>
+<p>You can also easily transfer ownership of these PDA records with the <cite>updateAuthority</cite> key on Metadata between parties, so you can sell printing rights to another party, or just give them the token itself while retaining the printing rights.</p>
+<p>## Token Vault</p>
+<p>Token Vault acts like a corporation or safe escrow for arbitrary token allotments. You can create a vault object, and insert any number of tokens from any number of mints into safety deposit boxes, and then activate the vault. It has a few different states, but the important ones are <strong>Activated</strong>, which is when it’s locked and nobody can access its contents, and <strong>Combined,</strong> when the vault has essentially been opened and the vault authority can withdraw the contents.</p>
+<p>Going from <strong>Activated</strong> to <strong>Combined</strong> has only one restraint - that there are no outstanding fractional shares in circulation. You can in principle go straight from <strong>Activated</strong> to <strong>Combined</strong> immediately if you issue 0 fractional shares (which is what the Metaplex front-end contract does during Auction creation).</p>
+<p>Once the vault is <strong>Activated</strong>, you can then mint treasury shares that represent fractional ownership of the tokens inside the vault. The treasury shares are valued based on an external price indicator account that does not need to be owned by the vault and is considered the vault’s price oracle, and these shares can then be sold on a dex or in an AMM or whatever you desire. This allows you, as the vault owner, to take your NFT(s) and turn them into a sort of corporation and sell partial ownership to other parties. If the external price oracle has its price driven by a proper third party such as a dex or other price discovery mechanism, then the entire system is balanced.</p>
+<p>When there are outstanding shares, you cannot, as the vault owner, <strong>Combine</strong> the vault, and retrieve your tokens, until you buy out the shares in circulation. You have to provide the number_of_shares_outstanding*price_from_oracle in the token_mint of the vault to the vault to unlock it. Then shareholders can return at their leisure to trade in shares for their winnings.</p>
+<p>## Auction</p>
+<p>The Auction Contract represents an auction primitive, and it knows nothing about NFTs, or Metadata, or anything else in the Metaplex ecosystem. All it cares about is that it has a resource address, it has auction mechanics, and it is using those auction mechanics to auction off that resource. It currently supports English Auctions and Open Edition Auctions (no winners but bids are tracked.) Its only purpose is to track who won what place in an auction and to collect money for those wins. When you place bids, or cancel them, you are interacting with this contract. However, when you redeem bids, you are not interacting with this contract, but Metaplex, because while it can provide proof that you did indeed win 4th place, it has no opinion on how the resource being auctioned off is divvied up between 1st, 2nd, 3rd, and 4th place winners, for example.</p>
+<p>This contract will be expanded in the future to include other auction types, and better guarantees between that the auctioneer claiming the bid actually has provided the prize by having the winner sign a PDA saying that they received the prize. Right now this primitive contract should _not_ be used in isolation, but in companionship with another contract (like Metaplex in our case) that makes such guarantees that prizes are delivered if prizes are won.</p>
+<p>## Metaplex</p>
+<p>This is the granddaddy contract of them all. The primary product of the Metaplex contract are AuctionManagers, and they are the nexus of the other three contract’s structs. The purpose of an AuctionManager is to understand that an Auction object is auctioning off the contents of a Vault, and that the contents of a Vault are different types of NFT arrangements, such as:</p>
+<ul class="simple">
+<li><p>Limited Edition Prints (Printing a new child edition from limited supply)</p></li>
+<li><p>Open Edition Prints (Printing a new child edition from unlimited supply)</p></li>
+<li><p>Full Rights Transfers (Giving away token + metadata ownership)</p></li>
+<li><p>Single Token Transfers (Giving away a token but not metadata ownership)</p></li>
+</ul>
+<p>It orchestrates disbursements of those contents to winners of an auction. An AuctionManager requires both a Vault and an Auction to run, and it requires that the Auction’s resource key be set to the Vault.</p>
+<p>Due to each type of NFT transfer above requiring slightly different nuanced handling and checking, Metaplex handles knowing about those things, and making the different CPI calls to the Token Metadata contract to make those things happen as required during the redemption phase. It also has full authority over all the objects like Vault and Auction, and handles all royalties payments by collecting funds from the auction into its own central escrow account and then disbursing to artists.</p>
+</section>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../_sources/04-guides/07-archived/00-architecture/00-contracts.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

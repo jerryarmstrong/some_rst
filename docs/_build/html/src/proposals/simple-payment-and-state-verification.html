@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>docs/src/proposals/simple-payment-and-state-verification.md &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../" id="documentation_options" src="../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" />
+   
+  <link rel="stylesheet" href="../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <section id="docs-src-proposals-simple-payment-and-state-verification-md">
+<h1>docs/src/proposals/simple-payment-and-state-verification.md<a class="headerlink" href="#docs-src-proposals-simple-payment-and-state-verification-md" title="Permalink to this heading">¶</a></h1>
+<p>Last edited: 2023-08-11 21:38:33</p>
+<p>Contents:</p>
+<div class="highlight-md notranslate"><div class="highlight"><pre><span></span>---
+</pre></div>
+</div>
+<p>title: Simple Payment and State Verification
+—</p>
+<p>It is often useful to allow low resourced clients to participate in a Solana
+cluster. Be this participation economic or contract execution, verification
+that a client’s activity has been accepted by the network is typically
+expensive. This proposal lays out a mechanism for such clients to confirm that
+their actions have been committed to the ledger state with minimal resource
+expenditure and third-party trust.</p>
+<p>## A Naive Approach</p>
+<p>Validators store the signatures of recently confirmed transactions for a short
+period of time to ensure that they are not processed more than once. Validators
+provide a JSON RPC endpoint, which clients can use to query the cluster if a
+transaction has been recently processed. Validators also provide a PubSub
+notification, whereby a client registers to be notified when a given signature
+is observed by the validator. While these two mechanisms allow a client to
+verify a payment, they are not a proof and rely on completely trusting a
+validator.</p>
+<p>We will describe a way to minimize this trust using Merkle Proofs to anchor the
+validator’s response in the ledger, allowing the client to confirm on their own
+that a sufficient number of their preferred validators have confirmed a
+transaction. Requiring multiple validator attestations further reduces trust in
+the validator, as it increases both the technical and economic difficulty of
+compromising several other network participants.</p>
+<p>## Light Clients</p>
+<p>A ‘light client’ is a cluster participant that does not itself run a validator.
+This light client would provide a level of security greater than trusting a
+remote validator, without requiring the light client to spend a lot of resources
+verifying the ledger.</p>
+<p>Rather than providing transaction signatures directly to a light client, the
+validator instead generates a Merkle Proof from the transaction of interest to
+the root of a Merkle Tree of all transactions in the including block. This
+Merkle Root is stored in a ledger entry which is voted on by validators,
+providing it consensus legitimacy. The additional level of security for a light
+client depends on an initial canonical set of validators the light client
+considers to be the stakeholders of the cluster. As that set is changed, the
+client can update its internal set of known validators with
+[receipts](simple-payment-and-state-verification.md#receipts). This may become
+challenging with a large number of delegated stakes.</p>
+<p>Validators themselves may want to use light client APIs for performance reasons.
+For example, during the initial launch of a validator, the validator may use a
+cluster provided checkpoint of the state and verify it with a receipt.</p>
+<p>## Receipts</p>
+<p>A receipt is a minimal proof that; a transaction has been included in a block,
+that the block has been voted on by the client’s preferred set of validators
+and that the votes have reached the desired confirmation depth.</p>
+<p>### Transaction Inclusion Proof</p>
+<p>A transaction inclusion proof is a data structure that contains a Merkle Path
+from a transaction, through an Entry-Merkle to a Block-Merkle, which is included
+in a Bank-Hash with the required set of validator votes. A chain of PoH Entries
+containing subsequent validator votes, deriving from the Bank-Hash, is the proof
+of confirmation.</p>
+<p>#### Transaction Merkle</p>
+<p>An Entry-Merkle is a Merkle Root including all transactions in a given entry,
+sorted by signature. Each transaction in an entry is already merkled here:
+<a class="reference external" href="https://github.com/solana-labs/solana/blob/b6bfed64cb159ee67bb6bdbaefc7f833bbed3563/ledger/src/entry.rs#L205">https://github.com/solana-labs/solana/blob/b6bfed64cb159ee67bb6bdbaefc7f833bbed3563/ledger/src/entry.rs#L205</a>.
+This means we can show a transaction <cite>T</cite> was included in an entry <cite>E</cite>.</p>
+<p>A Block-Merkle is the Merkle Root of all the Entry-Merkles sequenced in the
+block.</p>
+<p>![Block Merkle Diagram](/img/spv-block-merkle.svg)</p>
+<p>Together the two merkle proofs show a transaction <cite>T</cite> was included in a block
+with bank hash <cite>B</cite>.</p>
+<p>An Accounts-Hash is the hash of the concatenation of the state hashes of
+each account modified during the current slot.</p>
+<p>Transaction status is necessary for the receipt because the state receipt is
+constructed for the block. Two transactions over the same state can appear in
+the block, and therefore, there is no way to infer from just the state whether
+a transaction that is committed to the ledger has succeeded or failed in
+modifying the intended state. It may not be necessary to encode the full status
+code, but a single status bit to indicate the transaction’s success.</p>
+<p>Currently, the Block-Merkle is not implemented, so to verify <cite>E</cite> was an entry
+in the block with bank hash <cite>B</cite>, we would need to provide all the entry hashes
+in the block. Ideally this Block-Merkle would be implmented, as the alternative
+is very inefficient.</p>
+<p>#### Block Headers</p>
+<p>In order to verify transaction inclusion proofs, light clients need to be able
+to infer the topology of the forks in the network</p>
+<p>More specifically, the light client will need to track incoming block headers
+such that given two bank hashes for blocks <cite>A</cite> and <cite>B</cite>, they can determine
+whether <cite>A</cite> is an ancestor of <cite>B</cite> (Below section on
+<cite>Optimistic Confirmation Proof</cite> explains why!). Contents of header are the
+fields necessary to compute the bank hash.</p>
+<p>A Bank-Hash is the hash of the concatenation of the Block-Merkle and
+Accounts-Hash described in the <cite>Transaction Merkle</cite> section above.</p>
+<p>![Bank Hash Diagram](/img/spv-bank-hash.svg)</p>
+<p>In the code:</p>
+<p><a class="reference external" href="https://github.com/solana-labs/solana/blob/b6bfed64cb159ee67bb6bdbaefc7f833bbed3563/runtime/src/bank.rs#L3468-L3473">https://github.com/solana-labs/solana/blob/b6bfed64cb159ee67bb6bdbaefc7f833bbed3563/runtime/src/bank.rs#L3468-L3473</a></p>
+<dl>
+<dt><a href="#id1"><span class="problematic" id="id2">``</span></a><a href="#id3"><span class="problematic" id="id4">`</span></a></dt><dd><dl class="simple">
+<dt>let mut hash = hashv(&amp;[</dt><dd><p>// bank hash of the parent block
+self.parent_hash.as_ref(),
+// hash of all the modifed accounts
+accounts_delta_hash.hash.as_ref(),
+// Number of signatures processed in this block
+&amp;signature_count_buf,
+// Last PoH hash in this block
+self.latest_blockhash().as_ref(),</p>
+</dd>
+</dl>
+<p>]);</p>
+</dd>
+</dl>
+<p><a href="#id5"><span class="problematic" id="id6">``</span></a><a href="#id7"><span class="problematic" id="id8">`</span></a></p>
+<p>A good place to implement this logic along existing streaming logic in the
+validator’s replay logic: <a class="reference external" href="https://github.com/solana-labs/solana/blob/b6bfed64cb159ee67bb6bdbaefc7f833bbed3563/core/src/replay_stage.rs#L1092-L1096">https://github.com/solana-labs/solana/blob/b6bfed64cb159ee67bb6bdbaefc7f833bbed3563/core/src/replay_stage.rs#L1092-L1096</a></p>
+<p>#### Optimistic Confirmation Proof</p>
+<p>Currently optimistic confirmation is detected via a listener that monitors
+gossip and the replay pipeline for votes:
+<a class="reference external" href="https://github.com/solana-labs/solana/blob/b6bfed64cb159ee67bb6bdbaefc7f833bbed3563/core/src/cluster_info_vote_listener.rs#L604-L614">https://github.com/solana-labs/solana/blob/b6bfed64cb159ee67bb6bdbaefc7f833bbed3563/core/src/cluster_info_vote_listener.rs#L604-L614</a>.</p>
+<p>Each vote is a signed transaction that includes the bank hash of the block the
+validator voted for, i.e. the <cite>B</cite> from the <cite>Transaction Merkle</cite> section above.
+Once a certain threshold <cite>T</cite> of the network has voted on a block, the block is
+considered optimistially confirmed. The votes made by this group of <cite>T</cite>
+validators is needed to show the block with bank hash <cite>B</cite> was optimistically
+confirmed.</p>
+<p>However other than some metadata, the signed votes themselves are not
+currently stored anywhere, so they can’t be retrieved on demand. These votes
+probably need to be persisted in Rocksdb database, indexed by a key
+<cite>(Slot, Hash, Pubkey)</cite> which represents the slot of the vote, bank hash of the
+vote, and vote account pubkey responsible for the vote.</p>
+<p>Together, the transaction merkle and optimistic confirmation proofs can be
+provided over RPC to subscribers by extending the existing signature
+subscrption logic. Clients who subscribe to the “Confirmed” confirmation
+level are already notified when optimistic confirmation is detected, a flag
+can be provided to signal the two proofs above should also be returned.</p>
+<p>It is important to note that optimistcally confirming <cite>B</cite> also implies that all
+ancestor blocks of <cite>B</cite> are also optimistically confirmed, and also that not
+all blocks will be optimistically confirmed.</p>
+<p><a href="#id9"><span class="problematic" id="id10">``</span></a><a href="#id11"><span class="problematic" id="id12">`</span></a></p>
+<p>B -&gt; B’</p>
+<p><a href="#id13"><span class="problematic" id="id14">``</span></a><a href="#id15"><span class="problematic" id="id16">`</span></a></p>
+<p>So in the example above if a block <cite>B’</cite> is optimisically confirmed, then so is
+<cite>B</cite>. Thus if a transaction was in block <cite>B</cite>, the transaction merkle in the
+proof will be for block <cite>B</cite>, but the votes presented in the proof will be for
+block <cite>B’</cite>. This is why the headers in the <cite>Block headers</cite> section above are
+important, the client will need to verify that <cite>B</cite> is indeed an ancestor of
+<cite>B’</cite>.</p>
+<p>#### Proof of Stake Distribution</p>
+<p>Once presented with the transaction merkle and optimistic confirmation proofs
+above, a client can verify a transaction <cite>T</cite> was optimistially confirmed in a
+block with bank hash <cite>B</cite>. The last missing piece is how to verify that the
+votes in the optimistic proofs above actually constitute the valid <cite>T</cite>
+percentage of the stake necessay to uphold the safety guarantees of
+“optimistic confirmation”.</p>
+<p>One way to approach this might be for every epoch, when the stake set changes,
+to write all the stakes to a system account, and then have validators subscribe
+to that system account. Full nodes can then provide a merkle proving that the
+system account state was updated in some block <cite>B</cite>, and then show that the
+block <cite>B</cite> was optimistically confirmed/rooted.</p>
+<p>### Account State Verification</p>
+<p>An account’s state (balance or other data) can be verified by submitting a
+transaction with a <strong>_TBD_</strong> Instruction to the cluster. The client can then
+use a [Transaction Inclusion Proof](#transaction-inclusion-proof) to verify
+whether the cluster agrees that the acount has reached the expected state.</p>
+<p>### Validator Votes</p>
+<p>Leaders should coalesce the validator votes by stake weight into a single entry.
+This will reduce the number of entries necessary to create a receipt.</p>
+<p>### Chain of Entries</p>
+<p>A receipt has a PoH link from the payment or state Merkle Path root to a list
+of consecutive validation votes.</p>
+<p>It contains the following:</p>
+<ul class="simple">
+<li><p>Transaction -&amp;gt; Entry-Merkle -&amp;gt; Block-Merkle -&amp;gt; Bank-Hash</p></li>
+</ul>
+<p>And a vector of PoH entries:</p>
+<ul class="simple">
+<li><p>Validator vote entries</p></li>
+<li><p>Ticks</p></li>
+<li><p>Light entries</p></li>
+</ul>
+<p><a href="#id17"><span class="problematic" id="id18">``</span></a><a href="#id19"><span class="problematic" id="id20">`</span></a>text
+/// This Entry definition skips over the transactions and only contains the
+/// hash of the transactions used to modify PoH.
+LightEntry {</p>
+<blockquote>
+<div><p>/// The number of hashes since the previous Entry ID.
+pub num_hashes: u64,
+/// The SHA-256 hash <cite>num_hashes</cite> after the previous Entry ID.
+hash: Hash,
+/// The Merkle Root of the transactions encoded into the Entry.
+entry_hash: Hash,</p>
+</div></blockquote>
+<section id="id21">
+<h2>}<a class="headerlink" href="#id21" title="Permalink to this heading">¶</a></h2>
+<p>The light entries are reconstructed from Entries and simply show the entry
+Merkle Root that was mixed in to the PoH hash, instead of the full transaction
+set.</p>
+<p>Clients do not need the starting vote state. The
+[fork selection](../implemented-proposals/tower-bft.md) algorithm is defined
+such that only votes that appear after the transaction provide finality for the
+transaction, and finality is independent of the starting state.</p>
+<p>### Verification</p>
+<p>A light client that is aware of the supermajority set validators can verify a
+receipt by following the Merkle Path to the PoH chain. The Block-Merkle is the
+Merkle Root and will appear in votes included in an Entry. The light client can
+simulate [fork selection](../implemented-proposals/tower-bft.md) for the
+consecutive votes and verify that the receipt is confirmed at the desired
+lockout threshold.</p>
+<p>### Synthetic State</p>
+<p>Synthetic state should be computed into the Bank-Hash along with the bank
+generated state.</p>
+<p>For example:</p>
+<ul class="simple">
+<li><p>Epoch validator accounts and their stakes and weights.</p></li>
+<li><p>Computed fee rates</p></li>
+</ul>
+<p>These values should have an entry in the Bank-Hash. They should live under known
+accounts, and therefore have an index into the hash concatenation.</p>
+</section>
+</section>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../_sources/src/proposals/simple-payment-and-state-verification.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

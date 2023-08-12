@@ -1,0 +1,14 @@
+tests/run-make-fulldeps/invalid-library/foo.rs
+==============================================
+
+Last edited: 2023-03-30 20:35:59
+
+Contents:
+
+.. code-block:: rs
+
+    extern crate foo;
+
+fn main() {}
+
+

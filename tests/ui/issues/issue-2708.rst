@@ -1,0 +1,41 @@
+tests/ui/issues/issue-2708.rs
+=============================
+
+Last edited: 2023-03-30 20:35:59
+
+Contents:
+
+.. code-block:: rs
+
+    // run-pass
+#![allow(dead_code)]
+#![allow(non_snake_case)]
+
+// pretty-expanded FIXME #23616
+
+
+
+struct Font {
+    fontbuf: usize,
+    cairo_font: usize,
+    font_dtor: usize,
+
+}
+
+impl Drop for Font {
+    fn drop(&mut self) {}
+}
+
+fn Font() -> Font {
+    Font {
+        fontbuf: 0,
+        cairo_font: 0,
+        font_dtor: 0
+    }
+}
+
+pub fn main() {
+    let _f: Box<_> = Box::new(Font());
+}
+
+

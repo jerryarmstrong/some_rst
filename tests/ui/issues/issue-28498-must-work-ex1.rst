@@ -1,0 +1,29 @@
+tests/ui/issues/issue-28498-must-work-ex1.rs
+============================================
+
+Last edited: 2023-03-30 20:35:59
+
+Contents:
+
+.. code-block:: rs
+
+    // run-pass
+// Example taken from RFC 1238 text
+
+// https://github.com/rust-lang/rfcs/blob/master/text/1238-nonparametric-dropck.md
+//     #examples-of-code-that-must-continue-to-work
+
+use std::cell::Cell;
+
+struct Concrete<'a>(#[allow(unused_tuple_struct_fields)] u32, Cell<Option<&'a Concrete<'a>>>);
+
+fn main() {
+    let mut data = Vec::new();
+    data.push(Concrete(0, Cell::new(None)));
+    data.push(Concrete(0, Cell::new(None)));
+
+    data[0].1.set(Some(&data[1]));
+    data[1].1.set(Some(&data[0]));
+}
+
+

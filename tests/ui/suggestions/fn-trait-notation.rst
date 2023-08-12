@@ -1,0 +1,30 @@
+tests/ui/suggestions/fn-trait-notation.rs
+=========================================
+
+Last edited: 2023-03-30 20:35:59
+
+Contents:
+
+.. code-block:: rs
+
+    // run-rustfix
+fn e0658<F, G, H>(f: F, g: G, h: H) -> i32
+where
+    F: Fn<i32, Output = i32>, //~ ERROR E0658
+    G: Fn<(i32, i32, ), Output = (i32, i32)>, //~ ERROR E0658
+    H: Fn<(i32,), Output = i32>, //~ ERROR E0658
+{
+    f(3);
+    g(3, 4);
+    h(3)
+}
+
+fn main() {
+    e0658(
+        |a| a,
+        |a, b| (b, a),
+        |a| a,
+    );
+}
+
+

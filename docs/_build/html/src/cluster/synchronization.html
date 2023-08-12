@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>docs/src/cluster/synchronization.md &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../" id="documentation_options" src="../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" />
+   
+  <link rel="stylesheet" href="../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <section id="docs-src-cluster-synchronization-md">
+<h1>docs/src/cluster/synchronization.md<a class="headerlink" href="#docs-src-cluster-synchronization-md" title="Permalink to this heading">¶</a></h1>
+<p>Last edited: 2023-08-11 21:38:33</p>
+<p>Contents:</p>
+<div class="highlight-md notranslate"><div class="highlight"><pre><span></span>---
+</pre></div>
+</div>
+<p>title: Synchronization
+—</p>
+<p>Fast, reliable synchronization is the biggest reason Solana is able to achieve such high throughput. Traditional blockchains synchronize on large chunks of transactions called blocks. By synchronizing on blocks, a transaction cannot be processed until a duration, called “block time”, has passed. In Proof of Work consensus, these block times need to be very large (~10 minutes) to minimize the odds of multiple validators producing a new valid block at the same time. There’s no such constraint in Proof of Stake consensus, but without reliable timestamps, a validator cannot determine the order of incoming blocks. The popular workaround is to tag each block with a [wallclock timestamp](<a class="reference external" href="https://en.bitcoin.it/wiki/Block_timestamp">https://en.bitcoin.it/wiki/Block_timestamp</a>). Because of clock drift and variance in network latencies, the timestamp is only accurate within an hour or two. To workaround the workaround, these systems lengthen block times to provide reasonable certainty that the median timestamp on each block is always increasing.</p>
+<p>Solana takes a very different approach, which it calls _Proof of <a href="#id1"><span class="problematic" id="id2">History_</span></a> or _PoH_. Leader nodes “timestamp” blocks with cryptographic proofs that some duration of time has passed since the last proof. All data hashed into the proof most certainly have occurred before the proof was generated. The node then shares the new block with validator nodes, which are able to verify those proofs. The blocks can arrive at validators in any order or even could be replayed years later. With such reliable synchronization guarantees, Solana is able to break blocks into smaller batches of transactions called _entries_. Entries are streamed to validators in realtime, before any notion of block consensus.</p>
+<p>Solana technically never sends a _block_, but uses the term to describe the sequence of entries that validators vote on to achieve _confirmation_. In that way, Solana’s confirmation times can be compared apples to apples to block-based systems. The current implementation sets block time to 800ms.</p>
+<p>What’s happening under the hood is that entries are streamed to validators as quickly as a leader node can batch a set of valid transactions into an entry. Validators process those entries long before it is time to vote on their validity. By processing the transactions optimistically, there is effectively no delay between the time the last entry is received and the time when the node can vote. In the event consensus is <strong>not</strong> achieved, a node simply rolls back its state. This optimistic processing technique was introduced in 1981 and called [Optimistic Concurrency Control](<a class="reference external" href="https://en.wikipedia.org/wiki/Optimistic_concurrency_control">https://en.wikipedia.org/wiki/Optimistic_concurrency_control</a>). It can be applied to blockchain architecture where a cluster votes on a hash that represents the full ledger up to some _block <a href="#id3"><span class="problematic" id="id4">height_</span></a>. In Solana, it is implemented trivially using the last entry’s PoH hash.</p>
+<p>## Relationship to VDFs</p>
+<p>The Proof of History technique was first described for use in blockchain by Solana in November of 2017. In June of the following year, a similar technique was described at Stanford and called a [verifiable delay function](<a class="reference external" href="https://eprint.iacr.org/2018/601.pdf">https://eprint.iacr.org/2018/601.pdf</a>) or _VDF_.</p>
+<p>A desirable property of a VDF is that verification time is very fast. Solana’s approach to verifying its delay function is proportional to the time it took to create it. Split over a 4000 core GPU, it is sufficiently fast for Solana’s needs, but if you asked the authors of the paper cited above, they might tell you ([and have](<a class="reference external" href="https://github.com/solana-labs/solana/issues/388">https://github.com/solana-labs/solana/issues/388</a>)) that Solana’s approach is algorithmically slow and it shouldn’t be called a VDF. We argue the term VDF should represent the category of verifiable delay functions and not just the subset with certain performance characteristics. Until that’s resolved, Solana will likely continue using the term PoH for its application-specific VDF.</p>
+<p>Another difference between PoH and VDFs is that a VDF is used only for tracking duration. PoH’s hash chain, on the other hand, includes hashes of any data the application observed. That data is a double-edged sword. On one side, the data “proves history” - that the data most certainly existed before hashes after it. On the other side, it means the application can manipulate the hash chain by changing _when_ the data is hashed. The PoH chain therefore does not serve as a good source of randomness whereas a VDF without that data could. Solana’s [leader rotation algorithm](synchronization.md#leader-rotation), for example, is derived only from the VDF _height_ and not its hash at that height.</p>
+<p>## Relationship to Consensus Mechanisms</p>
+<p>Proof of History is not a consensus mechanism, but it is used to improve the performance of Solana’s Proof of Stake consensus. It is also used to improve the performance of the data plane protocols.</p>
+<p>## More on Proof of History</p>
+<ul class="simple">
+<li><p>[water clock analogy](<a class="reference external" href="https://medium.com/solana-labs/proof-of-history-explained-by-a-water-clock-e682183417b8">https://medium.com/solana-labs/proof-of-history-explained-by-a-water-clock-e682183417b8</a>)</p></li>
+<li><p>[Proof of History overview](<a class="reference external" href="https://medium.com/solana-labs/proof-of-history-a-clock-for-blockchain-cf47a61a9274">https://medium.com/solana-labs/proof-of-history-a-clock-for-blockchain-cf47a61a9274</a>)</p></li>
+</ul>
+</section>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../_sources/src/cluster/synchronization.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

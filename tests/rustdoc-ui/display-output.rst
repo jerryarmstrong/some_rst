@@ -1,0 +1,26 @@
+tests/rustdoc-ui/display-output.rs
+==================================
+
+Last edited: 2023-03-30 20:35:59
+
+Contents:
+
+.. code-block:: rs
+
+    // Test that `--show-output` has an effect and `allow(unused)` can be overridden.
+
+// check-pass
+// edition:2018
+// compile-flags:--test --test-args=--show-output
+// normalize-stdout-test: "tests/rustdoc-ui" -> "$$DIR"
+// normalize-stdout-test "finished in \d+\.\d+s" -> "finished in $$TIME"
+
+/// ```
+/// #![warn(unused)]
+/// let x = 12;
+///
+/// fn foo(x: &dyn std::fmt::Display) {}
+/// ```
+pub fn foo() {}
+
+

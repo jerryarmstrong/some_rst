@@ -1,0 +1,65 @@
+components/AboutRealm.tsx
+=========================
+
+Last edited: 2023-08-11 18:13:34
+
+Contents:
+
+.. code-block:: tsx
+
+    import useRealm from 'hooks/useRealm'
+import useProgramVersion from '@hooks/useProgramVersion'
+
+const AboutRealm = () => {
+  const { realmInfo, symbol } = useRealm()
+  const programVersion = useProgramVersion()
+
+  return (
+    <div className="pb-4 space-y-3">
+      <div>
+        <p className="text-xs text-fgd-3">Name</p>
+        <p className="text-fgd-1">{realmInfo?.displayName || symbol}</p>
+      </div>
+      {realmInfo?.isCertified ? (
+        <div>
+          <p className="text-xs text-fgd-3">Token</p>
+          <p className="text-fgd-1">{symbol}</p>
+        </div>
+      ) : null}
+      {realmInfo?.website ? (
+        <div>
+          <p className="text-xs text-fgd-3">Website</p>
+          <a
+            className="default-transition flex items-center text-primary-light hover:text-primary-dark text-sm"
+            href={realmInfo?.website}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            {realmInfo?.website}
+          </a>
+        </div>
+      ) : null}
+      {realmInfo?.twitter ? (
+        <div>
+          <p className="text-xs text-fgd-3">Twitter</p>
+          <a
+            className="default-transition flex items-center text-primary-light hover:text-primary-dark text-sm"
+            href={`https://twitter.com/${realmInfo?.twitter}`}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            {realmInfo?.twitter}
+          </a>
+        </div>
+      ) : null}
+      <div>
+        <p className="text-xs text-fgd-3">Program Version</p>
+        <p className="text-fgd-1">{programVersion}</p>
+      </div>
+    </div>
+  )
+}
+
+export default AboutRealm
+
+

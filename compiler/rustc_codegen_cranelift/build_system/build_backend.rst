@@ -1,0 +1,63 @@
+compiler/rustc_codegen_cranelift/build_system/build_backend.rs
+==============================================================
+
+Last edited: 2023-03-30 20:35:59
+
+Contents:
+
+.. code-block:: rs
+
+    use std::env;
+use std::path::PathBuf;
+
+use super::path::{Dirs, RelPath};
+use super::rustc_info::get_file_name;
+use super::utils::{is_ci, CargoProject, Compiler};
+
+static CG_CLIF: CargoProject = CargoProject::new(&RelPath::SOURCE, "cg_clif");
+
+pub(crate) fn build_backend(
+    dirs: &Dirs,
+    channel: &str,
+    host_triple: &str,
+    use_unstable_features: bool,
+) -> PathBuf {
+    let mut cmd = CG_CLIF.build(&Compiler::host(), dirs);
+
+    cmd.env("CARGO_BUILD_INCREMENTAL", "true"); // Force incr comp even in release mode
+
+    let mut rustflags = env::var("RUSTFLAGS").unwrap_or_default();
+
+    if is_ci() {
+        // Deny warnings on CI
+        rustflags += " -Dwarnings";
+
+        // Disabling incr comp reduces cache size and incr comp doesn't save as much on CI anyway
+        cmd.env("CARGO_BUILD_INCREMENTAL", "false");
+    }
+
+    if use_unstable_features {
+        cmd.arg("--features").arg("unstable-features");
+    }
+
+    match channel {
+        "debug" => {}
+        "release" => {
+            cmd.arg("--release");
+        }
+        _ => unreachable!(),
+    }
+
+    cmd.env("RUSTFLAGS", rustflags);
+
+    eprintln!("[BUILD] rustc_codegen_cranelift");
+    super::utils::spawn_and_wait(cmd);
+
+    CG_CLIF
+        .target_dir(dirs)
+        .join(host_triple)
+        .join(channel)
+        .join(get_file_name("rustc_codegen_cranelift", "dylib"))
+}
+
+

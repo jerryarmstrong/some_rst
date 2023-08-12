@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>docs/src/proposals/cluster-test-framework.md &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../" id="documentation_options" src="../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" />
+   
+  <link rel="stylesheet" href="../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <section id="docs-src-proposals-cluster-test-framework-md">
+<h1>docs/src/proposals/cluster-test-framework.md<a class="headerlink" href="#docs-src-proposals-cluster-test-framework-md" title="Permalink to this heading">¶</a></h1>
+<p>Last edited: 2023-08-11 21:38:33</p>
+<p>Contents:</p>
+<div class="highlight-md notranslate"><div class="highlight"><pre><span></span>---
+</pre></div>
+</div>
+<p>title: Cluster Test Framework
+—</p>
+<p>This document proposes the Cluster Test Framework (CTF). CTF is a test harness that allows tests to execute against a local, in-process cluster or a deployed cluster.</p>
+<p>## Motivation</p>
+<p>The goal of CTF is to provide a framework for writing tests independent of where and how the cluster is deployed. Regressions can be captured in these tests and the tests can be run against deployed clusters to verify the deployment. The focus of these tests should be on cluster stability, consensus, fault tolerance, API stability.</p>
+<p>Tests should verify a single bug or scenario, and should be written with the least amount of internal plumbing exposed to the test.</p>
+<p>## Design Overview</p>
+<p>Tests are provided an entry point, which is a <cite>contact_info::ContactInfo</cite> structure, and a keypair that has already been funded.</p>
+<p>Each node in the cluster is configured with a <cite>validator::ValidatorConfig</cite> at boot time. At boot time this configuration specifies any extra cluster configuration required for the test. The cluster should boot with the configuration when it is run in-process or in a data center.</p>
+<p>Once booted, the test will discover the cluster through a gossip entry point and configure any runtime behaviors via validator RPC.</p>
+<p>## Test Interface</p>
+<p>Each CTF test starts with an opaque entry point and a funded keypair. The test should not depend on how the cluster is deployed, and should be able to exercise all the cluster functionality through the publicly available interfaces.</p>
+<p><a href="#id1"><span class="problematic" id="id2">``</span></a><a href="#id3"><span class="problematic" id="id4">`</span></a>text
+use crate::contact_info::ContactInfo;
+use solana_sdk::signature::{Keypair, Signer};
+pub fn test_this_behavior(</p>
+<blockquote>
+<div><p>entry_point_info: &amp;ContactInfo,
+funding_keypair: &amp;Keypair,
+num_nodes: usize,</p>
+</div></blockquote>
+<section id="id5">
+<h2>)<a class="headerlink" href="#id5" title="Permalink to this heading">¶</a></h2>
+<p>## Cluster Discovery</p>
+<p>At test start, the cluster has already been established and is fully connected. The test can discover most of the available nodes over a few second.</p>
+<p><a href="#id6"><span class="problematic" id="id7">``</span></a><a href="#id8"><span class="problematic" id="id9">`</span></a>text
+use crate::gossip_service::discover_nodes;</p>
+<p>// Discover the cluster over a few seconds.
+let cluster_nodes = discover_nodes(&amp;entry_point_info, num_nodes);
+<a href="#id10"><span class="problematic" id="id11">``</span></a><a href="#id12"><span class="problematic" id="id13">`</span></a></p>
+<p>## Cluster Configuration</p>
+<p>To enable specific scenarios, the cluster needs to be booted with special configurations. These configurations can be captured in <cite>validator::ValidatorConfig</cite>.</p>
+<p>For example:</p>
+<p><a href="#id14"><span class="problematic" id="id15">``</span></a><a href="#id16"><span class="problematic" id="id17">`</span></a>text
+let mut validator_config = ValidatorConfig::default_for_test();
+let local = LocalCluster::new_with_config(</p>
+<blockquote>
+<div><p>num_nodes,
+10_000,
+100,
+&amp;validator_config
+);</p>
+</div></blockquote>
+<p><a href="#id18"><span class="problematic" id="id19">``</span></a><a href="#id20"><span class="problematic" id="id21">`</span></a></p>
+<p>## How to design a new test</p>
+<p>For example, there is a bug that shows that the cluster fails when it is flooded with invalid advertised gossip nodes. Our gossip library and protocol may change, but the cluster still needs to stay resilient to floods of invalid advertised gossip nodes.</p>
+<p>Configure the RPC service:</p>
+<p><code class="docutils literal notranslate"><span class="pre">`text</span>
+<span class="pre">let</span> <span class="pre">mut</span> <span class="pre">validator_config</span> <span class="pre">=</span> <span class="pre">ValidatorConfig::default_for_test();</span>
+<span class="pre">validator_config.rpc_config.enable_rpc_gossip_push</span> <span class="pre">=</span> <span class="pre">true;</span>
+<span class="pre">validator_config.rpc_config.enable_rpc_gossip_refresh_active_set</span> <span class="pre">=</span> <span class="pre">true;</span>
+<span class="pre">`</span></code></p>
+<p>Wire the RPCs and write a new test:</p>
+<p><a href="#id22"><span class="problematic" id="id23">``</span></a><a href="#id24"><span class="problematic" id="id25">`</span></a>text
+pub fn test_large_invalid_gossip_nodes(</p>
+<blockquote>
+<div><p>entry_point_info: &amp;ContactInfo,
+funding_keypair: &amp;Keypair,
+num_nodes: usize,</p>
+</div></blockquote>
+<dl>
+<dt>) {</dt><dd><p>let cluster = discover_nodes(&amp;entry_point_info, num_nodes);</p>
+<p>// Poison the cluster.
+let client = create_client(entry_point_info.client_facing_addr(), VALIDATOR_PORT_RANGE);
+for _ in 0..(num_nodes * 100) {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>client.gossip_push(</dt><dd><p>cluster_info::invalid_contact_info()</p>
+</dd>
+</dl>
+<p>);</p>
+</div></blockquote>
+<p>}
+sleep(Durration::from_millis(1000));</p>
+<p>// Force refresh of the active set.
+for node in &amp;cluster {</p>
+<blockquote>
+<div><p>let client = create_client(node.client_facing_addr(), VALIDATOR_PORT_RANGE);
+client.gossip_refresh_active_set();</p>
+</div></blockquote>
+<p>}</p>
+<p>// Verify that spends still work.
+verify_spends(&amp;cluster);</p>
+</dd>
+</dl>
+</section>
+<section id="id26">
+<h2>}<a class="headerlink" href="#id26" title="Permalink to this heading">¶</a></h2>
+</section>
+</section>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../_sources/src/proposals/cluster-test-framework.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

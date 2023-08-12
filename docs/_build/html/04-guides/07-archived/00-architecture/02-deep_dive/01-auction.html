@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>docs/04-guides/07-archived/00-architecture/02-deep_dive/01-auction.md &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../" id="documentation_options" src="../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <section id="docs-04-guides-07-archived-00-architecture-02-deep-dive-01-auction-md">
+<h1>docs/04-guides/07-archived/00-architecture/02-deep_dive/01-auction.md<a class="headerlink" href="#docs-04-guides-07-archived-00-architecture-02-deep-dive-01-auction-md" title="Permalink to this heading">¶</a></h1>
+<p>Last edited: 2023-08-08 19:56:25</p>
+<p>Contents:</p>
+<div class="highlight-md notranslate"><div class="highlight"><pre><span></span><span class="gh"># Auction</span>
+</pre></div>
+</div>
+<p>## Overview</p>
+<p>The Auction contract is a primitive that is meant to be used in conjunction with another smart contract that understands the context of the resource for which the auction is being held. It contains mechanics for collecting payment from bidders, for keeping track of a winners list, and handling bid placement and cancellation, but it has no opinions on what the resource being bid on should be, or how it gets divided.</p>
+<p>It currently has support for English Auctions and Open Edition Auctions. The state for the contract is reproduced here:</p>
+<p><a href="#id1"><span class="problematic" id="id2">``</span></a><a href="#id3"><span class="problematic" id="id4">`</span></a>rust
+/// Structure with pricing floor data.
+#[repr(C)]
+#[derive(Clone, BorshSerialize, BorshDeserialize, PartialEq, Debug)]
+pub enum PriceFloor {</p>
+<blockquote>
+<div><p>/// Due to borsh on the front end disallowing different arguments in enums, we have to make sure data is
+/// same size across all three
+/// No price floor, any bid is valid.
+None([u8; 32]),
+/// Explicit minimum price, any bid below this is rejected.
+MinimumPrice([u64; 4]),
+/// Hidden minimum price, revealed at the end of the auction.
+BlindedPrice(Hash),</p>
+</div></blockquote>
+<p>}</p>
+<p>#[repr(C)]
+#[derive(Clone, BorshSerialize, BorshDeserialize, PartialEq, Debug)]
+pub struct AuctionData {</p>
+<blockquote>
+<div><p>/// Pubkey of the authority with permission to modify this auction.
+pub authority: Pubkey,
+/// Pubkey of the resource being bid on.
+/// TODO try to bring this back some day. Had to remove this due to a stack access violation bug
+/// interacting that happens in metaplex during redemptions due to some low level rust error
+/// that happens when AuctionData has too many fields. This field was the least used.
+///pub resource: Pubkey,
+/// Token mint for the SPL token being used to bid
+pub token_mint: Pubkey,
+/// The time the last bid was placed, used to keep track of auction timing.
+pub last_bid: Option&lt;UnixTimestamp&gt;,
+/// Slot time the auction was officially ended by.
+pub ended_at: Option&lt;UnixTimestamp&gt;,
+/// End time is the cut-off point that the auction is forced to end by.
+pub end_auction_at: Option&lt;UnixTimestamp&gt;,
+/// Gap time is the amount of time in slots after the previous bid at which the auction ends.
+pub end_auction_gap: Option&lt;UnixTimestamp&gt;,
+/// Minimum price for any bid to meet.
+pub price_floor: PriceFloor,
+/// The state the auction is in, whether it has started or ended.
+pub state: AuctionState,
+/// Auction Bids, each user may have one bid open at a time.
+pub bid_state: BidState,</p>
+</div></blockquote>
+<p>}</p>
+<p>// Further storage for more fields. Would like to store more on the main data but due
+// to a borsh issue that causes more added fields to inflict “Access violation” errors
+// during redemption in main Metaplex app for no reason, we had to add this nasty PDA.
+#[repr(C)]
+#[derive(Clone, BorshSerialize, BorshDeserialize, PartialEq, Debug)]
+pub struct AuctionDataExtended {</p>
+<blockquote>
+<div><p>/// Total uncancelled bids
+pub total_uncancelled_bids: u64,
+// Unimplemented fields
+/// Tick size
+pub tick_size: Option&lt;u64&gt;,
+/// gap_tick_size_percentage - two decimal points
+pub gap_tick_size_percentage: Option&lt;u8&gt;,</p>
+</div></blockquote>
+<p>}</p>
+<p>/// Define valid auction state transitions.
+#[repr(C)]
+#[derive(Clone, BorshSerialize, BorshDeserialize, PartialEq, Debug)]
+pub enum AuctionState {</p>
+<blockquote>
+<div><p>Created,
+Started,
+Ended,</p>
+</div></blockquote>
+<p>}</p>
+<p>/// Bids associate a bidding key with an amount bid.
+#[repr(C)]
+#[derive(Clone, BorshSerialize, BorshDeserialize, PartialEq, Debug)]
+pub struct Bid(pub Pubkey, pub u64);</p>
+<p>/// BidState tracks the running state of an auction, each variant represents a different kind of
+/// auction being run.
+#[repr(C)]
+#[derive(Clone, BorshSerialize, BorshDeserialize, PartialEq, Debug)]
+pub enum BidState {</p>
+<blockquote>
+<div><p>EnglishAuction { bids: Vec&lt;Bid&gt;, max: usize },
+OpenEdition { bids: Vec&lt;Bid&gt;, max: usize },</p>
+</div></blockquote>
+<p>}</p>
+<p>#[repr(C)]
+#[derive(Clone, BorshSerialize, BorshDeserialize, PartialEq, Debug)]
+pub enum WinnerLimit {</p>
+<blockquote>
+<div><p>Unlimited(usize),
+Capped(usize),</p>
+</div></blockquote>
+<p>}</p>
+<p>/// Models a set of metadata for a bidder, meant to be stored in a PDA. This allows looking up
+/// information about a bidder regardless of if they have won, lost or cancelled.
+#[repr(C)]
+#[derive(Clone, BorshSerialize, BorshDeserialize, PartialEq, Debug)]
+pub struct BidderMetadata {</p>
+<blockquote>
+<div><p>// Relationship with the bidder who’s metadata this covers.
+pub bidder_pubkey: Pubkey,
+// Relationship with the auction this bid was placed on.
+pub auction_pubkey: Pubkey,
+// Amount that the user bid.
+pub last_bid: u64,
+// Tracks the last time this user bid.
+pub last_bid_timestamp: UnixTimestamp,
+// Whether the last bid the user made was cancelled. This should also be enough to know if the
+// user is a winner, as if cancelled it implies previous bids were also cancelled.
+pub cancelled: bool,</p>
+</div></blockquote>
+<p>}</p>
+<p>#[repr(C)]
+#[derive(Clone, BorshSerialize, BorshDeserialize, PartialEq)]
+pub struct BidderPot {</p>
+<blockquote>
+<div><p>/// Points at actual pot that is a token account
+pub bidder_pot: Pubkey,
+/// Originating bidder account
+pub bidder_act: Pubkey,
+/// Auction account
+pub auction_act: Pubkey,
+/// emptied or not
+pub emptied: bool,</p>
+</div></blockquote>
+<p>}</p>
+<p><a href="#id5"><span class="problematic" id="id6">``</span></a><a href="#id7"><span class="problematic" id="id8">`</span></a></p>
+<p>The instruction set for auction can be found here: [<a class="reference external" href="https://github.com/metaplex-foundation/metaplex-program-library/blob/master/auction/program/src/instruction.rs](https://github.com/metaplex-foundation/metaplex-program-library/blob/master/auction/program/src/instruction.rs">https://github.com/metaplex-foundation/metaplex-program-library/blob/master/auction/program/src/instruction.rs](https://github.com/metaplex-foundation/metaplex-program-library/blob/master/auction/program/src/instruction.rs</a>)</p>
+<p>## Types</p>
+<p>### AuctionData</p>
+<p>This is the core data representing an auction in this program. It contains (almost) all the configuration representing an auction. You’ll notice that it has a <cite>token_mint</cite> field which means any spl_token can be used as the base mint for an auction, so you can bid in any currency! It also keeps track of a few other goodies, so let’s break them down one by one:</p>
+<p><cite>last_bid</cite>: Every time someone bids, this is set. Useful for doing math with the gap time feature.</p>
+<p><cite>ended_at</cite> : This is when the auction actually will end or has ended. It can be set at any time.</p>
+<p><cite>end_auction_at</cite> : This is actually a duration and is a little confusing. If you’re planning to start your auction at a later point in time, you can set this as a duration, and when you finally start your auction, ended_at will be set to now + this duration. Useful, right? Maybe poorly named. Our bad.</p>
+<p><cite>end_auction_gap</cite> : Used in conjunction with <cite>last_bid</cite> - if this is set to 1 minute, then let’s say someone makes a bid in the last 5 seconds of an auction. The auction is then extended by 55 seconds from its original end time (+ 1 minute from the last bid.) If someone then makes another bid within that time period, it’s another + 1 minute from that bid. And so on.</p>
+<p><cite>price_floor</cite> : Various options for price floor, but essentially you can use this to set no price floor, a minimum price floor, or a blind price floor on the auction. See the enum for more.</p>
+<p>AuctionData accounts always have PDA addresses of <cite>[‘auction’, auction_program_id, resource_id]</cite> where <cite>resource_id</cite> is the thing being auctioned off and <cite>auction_program_id</cite> is the id of the auction contract.</p>
+<p>### Bid State</p>
+<p>Bid State is technically not a top level struct, but an embedded one within AuctionData. I thought it was good to give it a section anyway because it’s a complex little beast. It’s actually an enum that holds a bid vector and a maximum size denoting how many of those bids are actually “valid winners” vs just placeholders.</p>
+<p>It’s reversed, which is to say that the number one winner is always at the end of the vec. It’s also always bigger generally than the number of winners so that if a bid is cancelled, we have some people who got bumped out of top spots that can be moved back into them without having to cancel and replace their bids. When a bid is placed, it is inserted in the proper position based on it’s amount and then the lowest bidder is bumped off the 0th position of the vec if the vec is at max size, so the vec remains sorted at all times.</p>
+<p>In the case of open edition, the max is always zero, ie there are never any winners, and we are just accepting bids and creating BidderMetadata tickets and BidderPots to accept payment for (probably) fixed price Participation NFTs.</p>
+<p>We would prefer that OpenEdition enum have no bid vector and no max, but unfortunately borsh-js does not support enums with different internal data structures, so all data structures in an enum must be identical (even if unused.) Keep that in mind when designing your own end to end borsh implementations!</p>
+<p>### BidderMetadata</p>
+<p>This is created and/or updated during the <cite>place_bid</cite> and <cite>cancel_bid</cite> endpoints of the contract, and acts as proof to other contracts and this one that a bidder actually placed a bid, because there is no guarantee that this bidder will have an entry in the actual BidState as they could’ve gotten knocked off the array in high periods of bidder activity.</p>
+<p>BidderMetadata always has a PDA of <cite>[‘auction’, auction_program_id, auction_id, bidder_key, ‘metadata’]</cite> where <cite>auction_program_id</cite> is the program id of the auction contract, <cite>auction_id</cite> is the key of the auction, and <cite>bidder_key</cite> is the wallet making the bid.</p>
+<p>### BidderPot</p>
+<p>This ended up being a bit of a redundant struct, but this serves as a join table between the actual token account containing the funds collected by the auction for a given bidder, the bidder’s sol wallet, and an auction. In the future we may merge this struct into BidderMetadata. There is also an <cite>emptied</cite> boolean on it to track whether the bidder pot has been claimed by the auctioneer for easy lookup.</p>
+<p>BidderPot always has a PDA of <cite>[‘auction’, auction_program_id, auction_id, bidder_key]`where `auction_program_id</cite> is the program id of the auction contract, <cite>auction_id</cite> is the key of the auction, and <cite>bidder_key</cite> is the wallet making the bid.</p>
+<p>### AuctionDataExtended</p>
+<p>If you’ve read this far, you now get to witness my personal shame. So as it turns out, if you build a complex enough program with enough structs flying around, there is some kind of weird interaction in the Metaplex contract that causes it to blow out with an access violation if you add more than a certain number of keys to one particular struct (AuctionData), and _only_ during the redemption endpoint calls. We were unable to discern why this was across 3 days of debugging. We had a theory it was due to some issue with borsh, but it is not 100% certain, as we’re not experts with that library’s internals.</p>
+<p>Instead, our work-around was to introduce AuctionDataExtended to add new fields that we needed to AuctionData without breaking this hidden bug that seems to exist. What is odd about the whole thing is adding fields to _other_ structs doesn’t cause any issues. In the future I’d love to have someone who knows way more than me about these subjects weigh in and tell me what I did wrong here to resolve this split-brain problem! We also don’t have reverse lookup capability (Resource key on AuctionData) because of this bug - adding it would cause the blow out I mentioned.</p>
+<p>Another note here is <cite>gap_tick_size_percentage</cite> as of the time of this writing has not been implemented yet, it is just a dummy field.</p>
+<p>AuctionDataExtended accounts always have PDA addresses of <cite>[‘auction’, auction_program_id, resource_id, ‘extended’]</cite> where <cite>resource_id</cite> is the thing being auctioned off and <cite>auction_program_id</cite> is the id of the auction contract.</p>
+<p>## Concepts</p>
+<p>### Incompleteness</p>
+<p>The contract currently has a deficiency in its implementation where an auctioneer can claim the funds for a winning bid without the winner having signed off on having received some sort of prize for that bid - which is why we mention the “conjunction” above in the Overview. Metaplex guarantees through the interaction with the Metaplex contract that all users of Metaplex + Auction combination get a prize, but use of Auction by itself does not guarantee a winner gets a prize for a bid, because this functionality does not exist in this contract alone yet. A future version of this contract will require the winning bidders to create a PDA admitting they have received a prize before the auctioneer can withdraw funds, making this a complete primitive that can be used without any other contract making guarantees.</p>
+<p>The way Metaplex makes such a guarantee is that it controls the Vault resource being bid on, and if you present the Metaplex contract with a BidderMetadata account from the Auction that represents a winning bid, it will disburse the proper NFT to you from the Vault. You can do the same with your own custom implementation.</p>
+<p>### Cancelling before Placing a Bid</p>
+<p>Currently, you cannot change or place a new bid until you cancel the old one. Just keep that in mind - it makes for easier logic all around. This may change in the future as we add support for bidders not being able to cancel once a bid is placed, or not being able to bid less than they previously bid.</p>
+<p>### Claiming bids</p>
+<p>Pulling money out of the auction contract as an auctioneer can only be done after an auction has ended and must be done for each winning bid, one after the other. You provide a destination token account and drain each bidder pot to it via the <cite>claim_bid</cite> endpoint.</p>
+<p>### Refunds</p>
+<p>Refunds work by cancelling bids. Currently, any bidder can cancel any time during an auction, but only non-winners of the auction can cancel after it ends. When users cancel, they receive full refunds. The “refund bid” button on the front end just cancels the bid.</p>
+<p>### Turning the Crank</p>
+<p>The <cite>place_bid</cite> will turn the state of the auction to <strong>Ended</strong> if someone places a bid after the auction’s <cite>ended_at</cite> date passes. It will then return <cite>Ok(())</cite> in a kind of silent pass without actually placing a bid. Once the auction is in the <strong>Ended</strong> state, bid funds can be claimed by the auctioneer. This is actually how an auction is really ended - it does not end on its own accord, someone has to turn the crank! In theory, an auction will remain open for all eternity, past its own end date, if nobody touches it, but nobody can do any invalid things to it. It’s kind of like Schrödinger’s Cat. However, even if an auction is not officially in <strong>Ended</strong> state, but it is past its <cite>ended_at</cite>, winners will not be allowed to cancel bids.</p>
+</section>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../_sources/04-guides/07-archived/00-architecture/02-deep_dive/01-auction.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

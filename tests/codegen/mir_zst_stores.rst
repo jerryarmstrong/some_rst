@@ -1,0 +1,28 @@
+tests/codegen/mir_zst_stores.rs
+===============================
+
+Last edited: 2023-03-30 20:35:59
+
+Contents:
+
+.. code-block:: rs
+
+    // compile-flags: -C no-prepopulate-passes
+
+#![crate_type = "lib"]
+use std::marker::PhantomData;
+
+#[derive(Copy, Clone)]
+struct Zst { phantom: PhantomData<Zst> }
+
+// CHECK-LABEL: @mir
+// CHECK-NOT: store{{.*}}undef
+#[no_mangle]
+pub fn mir() {
+    let x = Zst { phantom: PhantomData };
+    let y = (x, 0);
+    drop(y);
+    drop((0, x));
+}
+
+

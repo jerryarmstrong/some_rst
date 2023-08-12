@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>docs/src/proposals/versioned-transactions.md &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../" id="documentation_options" src="../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" />
+   
+  <link rel="stylesheet" href="../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <section id="docs-src-proposals-versioned-transactions-md">
+<h1>docs/src/proposals/versioned-transactions.md<a class="headerlink" href="#docs-src-proposals-versioned-transactions-md" title="Permalink to this heading">¶</a></h1>
+<p>Last edited: 2023-08-11 21:38:33</p>
+<p>Contents:</p>
+<div class="highlight-md notranslate"><div class="highlight"><pre><span></span><span class="gh"># Versioned Transactions - v0: Address Lookup Tables</span>
+</pre></div>
+</div>
+<p>## Problem</p>
+<p>Messages transmitted to Solana validators must not exceed the IPv6 MTU size to
+ensure fast and reliable network transmission of cluster info over UDP.
+Solana’s networking stack uses a conservative MTU size of 1280 bytes which,
+after accounting for headers, leaves 1232 bytes for packet data like serialized
+transactions.</p>
+<p>Developers building applications on Solana must design their on-chain program
+interfaces within the above transaction size limit constraint. One common
+work-around is to store state temporarily on-chain and consume that state in
+later transactions. This is the approach used by the BPF loader program for
+deploying Solana programs.</p>
+<p>However, this workaround doesn’t work well when developers compose many on-chain
+programs in a single atomic transaction. With more composition comes more
+account inputs, each of which takes up 32 bytes. There is currently no available
+workaround for increasing the number of accounts used in a single transaction
+since each transaction must list all accounts that it needs to properly lock
+accounts for parallel execution. Therefore the current cap is about 35 accounts
+after accounting for signatures and other transaction metadata.</p>
+<p>## Proposed Solution</p>
+<ol class="arabic simple">
+<li><p>Introduce a new program which manages on-chain address lookup tables</p></li>
+<li><p>Add a new transaction format which can make use of on-chain
+address lookup tables to efficiently load more accounts in a single transaction.</p></li>
+</ol>
+<p>### Address Lookup Table Program</p>
+<p>Here we describe a program-based solution to the problem, whereby a protocol
+developer or end-user can create collections of related addresses on-chain for
+concise use in a transaction’s account inputs.</p>
+<p>After addresses are stored on-chain in an address lookup table account, they may be
+succinctly referenced in a transaction using a 1-byte u8 index rather than a
+full 32-byte address. This will require a new transaction format to make use of
+these succinct references as well as runtime handling for looking up and loading
+addresses from the on-chain lookup tables.</p>
+<p>#### State</p>
+<p>Address lookup tables must be rent-exempt when initialized and after
+each time new addresses are appended. Lookup tables can either be extended
+from an on-chain buffered list of addresses or directly by appending
+addresses through instruction data. Newly appended addresses require
+one slot to warmup before being available to transactions for lookups.</p>
+<p>Since transactions use a <cite>u8</cite> index to look up addresses, address tables can
+store up to 256 addresses each. In addition to stored addresses, address table
+accounts also tracks various metadata explained below.</p>
+<p><a href="#id1"><span class="problematic" id="id2">``</span></a><a href="#id3"><span class="problematic" id="id4">`</span></a>rust
+/// The maximum number of addresses that a lookup table can hold
+pub const LOOKUP_TABLE_MAX_ADDRESSES: usize = 256;</p>
+<p>/// The serialized size of lookup table metadata
+pub const LOOKUP_TABLE_META_SIZE: usize = 56;</p>
+<dl class="simple">
+<dt>pub struct LookupTableMeta {</dt><dd><p>/// Lookup tables cannot be closed until the deactivation slot is
+/// no longer “recent” (not accessible in the <cite>SlotHashes</cite> sysvar).
+pub deactivation_slot: Slot,
+/// The slot that the table was last extended. Address tables may
+/// only be used to lookup addresses that were extended before
+/// the current bank’s slot.
+pub last_extended_slot: Slot,
+/// The start index where the table was last extended from during
+/// the <cite>last_extended_slot</cite>.
+pub last_extended_slot_start_index: u8,
+/// Authority address which must sign for each modification.
+pub authority: Option&lt;Pubkey&gt;,
+// Raw list of addresses follows this serialized structure in
+// the account’s data, starting from <cite>LOOKUP_TABLE_META_SIZE</cite>.</p>
+</dd>
+</dl>
+<section id="id5">
+<h2>}<a class="headerlink" href="#id5" title="Permalink to this heading">¶</a></h2>
+<p>#### Cleanup</p>
+<p>Once an address lookup table is no longer needed, it can be deactivated and closed
+to have its rent balance reclaimed. Address lookup tables may not be recreated
+at the same address because each new lookup table must be initialized at an address
+derived from a recent slot.</p>
+<p>Address lookup tables can be deactivated at any time but can continue to be used
+by transactions until the deactivation slot is no longer present in the slot hashes
+sysvar. This cool-down period ensures that in-flight transactions cannot be
+censored and that address lookup tables cannot be closed and recreated for the same
+slot.</p>
+<p>### Versioned Transactions</p>
+<p>In order to support address table lookups, the structure of serialized
+transactions must be modified. The new transaction format should not
+affect transaction processing in the Solana program runtime beyond the
+increased capacity for accounts and program invocations. Invoked
+programs will be unaware of which transaction format was used.</p>
+<p>The new transaction format must be distinguished from the current transaction
+format. Current transactions can fit at most 19 signatures (64-bytes each) but
+the message header encodes <cite>num_required_signatures</cite> as a <cite>u8</cite>. Since the upper
+bit of the <cite>u8</cite> will never be set for a valid transaction, we can enable it to
+denote whether a transaction should be decoded with the versioned format or not.</p>
+<p>The original transaction format will be referred to as the legacy transaction
+version and the first versioned transaction format will start at version 0.</p>
+<p>#### New Transaction Format</p>
+<p><a href="#id6"><span class="problematic" id="id7">``</span></a><a href="#id8"><span class="problematic" id="id9">`</span></a>rust
+#[derive(Serialize, Deserialize)]
+pub struct VersionedTransaction {</p>
+<blockquote>
+<div><p>/// List of signatures
+#[serde(with = “short_vec”)]
+pub signatures: Vec&lt;Signature&gt;,
+/// Message to sign.
+pub message: VersionedMessage,</p>
+</div></blockquote>
+<p>}</p>
+<p>// Uses custom serialization. If the first bit is set, the remaining bits
+// in the first byte will encode a version number. If the first bit is not
+// set, the first byte will be treated as the first byte of an encoded
+// legacy message.
+pub enum VersionedMessage {</p>
+<blockquote>
+<div><p>Legacy(LegacyMessage),
+V0(v0::Message),</p>
+</div></blockquote>
+<p>}</p>
+<p>// The structure of the new v0 Message
+#[derive(Serialize, Deserialize)]
+pub struct Message {</p>
+<blockquote>
+<div><p>// unchanged
+pub header: MessageHeader,</p>
+<p>// unchanged
+#[serde(with = “short_vec”)]
+pub account_keys: Vec&lt;Pubkey&gt;,</p>
+<p>// unchanged
+pub recent_blockhash: Hash,</p>
+<p>// unchanged
+//
+// # Notes
+//
+// Account and program indexes will index into the list of addresses
+// constructed from the concatenation of three key lists:
+//   1) message <cite>account_keys</cite>
+//   2) ordered list of keys loaded from address table <cite>writable_indexes</cite>
+//   3) ordered list of keys loaded from address table <cite>readonly_indexes</cite>
+#[serde(with = “short_vec”)]
+pub instructions: Vec&lt;CompiledInstruction&gt;,</p>
+<p>/// List of address table lookups used to load additional accounts
+/// for this transaction.
+#[serde(with = “short_vec”)]
+pub address_table_lookups: Vec&lt;MessageAddressTableLookup&gt;,</p>
+</div></blockquote>
+<p>}</p>
+<p>/// Address table lookups describe an on-chain address lookup table to use
+/// for loading more readonly and writable accounts in a single tx.
+#[derive(Serialize, Deserialize)]
+pub struct MessageAddressTableLookup {</p>
+<blockquote>
+<div><p>/// Address lookup table account key
+pub account_key: Pubkey,
+/// List of indexes used to load writable account addresses
+#[serde(with = “short_vec”)]
+pub writable_indexes: Vec&lt;u8&gt;,
+/// List of indexes used to load readonly account addresses
+#[serde(with = “short_vec”)]
+pub readonly_indexes: Vec&lt;u8&gt;,</p>
+</div></blockquote>
+</section>
+<section id="id10">
+<h2>}<a class="headerlink" href="#id10" title="Permalink to this heading">¶</a></h2>
+<p>#### Size changes</p>
+<ul class="simple">
+<li><p>1 extra byte for the <cite>version</cite> field</p></li>
+<li><p>1 extra byte for the <cite>address_table_lookups</cite> length</p></li>
+<li><p>34 extra bytes for each address table lookup which includes 32 bytes for the
+address of the table and a byte each for the lengths of the <cite>writable_indexes</cite>
+and <cite>readonly_indexes</cite> fields</p></li>
+<li><p>1 extra byte for each lookup table index</p></li>
+</ul>
+<p>#### Cost</p>
+<p>Address lookups require extra computational overhead during transaction
+processing, but also reduce network bandwidth due to smaller transactions and
+therefore smaller blocks.</p>
+<p>#### Metadata changes</p>
+<p>Each resolved address from an address lookup table should be stored in
+the transaction metadata for quick reference. This will avoid the need for
+clients to make multiple RPC round trips to fetch all accounts loaded by a
+v0 transaction. It will also make it easier to use the ledger tool to
+analyze account access patterns.</p>
+<p>#### RPC changes</p>
+<p>Fetched transaction responses will likely require a new version field to
+indicate to clients which transaction structure to use for deserialization.
+Clients using pre-existing RPC methods will receive error responses when
+attempting to fetch a versioned transaction which will indicate that they
+must upgrade.</p>
+<p>The RPC API should also support an option for returning fully expanded
+transactions to abstract away the address lookup table details from
+downstream clients.</p>
+<p>### Limitations</p>
+<ul class="simple">
+<li><p>Max of 256 unique accounts may be loaded by a transaction because <cite>u8</cite>
+is used by compiled instructions to index into transaction message <cite>account_keys</cite>.</p></li>
+<li><p>Address lookup tables can hold up to 256 entries because lookup table indexes are also <cite>u8</cite>.</p></li>
+<li><p>Transaction signers may not be loaded through an address lookup table, the full
+address of each signer must be serialized in the transaction. This ensures that
+the performance of transaction signature checks is not affected.</p></li>
+<li><p>Hardware wallets will not be able to display details about accounts referenced
+through address lookup tables due to inability to verify on-chain data.</p></li>
+<li><p>Only single level address lookup tables can be used. Recursive lookups will not be supported.</p></li>
+</ul>
+<p>## Security Concerns</p>
+<p>### Lookup table re-initialization</p>
+<p>If an address lookup table can be closed and re-initialized with new addresses,
+any client which is unaware of the change could inadvertently lookup unexpected
+addresses. To avoid this, all address lookup tables must be initialized at an
+address derived from a recent slot and they cannot be closed until the slot
+used for deactivation is no longer in the slot hashes sysvar.</p>
+<p>### Resource consumption</p>
+<p>Enabling more account inputs in a transaction allows for more program
+invocations, write-locks, and data reads / writes. Before address tables are
+enabled, transaction-wide compute limits and increased costs for write locks and
+data reads are required.</p>
+<p>### Front running</p>
+<p>If the addresses listed within an address lookup table are mutable, front
+running attacks could modify which addresses are resolved for a later
+transaction. For this reason, address lookup tables are append-only and may
+only be closed if it’s no longer possible to create a new lookup table at the
+same derived address.</p>
+<p>Additionally, a malicious actor could try to fork the chain immediately after a
+new address lookup table account is added to a block. If successful, they could
+add a different unexpected table entry in the fork. In order to deter this attack,
+clients should wait for address lookup tables to be finalized before using them in a
+transaction. Clients may also append integrity check instructions to the
+transaction which verify that the correct accounts are looked up.</p>
+<p>### Denial of service</p>
+<p>Address lookup table accounts may be read very frequently and will therefore
+be a more high profile target for denial of service attacks through write locks
+similar to sysvar accounts.</p>
+<p>For this reason, special handling should be given to address lookup tables.
+When an address lookup table is used to lookup addresses for a transaction,
+it can be loaded without waiting for a read lock. To avoid race conditions,
+only the addresses appended in previous blocks can be used for lookups and
+deactivation requires a cool-down period.</p>
+<p>### Duplicate accounts</p>
+<p>Transactions may not load an account more than once whether directly through
+<cite>account_keys</cite> or indirectly through <cite>address_table_lookups</cite>.</p>
+<p>## Other Proposals</p>
+<ol class="arabic simple">
+<li><p>Account prefixes</p></li>
+</ol>
+<p>Needing to pre-register accounts in an on-chain address lookup table is cumbersome
+because it adds an extra step for transaction processing. Instead, Solana
+transactions could use variable length address prefixes to specify accounts.
+These prefix shortcuts can save on data usage without needing to setup on-chain
+state.</p>
+<p>However, this model requires nodes to keep a mapping of prefixes to active account
+addresses. Attackers can create accounts with the same prefix as a popular account
+to disrupt transactions.</p>
+<ol class="arabic simple" start="2">
+<li><p>Transaction builder program</p></li>
+</ol>
+<p>Solana can provide a new on-chain program which allows “Big” transactions to be
+constructed on-chain by normal transactions. Once the transaction is
+constructed, a final “Execute” transaction can trigger a node to process the big
+transaction as a normal transaction without needing to fit it into an MTU sized
+packet.</p>
+<p>The UX of this approach is tricky. A user could in theory sign a big transaction
+but it wouldn’t be great if they had to use their wallet to sign multiple
+transactions to build that transaction that they already signed and approved. This
+could be a use-case for transaction relay services, though. A user could pay a
+relayer to construct the large pre-signed transaction on-chain for them.</p>
+<p>In order to prevent the large transaction from being reconstructed and replayed,
+its message hash will need to be added to the status cache when executed.</p>
+<ol class="arabic simple" start="3">
+<li><p>Epoch account indexes</p></li>
+</ol>
+<p>Similarly to leader schedule calculation, validators could create a global index
+of the most accessed accounts in the previous epoch and make that index
+available to transactions in the following epoch.</p>
+<p>This approach has a downside of only updating the index at epoch boundaries
+which means there would be a few day delay before popular new accounts could be
+referenced. It also needs to be consistently generated by all validators by
+using some criteria like adding accounts in order by access count.</p>
+<ol class="arabic simple" start="4">
+<li><p>Address lists</p></li>
+</ol>
+<p>Extend the transaction structure to support addresses that, when loaded, expand
+to a list of addresses. After expansion, all account inputs are concatenated to
+form a single list of account keys which can be indexed into by instructions.
+Address lists would likely need to be immutable to prevent attacks. They would
+also need to be limited in length to limit resource consumption.</p>
+<p>This proposal can be thought of a special case of the proposed index account
+approach. Since the full account list would be expanded, there’s no need to add
+additional offsets that use up the limited space in a serialized transaction.
+However, the expected size of an address list may need to be encoded into the
+transaction to aid the sanitization of account indexes. We would also need to
+encode how many addresses in the list should be loaded as readonly vs
+read-write. Lastly, special attention must be given to watch out for addresses
+that exist in multiple account lists.</p>
+<ol class="arabic simple" start="5">
+<li><p>Increase transaction size</p></li>
+</ol>
+<p>Significantly larger serialized transactions have an increased likelihood of being
+dropped over the wire but this might not be a big issue since clients can retry
+transactions anyways. The only time validators need to send individual transactions
+over the network is when a leader forwards unprocessed transactions to the next
+leader.</p>
+</section>
+</section>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../_sources/src/proposals/versioned-transactions.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

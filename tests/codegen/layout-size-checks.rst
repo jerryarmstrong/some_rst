@@ -1,0 +1,42 @@
+tests/codegen/layout-size-checks.rs
+===================================
+
+Last edited: 2023-03-30 20:35:59
+
+Contents:
+
+.. code-block:: rs
+
+    // compile-flags: -O
+// only-x86_64
+// ignore-debug: the debug assertions get in the way
+
+#![crate_type = "lib"]
+
+use std::alloc::Layout;
+
+type RGB48 = [u16; 3];
+
+// CHECK-LABEL: @layout_array_rgb48
+#[no_mangle]
+pub fn layout_array_rgb48(n: usize) -> Layout {
+    // CHECK-NOT: llvm.umul.with.overflow.i64
+    // CHECK: icmp ugt i64 %n, 1537228672809129301
+    // CHECK-NOT: llvm.umul.with.overflow.i64
+    // CHECK: mul nuw nsw i64 %n, 6
+    // CHECK-NOT: llvm.umul.with.overflow.i64
+    Layout::array::<RGB48>(n).unwrap()
+}
+
+// CHECK-LABEL: @layout_array_i32
+#[no_mangle]
+pub fn layout_array_i32(n: usize) -> Layout {
+    // CHECK-NOT: llvm.umul.with.overflow.i64
+    // CHECK: icmp ugt i64 %n, 2305843009213693951
+    // CHECK-NOT: llvm.umul.with.overflow.i64
+    // CHECK: shl nuw nsw i64 %n, 2
+    // CHECK-NOT: llvm.umul.with.overflow.i64
+    Layout::array::<i32>(n).unwrap()
+}
+
+

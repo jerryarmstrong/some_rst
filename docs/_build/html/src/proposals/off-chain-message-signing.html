@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>docs/src/proposals/off-chain-message-signing.md &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../" id="documentation_options" src="../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" />
+   
+  <link rel="stylesheet" href="../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <section id="docs-src-proposals-off-chain-message-signing-md">
+<h1>docs/src/proposals/off-chain-message-signing.md<a class="headerlink" href="#docs-src-proposals-off-chain-message-signing-md" title="Permalink to this heading">¶</a></h1>
+<p>Last edited: 2023-08-11 21:38:33</p>
+<p>Contents:</p>
+<div class="highlight-md notranslate"><div class="highlight"><pre><span></span><span class="gh"># Off-chain message signing</span>
+</pre></div>
+</div>
+<p>## Motivation</p>
+<p>There is ecosystem demand for a method of signing non-transaction messages with
+a Solana wallet. Typically this is some kind of “proof of wallet ownership” for
+entry into a whitelisted system.</p>
+<p>Some inspiration can be gleaned from relevant portions of Ethereum’s
+[EIP-712](<a class="reference external" href="https://eips.ethereum.org/EIPS/eip-712">https://eips.ethereum.org/EIPS/eip-712</a>)</p>
+<p>## Considerations</p>
+<ul class="simple">
+<li><p>Security
+* Off-chain message signatures should not be valid transaction message signatures</p></li>
+<li><p>Future-proofing
+* Versioning
+* Co-exist with versioned transaction messages and extended length transactions</p></li>
+<li><p>Compatibility
+* Hardware wallet signing
+* Localization</p></li>
+</ul>
+<p>## Message Preamble</p>
+<div class="line-block">
+<div class="line">Field | Start offset | Length (bytes) | Description</div>
+<div class="line">:—- | :———-: | :————: | :———-</div>
+<div class="line">Signing Domain | 0x00 | 16 | [[1](#signing-domain-specifier)]</div>
+<div class="line">Header version | 0x10 | 1 | [[2](#header-version)]</div>
+<div class="line">Application domain | 0x11 | 32 | [[3](#application-domain)]</div>
+<div class="line">Message format | 0x31 | 1 | [[4](#message-format)]</div>
+<div class="line">Signer count | 0x32 | 1 | Number of signers committing to the message. An 8-bit, unsigned integer. <strong>MUST NOT</strong> be zero.</div>
+<div class="line">Signers | 0x33 | <cite>SIGNER_COUNT</cite> * 32 | <cite>SIGNER_COUNT</cite> ed25519 public keys of signers</div>
+<div class="line">Message length | 0x33 + <cite>SIGNER_CNT</cite> * 32 | 2 | Length of message in bytes. A 16-bit, unsigned, little-endian integer. <strong>MUST NOT</strong> be zero.</div>
+</div>
+<p>### Signing Domain Specifier</p>
+<p>The signing domain specifier is a prefix byte string used to give similar structure
+to all off-chain message signatures. We assign its value to be:
+<code class="docutils literal notranslate"><span class="pre">`</span>
+<span class="pre">b&quot;\xffsolana</span> <span class="pre">offchain&quot;</span>
+<span class="pre">`</span></code>
+The first byte, <cite>xff</cite>, was chosen for the following reasons
+1. It corresponds to a value that is illegal as the first byte in a transaction
+<cite>MessageHeader</cite>.
+1. It avoids unintentional misuse in languages with C-like, null-terminated strings.</p>
+<p>The remaining bytes, <cite>b”solana offchain”</cite>, were chosen to be descriptive and
+reasonably long, but are otherwise arbitrary.</p>
+<p>This field <strong>SHOULD NOT</strong> be displayed to users</p>
+<p>### Header</p>
+<p>#### Header version</p>
+<p>The header version is represented as an 8-bit unsigned integer. Only the version
+0 header format is specified in this document</p>
+<p>This field <strong>SHOULD NOT</strong> be displayed to users</p>
+<p>#### Application domain</p>
+<p>A 32-byte array identifying the application requesting off-chain message signing.
+This may be any arbitrary bytes. For instance the on-chain address of a program,
+DAO instance, Candy Machine, etc.</p>
+<p>This field <strong>SHOULD</strong> be displayed to users as a base58-encoded ASCII string rather
+than interpretted otherwise.</p>
+<p>#### Message Format</p>
+<p>Version <cite>0</cite> headers specify three message formats allowing for trade-offs between
+compatibility and composition of messages.</p>
+<div class="line-block">
+<div class="line">ID  | Encoding              | Maximum Length * | Hardware Wallet Support |</div>
+<div class="line">:-: | :——————-: | :—————: | :———————: |</div>
+<div class="line-block">
+<div class="line">0  | Restricted ASCII ** | 1232              | Yes                     |</div>
+<div class="line">1  | UTF-8                 | 1232              | Blind sign only         |</div>
+<div class="line">2  | UTF-8                 | 65535             | No                      |</div>
+</div>
+</div>
+<p>* Combined length of the [message preamble](#message-preamble) and message body&lt;br/&gt;
+** Those characters for which [<cite>isprint(3)</cite>](<a class="reference external" href="https://linux.die.net/man/3/isprint">https://linux.die.net/man/3/isprint</a>)
+returns true.  That is, <cite>0x20..=0x7e</cite>.</p>
+<p>Both the message encoding and maximum message length <strong>MUST</strong> be enforced by
+signer and verifier.</p>
+<p>Formats <cite>0</cite> and <cite>1</cite> are motivated by hardware wallet support where both RAM
+to store the payload and font character support are limited.</p>
+<p>This field <strong>SHOULD NOT</strong> be displayed to users</p>
+<p>## Signing</p>
+<p>Solana off-chain messages <strong>MUST</strong> only be signed using the ed25519 digital
+signature scheme. Before signing, the message <strong>MUST</strong> be strictly checked to
+conform to the associated preamble. The message body is then appended to the
+[message preamble](#message-preamble). Finally the result is ed25519 signed.</p>
+<p>## Verification
+Upon successful ed25519 verification of _all_ attached signatures, the message
+<strong>MUST</strong> be strictly checked to conform to the [message preamble](#message-preamble).
+A message that does not conform to its preamble is invalid, regardless of the
+validity of any signatures.</p>
+<p>## Envelope</p>
+<p>When passing around signed off-chain messages a common format is helpful. The
+recommended binary representation is as follows:</p>
+<div class="line-block">
+<div class="line">Field | Start offset | Length (bytes) | Description</div>
+<div class="line">:—- | :———-: | :————: | :———-</div>
+<div class="line">Signature Count * | 0x00 | 1 | Number of signatures. An 8-bit, unsigned integer</div>
+<div class="line">Signatures | 0x01 | <cite>SIG_COUNT</cite> * 64 | <cite>SIG_COUNT</cite> ed25519 signatures</div>
+<div class="line">Message Preamble | 0x01 + <cite>SIG_COUNT</cite> * 64 | <cite>PREAMBLE_LEN</cite> | The [message preamble](#message-preamble)</div>
+<div class="line">Message Body | 0x01 + <cite>SIG_COUNT * 64 + `PREAMBLE_LEN</cite> | <cite>MESSAGE_LEN</cite> | The message content</div>
+</div>
+<p>The signature count <strong>MUST</strong> match the value of signers count from the message
+preamble.</p>
+<p>Signatures <strong>MUST</strong> be ordered to match their corresponding public keys as
+specified in the message preamble.</p>
+<p>## Runtime Considerations</p>
+<p>To prevent social attacks by which the signer is tricked into signing a transaction,
+the runtime <strong>MUST NOT</strong> accept signed off-chain messages as transactions under any
+circumstances. The first byte of the [signing domain specifier](#signing-domain-specifier)
+is chosen such that it corresponds to a value (<cite>0xff</cite>) which is implicitly illegal
+as the first byte in a transaction <cite>MessageHeader</cite> today. The property is implicit
+because the top bit in the first byte of a <cite>MessageHeader</cite> being set signals a
+versioned transaction, but only a value of
+[zero is supported](<a class="reference external" href="https://github.com/solana-labs/solana/blob/b6ae6c1fe17e4b64c5051c651ca2585e4f55468c/sdk/program/src/message/versions/mod.rs#L269-L281">https://github.com/solana-labs/solana/blob/b6ae6c1fe17e4b64c5051c651ca2585e4f55468c/sdk/program/src/message/versions/mod.rs#L269-L281</a>)
+at this time. The runtime will need to be modified to reserve 127 as an illegal
+version number, making this property explicit.</p>
+<p>### Implementation</p>
+<p>The runtime changes described above have been implemented in PR [#29807](<a class="reference external" href="https://github.com/solana-labs/solana/pull/29807">https://github.com/solana-labs/solana/pull/29807</a>)</p>
+</section>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../_sources/src/proposals/off-chain-message-signing.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

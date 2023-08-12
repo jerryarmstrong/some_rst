@@ -1,0 +1,37 @@
+test/examples/sig-check/sig-check.test.ts
+=========================================
+
+Last edited: 2023-03-29 13:30:41
+
+Contents:
+
+.. code-block:: ts
+
+    import { Keypair } from '@solana/web3.js';
+import expect from 'expect';
+import nacl from 'tweetnacl';
+import { Contract } from '../../../src';
+import { loadContract } from '../utils';
+
+describe('Signature Check', () => {
+    let contract: Contract;
+    let storage: Keypair;
+
+    before(async function () {
+        this.timeout(150000);
+        ({ contract, storage } = await loadContract(__dirname, 'SigCheck'));
+    });
+
+    it('check valid signature', async function () {
+        const message = Buffer.from('Foobar');
+        const signature = nacl.sign.detached(message, storage.secretKey);
+
+        const { result } = await contract.functions.verify(storage.publicKey.toBytes(), message, signature, {
+            ed25519sigs: [{ publicKey: storage.publicKey, message, signature }],
+        });
+
+        expect(result).toEqual(true);
+    });
+});
+
+

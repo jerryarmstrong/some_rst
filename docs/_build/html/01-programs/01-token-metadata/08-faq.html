@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>docs/01-programs/01-token-metadata/08-faq.md &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../" id="documentation_options" src="../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" />
+   
+  <link rel="stylesheet" href="../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <section id="docs-01-programs-01-token-metadata-08-faq-md">
+<h1>docs/01-programs/01-token-metadata/08-faq.md<a class="headerlink" href="#docs-01-programs-01-token-metadata-08-faq-md" title="Permalink to this heading">¶</a></h1>
+<p>Last edited: 2023-08-08 19:56:25</p>
+<p>Contents:</p>
+<div class="highlight-md notranslate"><div class="highlight"><pre><span></span><span class="gh"># FAQ</span>
+</pre></div>
+</div>
+<p>### How can I filter Metadata accounts by fields located after the <cite>creators</cite> array using <cite>getProgramAccounts</cite>?</p>
+<p>When using [the <cite>getProgramAccounts</cite> method from the RPC API](<a class="reference external" href="https://docs.solana.com/developing/clients/jsonrpc-api#getprogramaccounts">https://docs.solana.com/developing/clients/jsonrpc-api#getprogramaccounts</a>), it is common to want to filter accounts by fields using <cite>memcmp</cite> filters.</p>
+<p>Since the <cite>memcmp</cite> filter compares arrays of bytes, this approach requires knowledge of the data structure of the account. Additionally, it requires the length of that data structure to be fixed, so we can find the position of the field we’re looking for, for every single account.</p>
+<p>Unfortunately, the <cite>creators</cite> field of the [Metadata Account](./accounts#metadata) is a vector that can contain one to five creators. This means the position of every field after it depends on how many creators the account has.</p>
+<p>Note that adding new fields to an account without adding breaking change requires appending optional fields to the accounts. This unfortunately means that any new features we may add to the Metadata Account will be after the <cite>creators</cite> field and therefore will be challenging to filter via <cite>getProgramAccounts</cite>.</p>
+<p>There are several ways to solve this problem:</p>
+<ul class="simple">
+<li><p>If every single account we are trying to filter has <strong>the same number of creators</strong>, then we can figure out the offset of the next field. We can do this by adding <cite>4 + 34 * n</cite> to the <cite>creators</cite> offset, where <cite>n</cite> is the fixed number of creators and <cite>4</cite> is because 4 bytes are used to store the length of the vector. This unblocks us for every field of fixed length present after the <cite>creators</cite> field. Unfortunately, the problem reoccurs as soon as we reach another field of variable size such as another vector or an optional field. Therefore, this solution is only valid if we know the exact length of all variable fields before the field we are trying to filter with.</p></li>
+<li><p>Another solution is to <strong>crawl transactions to find the accounts we’re looking for</strong>. This approach is a bit more complex and requires us to implement a custom procedure that fits our needs. For instance, we can use <cite>getSignaturesForAddress</cite> to get all transactions associated with an account and then use <cite>getTransaction</cite> on each of them to access their transaction data before filtering the ones that matter for our use case. It is also worth considering that this approach might not be the most future-proof solution since we might end up relying on instructions that could be deprecated in favor of new ones.</p></li>
+<li><p>Finally, <strong>the most robust solution is to index the data we’re looking for using a [Geyser Plugin](https://docs.solana.com/developing/plugins/geyser-plugins)</strong>. This currently requires a significant setup, but we end up with a reliable data store that mirrors the data in the Solana blockchain. Not only does it fix our filtering issue, but it also provides a much more convenient and efficient way to access our data.</p></li>
+</ul>
+<p>### How can I filter Metadata accounts by collection using <cite>getProgramAccounts</cite>?</p>
+<p>As mentioned in the question above, filtering by fields present after the <cite>creators</cite> array is a challenging task because it is not a field of fixed size.</p>
+<p>Since <strong>the `collection` field is located after the `creators` field</strong>, this makes filtering [Metadata accounts](./accounts#metadata) by collection somewhat difficult.</p>
+<p>The solutions listed above apply here too but, because this is a common problem, we have written a more detailed guide on how to use transaction crawling to access Metadata accounts of a given collection: <strong>[Get Collection Methods](https://metaplex.notion.site/Get-Collection-Methods-1ff0b118e4ce4605971df60e753a8559)</strong>.</p>
+<p>### Why are the mint and freeze authorities transferred to the Edition PDA?</p>
+<p>One question we often receive is: Why does the Token Metadata program transfer the <cite>Mint Authority</cite> and the <cite>Freeze Authority</cite> of the Mint Account to the Edition PDA when creating NFTs? Why not just void them by setting them to <cite>None</cite>?</p>
+<p>Let’s take a look at why this is the case for both of these authorities separately.</p>
+<p>#### Mint Authority</p>
+<p>Controlling the Mint Authority is a crucial step for ensuring the non-fungibility of a token. Without this protection, someone could mint more tokens for a given NFT and therefore make the NFT fungible.</p>
+<p>One way to prevent this from happening is to set the Mint Authority to <cite>None</cite> to ensure no one will ever be able to mint any more tokens for that NFT. However, the Token Metadata program sets that authority to the Edition PDA — which links to a Master Edition account or an Edition account.</p>
+<p><strong>But Why?</strong> The short answer is: <strong>it enables us to deploy upgrades to the Token Metadata program at a much lower cost</strong>.</p>
+<p>Losing the Mint Authority is an irreversible action which means we could never leverage it to migrate NFTs to newer versions. For instance, say we want to change the way Original and Printed NFTs are structured and, instead of using Edition accounts, we want to leverage tokens. Without the Mint Authority, migrating NFTs to the new version would simply be impossible.</p>
+<p><strong>Losing this authority would limit the scope of features and changes we may want to implement in the future</strong> and that’s why we’re not setting it to <cite>None</cite>.</p>
+<p>However, that doesn’t mean someone can use that Mint Authority to mint more tokens on your NFT. The Mint Authority isn’t transferred to someone’s public key, it is transferred to a PDA that belongs to the Token Metadata program. Therefore, only an instruction provided by the program could make use of it and such instruction does not exist on the program. It is important to note that the Token Metadata program is completely open-source so anyone can inspect it to ensure the Mint Authority is not used to mint more tokens.</p>
+<p>#### Freeze Authority</p>
+<p>Controlling the Freeze Authority allows someone to freeze a Token account, making that account immutable until it is thawed.</p>
+<p>One reason this authority is transferred to the Edition PDA of the Token Metadata program is, similarly to the Mint Authority, it increases the scope of potential new features and upgrades.</p>
+<p>However, contrary to the Mint Authority, we actually make use of that authority in the program.</p>
+<p>The [<cite>FreezeDelegatedAccount</cite>](./instructions#freeze-the-token-account-as-a-delegate) and [<cite>ThawDelegatedAccount</cite>](./instructions#thaw-the-token-account-as-a-delegate) instructions are the only instructions that make use of the Freeze Authority. They allow the Delegate of a Token account to freeze (and thaw) that Token account to make them what we call “<strong>Non-Transferable NFTs</strong>”. This enables a variety of use-cases such as preventing someone from selling an NFT while it is listed in an escrowless marketplace.</p>
+<p>### Why does the Metadata account have both on-chain and off-chain data?</p>
+<p>The [Metadata account](./accounts#metadata) contains on-chain data, yet it also has a <cite>URI</cite> attribute which points to an off-chain JSON file which provides additional data. So why is that? Can’t we just store everything on-chain? Well, there are several issues with that:</p>
+<ul class="simple">
+<li><p>We have to pay rent to store data on-chain. If we had to store everything within the Metadata account, which may include long texts such as the description of an NFT, it would require a lot more bytes and minting an NFT would suddenly be a lot more expensive.</p></li>
+<li><p>On-chain data is much less flexible. Once an account is created using a certain structure, it cannot easily be changed. Therefore, if we had to store everything on-chain, the NFT standard would be a lot harder to evolve with the demands of the ecosystem.</p></li>
+</ul>
+<p>Therefore, splitting the data into on-chain and off-chain data allows us to get the best of both worlds where on-chain data can be used by the program <strong>to create guarantees and expectations for its users</strong> whereas off-chain data can be used <strong>to provide standardized yet flexible information</strong>.</p>
+<p>### Are there any costs to using Token Metadata?</p>
+<p>Token Metadata currently charges very small fees ranging between 0.001 SOL and 0.01 SOL to the caller of certain instructions. More details can be found on the Protocol Fees page.</p>
+</section>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../_sources/01-programs/01-token-metadata/08-faq.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

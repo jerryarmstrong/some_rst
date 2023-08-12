@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>docs/src/cluster/turbine-block-propagation.md &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../" id="documentation_options" src="../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" />
+   
+  <link rel="stylesheet" href="../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <section id="docs-src-cluster-turbine-block-propagation-md">
+<h1>docs/src/cluster/turbine-block-propagation.md<a class="headerlink" href="#docs-src-cluster-turbine-block-propagation-md" title="Permalink to this heading">¶</a></h1>
+<p>Last edited: 2023-08-11 21:38:33</p>
+<p>Contents:</p>
+<div class="highlight-md notranslate"><div class="highlight"><pre><span></span>---
+</pre></div>
+</div>
+<p>title: Turbine Block Propagation
+—</p>
+<p>A Solana cluster uses a multi-layer block propagation mechanism called _Turbine_
+to broadcast ledger entries to all nodes. The cluster divides itself into layers
+of nodes, and each node in a given layer is responsible for propagating any data
+it receives on to a small set of nodes in the next downstream layer. This way
+each node only has to communicate with a small number of nodes.</p>
+<p>## Layer Structure</p>
+<p>The leader communicates with a special root node. The root can be thought of as
+layer 0 and communicates with layer 1, which is made up of at most
+<cite>DATA_PLANE_FANOUT</cite> nodes. If the number of nodes in the cluster is greater than
+layer 1, then the data plane fanout mechanism adds layers below. The number of
+nodes in each additional layer grows by a factor of <cite>DATA_PLANE_FANOUT</cite>.</p>
+<p>A good way to think about this is, layer 0 starts with a single node, layer 1
+starts with fanout nodes, and layer 2 will have <cite>fanout * number of nodes in
+layer 1</cite> and so on.</p>
+<p>### Layer Assignment  - Weighted Selection</p>
+<p>In order for data plane fanout to work, the entire cluster must agree on how the
+cluster is divided into layers. To achieve this, all the recognized validator
+nodes (the TVU peers) are shuffled with a stake weighting and stored in a
+list. This list is then indexed in different ways to figure out layer boundaries
+and retransmit peers - referred to as the (turbine tree). For example, the
+list is shuffled and leader selects the first node to be the root node, and the
+root node selects the next <cite>DATA_PLANE_FANOUT</cite> nodes to make up layer 1. The
+shuffle is biased towards higher staked nodes, allowing heavier votes to come
+back to the leader first. Layer 2 and lower-layer nodes use the same logic to
+find their next layer peers.</p>
+<p>To reduce the possibility of attack vectors, the list is shuffled and indexed on
+every shred. The turbine tree is generated from the set of validator nodes for
+each shred using a seed derived from the slot leader id, slot, shred index, and
+shred type.</p>
+<p>### Configuration Values</p>
+<p><cite>DATA_PLANE_FANOUT</cite> - Determines the size of layer 1. Subsequent layers grow by
+a factor of <cite>DATA_PLANE_FANOUT</cite>. Layers will fill to capacity before new ones are
+added, i.e if a layer isn’t full, it _must_ be the last one.</p>
+<p>Currently, configuration is set when the cluster is launched. In the future,
+these parameters may be hosted on-chain, allowing modification on the fly as the
+cluster sizes change.</p>
+<p>## Shred Propagation Flow</p>
+<p>During its slot, the leader node makes its initial broadcasts to a special root
+node (layer 0) sitting atop the turbine tree. This root node is rotated every
+shred based on the weighted shuffle previously mentioned. The root shares data
+with layer 1. Nodes in this layer then retransmit shreds to a subset of nodes in
+the next layer (layer 2). In general, every node in layer-1 retransmits to a
+unique subset of nodes in the next layer, etc, until all nodes in the cluster
+have received all the shreds.</p>
+<p>To prevent redundant transmission, each node uses the deterministically
+generated turbine tree, its own index in the tree, and <cite>DATA_PLANE_FANOUT</cite> to
+iterate through the tree and identify downstream nodes. Each node in a layer
+only has to broadcast its shreds to a maximum of <cite>DATA_PLANE_FANOUT</cite> nodes in
+the next layer instead of to every TVU peer in the cluster.</p>
+<p>The following diagram shows how shreds propagate through a cluster with 15 nodes
+and a fanout of 3.</p>
+<p>![Shred propagation through 15 node cluster with fanout of 3](/img/data-plane-propagation.png)</p>
+<p>## Calculating the required FEC rate</p>
+<p>Turbine relies on retransmission of packets between validators. Due to
+retransmission, any network wide packet loss is compounded, and the probability
+of the packet failing to reach its destination increases on each hop. The FEC
+rate needs to take into account the network wide packet loss, and the
+propagation depth.</p>
+<p>A shred group is the set of data and coding packets that can be used to
+reconstruct each other. Each shred group has a chance of failure, based on the
+likelihood of the number of packets failing that exceeds the FEC rate. If a
+validator fails to reconstruct the shred group, then the block cannot be
+reconstructed, and the validator has to rely on repair to fixup the blocks.</p>
+<p>The probability of the shred group failing can be computed using the binomial
+distribution. If the FEC rate is <cite>16:4</cite>, then the group size is 20, and at least
+4 of the shreds must fail for the group to fail. Which is equal to the sum of
+the probability of 4 or more trials failing out of 20.</p>
+<p>Probability of a block succeeding in turbine:</p>
+<ul class="simple">
+<li><p>Probability of packet failure: <cite>P = 1 - (1 - network_packet_loss_rate)^2</cite></p></li>
+<li><p>FEC rate: <cite>K:M</cite></p></li>
+<li><p>Number of trials: <cite>N = K + M</cite></p></li>
+<li><p>Shred group failure rate: <cite>S = 1 - (SUM of i=0 -&gt; M for binomial(prob_failure = P, trials = N, failures = i))</cite></p></li>
+<li><p>Shreds per block: <cite>G</cite></p></li>
+<li><p>Block success rate: <cite>B = (1 - S) ^ (G / N)</cite></p></li>
+<li><p>Binomial distribution for exactly <cite>i</cite> results with probability of P in N trials is defined as <cite>(N choose i) * P^i * (1 - P)^(N-i)</cite></p></li>
+</ul>
+<p>For example:</p>
+<ul class="simple">
+<li><p>Network packet loss rate is 15%.</p></li>
+<li><p>50k tps network generates 6400 shreds per second.</p></li>
+<li><p>FEC rate increases the total shreds per block by the FEC ratio.</p></li>
+</ul>
+<p>With a FEC rate: <cite>16:4</cite></p>
+<ul class="simple">
+<li><p><cite>G = 8000</cite></p></li>
+<li><p><cite>P = 1 - 0.85 * 0.85 = 1 - 0.7225 = 0.2775</cite></p></li>
+<li><p><cite>S = 1 - (SUM of i=0 -&gt; 4 for binomial(prob_failure = 0.2775, trials = 20, failures = i)) = 0.689414</cite></p></li>
+<li><p><cite>B = (1 - 0.689) ^ (8000 / 20) = 10^-203</cite></p></li>
+</ul>
+<p>With FEC rate of <cite>16:16</cite></p>
+<ul class="simple">
+<li><p><cite>G = 12800</cite></p></li>
+<li><p><cite>S = 1 - (SUM of i=0 -&gt; 16 for binomial(prob_failure = 0.2775, trials = 32, failures = i)) = 0.002132</cite></p></li>
+<li><p><cite>B = (1 - 0.002132) ^ (12800 / 32) = 0.42583</cite></p></li>
+</ul>
+<p>With FEC rate of <cite>32:32</cite></p>
+<ul class="simple">
+<li><p><cite>G = 12800</cite></p></li>
+<li><p><cite>S = 1 - (SUM of i=0 -&gt; 32 for binomial(prob_failure = 0.2775, trials = 64, failures = i)) = 0.000048</cite></p></li>
+<li><p><cite>B = (1 - 0.000048) ^ (12800 / 64) = 0.99045</cite></p></li>
+</ul>
+</section>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../_sources/src/cluster/turbine-block-propagation.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

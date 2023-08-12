@@ -1,0 +1,45 @@
+tests/ui/feature-gates/feature-gate-type_alias_impl_trait.rs
+============================================================
+
+Last edited: 2023-03-30 20:35:59
+
+Contents:
+
+.. code-block:: rs
+
+    // ignore-compare-mode-chalk
+// check-pass
+#![feature(type_alias_impl_trait)]
+use std::fmt::Debug;
+
+type Foo = impl Debug;
+
+struct Bar(Foo);
+fn define() -> Bar {
+    Bar(42)
+}
+
+type Foo2 = impl Debug;
+
+fn define2() {
+    let x = || -> Foo2 { 42 };
+}
+
+type Foo3 = impl Debug;
+
+fn define3(x: Foo3) {
+    let y: i32 = x;
+}
+fn define3_1() {
+    define3(42)
+}
+
+type Foo4 = impl Debug;
+
+fn define4() {
+    let y: Foo4 = 42;
+}
+
+fn main() {}
+
+

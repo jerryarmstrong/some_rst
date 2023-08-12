@@ -1,0 +1,33 @@
+tests/mir-opt/dead-store-elimination/cycle.rs
+=============================================
+
+Last edited: 2023-03-30 20:35:59
+
+Contents:
+
+.. code-block:: rs
+
+    // unit-test: DeadStoreElimination
+
+#[inline(never)]
+fn cond() -> bool {
+    false
+}
+
+// EMIT_MIR cycle.cycle.DeadStoreElimination.diff
+fn cycle(mut x: i32, mut y: i32, mut z: i32) {
+    // This example is interesting because the non-transitive version of `MaybeLiveLocals` would
+    // report that *all* of these stores are live.
+    while cond() {
+        let temp = z;
+        z = y;
+        y = x;
+        x = temp;
+    }
+}
+
+fn main() {
+    cycle(1, 2, 3);
+}
+
+

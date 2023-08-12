@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>docs/src/implemented-proposals/rent.md &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../" id="documentation_options" src="../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" />
+   
+  <link rel="stylesheet" href="../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <section id="docs-src-implemented-proposals-rent-md">
+<h1>docs/src/implemented-proposals/rent.md<a class="headerlink" href="#docs-src-implemented-proposals-rent-md" title="Permalink to this heading">¶</a></h1>
+<p>Last edited: 2023-08-11 21:38:33</p>
+<p>Contents:</p>
+<div class="highlight-md notranslate"><div class="highlight"><pre><span></span>---
+</pre></div>
+</div>
+<p>title: Rent
+—</p>
+<p>Accounts on Solana may have owner-controlled state (<cite>Account::data</cite>) that’s separate from the account’s balance (<cite>Account::lamports</cite>). Since validators on the network need to maintain a working copy of this state in memory, the network charges a time-and-space based fee for this resource consumption, also known as Rent.</p>
+<p>## Two-tiered rent regime</p>
+<p>Accounts which maintain a minimum balance equivalent to 2 years of rent payments are exempt. The _2 <a href="#id1"><span class="problematic" id="id2">years_</span></a> is drawn from the fact hardware cost drops by 50% in price every 2 years and the resulting convergence due to being a geometric series. Accounts whose balance falls below this threshold are charged rent at a rate specified in genesis, in lamports per byte-year. The network charges rent on a per-epoch basis, in credit for the next epoch, and <cite>Account::rent_epoch</cite> keeps track of the next time rent should be collected from the account.</p>
+<p>Currently, the rent cost is fixed at the genesis. However, it’s anticipated to be dynamic, reflecting the underlying hardware storage cost at the time. So the price is generally expected to decrease as the hardware cost declines as the technology advances.</p>
+<p>## Timings of collecting rent</p>
+<p>There are two timings of collecting rent from accounts: (1) when referenced by a transaction, (2) periodically once an epoch. (1) includes the transaction to create the new account itself, and it happens during the normal transaction processing by the bank as part of the load phase. (2) exists to ensure to collect rents from stale accounts, which aren’t referenced in recent epochs at all. (2) requires the whole scan of accounts and is spread over an epoch based on account address prefix to avoid load spikes due to this rent collection.</p>
+<p>On the contrary, rent collection isn’t applied to accounts that are directly manipulated by any of protocol-level bookkeeping processes including:</p>
+<ul class="simple">
+<li><p>The distribution of rent collection itself (Otherwise, it may cause recursive rent collection handling)</p></li>
+<li><p>The distribution of staking rewards at the start of every epoch (To reduce as much as processing spike at the start of new epoch)</p></li>
+<li><p>The distribution of transaction fee at the end of every slot</p></li>
+</ul>
+<p>Even if those processes are out of scope of rent collection, all of manipulated accounts will eventually be handled by the (2) mechanism.</p>
+<p>## Actual processing of collecting rent</p>
+<p>Rent is due for one epoch’s worth of time, and accounts have <cite>Account::rent_epoch</cite> of <cite>current_epoch</cite> or <cite>current_epoch + 1</cite> depending on the rent regime.</p>
+<p>If the account is in the exempt regime, <cite>Account::rent_epoch</cite> is simply updated to <cite>current_epoch</cite>.</p>
+<p>If the account is non-exempt, the difference between the next epoch and <cite>Account::rent_epoch</cite> is used to calculate the amount of rent owed by this account (via <cite>Rent::due()</cite>). Any fractional lamports of the calculation are truncated. Rent due is deducted from <cite>Account::lamports</cite> and <cite>Account::rent_epoch</cite> is updated to <cite>current_epoch + 1</cite> (= next epoch). If the amount of rent due is less than one lamport, no changes are made to the account.</p>
+<p>Accounts whose balance is insufficient to satisfy the rent that would be due simply fail to load.</p>
+<p>A percentage of the rent collected is destroyed. The rest is distributed to validator accounts by stake weight, a la transaction fees, at the end of every slot.</p>
+<p>Finally, rent collection happens according to the protocol-level account updates like the rent distribution to validators, meaning there is no corresponding transaction for rent deductions. So, rent collection is rather invisible, only implicitly observable by a recent transaction or predetermined timing given its account address prefix.</p>
+<p>## Design considerations</p>
+<p>### Current design rationale</p>
+<p>Under the preceding design, it is NOT possible to have accounts that linger, never get touched, and never have to pay rent. Accounts always pay rent exactly once for each epoch, except rent-exempt, sysvar and executable accounts.</p>
+<p>This is an intended design choice. Otherwise, it would be possible to trigger unauthorized rent collection with <cite>Noop</cite> instruction by anyone who may unfairly profit from the rent (a leader at the moment) or save the rent given anticipated fluctuating rent cost.</p>
+<p>As another side-effect of this choice, also note that this periodic rent collection effectively forces validators not to store stale accounts into a cold storage optimistically and save the storage cost, which is unfavorable for account owners and may cause transactions on them to stall longer than others. On the flip side, this prevents malicious users from creating significant numbers of garbage accounts, burdening validators.</p>
+<p>As the overall consequence of this design, all accounts are stored equally as a validator’s working set with the same performance characteristics, reflecting the uniform rent pricing structure.</p>
+<p>### Ad-hoc collection</p>
+<p>Collecting rent on an as-needed basis (i.e. whenever accounts were loaded/accessed) was considered. The issues with such an approach are:</p>
+<ul>
+<li><p>accounts loaded as “credit only” for a transaction could very reasonably be expected to have rent due,</p>
+<p>but would not be writable during any such transaction</p>
+</li>
+<li><p>a mechanism to “beat the bushes” (i.e. go find accounts that need to pay rent) is desirable,</p>
+<p>lest accounts that are loaded infrequently get a free ride</p>
+</li>
+</ul>
+<p>### System instruction for collecting rent</p>
+<p>Collecting rent via a system instruction was considered, as it would naturally have distributed rent to active and stake-weighted nodes and could have been done incrementally. However:</p>
+<ul class="simple">
+<li><p>it would have adversely affected network throughput</p></li>
+<li><p>it would require special-casing by the runtime, as accounts with non-SystemProgram owners may be debited by this instruction</p></li>
+<li><p>someone would have to issue the transactions</p></li>
+</ul>
+</section>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../_sources/src/implemented-proposals/rent.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

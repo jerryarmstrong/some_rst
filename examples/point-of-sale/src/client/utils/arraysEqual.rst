@@ -1,0 +1,20 @@
+examples/point-of-sale/src/client/utils/arraysEqual.ts
+======================================================
+
+Last edited: 2023-05-03 15:27:33
+
+Contents:
+
+.. code-block:: ts
+
+    export function arraysEqual(a: any[], b: any[]) {
+    if (a === b) return true;
+    if (a.length !== b.length) return false;
+
+    for (let i = 0; i < a.length; i++) {
+        if (a[i] !== b[i]) return false;
+    }
+    return true;
+}
+
+

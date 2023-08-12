@@ -1,0 +1,57 @@
+apps/payment-ui/src/components/CheckoutSection/index.tsx
+========================================================
+
+Last edited: 2023-08-11 21:51:34
+
+Contents:
+
+.. code-block:: tsx
+
+    import CancelledTransactionView from '@/components/CheckoutSection/CancelledTransactionView';
+import { ErrorView } from '@/components/CheckoutSection/ErrorView';
+import { GeoBlockedView } from '@/components/CheckoutSection/GeoBlockedView';
+import PaymentDoesNotExistView from '@/components/CheckoutSection/PaymentDoesNotExistView';
+import { PaymentLoadingView } from '@/components/CheckoutSection/PaymentLoadingView';
+import { PaymentView } from '@/components/CheckoutSection/PaymentView';
+import { ThankYouView } from '@/components/CheckoutSection/ThankYou';
+import {
+    Notification,
+    getConnectWalletNotification,
+    getSolanaPayNotification,
+} from '@/features/notification/notificationSlice';
+import { getIsPaymentError } from '@/features/payment-details/paymentDetailsSlice';
+import { MergedState, getIsCompleted, getMergedState } from '@/features/payment-session/paymentSessionSlice';
+import { useRouter } from 'next/router';
+import { useSelector } from 'react-redux';
+
+const CheckoutSection = () => {
+    const isCompleted = useSelector(getIsCompleted);
+    const isError = useSelector(getIsPaymentError);
+    const mergedState = useSelector(getMergedState);
+    const connectedWalletNotification = useSelector(getConnectWalletNotification);
+    const solanaPayNotification = useSelector(getSolanaPayNotification);
+
+    const router = useRouter();
+    const blockedString = router.query.blocked as string;
+    const blocked = blockedString == 'true' ? true : false;
+
+    if (blocked) {
+        return <GeoBlockedView />;
+    } else if (connectedWalletNotification == Notification.declined) {
+        return <CancelledTransactionView />;
+    } else if (solanaPayNotification == Notification.transactionDoesNotExist) {
+        return <PaymentDoesNotExistView />;
+    } else if (mergedState > MergedState.start && mergedState < MergedState.completed) {
+        return <PaymentLoadingView />;
+    } else if (isCompleted) {
+        return <ThankYouView />;
+    } else if (isError) {
+        return <ErrorView />;
+    } else {
+        return <PaymentView />;
+    }
+};
+
+export default CheckoutSection;
+
+

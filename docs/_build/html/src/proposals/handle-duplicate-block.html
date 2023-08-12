@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>docs/src/proposals/handle-duplicate-block.md &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../" id="documentation_options" src="../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" />
+   
+  <link rel="stylesheet" href="../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <section id="docs-src-proposals-handle-duplicate-block-md">
+<h1>docs/src/proposals/handle-duplicate-block.md<a class="headerlink" href="#docs-src-proposals-handle-duplicate-block-md" title="Permalink to this heading">¶</a></h1>
+<p>Last edited: 2023-08-11 21:38:33</p>
+<p>Contents:</p>
+<div class="highlight-md notranslate"><div class="highlight"><pre><span></span>---
+</pre></div>
+</div>
+<p>title: Handle Duplicate Block
+—</p>
+<p># Leader Duplicate Block Slashing</p>
+<p>This design describes how the cluster slashes leaders that produce duplicate
+blocks.</p>
+<p>Leaders that produce multiple blocks for the same slot increase the number of
+potential forks that the cluster has to resolve.</p>
+<p>## Primitives
+1. gossip_root: Nodes now gossip their current root
+2. gossip_duplicate_slots: Nodes can gossip up to <cite>N</cite> duplicate slot proofs.
+3. <cite>DUPLICATE_THRESHOLD</cite>: The minimum percentage of stake that needs to vote on a fork with version <cite>X</cite> of a duplicate slot, in order for that fork to become votable.</p>
+<p>## Protocol
+1. When WindowStage detects a duplicate slot proof <cite>P</cite>, it checks the new <cite>gossip_root</cite> to see if <cite>&lt;= 1/3</cite> of the nodes have rooted a slot <cite>S &gt;= P</cite>. If so, it pushes a proof to <cite>gossip_duplicate_slots</cite> to gossip. WindowStage then signals ReplayStage about this duplicate slot <cite>S</cite>. These proofs can be purged from gossip once the validator sees &gt; 2/3 of people gossiping roots <cite>R &gt; S</cite>.</p>
+<ol class="arabic simple" start="2">
+<li><p>When ReplayStage receives the signal for a duplicate slot <cite>S</cite> from <cite>1)</cite> above, the validator monitors gossip and replay waiting for`&gt;= DUPLICATE_THRESHOLD` votes for the same hash which implies the same version of the slot. If this conditon is met for some version with hash <cite>H</cite> of slot <cite>S</cite>, this is then known as the <cite>duplicate_confirmed</cite> version of the slot.</p></li>
+</ol>
+<p>Before a duplicate slot <cite>S</cite> is <cite>duplicate_confirmed</cite>, it’s first excluded from the vote candidate set in the fork choice rules. In addition, ReplayStage also resets PoH to the <em>latest</em> ancestor of the <em>earliest</em> <cite>non-duplicate/confirmed_duplicate_slot</cite>, so that block generation can start happening on the earliest known <em>safe</em> block.</p>
+<p>Some notes about the <cite>DUPLICATE_THRESHOLD</cite>. In the cases below, assume <cite>DUPLICATE_THRESHOLD = 52</cite>:</p>
+<p>a) If less than <cite>2 * DUPLICATE_THRESHOLD - 1</cite> percentage of the network is malicious, then there can only be one such <cite>duplicate_confirmed</cite> version of the slot. With <cite>DUPLICATE_THRESHOLD = 52</cite>, this is
+a malcious tolerance of <cite>4%</cite></p>
+<ol class="loweralpha simple" start="2">
+<li><p>The liveness of the network is at most <cite>1 - DUPLICATE_THRESHOLD - SWITCH_THRESHOLD</cite>. This is because if you need at least <cite>SWITCH_THRESHOLD</cite> percentage of the stake voting on a different fork in order to switch off of a duplicate fork that has <cite>&lt; DUPLICATE_THRESHOLD</cite> stake voting on it, and is <em>not</em> <cite>duplicate_confirmed</cite>. For <cite>DUPLICATE_THRESHOLD = 52</cite> and <cite>DUPLICATE_THRESHOLD = 38</cite>, this implies a liveness tolerance of <cite>10%</cite>.</p></li>
+</ol>
+<p>For example in the situation below, validators that voted on <cite>2</cite> can’t vote any further on fork <cite>2</cite> because it’s been removed from fork choice. Now slot 6 better have enough stake for a switching proof, or the network halts.</p>
+<dl class="simple">
+<dt><a href="#id1"><span class="problematic" id="id2">``</span></a><a href="#id3"><span class="problematic" id="id4">`</span></a>text</dt><dd><p><a href="#id5"><span class="problematic" id="id6">|</span></a>——– 2 (51% voted, then detected this slot was a duplicate and removed this slot from fork choice)</p>
+</dd>
+<dt>0—|</dt><dd><p><a href="#id7"><span class="problematic" id="id8">|</span></a>———- 6 (39%)</p>
+</dd>
+</dl>
+<p><a href="#id9"><span class="problematic" id="id10">``</span></a><a href="#id11"><span class="problematic" id="id12">`</span></a></p>
+<p>3. Switching proofs need to be extended to allow including vote hashes from different versions of the same same slot (detected through 1). Right now this is not supported since switching proofs can
+only be built using votes from banks in BankForks, and two different versions of the same slot cannot
+simultaneously exist in BankForks. For instance:</p>
+<dl>
+<dt><a href="#id13"><span class="problematic" id="id14">``</span></a><a href="#id15"><span class="problematic" id="id16">`</span></a>text</dt><dd><p><a href="#id17"><span class="problematic" id="id18">|</span></a>——– 2
+|</p>
+</dd>
+<dt>0————- 1 —— 2’</dt><dd><div class="line-block">
+<div class="line"><br /></div>
+</div>
+<p><a href="#id19"><span class="problematic" id="id20">|</span></a>———- 6</p>
+</dd>
+</dl>
+<p><a href="#id21"><span class="problematic" id="id22">``</span></a><a href="#id23"><span class="problematic" id="id24">`</span></a></p>
+<p>Imagine each version of slot 2 and 2’ have <cite>DUPLICATE_THRESHOLD / 2</cite> of the votes on them, so neither duplicate can be confirmed. At most slot 6 has <cite>1 - DUPLICATE_THRESHOLD / 2</cite> of the votes
+on it, which is less than the switching threshold. Thus, in order for validators voting on <cite>2</cite> or <cite>2’</cite> to switch to slot 6, and make progress, they need to incorporate votes from the other version of the slot into their switching proofs.</p>
+<p>### The repair problem.
+Now what happens if one of the following occurs:</p>
+<ol class="arabic simple">
+<li><p>Due to network blips/latencies, some validators fail to observe the gossip votes before they are overwritten by newer votes? Then some validators may conclude a slot <cite>S</cite> is <cite>duplicate_confirmed</cite> while others don’t.</p></li>
+<li><p>Due to lockouts, no version of duplicate slot <cite>S</cite> reaches <cite>duplicate_confirmed</cite> status, but one of its descendants may reach <cite>duplicate_confirmed</cite> after those lockouts expire, which by definition, means <cite>S</cite> is also <cite>duplicate_confirmed</cite>.</p></li>
+<li><p>People who are catching up and don’t see the votes in gossip encounter a dup block and can’t make progress.</p></li>
+</ol>
+<p>We assume that given a network is eventually stable, if at least one correct validator observed <cite>S</cite> is <cite>duplicate_confirmed</cite>, then if <cite>S</cite> is part of the heaviest fork, then eventually all validators will observe some descendant of <cite>S</cite> is duplicate confirmed.</p>
+<p>This problem we need to solve is modeled simply by the below scenario:</p>
+<p><code class="docutils literal notranslate"><span class="pre">`text</span>
+<span class="pre">1</span> <span class="pre">-&gt;</span> <span class="pre">2</span> <span class="pre">(duplicate)</span> <span class="pre">-&gt;</span> <span class="pre">3</span> <span class="pre">-&gt;</span> <span class="pre">4</span> <span class="pre">(duplicate)</span>
+<span class="pre">`</span></code>
+Assume the following:</p>
+<ol class="arabic simple">
+<li><p>Due to gossiping duplciate proofs, we assume everyone will eventually see duplicate proofs for 2 and 4, so everyone agrees to remove them from fork choice until they are <cite>duplicate_confirmed</cite>.</p></li>
+<li><p>Due to lockouts, <cite>&gt; DUPLICATE_THRESHOLD</cite> of the stake votes on 4, but not 2. This means at least <cite>DUPLICATE_THRESHOLD</cite> of people have the “correct” version of both slots 2 and 4.</p></li>
+<li><p>However, the remaining <cite>1-DUPLICATE_THRESHOLD</cite> of people have wrong version of 2. This means in replay, their slot 3 will be marked dead, <em>even though the faulty slot is 2</em>. The goal is to get these people on the right fork again.</p></li>
+</ol>
+<p>Possible solution:</p>
+<ol class="arabic simple">
+<li><p>Change <cite>EpochSlots</cite> to signal when a bank is frozen, not when a slot is complete. If we see &gt; <cite>DUPLICATE_THRESHOLD</cite> have frozen the dead slot 3, then we attempt recovery. Note this does not mean that all <cite>DUPLICATE_THRESHOLD</cite> have frozen the same version of the bank, it’s just a signal to us that something may be wrong with our version of the bank.</p></li>
+<li><p>Recovery takes the form of a special repair request, <cite>RepairDuplicateConfirmed(dead_slot, Vec&lt;(Slot, Hash)&gt;)</cite>, which specifies a  dead slot, and then a vector of <cite>(slot, hash)</cite> of <cite>N</cite> of its latest parents.</p></li>
+<li><p>The repairer sees this request and responds with the correct hash only if any element of the <cite>(slot, hash)</cite> vector is both <cite>duplicate_confirmed</cite> and the hash doesn’t match the requester’s hash in the vector.</p></li>
+<li><p>Once the requester sees the “correct” hash is different than their frozen hash, they dump the block so that they can accept a new block, and ask the network for the block with the correct hash.</p></li>
+</ol>
+<p>Of course the repairer might lie to you, and you’ll get the wrong version of the block, in which case you’ll end up with another dead block and repeat the procedure.</p>
+</section>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../_sources/src/proposals/handle-duplicate-block.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

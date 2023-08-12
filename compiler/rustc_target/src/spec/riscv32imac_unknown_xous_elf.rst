@@ -1,0 +1,33 @@
+compiler/rustc_target/src/spec/riscv32imac_unknown_xous_elf.rs
+==============================================================
+
+Last edited: 2023-03-30 20:35:59
+
+Contents:
+
+.. code-block:: rs
+
+    use crate::spec::{Cc, LinkerFlavor, Lld, PanicStrategy, RelocModel, Target, TargetOptions};
+
+pub fn target() -> Target {
+    Target {
+        data_layout: "e-m:e-p:32:32-i64:64-n32-S128".into(),
+        llvm_target: "riscv32".into(),
+        pointer_width: 32,
+        arch: "riscv32".into(),
+
+        options: TargetOptions {
+            os: "xous".into(),
+            linker_flavor: LinkerFlavor::Gnu(Cc::No, Lld::Yes),
+            linker: Some("rust-lld".into()),
+            cpu: "generic-rv32".into(),
+            max_atomic_width: Some(32),
+            features: "+m,+a,+c".into(),
+            panic_strategy: PanicStrategy::Abort,
+            relocation_model: RelocModel::Static,
+            ..Default::default()
+        },
+    }
+}
+
+

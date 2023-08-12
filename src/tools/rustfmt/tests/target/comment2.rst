@@ -1,0 +1,16 @@
+src/tools/rustfmt/tests/target/comment2.rs
+==========================================
+
+Last edited: 2023-03-30 20:35:59
+
+Contents:
+
+.. code-block:: rs
+
+    // rustfmt-wrap_comments: true
+
+/// This is a long line that angers rustfmt. Rustfmt shall deal with it swiftly
+/// and justly.
+pub mod foo {}
+
+

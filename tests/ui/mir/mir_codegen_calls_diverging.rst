@@ -1,0 +1,26 @@
+tests/ui/mir/mir_codegen_calls_diverging.rs
+===========================================
+
+Last edited: 2023-03-30 20:35:59
+
+Contents:
+
+.. code-block:: rs
+
+    // run-fail
+// error-pattern:diverging_fn called
+// ignore-emscripten no processes
+
+fn diverging_fn() -> ! {
+    panic!("diverging_fn called")
+}
+
+fn mir() {
+    diverging_fn();
+}
+
+fn main() {
+    mir();
+}
+
+

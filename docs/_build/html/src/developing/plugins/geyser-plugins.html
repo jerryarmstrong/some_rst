@@ -1,0 +1,513 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>docs/src/developing/plugins/geyser-plugins.md &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../" id="documentation_options" src="../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <section id="docs-src-developing-plugins-geyser-plugins-md">
+<h1>docs/src/developing/plugins/geyser-plugins.md<a class="headerlink" href="#docs-src-developing-plugins-geyser-plugins-md" title="Permalink to this heading">¶</a></h1>
+<p>Last edited: 2023-08-11 21:38:33</p>
+<p>Contents:</p>
+<div class="highlight-md notranslate"><div class="highlight"><pre><span></span>---
+</pre></div>
+</div>
+<p>title: Geyser Plugins
+—</p>
+<p>## Overview</p>
+<p>Validators under heavy RPC loads, such as when serving getProgramAccounts calls,
+can fall behind the network. To solve this problem, the validator has been
+enhanced to support a plugin mechanism, called a “Geyser” plugin, through which
+the information about accounts, slots, blocks, and transactions can be
+transmitted to external data stores such as relational databases, NoSQL
+databases or Kafka. RPC services then can be developed to consume data from
+these external data stores with the possibility of more flexible and targeted
+optimizations such as caching and indexing. This allows the validator to focus
+on processing transactions without being slowed down by busy RPC requests.</p>
+<p>This document describes the interfaces of the plugin and the referential plugin
+implementation for the PostgreSQL database.</p>
+<p>[crates.io]: <a class="reference external" href="https://crates.io/search?q=solana">https://crates.io/search?q=solana</a>-
+[docs.rs]: <a class="reference external" href="https://docs.rs/releases/search?query=solana">https://docs.rs/releases/search?query=solana</a>-</p>
+<p>### Important Crates:</p>
+<ul class="simple">
+<li><p>[<cite>solana-geyser-plugin-interface</cite>] &amp;mdash; This crate defines the plugin</p></li>
+</ul>
+<p>interfaces.</p>
+<ul class="simple">
+<li><p>[<cite>solana-accountsdb-plugin-postgres</cite>] &amp;mdash; The crate for the referential</p></li>
+</ul>
+<p>plugin implementation for the PostgreSQL database.</p>
+<p>[<cite>solana-geyser-plugin-interface</cite>]: <a class="reference external" href="https://docs.rs/solana-geyser-plugin-interface">https://docs.rs/solana-geyser-plugin-interface</a>
+[<cite>solana-accountsdb-plugin-postgres</cite>]: <a class="reference external" href="https://docs.rs/solana-accountsdb-plugin-postgres">https://docs.rs/solana-accountsdb-plugin-postgres</a>
+[<cite>solana-sdk</cite>]: <a class="reference external" href="https://docs.rs/solana-sdk">https://docs.rs/solana-sdk</a>
+[<cite>solana-transaction-status</cite>]: <a class="reference external" href="https://docs.rs/solana-transaction-status">https://docs.rs/solana-transaction-status</a></p>
+<p>## The Plugin Interface</p>
+<p>The Plugin interface is declared in [<cite>solana-geyser-plugin-interface</cite>]. It
+is defined by the trait <cite>GeyserPlugin</cite>. The plugin should implement the
+trait and expose a “C” function <cite>_create_plugin</cite> to return the pointer to this
+trait. For example, in the referential implementation, the following code
+instantiates the PostgreSQL plugin <a href="#id1"><span class="problematic" id="id2">`</span></a>GeyserPluginPostgres ` and returns its
+pointer.</p>
+<p><a href="#id3"><span class="problematic" id="id4">``</span></a>`
+#[no_mangle]
+#[allow(improper_ctypes_definitions)]
+/// # Safety
+///
+/// This function returns the GeyserPluginPostgres pointer as trait GeyserPlugin.
+pub unsafe extern “C” fn _create_plugin() -&gt; <a href="#id5"><span class="problematic" id="id6">*</span></a>mut dyn GeyserPlugin {</p>
+<blockquote>
+<div><p>let plugin = GeyserPluginPostgres::new();
+let plugin: Box&lt;dyn GeyserPlugin&gt; = Box::new(plugin);
+Box::into_raw(plugin)</p>
+</div></blockquote>
+<section id="id7">
+<h2>}<a class="headerlink" href="#id7" title="Permalink to this heading">¶</a></h2>
+<p>A plugin implementation can implement the <cite>on_load</cite> method to initialize itself.
+This function is invoked after a plugin is dynamically loaded into the validator
+when it starts. The configuration of the plugin is controlled by a configuration
+file in JSON5 format. The JSON5 file must have a field <cite>libpath</cite> that points
+to the full path name of the shared library implementing the plugin, and may
+have other configuration information, like connection parameters for the external
+database. The plugin configuration file is specified by the validator’s CLI
+parameter <cite>–geyser-plugin-config</cite> and the file must be readable to the
+validator process.</p>
+<p>Please see the [config file](#config) for the referential
+PostgreSQL plugin below for an example.</p>
+<p>The plugin can implement the <cite>on_unload</cite> method to do any cleanup before the
+plugin is unloaded when the validator is gracefully shutdown.</p>
+<p>The plugin framework supports streaming either accounts, transactions or both.
+A plugin uses the following function to indicate if it is interested in receiving
+account data:</p>
+<p><code class="docutils literal notranslate"><span class="pre">`</span>
+<span class="pre">fn</span> <span class="pre">account_data_notifications_enabled(&amp;self)</span> <span class="pre">-&gt;</span> <span class="pre">bool</span>
+<span class="pre">`</span></code></p>
+<p>And it uses the following function to indicate if it is interested in receiving
+transaction data:</p>
+<dl class="simple">
+<dt><a href="#id8"><span class="problematic" id="id9">``</span></a><a href="#id10"><span class="problematic" id="id11">`</span></a></dt><dd><p>fn transaction_notifications_enabled(&amp;self) -&gt; bool</p>
+</dd>
+</dl>
+<p><a href="#id12"><span class="problematic" id="id13">``</span></a><a href="#id14"><span class="problematic" id="id15">`</span></a></p>
+<p>The following method is used for notifying on an account update:</p>
+<dl>
+<dt><a href="#id16"><span class="problematic" id="id17">``</span></a><a href="#id18"><span class="problematic" id="id19">`</span></a></dt><dd><dl class="simple">
+<dt>fn update_account(</dt><dd><p>&amp;mut self,
+account: ReplicaAccountInfoVersions,
+slot: u64,
+is_startup: bool,</p>
+</dd>
+</dl>
+<p>) -&gt; Result&lt;()&gt;</p>
+</dd>
+</dl>
+<p><a href="#id20"><span class="problematic" id="id21">``</span></a><a href="#id22"><span class="problematic" id="id23">`</span></a></p>
+<p>The <cite>ReplicaAccountInfoVersions</cite> struct contains the metadata and data of the account
+streamed. The <cite>slot</cite> points to the slot the account is being updated at. When
+<cite>is_startup</cite> is true, it indicates the account is loaded from snapshots when
+the validator starts up. When <cite>is_startup</cite> is false, the account is updated
+when processing a transaction.</p>
+<p>The following method is called when all accounts have been notified when the
+validator restores the AccountsDb from snapshots at startup.</p>
+<p><code class="docutils literal notranslate"><span class="pre">`</span>
+<span class="pre">fn</span> <span class="pre">notify_end_of_startup(&amp;mut</span> <span class="pre">self)</span> <span class="pre">-&gt;</span> <span class="pre">Result&lt;()&gt;</span>
+<span class="pre">`</span></code></p>
+<p>When <cite>update_account</cite> is called during processing transactions, the plugin
+should process the notification as fast as possible because any delay may
+cause the validator to fall behind the network. Persistence to external data
+store is best to be done asynchronously.</p>
+<p>The following method is used for notifying slot status changes:</p>
+<dl>
+<dt><a href="#id24"><span class="problematic" id="id25">``</span></a><a href="#id26"><span class="problematic" id="id27">`</span></a></dt><dd><dl class="simple">
+<dt>fn update_slot_status(</dt><dd><p>&amp;mut self,
+slot: u64,
+parent: Option&lt;u64&gt;,
+status: SlotStatus,</p>
+</dd>
+</dl>
+<p>) -&gt; Result&lt;()&gt;</p>
+</dd>
+</dl>
+<p><a href="#id28"><span class="problematic" id="id29">``</span></a><a href="#id30"><span class="problematic" id="id31">`</span></a></p>
+<p>To ensure data consistency, the plugin implementation can choose to abort
+the validator in case of error persisting to external stores. When the
+validator restarts the account data will be re-transmitted.</p>
+<p>The following method is used for notifying transactions:</p>
+<dl>
+<dt><a href="#id32"><span class="problematic" id="id33">``</span></a><a href="#id34"><span class="problematic" id="id35">`</span></a></dt><dd><dl class="simple">
+<dt>fn notify_transaction(</dt><dd><p>&amp;mut self,
+transaction: ReplicaTransactionInfoVersions,
+slot: u64,</p>
+</dd>
+</dl>
+<p>) -&gt; Result&lt;()&gt;</p>
+</dd>
+</dl>
+<p><a href="#id36"><span class="problematic" id="id37">``</span></a><a href="#id38"><span class="problematic" id="id39">`</span></a></p>
+<p>The <cite>ReplicaTransactionInfoVersions</cite> struct
+contains the information about a streamed transaction. It wraps <cite>ReplicaTransactionInfo</cite></p>
+<p><a href="#id40"><span class="problematic" id="id41">``</span></a>`
+pub struct ReplicaTransactionInfo&lt;’a&gt; {</p>
+<blockquote>
+<div><p>/// The first signature of the transaction, used for identifying the transaction.
+pub signature: &amp;’a Signature,</p>
+<p>/// Indicates if the transaction is a simple vote transaction.
+pub is_vote: bool,</p>
+<p>/// The sanitized transaction.
+pub transaction: &amp;’a SanitizedTransaction,</p>
+<p>/// Metadata of the transaction status.
+pub transaction_status_meta: &amp;’a TransactionStatusMeta,</p>
+</div></blockquote>
+</section>
+<section id="id42">
+<h2>}<a class="headerlink" href="#id42" title="Permalink to this heading">¶</a></h2>
+<p>For details of <cite>SanitizedTransaction</cite> and <cite>TransactionStatusMeta `,
+please refer to [`solana-sdk</cite>] and [<cite>solana-transaction-status</cite>]</p>
+<p>The <cite>slot</cite> points to the slot the transaction is executed at.
+For more details, please refer to the Rust documentation in
+[<cite>solana-geyser-plugin-interface</cite>].</p>
+<p>## Example PostgreSQL Plugin</p>
+<p>The [<cite>solana-accountsdb-plugin-postgres</cite>] repository implements a plugin storing
+account data to a PostgreSQL database to illustrate how a plugin can be
+developed.</p>
+<p>&lt;a name=”config”&gt;
+### Configuration File Format
+&lt;/a&gt;</p>
+<p>The plugin is configured using the input configuration file. An example
+configuration file looks like the following:</p>
+<p><a href="#id43"><span class="problematic" id="id44">``</span></a>`
+{</p>
+<blockquote>
+<div><p>“libpath”: “/solana/target/release/libsolana_geyser_plugin_postgres.so”,
+“host”: “postgres-server”,
+“user”: “solana”,
+“port”: 5433,
+“threads”: 20,
+“batch_size”: 20,
+“panic_on_db_errors”: true,
+“accounts_selector” : {</p>
+<blockquote>
+<div><p>“accounts” : [“*”]</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+</section>
+<section id="id45">
+<h2>}<a class="headerlink" href="#id45" title="Permalink to this heading">¶</a></h2>
+<p>The <cite>host</cite>, <cite>user</cite>, and <cite>port</cite> control the PostgreSQL configuration
+information. For more advanced connection options, please use the
+<cite>connection_str</cite> field. Please see [Rust postgres configuration]
+(<a class="reference external" href="https://docs.rs/postgres/0.19.2/postgres/config/struct.Config.html">https://docs.rs/postgres/0.19.2/postgres/config/struct.Config.html</a>).</p>
+<p>To improve the throughput to the database, the plugin supports connection pooling
+using multiple threads, each maintaining a connection to the PostgreSQL database.
+The count of the threads is controlled by the <cite>threads</cite> field. A higher thread
+count usually offers better performance.</p>
+<p>To further improve performance when saving large numbers of accounts at
+startup, the plugin uses bulk inserts. The batch size is controlled by the
+<cite>batch_size</cite> parameter. This can help reduce the round trips to the database.</p>
+<p>The <cite>panic_on_db_errors</cite> can be used to panic the validator in case of database
+errors to ensure data consistency.</p>
+<p>### Account Selection</p>
+<p>The <cite>accounts_selector</cite> can be used to filter the accounts that should be persisted.</p>
+<p>For example, one can use the following to persist only the accounts with particular
+Base58-encoded Pubkeys,</p>
+<dl>
+<dt><a href="#id46"><span class="problematic" id="id47">``</span></a><a href="#id48"><span class="problematic" id="id49">`</span></a></dt><dd><dl class="simple">
+<dt>“accounts_selector”<span class="classifier">{</span></dt><dd><p>“accounts” : [“pubkey-1”, “pubkey-2”, …, “pubkey-n”],</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p><a href="#id50"><span class="problematic" id="id51">``</span></a><a href="#id52"><span class="problematic" id="id53">`</span></a></p>
+<p>Or use the following to select accounts with certain program owners:</p>
+<dl>
+<dt><a href="#id54"><span class="problematic" id="id55">``</span></a><a href="#id56"><span class="problematic" id="id57">`</span></a></dt><dd><dl class="simple">
+<dt>“accounts_selector”<span class="classifier">{</span></dt><dd><p>“owners” : [“pubkey-owner-1”, “pubkey-owner-2”, …, “pubkey-owner-m”],</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p><a href="#id58"><span class="problematic" id="id59">``</span></a><a href="#id60"><span class="problematic" id="id61">`</span></a></p>
+<p>To select all accounts, use the wildcard character (*):</p>
+<dl>
+<dt><a href="#id62"><span class="problematic" id="id63">``</span></a><a href="#id64"><span class="problematic" id="id65">`</span></a></dt><dd><dl class="simple">
+<dt>“accounts_selector”<span class="classifier">{</span></dt><dd><p>“accounts” : [“*”],</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+<p><a href="#id66"><span class="problematic" id="id67">``</span></a><a href="#id68"><span class="problematic" id="id69">`</span></a></p>
+<p>### Transaction Selection</p>
+<p><cite>transaction_selector</cite>, controls if and what transactions to store.
+If this field is missing, none of the transactions are stored.</p>
+<p>For example, one can use the following to select only the transactions
+referencing accounts with particular Base58-encoded Pubkeys,</p>
+<p><a href="#id70"><span class="problematic" id="id71">``</span></a>`
+“transaction_selector” : {</p>
+<blockquote>
+<div><p>“mentions” : [“pubkey-1”, “pubkey-2”, …, “pubkey-n”],</p>
+</div></blockquote>
+</section>
+<section id="id72">
+<h2>}<a class="headerlink" href="#id72" title="Permalink to this heading">¶</a></h2>
+<p>The <cite>mentions</cite> field supports wildcards to select all transaction or
+all ‘vote’ transactions. For example, to select all transactions:</p>
+<p><a href="#id73"><span class="problematic" id="id74">``</span></a>`
+“transaction_selector” : {</p>
+<blockquote>
+<div><p>“mentions” : [“*”],</p>
+</div></blockquote>
+</section>
+<section id="id75">
+<h2>}<a class="headerlink" href="#id75" title="Permalink to this heading">¶</a></h2>
+<p>To select all vote transactions:</p>
+<p><a href="#id76"><span class="problematic" id="id77">``</span></a>`
+“transaction_selector” : {</p>
+<blockquote>
+<div><p>“mentions” : [“all_votes”],</p>
+</div></blockquote>
+</section>
+<section id="id78">
+<h2>}<a class="headerlink" href="#id78" title="Permalink to this heading">¶</a></h2>
+<p>### Database Setup</p>
+<p>#### Install PostgreSQL Server</p>
+<p>Please follow [PostgreSQL Ubuntu Installation](<a class="reference external" href="https://www.postgresql.org/download/linux/ubuntu/">https://www.postgresql.org/download/linux/ubuntu/</a>)
+on instructions to install the PostgreSQL database server. For example, to
+install postgresql-14,</p>
+<p><code class="docutils literal notranslate"><span class="pre">`</span>
+<span class="pre">sudo</span> <span class="pre">sh</span> <span class="pre">-c</span> <span class="pre">'echo</span> <span class="pre">&quot;deb</span> <span class="pre">http://apt.postgresql.org/pub/repos/apt</span> <span class="pre">$(lsb_release</span> <span class="pre">-cs)-pgdg</span> <span class="pre">main&quot;</span> <span class="pre">&gt;</span> <span class="pre">/etc/apt/sources.list.d/pgdg.list'</span>
+<span class="pre">wget</span> <span class="pre">--quiet</span> <span class="pre">-O</span> <span class="pre">-</span> <span class="pre">https://www.postgresql.org/media/keys/ACCC4CF8.asc</span> <span class="pre">|</span> <span class="pre">sudo</span> <span class="pre">apt-key</span> <span class="pre">add</span> <span class="pre">-</span>
+<span class="pre">sudo</span> <span class="pre">apt-get</span> <span class="pre">update</span>
+<span class="pre">sudo</span> <span class="pre">apt-get</span> <span class="pre">-y</span> <span class="pre">install</span> <span class="pre">postgresql-14</span>
+<span class="pre">`</span></code>
+#### Control the Database Access</p>
+<p>Modify the pg_hba.conf as necessary to grant the plugin to access the database.
+For example, in /etc/postgresql/14/main/pg_hba.conf, the following entry allows
+nodes with IPs in the CIDR 10.138.0.0/24 to access all databases. The validator
+runs in a node with an ip in the specified range.</p>
+<p><code class="docutils literal notranslate"><span class="pre">`</span>
+<span class="pre">host</span>&#160;&#160;&#160; <span class="pre">all</span>&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160; <span class="pre">all</span>&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160; <span class="pre">10.138.0.0/24</span>&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160; <span class="pre">trust</span>
+<span class="pre">`</span></code></p>
+<p>It is recommended to run the database server on a separate node from the validator for
+better performance.</p>
+<p>#### Configure the Database Performance Parameters</p>
+<p>Please refer to the [PostgreSQL Server Configuration](<a class="reference external" href="https://www.postgresql.org/docs/14/runtime-config.html">https://www.postgresql.org/docs/14/runtime-config.html</a>)
+for configuration details. The referential implementation uses the following
+configurations for better database performance in the /etc/postgresql/14/main/postgresql.conf
+which are different from the default postgresql-14 installation.</p>
+<p><code class="docutils literal notranslate"><span class="pre">`</span>
+<span class="pre">max_connections</span> <span class="pre">=</span> <span class="pre">200</span>&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160; <span class="pre">#</span> <span class="pre">(change</span> <span class="pre">requires</span> <span class="pre">restart)</span>
+<span class="pre">shared_buffers</span> <span class="pre">=</span> <span class="pre">1GB</span>&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160; <span class="pre">#</span> <span class="pre">min</span> <span class="pre">128kB</span>
+<span class="pre">effective_io_concurrency</span> <span class="pre">=</span> <span class="pre">1000</span>&#160;&#160;&#160;&#160;&#160;&#160;&#160; <span class="pre">#</span> <span class="pre">1-1000;</span> <span class="pre">0</span> <span class="pre">disables</span> <span class="pre">prefetching</span>
+<span class="pre">wal_level</span> <span class="pre">=</span> <span class="pre">minimal</span>&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160; <span class="pre">#</span> <span class="pre">minimal,</span> <span class="pre">replica,</span> <span class="pre">or</span> <span class="pre">logical</span>
+<span class="pre">fsync</span> <span class="pre">=</span> <span class="pre">off</span>&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160; <span class="pre">#</span> <span class="pre">flush</span> <span class="pre">data</span> <span class="pre">to</span> <span class="pre">disk</span> <span class="pre">for</span> <span class="pre">crash</span> <span class="pre">safety</span>
+<span class="pre">synchronous_commit</span> <span class="pre">=</span> <span class="pre">off</span>&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160; <span class="pre">#</span> <span class="pre">synchronization</span> <span class="pre">level;</span>
+<span class="pre">full_page_writes</span> <span class="pre">=</span> <span class="pre">off</span>&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160; <span class="pre">#</span> <span class="pre">recover</span> <span class="pre">from</span> <span class="pre">partial</span> <span class="pre">page</span> <span class="pre">writes</span>
+<span class="pre">max_wal_senders</span> <span class="pre">=</span> <span class="pre">0</span>&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160; <span class="pre">#</span> <span class="pre">max</span> <span class="pre">number</span> <span class="pre">of</span> <span class="pre">walsender</span> <span class="pre">processes</span>
+<span class="pre">`</span></code></p>
+<p>The sample [postgresql.conf](<a class="reference external" href="https://github.com/solana-labs/solana/blob/7ac43b16d2c766df61ae0a06d7aaf14ba61996ac/accountsdb-plugin-postgres/scripts/postgresql.conf">https://github.com/solana-labs/solana/blob/7ac43b16d2c766df61ae0a06d7aaf14ba61996ac/accountsdb-plugin-postgres/scripts/postgresql.conf</a>)
+can be used for reference.</p>
+<p>#### Create the Database Instance and the Role</p>
+<p>Start the server:</p>
+<p><code class="docutils literal notranslate"><span class="pre">`</span>
+<span class="pre">sudo</span> <span class="pre">systemctl</span> <span class="pre">start</span> <span class="pre">postgresql&#64;14-main</span>
+<span class="pre">`</span></code></p>
+<p>Create the database. For example, the following creates a database named ‘solana’:</p>
+<p><code class="docutils literal notranslate"><span class="pre">`</span>
+<span class="pre">sudo</span> <span class="pre">-u</span> <span class="pre">postgres</span> <span class="pre">createdb</span> <span class="pre">solana</span> <span class="pre">-p</span> <span class="pre">5433</span>
+<span class="pre">`</span></code></p>
+<p>Create the database user. For example, the following creates a regular user named ‘solana’:</p>
+<p><code class="docutils literal notranslate"><span class="pre">`</span>
+<span class="pre">sudo</span> <span class="pre">-u</span> <span class="pre">postgres</span> <span class="pre">createuser</span> <span class="pre">-p</span> <span class="pre">5433</span> <span class="pre">solana</span>
+<span class="pre">`</span></code></p>
+<p>Verify the database is working using psql. For example, assuming the node running
+PostgreSQL has the ip 10.138.0.9, the following command will land in a shell where
+SQL commands can be entered:</p>
+<p><code class="docutils literal notranslate"><span class="pre">`</span>
+<span class="pre">psql</span> <span class="pre">-U</span> <span class="pre">solana</span> <span class="pre">-p</span> <span class="pre">5433</span> <span class="pre">-h</span> <span class="pre">10.138.0.9</span> <span class="pre">-w</span> <span class="pre">-d</span> <span class="pre">solana</span>
+<span class="pre">`</span></code></p>
+<p>#### Create the Schema Objects</p>
+<p>Use the [create_schema.sql](<a class="reference external" href="https://github.com/solana-labs/solana/blob/a70eb098f4ae9cd359c1e40bbb7752b3dd61de8d/accountsdb-plugin-postgres/scripts/create_schema.sql">https://github.com/solana-labs/solana/blob/a70eb098f4ae9cd359c1e40bbb7752b3dd61de8d/accountsdb-plugin-postgres/scripts/create_schema.sql</a>)
+to create the objects for storing accounts and slots.</p>
+<p>Download the script from github:</p>
+<p><code class="docutils literal notranslate"><span class="pre">`</span>
+<span class="pre">wget</span> <span class="pre">https://raw.githubusercontent.com/solana-labs/solana/a70eb098f4ae9cd359c1e40bbb7752b3dd61de8d/accountsdb-plugin-postgres/scripts/create_schema.sql</span>
+<span class="pre">`</span></code></p>
+<p>Then run the script:</p>
+<p><code class="docutils literal notranslate"><span class="pre">`</span>
+<span class="pre">psql</span> <span class="pre">-U</span> <span class="pre">solana</span> <span class="pre">-p</span> <span class="pre">5433</span> <span class="pre">-h</span> <span class="pre">10.138.0.9</span> <span class="pre">-w</span> <span class="pre">-d</span> <span class="pre">solana</span> <span class="pre">-f</span> <span class="pre">create_schema.sql</span>
+<span class="pre">`</span></code></p>
+<p>After this, start the validator with the plugin by using the <cite>–geyser-plugin-config</cite>
+argument mentioned above.</p>
+<p>#### Destroy the Schema Objects</p>
+<p>To destroy the database objects, created by <cite>create_schema.sql</cite>, use
+[drop_schema.sql](<a class="reference external" href="https://github.com/solana-labs/solana/blob/a70eb098f4ae9cd359c1e40bbb7752b3dd61de8d/accountsdb-plugin-postgres/scripts/drop_schema.sql">https://github.com/solana-labs/solana/blob/a70eb098f4ae9cd359c1e40bbb7752b3dd61de8d/accountsdb-plugin-postgres/scripts/drop_schema.sql</a>).
+For example,</p>
+<p><code class="docutils literal notranslate"><span class="pre">`</span>
+<span class="pre">psql</span> <span class="pre">-U</span> <span class="pre">solana</span> <span class="pre">-p</span> <span class="pre">5433</span> <span class="pre">-h</span> <span class="pre">10.138.0.9</span> <span class="pre">-w</span> <span class="pre">-d</span> <span class="pre">solana</span> <span class="pre">-f</span> <span class="pre">drop_schema.sql</span>
+<span class="pre">`</span></code></p>
+<p>### Capture Historical Account Data</p>
+<p>To capture account historical data, in the configuration file, turn
+<cite>store_account_historical_data</cite> to true.</p>
+<p>And ensure the database trigger is created to save data in the <cite>audit_table</cite> when
+records in <cite>account</cite> are updated, as shown in <cite>create_schema.sql</cite>,</p>
+<p><a href="#id79"><span class="problematic" id="id80">``</span></a>`
+CREATE FUNCTION audit_account_update() RETURNS trigger AS $audit_account_update$</p>
+<blockquote>
+<div><dl>
+<dt>BEGIN</dt><dd><blockquote>
+<div><blockquote>
+<div><p>INSERT INTO account_audit (pubkey, owner, lamports, slot, executable, rent_epoch, data, write_version, updated_on)</p>
+</div></blockquote>
+<dl class="simple">
+<dt>VALUES (OLD.pubkey, OLD.owner, OLD.lamports, OLD.slot,</dt><dd><p>OLD.executable, OLD.rent_epoch, OLD.data, OLD.write_version, OLD.updated_on);</p>
+</dd>
+</dl>
+</div></blockquote>
+<p>RETURN NEW;</p>
+</dd>
+</dl>
+<p>END;</p>
+</div></blockquote>
+<p>$audit_account_update$ LANGUAGE plpgsql;</p>
+<dl class="simple">
+<dt>CREATE TRIGGER account_update_trigger AFTER UPDATE OR DELETE ON account</dt><dd><p>FOR EACH ROW EXECUTE PROCEDURE audit_account_update();</p>
+</dd>
+</dl>
+<p><a href="#id81"><span class="problematic" id="id82">``</span></a><a href="#id83"><span class="problematic" id="id84">`</span></a></p>
+<p>The trigger can be dropped to disable this feature, for example,</p>
+<p><code class="docutils literal notranslate"><span class="pre">`</span>
+<span class="pre">DROP</span> <span class="pre">TRIGGER</span> <span class="pre">account_update_trigger</span> <span class="pre">ON</span> <span class="pre">account;</span>
+<span class="pre">`</span></code></p>
+<p>Over time, the account_audit can accumulate large amount of data. You may choose to
+limit that by deleting older historical data.</p>
+<p>For example, the following SQL statement can be used to keep up to 1000 of the most
+recent records for an account:</p>
+<p><a href="#id85"><span class="problematic" id="id86">``</span></a>`
+delete from account_audit a2 where (pubkey, write_version) in</p>
+<blockquote>
+<div><dl class="simple">
+<dt>(select pubkey, write_version from</dt><dd><dl class="simple">
+<dt>(select a.pubkey, a.updated_on, a.slot, a.write_version, a.lamports,</dt><dd><p>rank() OVER ( partition by pubkey order by write_version desc) as rnk
+from account_audit a) ranked
+where ranked.rnk &gt; 1000)</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</div></blockquote>
+<p><a href="#id87"><span class="problematic" id="id88">``</span></a><a href="#id89"><span class="problematic" id="id90">`</span></a></p>
+<p>### Main Tables</p>
+<p>The following are the tables in the Postgres database</p>
+<div class="line-block">
+<div class="line">Table         | Description             |</div>
+</div>
+<p><a href="#id91"><span class="problematic" id="id92">|:--------------|</span></a>:————————|
+| account       | Account data            |
+| slot          | Slot metadata           |
+| transaction   | Transaction data        |
+| account_audit | Account historical data |</p>
+<p>### Performance Considerations</p>
+<p>When a validator lacks sufficient compute power, the overhead of saving the
+account data can cause it to fall behind the network especially when all
+accounts or a large number of accounts are selected. The node hosting the
+PostgreSQL database need to be powerful enough to handle the database loads
+as well. It has been found using GCP n2-standard-64 machine type for the
+validator and n2-highmem-32 for the PostgreSQL node is adequate for handling
+transmitting all accounts while keeping up with the network. In addition, it is
+best to keep the validator and the PostgreSQL in the same local network to
+reduce latency. You may need to size the validator and database nodes
+differently if serving other loads.</p>
+</section>
+</section>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../_sources/src/developing/plugins/geyser-plugins.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

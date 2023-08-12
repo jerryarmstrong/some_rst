@@ -1,0 +1,21 @@
+tests/ui/proc-macro/no-macro-use-attr.rs
+========================================
+
+Last edited: 2023-03-30 20:35:59
+
+Contents:
+
+.. code-block:: rs
+
+    // aux-build:test-macros.rs
+
+#![feature(rustc_attrs)]
+#![warn(unused_extern_crates)]
+
+extern crate test_macros;
+//~^ WARN unused extern crate
+
+#[rustc_error]
+fn main() {} //~ ERROR fatal error triggered by #[rustc_error]
+
+

@@ -1,0 +1,40 @@
+tests/ui/transmute/transmute-padding-ice.rs
+===========================================
+
+Last edited: 2023-03-30 20:35:59
+
+Contents:
+
+.. code-block:: rs
+
+    #![crate_type = "lib"]
+#![feature(transmutability)]
+#![allow(dead_code)]
+
+mod assert {
+    use std::mem::{Assume, BikeshedIntrinsicFrom};
+    pub struct Context;
+
+    pub fn is_maybe_transmutable<Src, Dst>()
+    where
+        Dst: BikeshedIntrinsicFrom<
+            Src,
+            Context,
+            { Assume { alignment: true, lifetimes: true, safety: true, validity: true } },
+        >,
+    {
+    }
+}
+
+fn test() {
+    #[repr(C, align(2))]
+    struct A(u8, u8);
+
+    #[repr(C)]
+    struct B(u8, u8);
+
+    assert::is_maybe_transmutable::<B, A>();
+    //~^ ERROR cannot be safely transmuted
+}
+
+

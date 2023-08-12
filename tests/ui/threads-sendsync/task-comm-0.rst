@@ -1,0 +1,41 @@
+tests/ui/threads-sendsync/task-comm-0.rs
+========================================
+
+Last edited: 2023-03-30 20:35:59
+
+Contents:
+
+.. code-block:: rs
+
+    // run-pass
+#![allow(unused_must_use)]
+// ignore-emscripten no threads support
+
+use std::thread;
+use std::sync::mpsc::{channel, Sender};
+
+pub fn main() { test05(); }
+
+fn test05_start(tx : &Sender<isize>) {
+    tx.send(10).unwrap();
+    println!("sent 10");
+    tx.send(20).unwrap();
+    println!("sent 20");
+    tx.send(30).unwrap();
+    println!("sent 30");
+}
+
+fn test05() {
+    let (tx, rx) = channel();
+    let t = thread::spawn(move|| { test05_start(&tx) });
+    let mut value: isize = rx.recv().unwrap();
+    println!("{}", value);
+    value = rx.recv().unwrap();
+    println!("{}", value);
+    value = rx.recv().unwrap();
+    println!("{}", value);
+    assert_eq!(value, 30);
+    t.join();
+}
+
+

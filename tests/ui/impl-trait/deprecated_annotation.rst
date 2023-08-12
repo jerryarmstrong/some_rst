@@ -1,0 +1,30 @@
+tests/ui/impl-trait/deprecated_annotation.rs
+============================================
+
+Last edited: 2023-03-30 20:35:59
+
+Contents:
+
+.. code-block:: rs
+
+    // build-pass (FIXME(62277): could be check-pass?)
+
+#![deny(warnings)]
+
+#[deprecated]
+trait Deprecated {}
+
+#[deprecated]
+struct DeprecatedTy;
+
+#[allow(deprecated)]
+impl Deprecated for DeprecatedTy {}
+
+#[allow(deprecated)]
+fn foo() -> impl Deprecated { DeprecatedTy }
+
+fn main() {
+    foo();
+}
+
+

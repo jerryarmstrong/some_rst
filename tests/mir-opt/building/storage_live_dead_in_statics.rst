@@ -1,0 +1,44 @@
+tests/mir-opt/building/storage_live_dead_in_statics.rs
+======================================================
+
+Last edited: 2023-03-30 20:35:59
+
+Contents:
+
+.. code-block:: rs
+
+    // Check that when we compile the static `XXX` into MIR, we do not
+// generate `StorageStart` or `StorageEnd` statements.
+
+// EMIT_MIR storage_live_dead_in_statics.XXX.built.after.mir
+static XXX: &'static Foo = &Foo {
+    tup: "hi",
+    data: &[
+        (0, 1), (0, 2), (0, 3),
+        (0, 1), (0, 2), (0, 3),
+        (0, 1), (0, 2), (0, 3),
+        (0, 1), (0, 2), (0, 3),
+        (0, 1), (0, 2), (0, 3),
+        (0, 1), (0, 2), (0, 3),
+        (0, 1), (0, 2), (0, 3),
+        (0, 1), (0, 2), (0, 3),
+        (0, 1), (0, 2), (0, 3),
+        (0, 1), (0, 2), (0, 3),
+        (0, 1), (0, 2), (0, 3),
+        (0, 1), (0, 2), (0, 3),
+        (0, 1), (0, 2), (0, 3),
+        (0, 1), (0, 2), (0, 3),
+    ]
+};
+
+#[derive(Debug)]
+struct Foo {
+    tup: &'static str,
+    data: &'static [(u32, u32)]
+}
+
+fn main() {
+    println!("{:?}", XXX);
+}
+
+

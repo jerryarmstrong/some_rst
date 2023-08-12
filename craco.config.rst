@@ -1,0 +1,28 @@
+craco.config.js
+===============
+
+Last edited: 2021-03-16 20:45:52
+
+Contents:
+
+.. code-block:: js
+
+    const CracoLessPlugin = require("craco-less");
+
+module.exports = {
+  plugins: [
+    {
+      plugin: CracoLessPlugin,
+      options: {
+        lessLoaderOptions: {
+          lessOptions: {
+            modifyVars: { "@primary-color": "#2abdd2" },
+            javascriptEnabled: true,
+          },
+        },
+      },
+    },
+  ],
+};
+
+

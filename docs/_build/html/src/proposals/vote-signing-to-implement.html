@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>docs/src/proposals/vote-signing-to-implement.md &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../" id="documentation_options" src="../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" />
+   
+  <link rel="stylesheet" href="../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <section id="docs-src-proposals-vote-signing-to-implement-md">
+<h1>docs/src/proposals/vote-signing-to-implement.md<a class="headerlink" href="#docs-src-proposals-vote-signing-to-implement-md" title="Permalink to this heading">¶</a></h1>
+<p>Last edited: 2023-08-11 21:38:33</p>
+<p>Contents:</p>
+<div class="highlight-md notranslate"><div class="highlight"><pre><span></span>---
+</pre></div>
+</div>
+<p>title: Secure Vote Signing
+—</p>
+<p>## Secure Vote Signing</p>
+<p>This design describes additional vote signing behavior that will make the process more secure.</p>
+<p>Currently, Solana implements a vote-signing service that evaluates each vote to ensure it does not violate a slashing condition. The service could potentially have different variations, depending on the hardware platform capabilities. In particular, it could be used in conjunction with a secure enclave (such as SGX). The enclave could generate an asymmetric key, exposing an API for user (untrusted) code to sign the vote transactions, while keeping the vote-signing private key in its protected memory.</p>
+<p>The following sections outline how this architecture would work:</p>
+<p>### Message Flow</p>
+<ol class="arabic">
+<li><p>The node initializes the enclave at startup</p>
+<ul>
+<li><p>The enclave generates an asymmetric key and returns the public key to the</p>
+<p>node</p>
+</li>
+<li><p>The keypair is ephemeral. A new keypair is generated on node bootup. A</p>
+<p>new keypair might also be generated at runtime based on some to be determined</p>
+<p>criteria.</p>
+</li>
+<li><p>The enclave returns its attestation report to the node</p></li>
+</ul>
+</li>
+<li><p>The node performs attestation of the enclave (e.g using Intel’s IAS APIs)</p>
+<ul>
+<li><p>The node ensures that the Secure Enclave is running on a TPM and is</p>
+<p>signed by a trusted party</p>
+</li>
+</ul>
+</li>
+<li><p>The stakeholder of the node grants ephemeral key permission to use its stake.</p>
+<p>This process is to be determined.</p>
+</li>
+<li><p>The node’s untrusted, non-enclave software calls trusted enclave software</p>
+<p>using its interface to sign transactions and other data.</p>
+<ul>
+<li><p>In case of vote signing, the node needs to verify the PoH. The PoH</p>
+<p>verification is an integral part of signing. The enclave would be</p>
+<p>presented with some verifiable data to check before signing the vote.</p>
+</li>
+<li><p>The process of generating the verifiable data in untrusted space is to be determined</p></li>
+</ul>
+</li>
+</ol>
+<p>### PoH Verification</p>
+<ol class="arabic">
+<li><p>When the node votes on an en entry <cite>X</cite>, there’s a lockout period <cite>N</cite>, for</p>
+<p>which it cannot vote on a fork that does not contain <cite>X</cite> in its history.</p>
+</li>
+<li><p>Every time the node votes on the derivative of <cite>X</cite>, say <cite>X+y</cite>, the lockout</p>
+<p>period for <cite>X</cite> increases by a factor <cite>F</cite> (i.e. the duration node cannot vote on</p>
+<p>a fork that does not contain <cite>X</cite> increases).</p>
+<ul class="simple">
+<li><p>The lockout period for <cite>X+y</cite> is still <cite>N</cite> until the node votes again.</p></li>
+</ul>
+</li>
+<li><p>The lockout period increment is capped (e.g. factor <cite>F</cite> applies maximum 32</p>
+<p>times).</p>
+</li>
+<li><p>The signing enclave must not sign a vote that violates this policy. This</p>
+<p>means</p>
+<ul>
+<li><p>Enclave is initialized with <cite>N</cite>, <cite>F</cite> and <cite>Factor cap</cite></p></li>
+<li><p>Enclave stores <cite>Factor cap</cite> number of entry IDs on which the node had</p>
+<p>previously voted</p>
+</li>
+<li><p>The sign request contains the entry ID for the new vote</p></li>
+<li><p>Enclave verifies that new vote’s entry ID is on the correct fork</p>
+<p>(following the rules #1 and #2 above)</p>
+</li>
+</ul>
+</li>
+</ol>
+<p>### Ancestor Verification</p>
+<p>This is alternate, albeit, less certain approach to verifying voting fork. 1. The validator maintains an active set of nodes in the cluster 2. It observes the votes from the active set in the last voting period 3. It stores the ancestor/last_tick at which each node voted 4. It sends new vote request to vote-signing service</p>
+<ul>
+<li><p>It includes previous votes from nodes in the active set, and their</p>
+<p>corresponding ancestors</p>
+<ol class="arabic">
+<li><p>The signer checks if the previous votes contains a vote from the validator,</p>
+<p>and the vote ancestor matches with majority of the nodes</p>
+</li>
+</ol>
+</li>
+<li><p>It signs the new vote if the check is successful</p></li>
+<li><p>It asserts (raises an alarm of some sort) if the check is unsuccessful</p></li>
+</ul>
+<p>The premise is that the validator can be spoofed at most once to vote on incorrect data. If someone hijacks the validator and submits a vote request for bogus data, that vote will not be included in the PoH (as it’ll be rejected by the cluster). The next time the validator sends a request to sign the vote, the signing service will detect that validator’s last vote is missing (as part of</p>
+<p>## 5 above).</p>
+<p>### Fork determination</p>
+<p>Due to the fact that the enclave cannot process PoH, it has no direct knowledge of fork history of a submitted validator vote. Each enclave should be initiated with the current _active <a href="#id1"><span class="problematic" id="id2">set_</span></a> of public keys. A validator should submit its current vote along with the votes of the active set (including itself) that it observed in the slot of its previous vote. In this way, the enclave can surmise the votes accompanying the validator’s previous vote and thus the fork being voted on. This is not possible for the validator’s initial submitted vote, as it will not have a ‘previous’ slot to reference. To account for this, a short voting freeze should apply until the second vote is submitted containing the votes within the active set, along with it’s own vote, at the height of the initial vote.</p>
+<p>### Enclave configuration</p>
+<p>A staking client should be configurable to prevent voting on inactive forks. This mechanism should use the client’s known active set <cite>N_active</cite> along with a threshold vote <cite>N_vote</cite> and a threshold depth <cite>N_depth</cite> to determine whether or not to continue voting on a submitted fork. This configuration should take the form of a rule such that the client will only vote on a fork if it observes more than <cite>N_vote</cite> at <cite>N_depth</cite>. Practically, this represents the client from confirming that it has observed some probability of economic finality of the submitted fork at a depth where an additional vote would create a lockout for an undesirable amount of time if that fork turns out not to be live.</p>
+<p>### Challenges</p>
+<ol class="arabic">
+<li><p>Generation of verifiable data in untrusted space for PoH verification in the</p>
+<p>enclave.</p>
+</li>
+<li><p>Need infrastructure for granting stake to an ephemeral key.</p></li>
+</ol>
+</section>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../_sources/src/proposals/vote-signing-to-implement.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

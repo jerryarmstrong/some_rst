@@ -1,0 +1,44 @@
+tools/validators/accounts/token.ts
+==================================
+
+Last edited: 2023-08-11 18:13:34
+
+Contents:
+
+.. code-block:: ts
+
+    // Copied from Explorer code https://github.com/solana-labs/solana/blob/master/explorer/src/validators/accounts/token.ts
+
+import {
+  Infer,
+  number,
+  optional,
+  enums,
+  boolean,
+  string,
+  type,
+} from 'superstruct'
+import { PublicKeyFromString } from '../pubkey'
+
+const AccountState = enums(['initialized', 'uninitialized', 'frozen'])
+
+const TokenAmount = type({
+  decimals: number(),
+  uiAmountString: string(),
+  amount: string(),
+})
+
+export type TokenAccountInfo = Infer<typeof TokenAccountInfo>
+const TokenAccountInfo = type({
+  mint: PublicKeyFromString,
+  owner: PublicKeyFromString,
+  tokenAmount: TokenAmount,
+  delegate: optional(PublicKeyFromString),
+  state: AccountState,
+  isNative: boolean(),
+  rentExemptReserve: optional(TokenAmount),
+  delegatedAmount: optional(TokenAmount),
+  closeAuthority: optional(PublicKeyFromString),
+})
+
+

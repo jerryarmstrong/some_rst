@@ -1,0 +1,32 @@
+tests/ui/const-generics/intrinsics-type_name-as-const-argument.rs
+=================================================================
+
+Last edited: 2023-03-30 20:35:59
+
+Contents:
+
+.. code-block:: rs
+
+    // [full] check-pass
+// revisions: full min
+
+#![cfg_attr(full, allow(incomplete_features))]
+#![cfg_attr(full, feature(adt_const_params, generic_const_exprs))]
+
+#![feature(core_intrinsics)]
+#![feature(const_type_name)]
+
+trait Trait<const S: &'static str> {}
+//[min]~^ ERROR `&'static str` is forbidden as the type of a const generic parameter
+
+struct Bug<T>
+where
+    T: Trait<{std::intrinsics::type_name::<T>()}>
+    //[min]~^ ERROR generic parameters may not be used in const operations
+{
+    t: T
+}
+
+fn main() {}
+
+

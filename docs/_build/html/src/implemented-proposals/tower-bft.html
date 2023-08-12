@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>docs/src/implemented-proposals/tower-bft.md &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../" id="documentation_options" src="../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" />
+   
+  <link rel="stylesheet" href="../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <section id="docs-src-implemented-proposals-tower-bft-md">
+<h1>docs/src/implemented-proposals/tower-bft.md<a class="headerlink" href="#docs-src-implemented-proposals-tower-bft-md" title="Permalink to this heading">¶</a></h1>
+<p>Last edited: 2023-08-11 21:38:33</p>
+<p>Contents:</p>
+<div class="highlight-md notranslate"><div class="highlight"><pre><span></span>---
+</pre></div>
+</div>
+<p>title: Tower BFT
+—</p>
+<p>This design describes Solana’s _Tower <a href="#id7"><span class="problematic" id="id8">BFT_</span></a> algorithm. It addresses the following problems:</p>
+<ul class="simple">
+<li><p>Some forks may not end up accepted by the supermajority of the cluster, and voters need to recover from voting on such forks.</p></li>
+<li><p>Many forks may be votable by different voters, and each voter may see a different set of votable forks. The selected forks should eventually converge for the cluster.</p></li>
+<li><p>Reward based votes have an associated risk. Voters should have the ability to configure how much risk they take on.</p></li>
+<li><p>The [cost of rollback](tower-bft.md#cost-of-rollback) needs to be computable. It is important to clients that rely on some measurable form of Consistency. The costs to break consistency need to be computable, and increase super-linearly for older votes.</p></li>
+<li><p>ASIC speeds are different between nodes, and attackers could employ Proof of History ASICS that are much faster than the rest of the cluster. Consensus needs to be resistant to attacks that exploit the variability in Proof of History ASIC speed.</p></li>
+</ul>
+<p>For brevity this design assumes that a single voter with a stake is deployed as an individual validator in the cluster.</p>
+<p>## Time</p>
+<p>The Solana cluster generates a source of time via a Verifiable Delay Function we are calling [Proof of History](../cluster/synchronization.md).</p>
+<p>The unit of time is called a “slot”. Each slot has a designated leader that can
+produce a block <cite>B</cite>. The <cite>slot</cite> of block <cite>B</cite> is designated <cite>slot(B)</cite>. A leader
+does not necessarily need to generate a block for its slot, in which case there
+may not be blocks for some slots.</p>
+<p>For more details, see [fork generation](../cluster/fork-generation.md) and [leader rotation](../cluster/leader-rotation.md).</p>
+<p>## Votes</p>
+<p>Validators communicate which fork they think is the heaviest through votes.
+Each vote <cite>v</cite> is signed by the validator that produces it, and is of the form <cite>(i, B)</cite>, where <cite>i</cite> is the public key of the validator producing the vote and <cite>B</cite> is a hash identifying the block being voted for.</p>
+<p>## Lockouts</p>
+<p>Making votes on a particular fork incurs a lockout on that particular fork. A lockout is a designated period of time, measured in slots, within which a validator cannot vote on another fork. The purpose of the lockout is to force a
+validator to commit opportunity cost to a specific fork. Lockouts are measured
+in slots, and therefore represent a real-time forced delay that a validator
+needs to wait before breaking the commitment to a fork.</p>
+<p>Validators that violate the lockouts and vote for a diverging fork within the lockout should be punished. The proposed punishment is to slash the validator stake if a concurrent vote within a lockout for a non-descendant fork can be proven to the cluster.</p>
+<p>## Algorithm</p>
+<p>The basic idea to this approach is to stack consensus votes and double lockouts. Each vote in the stack is a confirmation of a fork. Each confirmed fork is an ancestor of the fork above it. Each vote has a <cite>lockout</cite> in units of slots before the validator can submit a vote that does not contain the confirmed fork as an ancestor.</p>
+<p>We call this stack the Vote Tower.</p>
+<p>When a vote is added to the tower, the lockouts of all the previous votes in the tower are doubled (more on this in [Vote Tower](#vote-tower)). With each new vote, a validator commits the previous votes to an ever-increasing lockout. At 32 votes we can consider the vote to be at <cite>max lockout</cite> any votes with a lockout equal to or above <cite>1&lt;&lt;32</cite> are dequeued (FIFO). Dequeuing a vote is the trigger for a reward. If the vote on the top of the tower expires before it is dequeued, it and subsequent expired votes are popped in a LIFO fashion from the vote tower. The validator needs to start rebuilding the tower from that point.</p>
+<p>### Vote Tower</p>
+<p>Before a vote is pushed to the tower, all the votes leading up to vote with a lower lock expiration slot than the new vote are popped. After rollback
+lockouts are not doubled until the validator catches up to the rollback height of votes.</p>
+<p>For example, a vote tower with the following state:</p>
+<div class="line-block">
+<div class="line">vote | vote slot | lockout | lock expiration slot |</div>
+<div class="line">—: | ——–: | ——: | ——————-: |</div>
+<div class="line-block">
+<div class="line">4 |         4 |       2 |                    6 |</div>
+<div class="line">3 |         3 |       4 |                    7 |</div>
+<div class="line">2 |         2 |       8 |                   10 |</div>
+<div class="line">1 |         1 |      16 |                   17 |</div>
+</div>
+</div>
+<p>_Vote <a href="#id9"><span class="problematic" id="id10">5_</span></a> is at slot 9, and the resulting state is</p>
+<div class="line-block">
+<div class="line">vote | vote slot | lockout | lock expiration slot |</div>
+<div class="line">—: | ——–: | ——: | ——————-: |</div>
+<div class="line-block">
+<div class="line">5 |         9 |       2 |                   11 |</div>
+<div class="line">2 |         2 |       8 |                   10 |</div>
+<div class="line">1 |         1 |      16 |                   17 |</div>
+</div>
+</div>
+<p>_Vote <a href="#id11"><span class="problematic" id="id12">6_</span></a> is at slot 10</p>
+<div class="line-block">
+<div class="line">vote | vote slot | lockout | lock expiration slot |</div>
+<div class="line">—: | ——–: | ——: | ——————-: |</div>
+<div class="line-block">
+<div class="line">6 |        10 |       2 |                   12 |</div>
+<div class="line">5 |         9 |       4 |                   13 |</div>
+<div class="line">2 |         2 |       8 |                   10 |</div>
+<div class="line">1 |         1 |      16 |                   17 |</div>
+</div>
+</div>
+<p>At slot 10 the new votes caught up to the previous votes. When _vote <a href="#id13"><span class="problematic" id="id14">7_</span></a> at slot 11 is applied we scan top down to pop expired votes. Although _vote <a href="#id15"><span class="problematic" id="id16">2_</span></a> has expired, since _vote <a href="#id17"><span class="problematic" id="id18">6_</span></a> has not expired, we do not continue scanning. Finally we have reached a new stack depth, lockouts are doubled</p>
+<div class="line-block">
+<div class="line">vote | vote slot | lockout | lock expiration slot |</div>
+<div class="line">—: | ——–: | ——: | ——————-: |</div>
+<div class="line-block">
+<div class="line">7 |        11 |       2 |                   13 |</div>
+<div class="line">6 |        10 |       4 |                   14 |</div>
+<div class="line">5 |         9 |       8 |                   17 |</div>
+<div class="line">2 |         2 |      16 |                   18 |</div>
+<div class="line">1 |         1 |      32 |                   33 |</div>
+</div>
+</div>
+<p>Finally we have _vote <a href="#id19"><span class="problematic" id="id20">8_</span></a> at slot 18, this leads to the expiry of _vote <a href="#id21"><span class="problematic" id="id22">7_</span></a>, _vote <a href="#id23"><span class="problematic" id="id24">6_</span></a>, and _vote <a href="#id25"><span class="problematic" id="id26">5_</span></a>.</p>
+<div class="line-block">
+<div class="line">vote | vote slot | lockout | lock expiration slot |</div>
+<div class="line">—: | ——–: | ——: | ——————-: |</div>
+<div class="line-block">
+<div class="line">8 |        18 |       2 |                   20 |</div>
+<div class="line">2 |         2 |      16 |                   18 |</div>
+<div class="line">1 |         1 |      32 |                   33 |</div>
+</div>
+</div>
+<p>### Cost of Rollback</p>
+<p>Cost of rollback of _fork <a href="#id27"><span class="problematic" id="id28">A_</span></a> is defined as the cost in terms of lockout time to the validator to confirm any other fork that does not include _fork <a href="#id29"><span class="problematic" id="id30">A_</span></a> as an ancestor.</p>
+<p>The <strong>Economic Finality</strong> of _fork <a href="#id31"><span class="problematic" id="id32">A_</span></a> can be calculated as the loss of all the rewards from rollback of _fork <a href="#id33"><span class="problematic" id="id34">A_</span></a> and its descendants, plus the opportunity cost of reward due to the exponentially growing lockout of the votes that have confirmed _fork <a href="#id35"><span class="problematic" id="id36">A_</span></a>.</p>
+<p>### Threshold Check
+In order to prevent a validator from locking itself out on the wrong fork
+in the case of a partition, there also needs to be a check to ensure that the rest of the cluster is committing to the same fork. This check is called the
+“threshold check”, and is outlined as follows.</p>
+<p>In deciding whether to vote for a block <cite>B</cite>:</p>
+<ol class="arabic simple">
+<li><p>Simulate a vote for <cite>B</cite> on your current tower</p></li>
+<li><p>Simulate popping off all the votes that would be expired by <cite>B</cite></p></li>
+<li><p>Now index every vote in the tower from <cite>[0, tower.length()]</cite>, assuming that the most recent simulated vote <cite>B</cite> is index 0, the second most recent vote is index 1, etc.</p></li>
+<li><p>Let <cite>T</cite> be the vote in the tower with index equal to <cite>threshold_check_depth</cite>, currently hardcoded to <cite>8</cite>.</p></li>
+<li><p>Check all the blocks descended from <cite>T</cite>. Let <cite>Votes</cite> be the set of all votes in these blocks for <cite>T</cite> or any descendants <cite>D_n</cite> of <cite>T</cite>. Let <cite>V</cite> be the set of all validators that have made a vote in <cite>V</cite>. If the sum of the validators’ stakes in <cite>V</cite> totals <cite>&gt;= 2/3</cite> of the stake of the network, then we commit a vote to <cite>T</cite>.</p></li>
+</ol>
+<p>### Algorithm parameters</p>
+<p>The following parameters need to be tuned:</p>
+<ul class="simple">
+<li><p>Number of votes in the stack before dequeue occurs (32).</p></li>
+<li><p>Rate of growth for lockouts in the stack (2x).</p></li>
+<li><p>Starting default lockout (2).</p></li>
+<li><p>Threshold check depth for minimum cluster commitment before committing to the fork (8).</p></li>
+<li><p>Minimum cluster commitment size at threshold depth (50%+).</p></li>
+</ul>
+<p>### Fork Choice</p>
+<p>Fork choice is how each validator determines which fork to vote on when multiple
+concurrent forks exist. Forks are weighted based on the latest votes made by the validator set, and individual validators then vote on the “heaviest”
+such fork.</p>
+<p>Given the view of a single validator <cite>i</cite>:</p>
+<p>Let <cite>V</cite> be the set of “most recent” valid votes received by <cite>i</cite>, i.e., <cite>v = (j, B)</cite> is in <cite>V</cite> and <cite>i</cite> has not also received a vote of the form <cite>(j, B′) `such that `slot(B′) &gt; slot(B)</cite>.</p>
+<p>Now the algorithm proceeds as follows:</p>
+<p>1. For each vote <cite>(j, B)</cite> in <cite>V</cite>, add the stake of <cite>j</cite> to <cite>B</cite> and all of its
+ancestors.
+2. Now Set <cite>B</cite> to be the rooted block. Set <cite>finish := 0</cite>.
+3. Perform the following loop:</p>
+<p><a href="#id1"><span class="problematic" id="id2">``</span></a>`
+<em>While</em> <cite>finish == 0</cite>
+<em>Do</em>:</p>
+<blockquote>
+<div><p><em>If</em>: <cite>i</cite> has received no children of <cite>B</cite> then set <cite>finish := 1</cite> and return
+<cite>B</cite>.
+<em>Else</em>: Let <cite>B′</cite> be the child of <cite>B</cite> (amongst those received by <cite>i</cite>) with
+most the most stake-weighted votes in <cite>V</cite>, breaking ties by the smallest
+slot. Set <cite>B</cite> equal to <cite>B’</cite>.</p>
+</div></blockquote>
+<p><a href="#id3"><span class="problematic" id="id4">``</span></a><a href="#id5"><span class="problematic" id="id6">`</span></a></p>
+<p>### Voting Algorithm</p>
+<p>Each validator maintains a vote tower <cite>T</cite> which follows the rules described above in [Vote Tower](#vote-tower), which is a sequence of blocks it has voted for (initially empty). The variable <cite>l</cite> records the length of the stack. For each entry in the tower, denoted by <cite>B = T(x)</cite> for <cite>x &lt; l</cite> where <cite>B</cite> is the <cite>xth</cite> entry in the tower, we record also a value <cite>confcount(B)</cite>. Define the lock expiration slot <cite>lockexp(B) := slot(B) + 2 ^ confcount(B)</cite>.</p>
+<p>The validator <cite>i</cite> runs a voting loop as as follows. Let <cite>B</cite> be the heaviest
+block returned by the fork choice rule above [Fork Choice](#fork-choice). If <cite>i</cite> has not voted for <cite>B</cite> before, then <cite>i</cite> votes for <cite>B</cite> so long as the following conditions are satisfied:</p>
+<ol class="arabic simple">
+<li><p>Respecting lockouts: For any block <cite>B′</cite> in the tower that is not an ancestor of <cite>B</cite>, <cite>lockexp(B′) ≤ slot(B)</cite>.</p></li>
+<li><p>Threshold check: Described above in [Threshold Check](#threshold-check)</p></li>
+<li><dl class="simple">
+<dt>Switching threshold: Have sufficiently many votes on other forks if switching forks. Let <cite>Btop</cite> denote the block at the top of the stack. If <cite>Btop</cite> is not an ancestor of <cite>B</cite>, then:</dt><dd><ul class="simple">
+<li><p>Let <cite>VBtop ⊆ V</cite> be the set of votes on <cite>Btop</cite> or ancestors or descendents of <cite>Btop</cite>.</p></li>
+<li><p>We need <cite>|V VBtop | &gt; 38%</cite>. More details on this can be found in [Optimistic Confirmation](../proposals/optimistic_confirmation.md)</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ol>
+<p>If all the conditions are satisfied and validator <cite>i</cite> votes for block <cite>B</cite> then it adjusts its tower as follows (same rules described above in [Vote Tower](#vote-tower)).
+1. Remove expired blocks top down. Let <cite>x := l - 1</cite>. While <cite>x &gt;= 0 &amp;&amp; lockexp(T(x)) &lt; slot(B)</cite>, remove <cite>T(x)</cite> from the tower, and set <cite>l := l - 1</cite> and <cite>x := x - 1</cite>.
+2. Add block to tower. <cite>T(l) := B</cite>, <cite>confcount(B) := 1</cite>, and set <cite>l := l + 1</cite>.
+3. Double lockouts. For each element <cite>B = T(x)</cite> if <cite>l &gt; x + confcount(B)</cite>, then <cite>confcount(B) := confcount(B) + 1</cite>.</p>
+<p>## PoH ASIC Resistance</p>
+<p>Votes and lockouts grow exponentially while ASIC speed up is linear. There are possible attack vectors involving a faster ASIC outlined below.</p>
+<p>### ASIC Rollback</p>
+<p>An attacker generates a concurrent fork from an older block to try to rollback the cluster. In this attack the concurrent fork is competing with forks that have already been voted on. This attack is limited by the exponential growth of the lockouts.</p>
+<ul class="simple">
+<li><p>1 vote has a lockout of 2 slots. Concurrent fork must be at least 2 slots ahead, and be produced in 1 slot. Therefore requires an ASIC 2x faster.</p></li>
+<li><p>2 votes have a lockout of 4 slots. Concurrent fork must be at least 4 slots ahead and produced in 2 slots. Therefore requires an ASIC 2x faster.</p></li>
+<li><p>3 votes have a lockout of 8 slots. Concurrent fork must be at least 8 slots ahead and produced in 3 slots. Therefore requires an ASIC 2.6x faster.</p></li>
+<li><p>10 votes have a lockout of 1024 slots. 1024/10, or 102.4x faster ASIC.</p></li>
+<li><p>20 votes have a lockout of 2^20 slots. 2^20/20, or 52,428.8x faster ASIC.</p></li>
+</ul>
+</section>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../_sources/src/implemented-proposals/tower-bft.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

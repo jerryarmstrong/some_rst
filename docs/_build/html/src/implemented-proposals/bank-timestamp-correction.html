@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>docs/src/implemented-proposals/bank-timestamp-correction.md &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../" id="documentation_options" src="../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" />
+   
+  <link rel="stylesheet" href="../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <section id="docs-src-implemented-proposals-bank-timestamp-correction-md">
+<h1>docs/src/implemented-proposals/bank-timestamp-correction.md<a class="headerlink" href="#docs-src-implemented-proposals-bank-timestamp-correction-md" title="Permalink to this heading">¶</a></h1>
+<p>Last edited: 2023-08-11 21:38:33</p>
+<p>Contents:</p>
+<div class="highlight-md notranslate"><div class="highlight"><pre><span></span>---
+</pre></div>
+</div>
+<p>title: Bank Timestamp Correction
+—</p>
+<p>Each Bank has a timestamp that is stashed in the Clock sysvar and used to assess
+time-based stake account lockups. However, since genesis, this value has been
+based on a theoretical slots-per-second instead of reality, so it’s quite
+inaccurate. This poses a problem for lockups, since the accounts will not
+register as lockup-free on (or anytime near) the date the lockup is set to
+expire.</p>
+<p>Block times are already being estimated to cache in Blockstore and long-term
+storage using a [validator timestamp oracle](validator-timestamp-oracle.md);
+this data provides an opportunity to align the bank timestamp more closely with
+real-world time.</p>
+<p>The general outline of the proposed implementation is as follows:</p>
+<ul class="simple">
+<li><p>Correct each Bank timestamp using the validator-provided timestamp.</p></li>
+<li><p>Update the validator-provided timestamp calculation to use a stake-weighted
+median, rather than a stake-weighted mean.</p></li>
+<li><p>Bound the timestamp correction so that it cannot deviate too far from the
+expected theoretical estimate</p></li>
+</ul>
+<p>## Timestamp Correction</p>
+<p>On every new Bank, the runtime calculates a realistic timestamp estimate using
+validator timestamp-oracle data. The Bank timestamp is corrected to this value
+if it is greater than or equal to the previous Bank’s timestamp. That is, time
+should not ever go backward, so that locked up accounts may be released by the
+correction, but once released, accounts can never be relocked by a time
+correction.</p>
+<p>### Calculating Stake-Weighted Median Timestamp</p>
+<p>In order to calculate the estimated timestamp for a particular Bank, the runtime
+first needs to get the most recent vote timestamps from the active validator
+set. The <cite>Bank::vote_accounts()</cite> method provides the vote accounts state, and
+these can be filtered to all accounts whose most recent timestamp was provided
+within the last epoch.</p>
+<p>From each vote timestamp, an estimate for the current Bank is calculated using
+the epoch’s target ns_per_slot for any delta between the Bank slot and the
+timestamp slot. Each timestamp estimate is associated with the stake delegated
+to that vote account, and all the timestamps are collected to create a
+stake-weighted timestamp distribution.</p>
+<p>From this set, the stake-weighted median timestamp – that is, the timestamp at
+which 50% of the stake estimates a greater-or-equal timestamp and 50% of the
+stake estimates a lesser-or-equal timestamp – is selected as the potential
+corrected timestamp.</p>
+<p>This stake-weighted median timestamp is preferred over the stake-weighted mean
+because the multiplication of stake by proposed timestamp in the mean
+calculation allows a node with very small stake to still have a large effect on
+the resulting timestamp by proposing a timestamp that is very large or very
+small. For example, using the previous <cite>calculate_stake_weighted_timestamp()</cite>
+method, a node with 0.00003% of the stake proposing a timestamp of <cite>i64::MAX</cite>
+can shift the timestamp forward 97k years!</p>
+<p>### Bounding Timestamps</p>
+<p>In addition to preventing time moving backward, we can prevent malicious
+activity by bounding the corrected timestamp to an acceptable level of deviation
+from the theoretical expected time.</p>
+<p>This proposal suggests that each timestamp be allowed to deviate up to 25% from
+the expected time since the start of the epoch.</p>
+<p>In order to calculate the timestamp deviation, each Bank needs to log the
+<cite>epoch_start_timestamp</cite> in the Clock sysvar. This value is set to the
+<cite>Clock::unix_timestamp</cite> on the first slot of each epoch.</p>
+<p>Then, the runtime compares the expected elapsed time since the start of the
+epoch with the proposed elapsed time based on the corrected timestamp. If the
+corrected elapsed time is within +/- 25% of expected, the corrected timestamp is
+accepted. Otherwise, it is bounded to the acceptable deviation.</p>
+</section>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../_sources/src/implemented-proposals/bank-timestamp-correction.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

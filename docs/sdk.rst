@@ -1,0 +1,23 @@
+docs/sdk.md
+===========
+
+Last edited: 2022-12-05 19:44:34
+
+Contents:
+
+.. code-block:: md
+
+    # Farm SDK
+
+Farm SDK is a lower-level Rust library with a common code that is used by all Solana Farms tools and contracts. You might only need this SDK if you plan to build your own on-chain program or custom client that uses some of the SDK's functionality. Otherwise you should be using existing [HTTP Client](https://github.com/solana-labs/farms/blob/master/docs/http_client.md) or [Rust Client](https://github.com/solana-labs/farms/blob/master/docs/rust_client.md).
+
+To use the library, specify it in the `[dependencies]` section of your Cargo.toml, e.g.:
+
+```
+[dependencies]
+solana-farm-sdk = "1.1.3"
+```
+
+The best way to learn what can be done with SDK is to look at the source code, which can be found [here](https://github.com/solana-labs/farms/tree/master/farm-sdk/src).
+
+

@@ -1,0 +1,32 @@
+tests/ui/traits/trait-upcasting/multiple-occurrence-ambiguousity.rs
+===================================================================
+
+Last edited: 2023-03-30 20:35:59
+
+Contents:
+
+.. code-block:: rs
+
+    // check-fail
+#![feature(trait_upcasting)]
+
+trait Bar<T> {
+    fn bar(&self, _: T) {}
+}
+
+trait Foo: Bar<i32> + Bar<u32> {
+    fn foo(&self, _: ()) {}
+}
+
+struct S;
+
+impl Bar<i32> for S {}
+impl Bar<u32> for S {}
+impl Foo for S {}
+
+fn main() {
+    let s: &dyn Foo = &S;
+    let t: &dyn Bar<_> = s; //~ ERROR mismatched types
+}
+
+

@@ -1,0 +1,33 @@
+tests/rustdoc/auxiliary/all-item-types.rs
+=========================================
+
+Last edited: 2023-03-30 20:35:59
+
+Contents:
+
+.. code-block:: rs
+
+    #![feature(extern_types)]
+
+pub mod foo_mod {}
+extern "C" {
+    pub fn foo_ffn();
+    pub static FOO_FSTATIC: FooStruct;
+    pub type FooFType;
+}
+pub fn foo_fn() {}
+pub trait FooTrait {}
+pub struct FooStruct;
+pub enum FooEnum {}
+pub union FooUnion {
+    x: (),
+}
+pub type FooType = FooStruct;
+pub static FOO_STATIC: FooStruct = FooStruct;
+pub const FOO_CONSTANT: FooStruct = FooStruct;
+#[macro_export]
+macro_rules! foo_macro {
+    () => ();
+}
+
+

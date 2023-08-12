@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>docs/src/validator/blockstore.md &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../" id="documentation_options" src="../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" />
+   
+  <link rel="stylesheet" href="../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <section id="docs-src-validator-blockstore-md">
+<h1>docs/src/validator/blockstore.md<a class="headerlink" href="#docs-src-validator-blockstore-md" title="Permalink to this heading">¶</a></h1>
+<p>Last edited: 2023-08-11 21:38:33</p>
+<p>Contents:</p>
+<div class="highlight-md notranslate"><div class="highlight"><pre><span></span>---
+</pre></div>
+</div>
+<p>title: Blockstore
+—</p>
+<p>After a block reaches finality, all blocks from that one on down to the genesis block form a linear chain with the familiar name blockchain. Until that point, however, the validator must maintain all potentially valid chains, called _forks_. The process by which forks naturally form as a result of leader rotation is described in [fork generation](../cluster/fork-generation.md). The _blockstore_ data structure described here is how a validator copes with those forks until blocks are finalized.</p>
+<p>The blockstore allows a validator to record every shred it observes on the network, in any order, as long as the shred is signed by the expected leader for a given slot.</p>
+<p>Shreds are moved to a fork-able key space the tuple of <cite>leader slot</cite> + <cite>shred index</cite> (within the slot). This permits the skip-list structure of the Solana protocol to be stored in its entirety, without a-priori choosing which fork to follow, which Entries to persist or when to persist them.</p>
+<p>Repair requests for recent shreds are served out of RAM or recent files and out of deeper storage for less recent shreds, as implemented by the store backing Blockstore.</p>
+<p>## Functionalities of Blockstore</p>
+<ol class="arabic">
+<li><p>Persistence: the Blockstore lives in the front of the nodes verification</p>
+<p>pipeline, right behind network receive and signature verification. If the</p>
+<p>shred received is consistent with the leader schedule (i.e. was signed by the</p>
+<p>leader for the indicated slot), it is immediately stored.</p>
+</li>
+<li><p>Repair: repair is the same as window repair above, but able to serve any</p>
+<p>shred that’s been received. Blockstore stores shreds with signatures,</p>
+<p>preserving the chain of origination.</p>
+</li>
+<li><p>Forks: Blockstore supports random access of shreds, so can support a</p>
+<p>validator’s need to rollback and replay from a Bank checkpoint.</p>
+</li>
+<li><p>Restart: with proper pruning/culling, the Blockstore can be replayed by</p>
+<p>ordered enumeration of entries from slot 0. The logic of the replay stage</p>
+<p>(i.e. dealing with forks) will have to be used for the most recent entries in</p>
+<p>the Blockstore.</p>
+</li>
+</ol>
+<p>## Blockstore Design</p>
+<ol class="arabic">
+<li><p>Entries in the Blockstore are stored as key-value pairs, where the key is the concatenated slot index and shred index for an entry, and the value is the entry data. Note shred indexes are zero-based for each slot (i.e. they’re slot-relative).</p></li>
+<li><p>The Blockstore maintains metadata for each slot, in the <cite>SlotMeta</cite> struct containing:</p>
+<ul>
+<li><p><cite>slot_index</cite> - The index of this slot</p></li>
+<li><p><cite>num_blocks</cite> - The number of blocks in the slot (used for chaining to a previous slot)</p></li>
+<li><p><cite>consumed</cite> - The highest shred index <cite>n</cite>, such that for all <cite>m &lt; n</cite>, there exists a shred in this slot with shred index equal to <cite>n</cite> (i.e. the highest consecutive shred index).</p></li>
+<li><p><cite>received</cite> - The highest received shred index for the slot</p></li>
+<li><p><cite>next_slots</cite> - A list of future slots this slot could chain to. Used when rebuilding</p>
+<p>the ledger to find possible fork points.</p>
+</li>
+<li><p><cite>last_index</cite> - The index of the shred that is flagged as the last shred for this slot. This flag on a shred will be set by the leader for a slot when they are transmitting the last shred for a slot.</p></li>
+<li><p><cite>is_connected</cite> - True iff every block from 0…slot forms a full sequence without any holes. We can derive is_connected for each slot with the following rules. Let slot(n) be the slot with index <cite>n</cite>, and slot(n).is_full() is true if the slot with index <cite>n</cite> has all the ticks expected for that slot. Let is_connected(n) be the statement that “the slot(n).is_connected is true”. Then:</p>
+<p>is_connected(0) is_connected(n+1) iff (is_connected(n) and slot(n).is_full()</p>
+</li>
+</ul>
+</li>
+<li><p>Chaining - When a shred for a new slot <cite>x</cite> arrives, we check the number of blocks (<cite>num_blocks</cite>) for that new slot (this information is encoded in the shred). We then know that this new slot chains to slot <cite>x - num_blocks</cite>.</p></li>
+<li><p>Subscriptions - The Blockstore records a set of slots that have been “subscribed” to. This means entries that chain to these slots will be sent on the Blockstore channel for consumption by the ReplayStage. See the <cite>Blockstore APIs</cite> for details.</p></li>
+<li><p>Update notifications - The Blockstore notifies listeners when slot(n).is_connected is flipped from false to true for any <cite>n</cite>.</p></li>
+</ol>
+<p>## Blockstore APIs</p>
+<p>The Blockstore offers a subscription based API that ReplayStage uses to ask for entries it’s interested in. These subscription API’s are as follows:</p>
+<ol class="arabic simple">
+<li><p><cite>fn get_slots_since(slots: &amp;[u64]) -&gt; Result&lt;HashMap&lt;u64, Vec&lt;u64&gt;&gt;&gt;</cite>: Returns slots that are connected to any of the elements of <cite>slots</cite>. This method enables the discovery of new children slots.</p></li>
+<li><p><cite>fn get_slot_entries(slot: Slot, shred_start_index: u64) -&gt; Result&lt;Vec&lt;Entry&gt;&gt;</cite>: For the specified <cite>slot</cite>, return a vector of the available, contiguous entries starting from <cite>shred_start_index</cite>. Shreds are fragments of serialized entries so the conversion from entry index to shred index is not one-to-one. However, there is a similar function <cite>get_slot_entries_with_shred_info()</cite> that returns the number of shreds that comprise the returned entry vector. This allows a caller to track progress through the slot.</p></li>
+</ol>
+<p>Note: Cumulatively, this means that the replay stage will now have to know when a slot is finished, and subscribe to the next slot it’s interested in to get the next set of entries. Previously, the burden of chaining slots fell on the Blockstore.</p>
+<p>## Interfacing with Bank</p>
+<p>The bank exposes to replay stage:</p>
+<ol class="arabic simple">
+<li><p><cite>prev_hash</cite>: which PoH chain it’s working on as indicated by the hash of the last entry it processed</p></li>
+<li><p><cite>tick_height</cite>: the ticks in the PoH chain currently being verified by this bank</p></li>
+<li><dl class="simple">
+<dt><cite>votes</cite>: a stack of records that contains:</dt><dd><ul class="simple">
+<li><p><cite>prev_hashes</cite>: what anything after this vote must chain to in PoH</p></li>
+<li><p><cite>tick_height</cite>: the tick height at which this vote was cast</p></li>
+<li><p><cite>lockout period</cite>: how long a chain must be observed to be in the ledger to be able to be chained below this vote</p></li>
+</ul>
+</dd>
+</dl>
+</li>
+</ol>
+<p>Replay stage uses Blockstore APIs to find the longest chain of entries it can hang off a previous vote. If that chain of entries does not hang off the latest vote, the replay stage rolls back the bank to that vote and replays the chain from there.</p>
+<p>## Pruning Blockstore</p>
+<p>Once Blockstore entries are old enough, representing all the possible forks becomes less useful, perhaps even problematic for replay upon restart. Once a validator’s votes have reached max lockout, however, any Blockstore contents that are not on the PoH chain for that vote for can be pruned, expunged.</p>
+</section>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../_sources/src/validator/blockstore.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

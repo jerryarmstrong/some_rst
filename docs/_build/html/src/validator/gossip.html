@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>docs/src/validator/gossip.md &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../" id="documentation_options" src="../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" />
+   
+  <link rel="stylesheet" href="../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <section id="docs-src-validator-gossip-md">
+<h1>docs/src/validator/gossip.md<a class="headerlink" href="#docs-src-validator-gossip-md" title="Permalink to this heading">¶</a></h1>
+<p>Last edited: 2023-08-11 21:38:33</p>
+<p>Contents:</p>
+<div class="highlight-md notranslate"><div class="highlight"><pre><span></span>---
+</pre></div>
+</div>
+<p>title: Gossip Service
+—</p>
+<p>The Gossip Service acts as a gateway to nodes in the [control plane](terminology.md#control-plane). Validators use the service to ensure information is available to all other nodes in a cluster. The service broadcasts information using a [gossip protocol](<a class="reference external" href="https://en.wikipedia.org/wiki/Gossip_protocol">https://en.wikipedia.org/wiki/Gossip_protocol</a>).</p>
+<p>## Gossip Overview</p>
+<p>Nodes continuously share signed data objects among themselves in order to manage a cluster. For example, they share their contact information, ledger height, and votes.</p>
+<p>Every tenth of a second, each node sends a “push” message and/or a “pull” message. Push and pull messages may elicit responses, and push messages may be forwarded on to others in the cluster.</p>
+<p>Gossip runs on a well-known UDP/IP port or a port in a well-known range. Once a cluster is bootstrapped, nodes advertise to each other where to find their gossip endpoint (a socket address).</p>
+<p>## Gossip Records</p>
+<p>Records shared over gossip are arbitrary, but signed and versioned (with a timestamp) as needed to make sense to the node receiving them. If a node receives two records from the same source, it updates its own copy with the record with the most recent timestamp.</p>
+<p>## Gossip Service Interface</p>
+<p>### Push Message</p>
+<p>A node sends a push message to tells the cluster it has information to share. Nodes send push messages to <cite>PUSH_FANOUT</cite> push peers.</p>
+<p>Upon receiving a push message, a node examines the message for:</p>
+<ol class="arabic simple">
+<li><p>Duplication: if the message has been seen before, the node drops the message and may respond with <cite>PushMessagePrune</cite> if forwarded from a low staked node</p></li>
+<li><p>New data: if the message is new to the node</p>
+<ul class="simple">
+<li><p>Stores the new information with an updated version in its cluster info and purges any previous older value</p></li>
+<li><p>Stores the message in <cite>pushed_once</cite> (used for detecting duplicates, purged after <cite>PUSH_MSG_TIMEOUT * 5</cite> ms)</p></li>
+<li><p>Retransmits the messages to its own push peers</p></li>
+</ul>
+</li>
+<li><p>Expiration: nodes drop push messages that are older than <cite>PUSH_MSG_TIMEOUT</cite></p></li>
+</ol>
+<p>### Push Peers, Prune Message</p>
+<p>A nodes selects its push peers at random from the active set of known peers. The node keeps this selection for a relatively long time. When a prune message is received, the node drops the push peer that sent the prune. Prune is an indication that there is another, higher stake weighted path to that node than direct push.</p>
+<p>The set of push peers is kept fresh by rotating a new node into the set every <cite>PUSH_MSG_TIMEOUT/2</cite> milliseconds.</p>
+<p>### Pull Message</p>
+<p>A node sends a pull message to ask the cluster if there is any new information. A pull message is sent to a single peer at random and comprises a Bloom filter that represents things it already has. A node receiving a pull message iterates over its values and constructs a pull response of things that miss the filter and would fit in a message.</p>
+<p>A node constructs the pull Bloom filter by iterating over current values and recently purged values.</p>
+<p>A node handles items in a pull response the same way it handles new data in a push message.</p>
+<p>## Purging</p>
+<p>Nodes retain prior versions of values (those updated by a pull or push) and expired values (those older than <cite>GOSSIP_PULL_CRDS_TIMEOUT_MS</cite>) in <cite>purged_values</cite> (things I recently had). Nodes purge <cite>purged_values</cite> that are older than <cite>5 * GOSSIP_PULL_CRDS_TIMEOUT_MS</cite>.</p>
+<p>## Eclipse Attacks</p>
+<p>An eclipse attack is an attempt to take over the set of node connections with adversarial endpoints.</p>
+<p>This is relevant to our implementation in the following ways.</p>
+<ul class="simple">
+<li><p>Pull messages select a random node from the network. An eclipse attack on _pull_ would require an attacker to influence the random selection in such a way that only adversarial nodes are selected for pull.</p></li>
+<li><p>Push messages maintain an active set of nodes and select a random fanout for every push message. An eclipse attack on _push_ would influence the active set selection, or the random fanout selection.</p></li>
+</ul>
+<p>### Time and Stake based weights</p>
+<p>Weights are calculated based on <cite>time since last picked</cite> and the <cite>natural log</cite> of the <cite>stake weight</cite>.</p>
+<p>Taking the <cite>ln</cite> of the stake weight allows giving all nodes a fairer chance of network coverage in a reasonable amount of time. It helps normalize the large possible <cite>stake weight</cite> differences between nodes. This way a node with low <cite>stake weight</cite>, compared to a node with large <cite>stake weight</cite> will only have to wait a few multiples of ln(<cite>stake</cite>) seconds before it gets picked.</p>
+<p>There is no way for an adversary to influence these parameters.</p>
+<p>### Pull Message</p>
+<p>A node is selected as a pull target based on the weights described above.</p>
+<p>### Push Message</p>
+<p>A prune message can only remove an adversary from a potential connection.</p>
+<p>Just like _pull <a href="#id1"><span class="problematic" id="id2">message_</span></a>, nodes are selected into the active set based on weights.</p>
+<p>## Notable differences from PlumTree</p>
+<p>The active push protocol described here is based on
+[Plum Tree](<a class="reference external" href="https://haslab.uminho.pt/sites/default/files/jop/files/lpr07a.pdf">https://haslab.uminho.pt/sites/default/files/jop/files/lpr07a.pdf</a>).
+The main differences are:</p>
+<ul class="simple">
+<li><p>Push messages have a wallclock that is signed by the originator. Once the wallclock expires the message is dropped. A hop limit is difficult to implement in an adversarial setting.</p></li>
+<li><p>Lazy Push is not implemented because its not obvious how to prevent an adversary from forging the message fingerprint. A naive approach would allow an adversary to be prioritized for pull based on their input.</p></li>
+</ul>
+</section>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../_sources/src/validator/gossip.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

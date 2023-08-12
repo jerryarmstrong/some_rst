@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>docs/04-guides/07-archived/00-architecture/02-deep_dive/overview.md &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../../" id="documentation_options" src="../../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <section id="docs-04-guides-07-archived-00-architecture-02-deep-dive-overview-md">
+<h1>docs/04-guides/07-archived/00-architecture/02-deep_dive/overview.md<a class="headerlink" href="#docs-04-guides-07-archived-00-architecture-02-deep-dive-overview-md" title="Permalink to this heading">¶</a></h1>
+<p>Last edited: 2023-08-08 19:56:25</p>
+<p>Contents:</p>
+<div class="highlight-md notranslate"><div class="highlight"><pre><span></span><span class="gh"># Overview</span>
+</pre></div>
+</div>
+<p>The Token Metadata contract can be used for storing generic metadata about any given mint, whether NFT or not. Metadata
+allows storage of name, symbol, and URI to an external resource. Additionally, the Metadata allows for the tracking of
+creators, primary sales, and seller fees. Once the mint has been created, the mint authority can use the SPL Metadata
+program to create metadata as described in this document.</p>
+<p>Minting an NFT requires creating a new SPL Mint with the supply of one and decimals zero as
+described [<a class="reference external" href="https://spl.solana.com/token#example-create-a-non-fungible-token](https://spl.solana.com">https://spl.solana.com/token#example-create-a-non-fungible-token](https://spl.solana.com</a>/token#example-create-a-non-fungible-token)</p>
+<p>Below is the Rust representation of the structs that are stored on-chain.</p>
+<p><a href="#id1"><span class="problematic" id="id2">``</span></a><a href="#id3"><span class="problematic" id="id4">`</span></a>rust</p>
+<p>#[repr(C)]
+#[derive(BorshSerialize, BorshDeserialize, PartialEq, Debug, Clone)]
+pub struct Data {</p>
+<blockquote>
+<div><p>/// The name of the asset
+pub name: String,
+/// The symbol for the asset
+pub symbol: String,
+/// URI pointing to JSON representing the asset
+pub uri: String,
+/// Royalty basis points that goes to creators in secondary sales (0-10000)
+pub seller_fee_basis_points: u16,
+/// Array of creators, optional
+pub creators: Option&lt;Vec&lt;Creator&gt;&gt;,</p>
+</div></blockquote>
+<p>}</p>
+<p>#[repr(C)]
+#[derive(Clone, BorshSerialize, BorshDeserialize, Debug)]
+pub struct Metadata {</p>
+<blockquote>
+<div><p>pub key: Key,
+pub update_authority: Pubkey,
+pub mint: Pubkey,
+pub data: Data,
+// Immutable, once flipped, all sales of this metadata are considered secondary.
+pub primary_sale_happened: bool,
+// Whether or not the data struct is mutable, default is not
+pub is_mutable: bool,</p>
+</div></blockquote>
+<p>}</p>
+<p>#[repr(C)]
+#[derive(Clone, Debug, PartialEq, BorshSerialize, BorshDeserialize)]
+pub struct MasterEdition {</p>
+<blockquote>
+<div><p>pub key: Key,
+pub supply: u64,
+pub max_supply: Option&lt;u64&gt;,</p>
+</div></blockquote>
+<p>}</p>
+<p>#[repr(C)]
+#[derive(Clone, Debug, PartialEq, BorshSerialize, BorshDeserialize)]
+/// All Editions should never have a supply greater than 1.
+/// To enforce this, a transfer mint authority instruction will happen when
+/// a normal token is turned into an Edition, and in order for a Metadata update authority
+/// to do this transaction they will also need to sign the transaction as the Mint authority.
+pub struct Edition {</p>
+<blockquote>
+<div><p>pub key: Key,</p>
+<p>/// Points at MasterEdition struct
+pub parent: Pubkey,</p>
+<p>/// Starting at 0 for master record, this is incremented for each edition minted.
+pub edition: u64,</p>
+</div></blockquote>
+<p>}</p>
+<p>#[repr(C)]
+#[derive(BorshSerialize, BorshDeserialize, PartialEq, Debug, Clone)]
+pub struct Creator {</p>
+<blockquote>
+<div><p>pub address: Pubkey,
+pub verified: bool,
+// In percentages, NOT basis points ;) Watch out!
+pub share: u8,</p>
+</div></blockquote>
+<p>}</p>
+<p>#[repr(C)]
+#[derive(BorshSerialize, BorshDeserialize, PartialEq, Debug, Clone)]
+pub struct EditionMarker {</p>
+<blockquote>
+<div><p>pub key: Key,
+pub ledger: [u8; 31],</p>
+</div></blockquote>
+<p>}</p>
+<p><a href="#id5"><span class="problematic" id="id6">``</span></a><a href="#id7"><span class="problematic" id="id8">`</span></a></p>
+<p>The instruction set for the token metadata contract can be
+found [here](<a class="reference external" href="https://github.com/metaplex-foundation/metaplex-program-library/blob/master/token-metadata/program/src/instruction.rs">https://github.com/metaplex-foundation/metaplex-program-library/blob/master/token-metadata/program/src/instruction.rs</a>)
+.</p>
+<p>### Types</p>
+<p>### Metadata</p>
+<p>This object can be used to provide basic info about SPL tokens on Solana, which include the name, symbol, URI and seller
+fees, as well as whether the sale of this metadata has happened yet. Anybody carrying a token from this mint can
+mark this primary sale as having happened via the <cite>update_primary_sale_happened_via_token</cite> command. There is obviously
+no incentive for a primary owner to do this as it precludes them from getting full royalties on the first sale, but a
+secondary owner must do this if they ever want to see fees from selling!</p>
+<p>Metadata accounts are simply PDA addresses with derived key of <cite>[‘metadata’, token_metadata_program_id, mint_id]</cite>.</p>
+<p>### Master Edition</p>
+<p>In addition to simple metadata, a Master Edition object can be created. Master Editions act similar to a token mint and
+allows the holder to create new number editions while tracking provenance of the items. A Master Edition token, when
+minted, represents both a non-fungible token on Solana and metadata that allows creators to control the provenance of
+prints created from the master edition. A Master Edition object can only be created for mints with supply of one and
+decimals of zero.</p>
+<p>The creator can set the maximum supply of the master edition just like a regular mint on Solana, with the main
+difference being that each print is a numbered edition created from it. To mint a new limited edition, this master
+edition token must be presented, along with a new mint + token, to the <cite>mint_new_edition_from_master_edition_via_token</cite>
+endpoint.</p>
+<p>Master Edition accounts are PDA addresses of <cite>[‘metadata’, token_metadata_program_id, mint_id, ‘edition’]</cite>.</p>
+<p>### Edition</p>
+<p>An edition represents a copy of an NFT, and is created from a Master Edition. Each print has an edition number
+associated with it. Normally, prints can be created during Open Edition or Limited Edition auction, but they could also
+be created by the creator manually.</p>
+<p>Editions are created by presenting the Master Edition token, along with a new mint that lacks a Metadata account and a
+token account containing one token from that mint to the <cite>mint_new_edition_from_master_edition_via_token</cite> endpoint. This
+endpoint will create both an immutable Metadata based on the parent Metadata and a special Edition struct based on the
+parent Master Edition struct.</p>
+<p>The Edition has the same PDA as a Master Edition to force collision and prevent a user from having a mint with
+both, <cite>[‘metadata’, token_metadata_program_id, mint_id, ‘edition’]</cite>.</p>
+<p>## Concepts</p>
+<p>### Decoration as PDA Extensions</p>
+<p>The whole idea of the Token Metadata program is to be a decorator to a Token Mint. Each struct acts as further
+decoration. The Metadata struct gives a mint a name and a symbol and points to some external URI that can be anything.
+The Master Edition gives it printing capabilities. The Edition labels it as a child of something.</p>
+<p>This is important to internalize, because it means you as a Rust developer can take it a step further. There is nothing
+stopping you from building a new contract on top of ours that makes its own PDAs and extending this still further.
+Why not build a CookingRecipes PDA, that has seed <cite>[‘your-app’, your_program_id, mint_id, ‘recipes’]</cite>? You can require
+that a Metadata PDA from our contract exists to make a PDA in your program, and then you can further decorate mints on
+top of our decorations. The idea is to compose mints with further information than they ever had before, and then build
+clients that can consume that information in new and interesting ways.</p>
+<p>### Co-Creators</p>
+<p>The Token Metadata program supports storing up to five co-creators that share potential future profits from sales for
+the items as defined by <cite>seller_fee_basis_points</cite> . Each creator needs to be added as part of the minting process and is
+required to approve metadata that was used in his name using the <cite>sign_metadata</cite> endpoint. Unverified artwork cannot be
+sold with Metaplex.</p>
+<p>During the first sale, creators share in 100% of the proceeds, while in follow-up sales, they share in proceeds as a
+percentage determined by <cite>seller_fee_basis_points</cite>. Whether a metadata is considered in second sale or not is
+determined by the <cite>primary_sale_happened</cite> boolean on the Metadata account.</p>
+<p>### URI JSON Schema</p>
+<p>The URI resource is compatible
+with [ERC-1155 JSON Schema](<a class="reference external" href="https://github.com/ethereum/EIPs/blob/master/EIPS/eip-1155.md#erc-1155-metadata-uri-json-schema">https://github.com/ethereum/EIPs/blob/master/EIPS/eip-1155.md#erc-1155-metadata-uri-json-schema</a>)
+in order to easily port NFTs across different chains using the wormhole bridge. You can see how we build this in our
+reference implementation
+here: [<a class="reference external" href="https://github.com/metaplex-foundation/metaplex/blob/master/js/packages/web/src/actions/nft.tsx#L66](https://github.com/metaplex-foundation/metaplex/blob/master/js/packages/web/src/actions/nft">https://github.com/metaplex-foundation/metaplex/blob/master/js/packages/web/src/actions/nft.tsx#L66](https://github.com/metaplex-foundation/metaplex/blob/master/js/packages/web/src/actions/nft</a>.tsx#L66)</p>
+<p><a href="#id9"><span class="problematic" id="id10">``</span></a><a href="#id11"><span class="problematic" id="id12">`</span></a>json
+{</p>
+<blockquote>
+<div><p>“title”: “Token Metadata”,
+“type”: “object”,
+“properties”: {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>“name”: {</dt><dd><p>“type”: “string”,
+“description”: “Identifies the asset to which this token represents”</p>
+</dd>
+</dl>
+<p>},
+“description”: {</p>
+<blockquote>
+<div><p>“type”: “string”,
+“description”: “Describes the asset to which this token represents”</p>
+</div></blockquote>
+<p>},
+“image”: {</p>
+<blockquote>
+<div><p>“type”: “string”,
+“description”: “A URI pointing to a resource with mime type image/* representing the asset to which this token represents. Consider making any images at a width between 320 and 1080 pixels and aspect ratio between 1.91:1 and 4:5 inclusive.”</p>
+</div></blockquote>
+<p>},
+“external_url”: {</p>
+<blockquote>
+<div><p>“type”: “string”,
+“description”: “A URI pointing to an external resource that will take user outside of the platform.”</p>
+</div></blockquote>
+<p>},
+“seller_fee_basis_points”: {</p>
+<blockquote>
+<div><p>“type”: “number”</p>
+</div></blockquote>
+<p>},
+“properties”: {</p>
+<blockquote>
+<div><p>“type”: “object”,
+“description”: “Arbitrary properties. Values may be strings, numbers, object or arrays.”,
+“properties”: {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>“creators”: {</dt><dd><p>“type”: “array”,
+“description”: “Contains list of creators, each with Solana address and share of the nft”</p>
+</dd>
+</dl>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<section id="id13">
+<h2>}<a class="headerlink" href="#id13" title="Permalink to this heading">¶</a></h2>
+</section>
+</section>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../../_sources/04-guides/07-archived/00-architecture/02-deep_dive/overview.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

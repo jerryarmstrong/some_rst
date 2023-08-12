@@ -1,0 +1,18 @@
+tests/ui/feature-gates/feature-gate-link_llvm_intrinsics.rs
+===========================================================
+
+Last edited: 2023-03-30 20:35:59
+
+Contents:
+
+.. code-block:: rs
+
+    extern "C" {
+    #[link_name = "llvm.sqrt.f32"]
+    fn sqrt(x: f32) -> f32;
+//~^ ERROR linking to LLVM intrinsics is experimental
+}
+
+fn main() {}
+
+

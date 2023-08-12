@@ -1,0 +1,17 @@
+tests/ui/error-codes/E0508-fail.rs
+==================================
+
+Last edited: 2023-03-30 20:35:59
+
+Contents:
+
+.. code-block:: rs
+
+    struct NonCopy;
+
+fn main() {
+    let array = [NonCopy; 1];
+    let _value = array[0];  //~ ERROR [E0508]
+}
+
+

@@ -1,0 +1,478 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>docs/src/pages/docs/pdas.md &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../../" id="documentation_options" src="../../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../search.html" />
+   
+  <link rel="stylesheet" href="../../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <section id="docs-src-pages-docs-pdas-md">
+<h1>docs/src/pages/docs/pdas.md<a class="headerlink" href="#docs-src-pages-docs-pdas-md" title="Permalink to this heading">¶</a></h1>
+<p>Last edited: 2022-12-14 20:15:57</p>
+<p>Contents:</p>
+<div class="highlight-md notranslate"><div class="highlight"><pre><span></span>---
+</pre></div>
+</div>
+<p>title: Program Derived Addresses
+description: Anchor - Program Derived Addresses
+—</p>
+<p>Knowing how to use PDAs is one of the most important skills for Solana Programming.
+They simplify the programming model and make programs more secure. So what are they?</p>
+<p>—</p>
+<p>PDAs (program derived addresses) are addresses with special properties.</p>
+<p>Unlike normal addresses, PDAs are not public keys and therefore do not have an associated private key. There are two use cases for PDAs. They provide a mechanism to build hashmap-like structures on-chain and they allow programs to sign instructions.</p>
+<p>## Creation of a PDA</p>
+<p>Before we dive into how to use PDAs in anchor, here’s a short explainer on what PDAs are.</p>
+<p>PDAs are created by hashing a number of seeds the user can choose and the id of a program:</p>
+<p><code class="docutils literal notranslate"><span class="pre">`rust</span>
+<span class="pre">//</span> <span class="pre">pseudo</span> <span class="pre">code</span>
+<span class="pre">let</span> <span class="pre">pda</span> <span class="pre">=</span> <span class="pre">hash(seeds,</span> <span class="pre">program_id);</span>
+<span class="pre">`</span></code></p>
+<p>The seeds can be anything. A pubkey, a string, an array of numbers etc.</p>
+<p>There’s a 50% chance that this hash function results in a public key (but PDAs are not public keys), so a bump has to be searched for so that we get a PDA:</p>
+<p><a href="#id1"><span class="problematic" id="id2">``</span></a><a href="#id3"><span class="problematic" id="id4">`</span></a>rust
+// pseudo code
+fn find_pda(seeds, program_id) {</p>
+<blockquote>
+<div><dl>
+<dt>for bump in 0..256 {</dt><dd><p>let potential_pda = hash(seeds, bump, program_id);
+if is_pubkey(potential_pda) {</p>
+<blockquote>
+<div><p>continue;</p>
+</div></blockquote>
+<p>}
+return (potential_pda, bump);</p>
+</dd>
+</dl>
+<p>}
+panic!(“Could not find pda after 256 tries.”);</p>
+</div></blockquote>
+<section id="id5">
+<h2>}<a class="headerlink" href="#id5" title="Permalink to this heading">¶</a></h2>
+<p>It is technically possible that no bump is found within 256 tries but this probability is negligible.
+If you’re interested in the exact calculation of a PDA, check out the [<cite>solana_program</cite> source code](<a class="reference external" href="https://docs.rs/solana-program/latest/solana_program/pubkey/struct.Pubkey.html#method.find_program_address">https://docs.rs/solana-program/latest/solana_program/pubkey/struct.Pubkey.html#method.find_program_address</a>).</p>
+<p>The first bump that results in a PDA is commonly called the “canonical bump”. Other bumps may also result in a PDA but it’s recommended to only use the canonical bump to avoid confusion.</p>
+<p>## Using PDAs</p>
+<p>We are now going to show you what you can do with PDAs and how to do it in Anchor!</p>
+<p>### Hashmap-like structures using PDAs</p>
+<p>Before we dive into the specifics of creating hashmaps in anchor, let’s look at how to create a hashmap with PDAs in general.</p>
+<p>#### Building hashmaps with PDAs</p>
+<p>PDAs are hashed from the bump, a program id, but also a number of seeds which can be freely chosen by the user.
+These seeds can be used to build hashmap-like structures on-chain.</p>
+<p>For instance, imagine you’re building an in-browser game and want to store some user stats. Maybe their level and their in-game name. You could create an account with a layout that looks like this:</p>
+<p><a href="#id6"><span class="problematic" id="id7">``</span></a><a href="#id8"><span class="problematic" id="id9">`</span></a>rust
+pub struct UserStats {</p>
+<blockquote>
+<div><p>level: u16,
+name: String,
+authority: Pubkey</p>
+</div></blockquote>
+</section>
+<section id="id10">
+<h2>}<a class="headerlink" href="#id10" title="Permalink to this heading">¶</a></h2>
+<p>The <cite>authority</cite> would be the user the accounts belongs to.</p>
+<p>This approach creates the following problem. It’s easy to go from the user stats account to the user account address (just read the <cite>authority</cite> field) but if you just have the user account address (which is more likely), how do you find the user stats account? You can’t. This is a problem because your game probably has instructions that require both the user stats account and its authority which means the client needs to pass those accounts into the instruction (for example, a <cite>ChangeName</cite> instruction). So maybe the frontend could store a mapping between a user’s account address and a user’s info address in local storage. This works until the user accidentally wipes their local storage.</p>
+<p>With PDAs you can have a layout like this:</p>
+<p><a href="#id11"><span class="problematic" id="id12">``</span></a><a href="#id13"><span class="problematic" id="id14">`</span></a>rust
+pub struct UserStats {</p>
+<blockquote>
+<div><p>level: u16,
+name: String,
+bump: u8</p>
+</div></blockquote>
+</section>
+<section id="id15">
+<h2>}<a class="headerlink" href="#id15" title="Permalink to this heading">¶</a></h2>
+<p>and encode the information about the relationship between the user and the user stats account in the address of the user stats account itself.</p>
+<p>Reusing the pseudo code from above:</p>
+<p><code class="docutils literal notranslate"><span class="pre">`rust</span>
+<span class="pre">//</span> <span class="pre">pseudo</span> <span class="pre">code</span>
+<span class="pre">let</span> <span class="pre">seeds</span> <span class="pre">=</span> <span class="pre">[b&quot;user-stats&quot;,</span> <span class="pre">authority];</span>
+<span class="pre">let</span> <span class="pre">(pda,</span> <span class="pre">bump)</span> <span class="pre">=</span> <span class="pre">find_pda(seeds,</span> <span class="pre">game_program_id);</span>
+<span class="pre">`</span></code></p>
+<p>When a user connects to your website, this pda calculation can be done client-side using their user account address as the <cite>authority</cite>. The resulting pda then serves as the address of the user’s stats account. The <cite>b”user-stats”</cite> is added in case there are other account types that are also PDAs. If there were an inventory account, it could be inferred using these seeds:</p>
+<p><code class="docutils literal notranslate"><span class="pre">`rust</span>
+<span class="pre">let</span> <span class="pre">seeds</span> <span class="pre">=</span> <span class="pre">[b&quot;inventory&quot;,</span> <span class="pre">authority];</span>
+<span class="pre">`</span></code></p>
+<p>To summarize, we have used PDAs to create a mapping between a user and their user stats account. There is no single hashmap object that exposes a <cite>get</cite> function. Instead, each value (the user stats address) can be found by using certain seeds (“user-stats” and the user account address) as inputs to the <cite>find_pda</cite> function.</p>
+<p>#### How to build PDA hashmaps in Anchor</p>
+<p>Continuing with the example from the previous sections, create a new workspace</p>
+<p><code class="docutils literal notranslate"><span class="pre">`shell</span>
+<span class="pre">anchor</span> <span class="pre">init</span> <span class="pre">game</span>
+<span class="pre">`</span></code></p>
+<p>and copy the following code</p>
+<p><a href="#id16"><span class="problematic" id="id17">``</span></a><a href="#id18"><span class="problematic" id="id19">`</span></a>rust
+use anchor_lang::prelude::<a href="#id20"><span class="problematic" id="id21">*</span></a>;</p>
+<p>declare_id!(“Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS”);</p>
+<p>#[program]
+pub mod game {</p>
+<blockquote>
+<div><p>use super::<a href="#id22"><span class="problematic" id="id23">*</span></a>;
+// handler function
+pub fn create_user_stats(ctx: Context&lt;CreateUserStats&gt;, name: String) -&gt; Result&lt;()&gt; {</p>
+<blockquote>
+<div><p>let user_stats = &amp;mut ctx.accounts.user_stats;
+user_stats.level = 0;
+if name.as_bytes().len() &gt; 200 {</p>
+<blockquote>
+<div><p>// proper error handling omitted for brevity
+panic!();</p>
+</div></blockquote>
+<p>}
+user_stats.name = name;
+user_stats.bump = <a href="#id24"><span class="problematic" id="id25">*</span></a>ctx.bumps.get(“user_stats”).unwrap();
+Ok(())</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>#[account]
+pub struct UserStats {</p>
+<blockquote>
+<div><p>level: u16,
+name: String,
+bump: u8,</p>
+</div></blockquote>
+<p>}</p>
+<p>// validation struct
+#[derive(Accounts)]
+pub struct CreateUserStats&lt;’info&gt; {</p>
+<blockquote>
+<div><p>#[account(mut)]
+pub user: Signer&lt;’info&gt;,
+// space: 8 discriminator + 2 level + 4 name length + 200 name + 1 bump
+#[account(</p>
+<blockquote>
+<div><p>init,
+payer = user,
+space = 8 + 2 + 4 + 200 + 1, seeds = [b”user-stats”, user.key().as_ref()], bump</p>
+</div></blockquote>
+<p>)]
+pub user_stats: Account&lt;’info, UserStats&gt;,
+pub system_program: Program&lt;’info, System&gt;,</p>
+</div></blockquote>
+</section>
+<section id="id26">
+<h2>}<a class="headerlink" href="#id26" title="Permalink to this heading">¶</a></h2>
+<p>In the account validation struct we use <cite>seeds</cite> together with <cite>init</cite> to create a PDA with the desired seeds.
+Additionally, we add an empty <cite>bump</cite> constraint to signal to anchor that it should find the canonical bump itself.
+Then, in the handler, we call <cite>ctx.bumps.get(“user_stats”)</cite> to get the bump anchor found and save it to the user stats
+account as an extra property.</p>
+<p>If we then want to use the created pda in a different instruction, we can add a new validation struct (This will check that the <cite>user_stats</cite> account is the pda created by running <cite>hash(seeds, user_stats.bump, game_program_id)</cite>):</p>
+<p><a href="#id27"><span class="problematic" id="id28">``</span></a><a href="#id29"><span class="problematic" id="id30">`</span></a>rust
+// validation struct
+#[derive(Accounts)]
+pub struct ChangeUserName&lt;’info&gt; {</p>
+<blockquote>
+<div><p>pub user: Signer&lt;’info&gt;,
+#[account(mut, seeds = [b”user-stats”, user.key().as_ref()], bump = user_stats.bump)]
+pub user_stats: Account&lt;’info, UserStats&gt;,</p>
+</div></blockquote>
+</section>
+<section id="id31">
+<h2>}<a class="headerlink" href="#id31" title="Permalink to this heading">¶</a></h2>
+<p>and another handler function:</p>
+<p><a href="#id32"><span class="problematic" id="id33">``</span></a><a href="#id34"><span class="problematic" id="id35">`</span></a>rust
+// handler function (add this next to the create_user_stats function in the game module)
+pub fn change_user_name(ctx: Context&lt;ChangeUserName&gt;, new_name: String) -&gt; Result&lt;()&gt; {</p>
+<blockquote>
+<div><dl class="simple">
+<dt>if new_name.as_bytes().len() &gt; 200 {</dt><dd><p>// proper error handling omitted for brevity
+panic!();</p>
+</dd>
+</dl>
+<p>}
+ctx.accounts.user_stats.name = new_name;
+Ok(())</p>
+</div></blockquote>
+</section>
+<section id="id36">
+<h2>}<a class="headerlink" href="#id36" title="Permalink to this heading">¶</a></h2>
+<p>Finally, let’s add a test. Copy this into <cite>game.ts</cite></p>
+<p><a href="#id37"><span class="problematic" id="id38">``</span></a><a href="#id39"><span class="problematic" id="id40">`</span></a>ts
+import * as anchor from <a class="reference external" href="mailto:'&#37;&#52;&#48;project-serum/anchor">‘<span>&#64;</span>project-serum/anchor</a>’
+import { Program } from <a class="reference external" href="mailto:'&#37;&#52;&#48;project-serum/anchor">‘<span>&#64;</span>project-serum/anchor</a>’
+import { PublicKey } from <a class="reference external" href="mailto:'&#37;&#52;&#48;solana/web3&#46;js">‘<span>&#64;</span>solana/web3<span>&#46;</span>js</a>’
+import { Game } from ‘../target/types/game’
+import { expect } from ‘chai’</p>
+<dl>
+<dt>describe(‘game’, async () =&gt; {</dt><dd><p>const provider = anchor.AnchorProvider.env()
+anchor.setProvider(provider)</p>
+<p>const program = anchor.workspace.Game as Program&lt;Game&gt;</p>
+<dl>
+<dt>it(‘Sets and changes name!’, async () =&gt; {</dt><dd><dl>
+<dt>const [userStatsPDA, _] = await PublicKey.findProgramAddress(</dt><dd><dl class="simple">
+<dt>[</dt><dd><p>anchor.utils.bytes.utf8.encode(‘user-stats’),
+provider.wallet.publicKey.toBuffer(),</p>
+</dd>
+</dl>
+<p>],
+program.programId</p>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>await program.methods</dt><dd><p>.createUserStats(‘brian’)
+.accounts({</p>
+<blockquote>
+<div><p>user: provider.wallet.publicKey,
+userStats: userStatsPDA,</p>
+</div></blockquote>
+<p>})
+.rpc()</p>
+</dd>
+<dt>expect((await program.account.userStats.fetch(userStatsPDA)).name).to.equal(</dt><dd><p>‘brian’</p>
+</dd>
+</dl>
+<p>)</p>
+<dl>
+<dt>await program.methods</dt><dd><p>.changeUserName(‘tom’)
+.accounts({</p>
+<blockquote>
+<div><p>user: provider.wallet.publicKey,
+userStats: userStatsPDA,</p>
+</div></blockquote>
+<p>})
+.rpc()</p>
+</dd>
+<dt>expect((await program.account.userStats.fetch(userStatsPDA)).name).to.equal(</dt><dd><p>‘tom’</p>
+</dd>
+</dl>
+<p>)</p>
+</dd>
+</dl>
+<p>})</p>
+</dd>
+</dl>
+</section>
+<section id="id41">
+<h2>})<a class="headerlink" href="#id41" title="Permalink to this heading">¶</a></h2>
+<p>Exactly as described in the subchapter before this one, we use a <cite>find</cite> function to find the PDA. We can then use it just like a normal address. Well, almost. When we call <cite>createUserStats</cite>, we don’t have to add the PDA to the <cite>[signers]</cite> array even though account creation requires a signature. This is because it is impossible to sign the transaction from outside the program as the PDA (it’s not a public key so there is no private key to sign with). Instead, the signature is added when the CPI to the system program is made. We’re going to explain how this works in the [Programs as Signers](#programs-as-signers) section.</p>
+<p>#### Enforcing uniqueness</p>
+<p>A subtle result of this hashmap structure is enforced uniqueness. When <cite>init</cite> is used with <cite>seeds</cite> and <cite>bump</cite>, it will always search for the canonical bump. This means that it can only be called once (because the 2nd time it’s called the PDA will already be initialized). To illustrate how powerful enforced uniqueness is, consider a decentralized exchange program. In this program, anyone can create a new market for two assets. However, the program creators want liquidity to be concentrated so there should only be one market for every combination of two assets. This could be done without PDAs but would require a global account that saves all the different markets. Then upon market creation, the program would check whether the asset combination exists in the global market list. With PDAs this can be done in a much more straightforward way. Any market would simply be the PDA of the mint addresses of the two assets. The program would then check whether either of the two possible PDAs (because the market could’ve been created with the assets in reverse order) already exists.</p>
+<p>### Programs as Signers</p>
+<p>Creating PDAs requires them to sign the <cite>createAccount</cite> CPI of the system program. How does that work?</p>
+<p>PDAs are not public keys so it’s impossible for them to sign anything. However, PDAs can still pseudo sign CPIs.
+In anchor, to sign with a pda you have to change <cite>CpiContext::new(cpi_program, cpi_accounts)</cite> to <cite>CpiContext::new_with_signer(cpi_program, cpi_accounts, seeds)</cite> where the <cite>seeds</cite> argument are the seeds _and_ the bump the PDA was created with.
+When the CPI is invoked, for each account in <cite>cpi_accounts</cite> the Solana runtime will check whether`hash(seeds, current_program_id) == account address` is true. If yes, that account’s <cite>is_signer</cite> flag will be turned to true.
+This means a PDA derived from some program X, may only be used to sign CPIs that originate from that program X. This means that on a high level, PDA signatures can be considered program signatures.</p>
+<p>This is great news because for many programs it is necessary that the program itself takes the authority over some assets.
+For instance, lending protocol programs need to manage deposited collateral and automated market maker programs need to manage the tokens put into their liquidity pools.</p>
+<p>Let’s revisit the puppet workspace and add a PDA signature.</p>
+<p>First, adjust the puppet-master code:</p>
+<p><a href="#id42"><span class="problematic" id="id43">``</span></a><a href="#id44"><span class="problematic" id="id45">`</span></a>rust
+use anchor_lang::prelude::<a href="#id46"><span class="problematic" id="id47">*</span></a>;
+use puppet::cpi::accounts::SetData;
+use puppet::program::Puppet;
+use puppet::{self, Data};</p>
+<p>declare_id!(“HmbTLCmaGvZhKnn1Zfa1JVnp7vkMV4DYVxPLWBVoN65L”);</p>
+<p>#[program]
+mod puppet_master {</p>
+<blockquote>
+<div><p>use super::<a href="#id48"><span class="problematic" id="id49">*</span></a>;
+pub fn pull_strings(ctx: Context&lt;PullStrings&gt;, bump: u8, data: u64) -&gt; Result&lt;()&gt; {</p>
+<blockquote>
+<div><p>let bump = &amp;[bump][..];
+puppet::cpi::set_data(</p>
+<blockquote>
+<div><p>ctx.accounts.set_data_ctx().with_signer(&amp;[&amp;[bump][..]]),
+data,</p>
+</div></blockquote>
+<p>)</p>
+</div></blockquote>
+<p>}</p>
+</div></blockquote>
+<p>}</p>
+<p>#[derive(Accounts)]
+pub struct PullStrings&lt;’info&gt; {</p>
+<blockquote>
+<div><p>#[account(mut)]
+pub puppet: Account&lt;’info, Data&gt;,
+pub puppet_program: Program&lt;’info, Puppet&gt;,
+/// CHECK: only used as a signing PDA
+pub authority: UncheckedAccount&lt;’info&gt;,</p>
+</div></blockquote>
+<p>}</p>
+<dl>
+<dt>impl&lt;’info&gt; PullStrings&lt;’info&gt; {</dt><dd><dl>
+<dt>pub fn set_data_ctx(&amp;self) -&gt; CpiContext&lt;’_, ‘_, ‘_, ‘info, SetData&lt;’info&gt;&gt; {</dt><dd><p>let cpi_program = self.puppet_program.to_account_info();
+let cpi_accounts = SetData {</p>
+<blockquote>
+<div><p>puppet: self.puppet.to_account_info(),
+authority: self.authority.to_account_info(),</p>
+</div></blockquote>
+<p>};
+CpiContext::new(cpi_program, cpi_accounts)</p>
+</dd>
+</dl>
+<p>}</p>
+</dd>
+</dl>
+</section>
+<section id="id50">
+<h2>}<a class="headerlink" href="#id50" title="Permalink to this heading">¶</a></h2>
+<p>The <cite>authority</cite> account is now an <cite>UncheckedAccount</cite> instead of a <cite>Signer</cite>. When the puppet-master is invoked, the <cite>authority</cite> pda is not a signer yet so we mustn’t add a check for it. We just care about the puppet-master being able to sign so we don’t add any additional seeds. Just a bump that is calculated off-chain and then passed to the function.</p>
+<p>Finally, this is the new <cite>puppet.ts</cite>:</p>
+<p><a href="#id51"><span class="problematic" id="id52">``</span></a><a href="#id53"><span class="problematic" id="id54">`</span></a>ts
+import * as anchor from <a class="reference external" href="mailto:'&#37;&#52;&#48;project-serum/anchor">‘<span>&#64;</span>project-serum/anchor</a>’
+import { Program } from <a class="reference external" href="mailto:'&#37;&#52;&#48;project-serum/anchor">‘<span>&#64;</span>project-serum/anchor</a>’
+import { Keypair, PublicKey } from <a class="reference external" href="mailto:'&#37;&#52;&#48;solana/web3&#46;js">‘<span>&#64;</span>solana/web3<span>&#46;</span>js</a>’
+import { Puppet } from ‘../target/types/puppet’
+import { PuppetMaster } from ‘../target/types/puppet_master’
+import { expect } from ‘chai’</p>
+<dl>
+<dt>describe(‘puppet’, () =&gt; {</dt><dd><p>const provider = anchor.AnchorProvider.env()
+anchor.setProvider(provider)</p>
+<p>const puppetProgram = anchor.workspace.Puppet as Program&lt;Puppet&gt;
+const puppetMasterProgram = anchor.workspace</p>
+<blockquote>
+<div><p>.PuppetMaster as Program&lt;PuppetMaster&gt;</p>
+</div></blockquote>
+<p>const puppetKeypair = Keypair.generate()</p>
+<dl>
+<dt>it(‘Does CPI!’, async () =&gt; {</dt><dd><dl>
+<dt>const [puppetMasterPDA, puppetMasterBump] =</dt><dd><p>await PublicKey.findProgramAddress([], puppetMasterProgram.programId)</p>
+</dd>
+<dt>await puppetProgram.methods</dt><dd><p>.initialize(puppetMasterPDA)
+.accounts({</p>
+<blockquote>
+<div><p>puppet: puppetKeypair.publicKey,
+user: provider.wallet.publicKey,</p>
+</div></blockquote>
+<p>})
+.signers([puppetKeypair])
+.rpc()</p>
+</dd>
+<dt>await puppetMasterProgram.methods</dt><dd><p>.pullStrings(puppetMasterBump, new anchor.BN(42))
+.accounts({</p>
+<blockquote>
+<div><p>puppetProgram: puppetProgram.programId,
+puppet: puppetKeypair.publicKey,
+authority: puppetMasterPDA,</p>
+</div></blockquote>
+<p>})
+.rpc()</p>
+</dd>
+<dt>expect(</dt><dd><dl class="simple">
+<dt>(</dt><dd><p>await puppetProgram.account.data.fetch(puppetKeypair.publicKey)</p>
+</dd>
+</dl>
+<p>).data.toNumber()</p>
+</dd>
+</dl>
+<p>).to.equal(42)</p>
+</dd>
+</dl>
+<p>})</p>
+</dd>
+</dl>
+</section>
+<section id="id55">
+<h2>})<a class="headerlink" href="#id55" title="Permalink to this heading">¶</a></h2>
+<p>The <cite>authority</cite> is no longer a randomly generated keypair but a PDA derived from the puppet-master program. This means the puppet-master can sign with it which it does inside <cite>pullStrings</cite>. It’s worth noting that our implementation also allows non-canonical bumps but again because we are only interested in being able to sign we don’t care which bump is used.</p>
+<p>&gt; In some cases it’s possible to reduce the number of accounts you need by making a PDA storing state also sign a CPI instead of defining a separate PDA to do that.</p>
+<p>## PDAs: Conclusion</p>
+<p>This section serves as a brief recap of the different things you can do with PDAs.</p>
+<p>First, you can create hashmaps with them. We created a user stats PDA which was derived from the user address. This derivation linked the user address and the user stats account, allowing the latter to be easily found given the former.
+Hashmaps also result in enforced uniqueness which can be used in many different ways, e.g. for only allowing one market per two assets in a decentralized exchange.</p>
+<p>Secondly, PDAs can be used to allow programs to sign CPIs. This means that programs can be given control over assets which they then manage according to the rules defined in their code.</p>
+<p>You can even combine these two use cases and use a PDA that’s used in an instruction as a state account to also sign a CPI.</p>
+<p>Admittedly, working with PDAs is one of the most challenging parts of working with Solana.
+This is why in addition to our explanations here, we want to provide you with some further resources.</p>
+<p>## Other Resources</p>
+<ul class="simple">
+<li><p>[Solana Cookbook](<a class="reference external" href="https://solanacookbook.com/core-concepts/pdas.html">https://solanacookbook.com/core-concepts/pdas.html</a>)</p></li>
+<li><p>[Pencilflips’s twitter thread on PDAs](<a class="reference external" href="https://twitter.com/pencilflip/status/1455948263853600768?s=20&amp;t=J2JXCwv395D7MNkX7a9LGw">https://twitter.com/pencilflip/status/1455948263853600768?s=20&amp;t=J2JXCwv395D7MNkX7a9LGw</a>)</p></li>
+<li><p>[jarry xiao’s talk on PDAs and CPIs](<a class="reference external" href="https://www.youtube.com/watch?v=iMWaQRyjpl4">https://www.youtube.com/watch?v=iMWaQRyjpl4</a>)</p></li>
+<li><p>[paulx’s guide on everything Solana (covers much more than PDAs)](<a class="reference external" href="https://paulx.dev/blog/2021/01/14/programming-on-solana-an-introduction/">https://paulx.dev/blog/2021/01/14/programming-on-solana-an-introduction/</a>)</p></li>
+</ul>
+</section>
+</section>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../../_sources/src/pages/docs/pdas.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

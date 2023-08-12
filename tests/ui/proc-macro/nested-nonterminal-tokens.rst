@@ -1,0 +1,37 @@
+tests/ui/proc-macro/nested-nonterminal-tokens.rs
+================================================
+
+Last edited: 2023-03-30 20:35:59
+
+Contents:
+
+.. code-block:: rs
+
+    // check-pass
+// edition:2018
+// compile-flags: -Z span-debug
+// aux-build:test-macros.rs
+
+// Tests that we properly pass tokens to proc-macro when nested
+// nonterminals are involved.
+
+#![no_std] // Don't load unnecessary hygiene information from std
+extern crate std;
+
+#[macro_use]
+extern crate test_macros;
+
+
+macro_rules! wrap {
+    (first, $e:expr) => { wrap!(second, $e + 1) };
+    (second, $e:expr) => { wrap!(third, $e + 2) };
+    (third, $e:expr) => {
+        print_bang!($e + 3)
+    };
+}
+
+fn main() {
+    let _ = wrap!(first, 0);
+}
+
+

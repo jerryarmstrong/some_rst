@@ -1,0 +1,19 @@
+tests/ui/did_you_mean/issue-36798_unknown_field.rs
+==================================================
+
+Last edited: 2023-03-30 20:35:59
+
+Contents:
+
+.. code-block:: rs
+
+    struct Foo {
+    bar: u8
+}
+
+fn main() {
+    let f = Foo { bar: 22 };
+    f.zz; //~ ERROR no field
+}
+
+

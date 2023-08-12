@@ -1,0 +1,35 @@
+tests/ui/issues/issue-58375-monomorphize-default-impls.rs
+=========================================================
+
+Last edited: 2023-03-30 20:35:59
+
+Contents:
+
+.. code-block:: rs
+
+    // Make sure that the mono-item collector does not crash when trying to
+// instantiate a default impl for DecodeUtf16<<u8 as A>::Item>
+// See https://github.com/rust-lang/rust/issues/58375
+
+// build-pass
+// compile-flags:-C link-dead-code
+
+#![crate_type = "rlib"]
+
+pub struct DecodeUtf16<I>(I);
+
+pub trait Arbitrary {
+    fn arbitrary() {}
+}
+
+pub trait A {
+    type Item;
+}
+
+impl A for u8 {
+    type Item = char;
+}
+
+impl Arbitrary for DecodeUtf16<<u8 as A>::Item> {}
+
+

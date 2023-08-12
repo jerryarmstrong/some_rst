@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>docs/src/running-validator/validator-failover.md &#8212; twit  documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b3523f8e" />
+    <link rel="stylesheet" type="text/css" href="../../_static/alabaster.css?v=039e1c02" />
+    <script data-url_root="../../" id="documentation_options" src="../../_static/documentation_options.js?v=b3ba4146"></script>
+    <script src="../../_static/doctools.js?v=888ff710"></script>
+    <script src="../../_static/sphinx_highlight.js?v=4825356b"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" />
+   
+  <link rel="stylesheet" href="../../_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <section id="docs-src-running-validator-validator-failover-md">
+<h1>docs/src/running-validator/validator-failover.md<a class="headerlink" href="#docs-src-running-validator-validator-failover-md" title="Permalink to this heading">¶</a></h1>
+<p>Last edited: 2023-08-11 21:38:33</p>
+<p>Contents:</p>
+<div class="highlight-md notranslate"><div class="highlight"><pre><span></span>---
+</pre></div>
+</div>
+<p>title: Failover Setup
+—</p>
+<p>A simple two machine instance failover method is described here, which allows you to:
+* upgrade your validator software with virtually no down time, and
+* failover to the secondary instance when your monitoring detects a problem with</p>
+<blockquote>
+<div><p>the primary instance</p>
+</div></blockquote>
+<p>without any safety issues that would otherwise be associated with running two
+instances of your validator.</p>
+<p>You will need two validator-class machines for your primary and secondary
+validator. A third machine for running an [etcd](<a class="reference external" href="https://etcd.io/">https://etcd.io/</a>) cluster,
+which is used to store the tower voting record for your validator.</p>
+<p>## Setup</p>
+<p>### etcd cluster setup</p>
+<p>There is ample documentation regarding etcd setup and configuration at
+<a class="reference external" href="https://etcd.io/">https://etcd.io/</a>, please generally familiarize yourself with etcd before
+continuing.</p>
+<p>It’s recommended that etcd be installed on a separate machine from your primary
+and secondary validator machines. This machine must be highly available, and
+depending on your needs you may wish to configure etcd with more than just
+one node.</p>
+<p>First install <cite>etcd</cite> as desired for your machine. Then TLS certificates must be
+created for authentication between the etcd cluster and your validator.  Here is
+one way to do this:</p>
+<p>With [Golang](<a class="reference external" href="https://golang.org/">https://golang.org/</a>) installed, run
+<cite>go install github.com/cloudflare/cfssl/cmd/cfssl&#64;latest</cite>.  The <cite>cfssl</cite> program
+should now be available at <cite>~/go/bin/cfssl</cite>.  Ensure <cite>~/go/bin</cite> is in your PATH
+by running <cite>PATH=$PATH:~/go/bin/</cite>.</p>
+<p>Now create a certificate directory and configuration file:
+<code class="docutils literal notranslate"><span class="pre">`</span>
+<span class="pre">mkdir</span> <span class="pre">-p</span> <span class="pre">certs/</span>
+<span class="pre">echo</span> <span class="pre">'{&quot;CN&quot;:&quot;etcd&quot;,&quot;hosts&quot;:[&quot;localhost&quot;,</span> <span class="pre">&quot;127.0.0.1&quot;],&quot;key&quot;:{&quot;algo&quot;:&quot;rsa&quot;,&quot;size&quot;:2048}}'</span> <span class="pre">&gt;</span> <span class="pre">certs/config.json</span>
+<span class="pre">`</span></code></p>
+<p>then create certificates for the etcd server and the validator:
+<code class="docutils literal notranslate"><span class="pre">`</span>
+<span class="pre">cfssl</span> <span class="pre">gencert</span> <span class="pre">-initca</span> <span class="pre">certs/config.json</span> <span class="pre">|</span> <span class="pre">cfssljson</span> <span class="pre">-bare</span> <span class="pre">certs/etcd-ca</span>
+<span class="pre">cfssl</span> <span class="pre">gencert</span> <span class="pre">-ca</span> <span class="pre">certs/etcd-ca.pem</span> <span class="pre">-ca-key</span> <span class="pre">certs/etcd-ca-key.pem</span> <span class="pre">certs/config.json</span> <span class="pre">|</span> <span class="pre">cfssljson</span> <span class="pre">-bare</span> <span class="pre">certs/validator</span>
+<span class="pre">cfssl</span> <span class="pre">gencert</span> <span class="pre">-ca</span> <span class="pre">certs/etcd-ca.pem</span> <span class="pre">-ca-key</span> <span class="pre">certs/etcd-ca-key.pem</span> <span class="pre">certs/config.json</span> <span class="pre">|</span> <span class="pre">cfssljson</span> <span class="pre">-bare</span> <span class="pre">certs/etcd</span>
+<span class="pre">`</span></code></p>
+<p>Copy these files to your primary and secondary validator machines:
+* <cite>certs/validator-key.pem</cite>
+* <cite>certs/validator.pem</cite>
+* <cite>certs/etcd-ca.pem</cite></p>
+<p>and these files to the machine running the etcd server:
+* <cite>certs/etcd.pem</cite>
+* <cite>certs/etcd-key.pem</cite>
+* <cite>certs/etcd-ca.pem</cite></p>
+<p>With this configuration, both the validator and etdc will share the same
+TLS certificate authority and will each authenticate the other with it.</p>
+<p>Start <cite>etcd</cite> with the following arguments:
+<a href="#id1"><span class="problematic" id="id2">``</span></a><a href="#id3"><span class="problematic" id="id4">`</span></a>bash
+etcd –auto-compaction-retention 2 –auto-compaction-mode revision </p>
+<blockquote>
+<div><p>–cert-file=certs/etcd.pem –key-file=certs/etcd-key.pem –client-cert-auth –trusted-ca-file=certs/etcd-ca.pem –listen-client-urls=https://127.0.0.1:2379 –advertise-client-urls=https://127.0.0.1:2379</p>
+</div></blockquote>
+<p><a href="#id5"><span class="problematic" id="id6">``</span></a><a href="#id7"><span class="problematic" id="id8">`</span></a></p>
+<p>and use <cite>curl</cite> to confirm the etcd TLS certificates are properly configured:
+<code class="docutils literal notranslate"><span class="pre">`bash</span>
+<span class="pre">curl</span> <span class="pre">--cacert</span> <span class="pre">certs/etcd-ca.pem</span> <span class="pre">https://127.0.0.1:2379/</span> <span class="pre">--cert</span> <span class="pre">certs/validator.pem</span> <span class="pre">--key</span> <span class="pre">certs/validator-key.pem</span>
+<span class="pre">`</span></code>
+On success, curl will return a 404 response.</p>
+<p>For more information on etcd TLS setup, please refer to
+<a class="reference external" href="https://etcd.io/docs/v3.5/op-guide/security/#example-2-client-to-server-authentication-with-https-client-certificates">https://etcd.io/docs/v3.5/op-guide/security/#example-2-client-to-server-authentication-with-https-client-certificates</a></p>
+<p>### Primary Validator
+The following additional <cite>solana-validator</cite> parameters are required to enable
+tower storage into etcd:</p>
+<p><a href="#id9"><span class="problematic" id="id10">``</span></a>`
+solana-validator … </p>
+<blockquote>
+<div><p>–tower-storage etcd –etcd-cacert-file certs/etcd-ca.pem –etcd-cert-file certs/validator.pem –etcd-key-file certs/validator-key.pem –etcd-endpoint 127.0.0.1:2379  # &lt;– replace 127.0.0.1 with the actual IP address</p>
+</div></blockquote>
+<p><a href="#id11"><span class="problematic" id="id12">``</span></a><a href="#id13"><span class="problematic" id="id14">`</span></a></p>
+<p>Note that once running your validator <em>will terminate</em> if it’s not able to write
+its tower into etcd before submitting a vote transaction, so it’s essential
+that your etcd endpoint remain accessible at all times.</p>
+<p>### Secondary Validator
+Configure the secondary validator like the primary with the exception of the
+following <cite>solana-validator</cite> command-line argument changes:
+* Generate and use a secondary validator identity: <cite>–identity secondary-validator-keypair.json</cite>
+* Add <cite>–no-check-vote-account</cite>
+* Add <cite>–authorized-voter validator-keypair.json</cite> (where</p>
+<blockquote>
+<div><p><cite>validator-keypair.json</cite> is the identity keypair for your primary validator)</p>
+</div></blockquote>
+<p>## Triggering a failover manually
+When both validators are running normally and caught up to the cluster, a
+failover from primary to secondary can be triggered by running the following
+command on the secondary validator:
+<a href="#id15"><span class="problematic" id="id16">``</span></a><a href="#id17"><span class="problematic" id="id18">`</span></a>bash
+$ solana-validator wait-for-restart-window –identity validator-keypair.json </p>
+<blockquote>
+<div><p>&amp;&amp; solana-validator set-identity validator-keypair.json</p>
+</div></blockquote>
+<p><a href="#id19"><span class="problematic" id="id20">``</span></a><a href="#id21"><span class="problematic" id="id22">`</span></a></p>
+<p>The secondary validator will acquire a lock on the tower in etcd to ensure
+voting and block production safely switches over from the primary validator.</p>
+<p>The primary validator will then terminate as soon as it detects the secondary
+validator using its identity.</p>
+<p>Note: When the primary validator restarts (which may be immediate if you have
+configured your primary validator to do so) it will reclaim its identity
+from the secondary validator. This will in turn cause the secondary validator to
+exit. However if/when the secondary validator restarts, it will do so using the
+secondary validator identity and thus the restart cycle is broken.</p>
+<p>## Triggering a failover via monitoring
+Monitoring of your choosing can invoke the <cite>solana-validator set-identity
+validator-keypair.json</cite> command mentioned in the previous section.</p>
+<p>It is not necessary to guarantee the primary validator has halted before failing
+over to the secondary, as the failover process will prevent the primary
+validator from voting and producing blocks even if it is in an unknown state.</p>
+<p>## Validator Software Upgrades
+To perform a software upgrade using this failover method:
+1. Install the new software version on your primary validator system but do not</p>
+<blockquote>
+<div><p>restart it yet.</p>
+</div></blockquote>
+<ol class="arabic simple" start="2">
+<li><p>Trigger a manual failover to your secondary validator. This should cause your
+primary validator to terminate.</p></li>
+<li><p>When your primary validator restarts it will now be using the new software version.</p></li>
+<li><p>Once the primary validator catches up upgrade the secondary validator at
+your convenience.</p></li>
+</ol>
+</section>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../index.html">twit</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2023, jare.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 7.1.2</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.13</a>
+      
+      |
+      <a href="../../_sources/src/running-validator/validator-failover.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

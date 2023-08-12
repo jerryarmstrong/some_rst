@@ -1,0 +1,53 @@
+apps/backend-serverless/src/utilities/shopify/webhook-subscribe.utility.ts
+==========================================================================
+
+Last edited: 2023-08-11 21:51:34
+
+Contents:
+
+.. code-block:: ts
+
+    import axios from 'axios';
+import { shopifyAdminRestEndpoint } from '../../configs/endpoints.config.js';
+
+interface Props {
+    shop: string;
+    accessToken: string;
+    topic: string;
+    endpoint: string;
+}
+export async function createShopifyWebhook(props: Props) {
+    const url = shopifyAdminRestEndpoint(props.shop, 'webhooks');
+
+    const payload = {
+        webhook: {
+            topic: props.topic,
+            address: process.env.BACKEND_URL + props.endpoint,
+            format: 'json',
+        },
+    };
+
+    const headers = {
+        'X-Shopify-Access-Token': props.accessToken,
+    };
+
+    try {
+        let response;
+        if (process.env.NODE_ENV === 'development') {
+            return;
+        } else {
+            response = await axios({
+                url,
+                method: 'POST',
+                data: payload,
+                headers: headers,
+            });
+        }
+
+        return response.data;
+    } catch (error) {
+        console.error(error);
+    }
+}
+
+

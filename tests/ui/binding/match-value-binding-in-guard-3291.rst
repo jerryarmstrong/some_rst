@@ -1,0 +1,28 @@
+tests/ui/binding/match-value-binding-in-guard-3291.rs
+=====================================================
+
+Last edited: 2023-03-30 20:35:59
+
+Contents:
+
+.. code-block:: rs
+
+    // run-pass
+// pretty-expanded FIXME #23616
+
+fn foo(x: Option<Box<isize>>, b: bool) -> isize {
+    match x {
+      None => { 1 }
+      Some(ref x) if b => { *x.clone() }
+      Some(_) => { 0 }
+    }
+}
+
+pub fn main() {
+    foo(Some(Box::new(22)), true);
+    foo(Some(Box::new(22)), false);
+    foo(None, true);
+    foo(None, false);
+}
+
+

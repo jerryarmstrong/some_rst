@@ -1,0 +1,51 @@
+components/DropdownMenu/DropdownMenu.tsx
+========================================
+
+Last edited: 2023-08-11 18:13:34
+
+Contents:
+
+.. code-block:: tsx
+
+    import React from 'react'
+import * as Dropdown from '@radix-ui/react-dropdown-menu'
+import { DotsVerticalIcon } from '@heroicons/react/solid'
+
+interface Props {
+  triggerButton: React.ReactNode
+  children: React.ReactNode[] | React.ReactNode
+}
+
+const DropdownMenu: React.FC<Props> = (props) => {
+  return (
+    <Dropdown.Root>
+      <Dropdown.Trigger asChild>
+        <button aria-label="Further Options">
+          <DotsVerticalIcon className="h-4 w-4" />
+        </button>
+      </Dropdown.Trigger>
+
+      <Dropdown.Content
+        className="DropdownMenuContent"
+        side="top"
+        sideOffset={5}
+      >
+        {(Array.isArray(props.children) ? props.children : [props.children])
+          .filter((menuItem) => menuItem)
+          .map((menuItem: React.ReactNode) => (
+            <Dropdown.Item
+              className="DropdownMenuItem"
+              // menu item will exist because of the filter above.
+              key={menuItem!.toString()}
+            >
+              {menuItem}
+            </Dropdown.Item>
+          ))}
+      </Dropdown.Content>
+    </Dropdown.Root>
+  )
+}
+
+export default DropdownMenu
+
+
