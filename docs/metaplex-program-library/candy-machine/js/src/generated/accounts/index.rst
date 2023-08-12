@@ -1,0 +1,20 @@
+candy-machine/js/src/generated/accounts/index.ts
+================================================
+
+Last edited: 2023-07-31 23:00:16
+
+Contents:
+
+.. code-block:: ts
+
+    export * from './CandyMachine';
+export * from './CollectionPDA';
+export * from './FreezePDA';
+
+import { CandyMachine } from './CandyMachine';
+import { CollectionPDA } from './CollectionPDA';
+import { FreezePDA } from './FreezePDA';
+
+export const accountProviders = { CandyMachine, CollectionPDA, FreezePDA };
+
+

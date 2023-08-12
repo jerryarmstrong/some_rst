@@ -1,0 +1,107 @@
+apps/backend-serverless/src/services/transaction-request/fetch-manage-tiers-transaction.service.ts
+==================================================================================================
+
+Last edited: 2023-08-11 21:51:34
+
+Contents:
+
+.. code-block:: ts
+
+    import { GuestIdentityDriver, Metaplex } from '@metaplex-foundation/js';
+import { Keypair, PublicKey } from '@solana/web3.js';
+import { getConnection } from '../../utilities/connection.utility.js';
+
+type TransactionData = {
+    base: string;
+    mintAddress?: PublicKey;
+};
+
+export const fetchCreateTiersTransaction = async (
+    gasAddress: Keypair,
+    merchantAddress: PublicKey,
+    name: string,
+    discount: number,
+    threshold: number
+): Promise<TransactionData> => {
+    let connection = getConnection();
+    let metaplex = Metaplex.make(connection);
+
+    let merchantIdentity = new GuestIdentityDriver(merchantAddress);
+    let generatedMint = Keypair.generate();
+
+    let nftBuilder = await metaplex
+        .nfts()
+        .builders()
+        .createSft(
+            {
+                updateAuthority: gasAddress,
+                mintAuthority: gasAddress,
+                uri: 'https://arweave.net/9bMqZG9aCu9bCbilTQYuWCyDCCOXLdd6s5YalNDTn74',
+                name: name,
+                sellerFeeBasisPoints: threshold * 100,
+                symbol: discount.toString(),
+                useNewMint: generatedMint,
+            },
+            { payer: merchantIdentity }
+        );
+
+    const latestBlockhash = await connection.getLatestBlockhash();
+    const transaction = await nftBuilder.toTransaction(latestBlockhash);
+
+    transaction.partialSign(gasAddress);
+    transaction.partialSign(generatedMint);
+
+    let base = transaction.serialize({ requireAllSignatures: false, verifySignatures: false }).toString('base64');
+
+    return { base, mintAddress: generatedMint?.publicKey };
+};
+
+export const fetchUpdateTiersTransaction = async (
+    gasAddress: Keypair,
+    merchantAddress: PublicKey,
+    mintAddress: PublicKey,
+    name: string,
+    discount: number,
+    threshold: number
+): Promise<string | null> => {
+    let connection = getConnection();
+    let metaplex = Metaplex.make(connection);
+
+    let merchantIdentity = new GuestIdentityDriver(merchantAddress);
+
+    const nft = await metaplex.nfts().findByMint({ mintAddress });
+    let updatedFields = {
+        ...(nft.name !== name && { name: name }),
+        ...(nft.sellerFeeBasisPoints !== threshold * 100 && { sellerFeeBasisPoints: threshold * 100 }),
+        ...(nft.symbol !== discount.toString() && { symbol: discount.toString() }),
+    };
+
+    if (Object.keys(updatedFields).length === 0) {
+        return null;
+    }
+
+    let nftBuilder = await metaplex
+        .nfts()
+        .builders()
+        .update(
+            {
+                nftOrSft: nft,
+                updateAuthority: gasAddress,
+                ...updatedFields,
+            },
+            {
+                payer: merchantIdentity,
+            }
+        );
+
+    const latestBlockhash = await connection.getLatestBlockhash();
+    const transaction = await nftBuilder.toTransaction(latestBlockhash);
+
+    transaction.partialSign(gasAddress);
+
+    let base = transaction.serialize({ requireAllSignatures: false, verifySignatures: false }).toString('base64');
+
+    return base;
+};
+
+

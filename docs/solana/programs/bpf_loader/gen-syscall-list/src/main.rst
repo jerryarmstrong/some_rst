@@ -1,0 +1,14 @@
+programs/bpf_loader/gen-syscall-list/src/main.rs
+================================================
+
+Last edited: 2023-08-11 21:38:33
+
+Contents:
+
+.. code-block:: rs
+
+    fn main() {
+    /* I do all my work in `../build.rs` */
+}
+
+

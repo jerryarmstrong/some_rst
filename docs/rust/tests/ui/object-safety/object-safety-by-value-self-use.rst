@@ -1,0 +1,29 @@
+tests/ui/object-safety/object-safety-by-value-self-use.rs
+=========================================================
+
+Last edited: 2023-03-30 20:35:59
+
+Contents:
+
+.. code-block:: rs
+
+    // Check that while a trait with by-value self is object-safe, we
+// can't actually invoke it from an object (yet...?).
+
+#![feature(rustc_attrs)]
+
+trait Bar {
+    fn bar(self);
+}
+
+trait Baz {
+    fn baz(self: Self);
+}
+
+fn use_bar(t: Box<dyn Bar>) {
+    t.bar() //~ ERROR cannot move a value of type `dyn Bar`
+}
+
+fn main() { }
+
+

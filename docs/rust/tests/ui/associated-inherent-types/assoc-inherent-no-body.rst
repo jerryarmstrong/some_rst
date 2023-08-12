@@ -1,0 +1,21 @@
+tests/ui/associated-inherent-types/assoc-inherent-no-body.rs
+============================================================
+
+Last edited: 2023-03-30 20:35:59
+
+Contents:
+
+.. code-block:: rs
+
+    #![feature(inherent_associated_types)]
+#![allow(incomplete_features)]
+
+struct Foo;
+
+impl Foo {
+    type Baz; //~ ERROR associated type in `impl` without body
+}
+
+fn main() {}
+
+

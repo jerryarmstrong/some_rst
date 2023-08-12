@@ -1,0 +1,38 @@
+tests/ui/structs-enums/nested-enum-same-names.rs
+================================================
+
+Last edited: 2023-03-30 20:35:59
+
+Contents:
+
+.. code-block:: rs
+
+    // run-pass
+#![allow(dead_code)]
+// pretty-expanded FIXME #23616
+
+/*
+
+#7770 ICE with sibling methods containing same-name-enum containing
+ same-name-member
+
+If you have two methods in an impl block, each containing an enum
+(with the same name), each containing at least one value with the same
+name, rustc gives the same LLVM symbol for the two of them and fails,
+as it does not include the method name in the symbol name.
+
+*/
+
+pub struct Foo;
+impl Foo {
+    pub fn foo() {
+        enum Panic { Common }
+    }
+    pub fn bar() {
+        enum Panic { Common }
+    }
+}
+
+pub fn main() {}
+
+

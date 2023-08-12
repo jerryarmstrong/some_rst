@@ -1,0 +1,19 @@
+packages/umi-downloader-http/src/plugin.ts
+==========================================
+
+Last edited: 2023-07-27 15:49:41
+
+Contents:
+
+.. code-block:: ts
+
+    import { UmiPlugin } from '@metaplex-foundation/umi';
+import { createHttpDownloader } from './createHttpDownloader';
+
+export const httpDownloader = (): UmiPlugin => ({
+  install(umi) {
+    umi.downloader = createHttpDownloader(umi);
+  },
+});
+
+

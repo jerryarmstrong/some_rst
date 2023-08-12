@@ -1,0 +1,39 @@
+tests/ui/sanitize/cfg.rs
+========================
+
+Last edited: 2023-03-30 20:35:59
+
+Contents:
+
+.. code-block:: rs
+
+    // Verifies that when compiling with -Zsanitizer=option,
+// the `#[cfg(sanitize = "option")]` attribute is configured.
+
+// needs-sanitizer-support
+// needs-sanitizer-address
+// needs-sanitizer-leak
+// needs-sanitizer-memory
+// needs-sanitizer-thread
+// check-pass
+// revisions: address leak memory thread
+//[address]compile-flags: -Zsanitizer=address --cfg address
+//[leak]compile-flags:    -Zsanitizer=leak    --cfg leak
+//[memory]compile-flags:  -Zsanitizer=memory  --cfg memory
+//[thread]compile-flags:  -Zsanitizer=thread  --cfg thread
+
+#![feature(cfg_sanitize)]
+
+#[cfg(all(sanitize = "address", address))]
+fn main() {}
+
+#[cfg(all(sanitize = "leak", leak))]
+fn main() {}
+
+#[cfg(all(sanitize = "memory", memory))]
+fn main() {}
+
+#[cfg(all(sanitize = "thread", thread))]
+fn main() {}
+
+

@@ -1,0 +1,32 @@
+tests/ui/proc-macro/nonterminal-recollect-attr.rs
+=================================================
+
+Last edited: 2023-03-30 20:35:59
+
+Contents:
+
+.. code-block:: rs
+
+    // check-pass
+// compile-flags: -Z span-debug
+// aux-build:nonterminal-recollect-attr.rs
+
+#![no_std] // Don't load unnecessary hygiene information from std
+extern crate std;
+
+extern crate nonterminal_recollect_attr;
+use nonterminal_recollect_attr::*;
+
+macro_rules! my_macro {
+    ($v:ident) => {
+        #[first_attr]
+        $v struct Foo {
+            field: u8
+        }
+    }
+}
+
+my_macro!(pub);
+fn main() {}
+
+

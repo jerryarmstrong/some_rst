@@ -1,0 +1,27 @@
+projects/solarians.md
+=====================
+
+Last edited: 2021-12-16 22:28:41
+
+Contents:
+
+.. code-block:: md
+
+    ---
+slug: "solarians"
+date: "2021-03-22"
+title: "Solarians"
+logline: "Solarians are the first generative NFTs built on Solana."
+cta: https://solarians.click/
+logo: /img/solarians.svg
+category: nft
+website: https://solarians.click/
+twitter: https://twitter.com/SolariansNFT
+telegram: https://t.me/SolariansOfficial
+discord: https://discord.gg/6zQDYBde3w
+status: live
+---
+
+Solarian robots originate from Solaria Prime. When you purchase Solarian, it will be assembled from 200 different traits and attributes with varying rarities based on the transaction hash.
+
+

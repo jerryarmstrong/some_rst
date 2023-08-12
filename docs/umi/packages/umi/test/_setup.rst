@@ -1,0 +1,70 @@
+packages/umi/test/_setup.ts
+===========================
+
+Last edited: 2023-07-27 15:49:41
+
+Contents:
+
+.. code-block:: ts
+
+    /* eslint-disable import/no-extraneous-dependencies */
+import {
+  Context,
+  PublicKey,
+  Signer,
+  Umi,
+  WrappedInstruction,
+  createUmi as baseCreateUmi,
+  generateSigner,
+  generatedSignerIdentity,
+  publicKey,
+} from '../src';
+import { base10 } from '../src/serializers';
+
+export const createUmi = (): Umi =>
+  baseCreateUmi().use(generatedSignerIdentity());
+
+export const mockInstruction = (): WrappedInstruction => ({
+  instruction: {
+    programId: publicKey('11111111111111111111111111111111'),
+    keys: [
+      {
+        pubkey: publicKey('LorisCg1FTs89a32VSrFskYDgiRbNQzct1WxyZb7nuA'),
+        isSigner: false,
+        isWritable: true,
+      },
+    ],
+    data: new Uint8Array(),
+  },
+  bytesCreatedOnChain: 0,
+  signers: [],
+});
+
+export const transferSol = (
+  context: Pick<Context, 'eddsa'>,
+  params: {
+    from?: Signer;
+    to?: PublicKey;
+    lamports?: number | bigint;
+  } = {}
+): WrappedInstruction => {
+  const from = params.from ?? generateSigner(context);
+  const to = params.to ?? generateSigner(context).publicKey;
+  const lamports = BigInt(params.lamports ?? 1_000_000_000);
+  const keys = [
+    { pubkey: from.publicKey, isSigner: true, isWritable: true },
+    { pubkey: to, isSigner: false, isWritable: true },
+  ];
+
+  return {
+    instruction: {
+      programId: publicKey('11111111111111111111111111111111'),
+      keys,
+      data: base10.serialize(lamports.toString()),
+    },
+    bytesCreatedOnChain: 0,
+    signers: [from],
+  };
+};
+
+

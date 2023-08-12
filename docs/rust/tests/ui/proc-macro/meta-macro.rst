@@ -1,0 +1,25 @@
+tests/ui/proc-macro/meta-macro.rs
+=================================
+
+Last edited: 2023-03-30 20:35:59
+
+Contents:
+
+.. code-block:: rs
+
+    // aux-build:make-macro.rs
+// aux-build:meta-macro.rs
+// edition:2018
+// compile-flags: -Z span-debug
+// run-pass
+
+#![no_std] // Don't load unnecessary hygiene information from std
+extern crate std;
+
+extern crate meta_macro;
+
+fn main() {
+    meta_macro::print_def_site!();
+}
+
+

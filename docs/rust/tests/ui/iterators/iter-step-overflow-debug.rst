@@ -1,0 +1,32 @@
+tests/ui/iterators/iter-step-overflow-debug.rs
+==============================================
+
+Last edited: 2023-03-30 20:35:59
+
+Contents:
+
+.. code-block:: rs
+
+    // run-pass
+// needs-unwind
+// compile-flags: -C debug_assertions=yes
+
+use std::panic;
+
+fn main() {
+    let r = panic::catch_unwind(|| {
+        let mut it = u8::MAX..;
+        it.next().unwrap(); // 255
+        it.next().unwrap();
+    });
+    assert!(r.is_err());
+
+    let r = panic::catch_unwind(|| {
+        let mut it = i8::MAX..;
+        it.next().unwrap(); // 127
+        it.next().unwrap();
+    });
+    assert!(r.is_err());
+}
+
+

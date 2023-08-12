@@ -1,0 +1,33 @@
+tests/ui/const-generics/generic_const_exprs/object-safety-err-where-bounds.rs
+=============================================================================
+
+Last edited: 2023-03-30 20:35:59
+
+Contents:
+
+.. code-block:: rs
+
+    #![feature(generic_const_exprs)]
+#![allow(incomplete_features)]
+#![deny(where_clauses_object_safety)]
+
+
+const fn bar<T: ?Sized>() -> usize { 7 }
+
+trait Foo {
+    fn test(&self) where [u8; bar::<Self>()]: Sized;
+    //~^ ERROR the trait `Foo` cannot be made into an object
+    //~| WARN this was previously accepted by the compiler but is being phased out
+}
+
+impl Foo for () {
+    fn test(&self) where [u8; bar::<Self>()]: Sized {}
+}
+
+fn use_dyn(v: &dyn Foo) {
+    v.test();
+}
+
+fn main() {}
+
+

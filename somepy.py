@@ -7,7 +7,7 @@ index_rst = """"""
 # Path to the local git repository
 for repo in glob.glob('/tmp/repos/*'):
     repo_path = os.path.join(os.getcwd(), repo)
-
+    
     # Create a Repo object
     repo = Repo(repo_path)
 
@@ -21,9 +21,10 @@ for repo in glob.glob('/tmp/repos/*'):
             if file.type == 'blob':
                 file_path = file.path
                 extension = os.path.splitext(file_path)[1]
-                print(file_path)
+                
                 extensions = ['.py', '.js', '.tsx', '.ts', '.rs', '.md', '.scala', '.java']
                 if extension in extensions:
+                    print(file_path)
                     content = file.data_stream.read().decode('utf-8')
                     loc = len(content.splitlines())
 
@@ -45,7 +46,7 @@ for repo in glob.glob('/tmp/repos/*'):
                     # link to file_path in rst as :ref: 
 
                     # Write the contents to an RST file
-                    rst_path = os.path.splitext(file_path)[0] + '.rst'
+                    rst_path = 'docs/'+repo_path.split('/')[-1]+'/'+os.path.splitext(file_path)[0] + '.rst'
                     # Get the directory name
                     dir_path = os.path.dirname(rst_path)
 
@@ -62,7 +63,7 @@ for repo in glob.glob('/tmp/repos/*'):
                             rst_file.write(f"    {content}\n\n")
                     except:
                         abc=123
-                    index_rst += f""" `{file_path} <""" + file_path + """.html>`_ \n\n"""
+                    index_rst += f""" `{file_path} <""" + rst_path + """.html>`_ \n\n"""
     except Exception as e:
         print(e)            
                 

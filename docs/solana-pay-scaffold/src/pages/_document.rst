@@ -1,0 +1,36 @@
+src/pages/_document.tsx
+=======================
+
+Last edited: 2023-03-08 10:13:00
+
+Contents:
+
+.. code-block:: tsx
+
+    import Document, { DocumentContext, Head, Html, Main, NextScript } from 'next/document'
+
+class MyDocument extends Document {
+  static async getInitialProps(ctx: DocumentContext) {
+    const initialProps = await Document.getInitialProps(ctx)
+
+    return initialProps
+  }
+
+  render() {
+    return (
+      <Html>
+        <Head>
+        <link rel="shortcut icon" href="/favicon.ico"/>
+        </Head>
+        <body>
+          <Main />
+          <NextScript />
+        </body>
+      </Html>
+    );
+  }
+}
+
+export default MyDocument;
+
+

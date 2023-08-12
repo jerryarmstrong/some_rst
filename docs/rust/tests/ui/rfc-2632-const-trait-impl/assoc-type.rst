@@ -1,0 +1,43 @@
+tests/ui/rfc-2632-const-trait-impl/assoc-type.rs
+================================================
+
+Last edited: 2023-03-30 20:35:59
+
+Contents:
+
+.. code-block:: rs
+
+    #![feature(const_trait_impl)]
+
+struct NonConstAdd(i32);
+
+impl std::ops::Add for NonConstAdd {
+    type Output = Self;
+
+    fn add(self, rhs: Self) -> Self {
+        NonConstAdd(self.0 + rhs.0)
+    }
+}
+
+#[const_trait]
+trait Foo {
+    type Bar: ~const std::ops::Add;
+}
+
+impl const Foo for NonConstAdd {
+    type Bar = NonConstAdd;
+    //~^ ERROR: cannot add `NonConstAdd` to `NonConstAdd` in const contexts
+}
+
+#[const_trait]
+trait Baz {
+    type Qux: std::ops::Add;
+}
+
+impl const Baz for NonConstAdd {
+    type Qux = NonConstAdd; // OK
+}
+
+fn main() {}
+
+

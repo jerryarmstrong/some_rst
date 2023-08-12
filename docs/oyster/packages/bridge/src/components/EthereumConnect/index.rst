@@ -1,0 +1,75 @@
+packages/bridge/src/components/EthereumConnect/index.tsx
+========================================================
+
+Last edited: 2023-07-19 16:40:40
+
+Contents:
+
+.. code-block:: tsx
+
+    import React from 'react';
+import { Button, Dropdown, Menu } from 'antd';
+import './index.less';
+
+import { useCorrectNetwork } from '../../hooks/useCorrectNetwork';
+import { shortenAddress } from '@oyster/common';
+import { useEthereum } from '../../contexts';
+
+export const EthereumConnect = () => {
+  const {
+    accounts,
+    onConnectEthereum,
+    connected,
+    walletProvider,
+    select,
+    disconnect,
+  } = useEthereum();
+  const { hasCorrespondingNetworks } = useCorrectNetwork();
+
+  const menu = (
+    <Menu>
+      <Menu.Item key="3" onClick={select}>
+        Change Eth Wallet
+      </Menu.Item>
+    </Menu>
+  );
+
+  return (
+    <div className={'eth-connect'}>
+      {connected ? (
+        hasCorrespondingNetworks ? (
+          <div className={'eth-address'}>
+            <img
+              alt={'ethereum-icon'}
+              width={20}
+              height={20}
+              style={{ marginRight: 5 }}
+              src={walletProvider.icon}
+            />
+            {shortenAddress(accounts[0], 4)}
+            <span className={'disconnect'} onClick={() => disconnect()}>
+              X
+            </span>
+          </div>
+        ) : (
+          <Button danger type={'primary'}>
+            WRONG NETWORK
+          </Button>
+        )
+      ) : !!walletProvider ? (
+        <Dropdown.Button
+          onClick={() => onConnectEthereum && onConnectEthereum()}
+          overlay={menu}
+        >
+          CONNECT
+        </Dropdown.Button>
+      ) : (
+        <Button onClick={() => onConnectEthereum && onConnectEthereum()}>
+          CONNECT
+        </Button>
+      )}
+    </div>
+  );
+};
+
+

@@ -1,0 +1,48 @@
+apps/backend-serverless/src/handlers/shopify-handlers/logout.ts
+===============================================================
+
+Last edited: 2023-08-11 21:51:34
+
+Contents:
+
+.. code-block:: ts
+
+    import { PrismaClient } from '@prisma/client';
+import * as Sentry from '@sentry/serverless';
+import { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from 'aws-lambda';
+import { deleteMerchantAuthCookieHeader } from '../../utilities/clients/delete-cookie-header.utility.js';
+
+const prisma = new PrismaClient();
+
+Sentry.AWSLambda.init({
+    dsn: process.env.SENTRY_DSN,
+    tracesSampleRate: 1.0,
+    integrations: [new Sentry.Integrations.Prisma({ client: prisma })],
+});
+
+export const logout = Sentry.AWSLambda.wrapHandler(
+    async (event: APIGatewayProxyEventV2): Promise<APIGatewayProxyResultV2> => {
+        Sentry.captureEvent({
+            message: 'in logout',
+            level: 'info',
+            extra: {
+                event,
+            },
+        });
+        const merchantCookie = deleteMerchantAuthCookieHeader();
+        const nonceCookie = `nonce=; HttpOnly; Secure; SameSite=Lax; Max-age=0;`;
+
+        return {
+            statusCode: 200,
+            headers: {
+                'Access-Control-Allow-Credentials': true,
+                'Access-Control-Allow-Origin': '*',
+                'Content-Type': 'text/html',
+            },
+            cookies: [merchantCookie, nonceCookie],
+            body: JSON.stringify({ message: 'Logged out' }),
+        };
+    }
+);
+
+

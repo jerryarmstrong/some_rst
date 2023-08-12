@@ -1,0 +1,40 @@
+tests/ui/consts/control-flow/exhaustive-c-like-enum-match.rs
+============================================================
+
+Last edited: 2023-03-30 20:35:59
+
+Contents:
+
+.. code-block:: rs
+
+    // Test for <https://github.com/rust-lang/rust/issues/66756>
+
+// check-pass
+
+enum E {
+    A,
+    B,
+    C
+}
+
+const fn f(e: E) {
+    match e {
+        E::A => {}
+        E::B => {}
+        E::C => {}
+    }
+}
+
+const fn g(e: E) -> usize {
+    match e {
+        _ => 0
+    }
+}
+
+fn main() {
+    const X: usize = g(E::C);
+    assert_eq!(X, 0);
+    assert_eq!(g(E::A), 0);
+}
+
+

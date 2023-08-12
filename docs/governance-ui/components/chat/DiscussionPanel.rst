@@ -1,0 +1,55 @@
+components/chat/DiscussionPanel.tsx
+===================================
+
+Last edited: 2023-05-19 22:20:18
+
+Contents:
+
+.. code-block:: tsx
+
+    import React, { useMemo } from 'react'
+import DiscussionForm from './DiscussionForm'
+import Comment from './Comment'
+import useWalletStore from '../../stores/useWalletStore'
+
+const DiscussionPanel = () => {
+  const { chatMessages, voteRecordsByVoter, proposalMint } = useWalletStore(
+    (s) => s.selectedProposal
+  )
+
+  const sortedMessages = useMemo(
+    () =>
+      Object.values(chatMessages).sort(
+        (m1, m2) =>
+          m2.account.postedAt.toNumber() - m1.account.postedAt.toNumber()
+      ),
+    [chatMessages]
+  )
+
+  return (
+    <div className="border border-fgd-4 p-4 md:p-6 rounded-lg">
+      <h2 className="mb-4">
+        Discussion{' '}
+        <span className="text-base text-fgd-3">
+          ({Object.keys(chatMessages).length})
+        </span>
+      </h2>
+      <div className="pb-4">
+        <DiscussionForm />
+      </div>
+
+      {sortedMessages.map((cm) => (
+        <Comment
+          key={cm.pubkey.toBase58()}
+          chatMessage={cm.account}
+          voteRecord={voteRecordsByVoter[cm.account.author.toBase58()]?.account}
+          proposalMint={proposalMint}
+        />
+      ))}
+    </div>
+  )
+}
+
+export default DiscussionPanel
+
+

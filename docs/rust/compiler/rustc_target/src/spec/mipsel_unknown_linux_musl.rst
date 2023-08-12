@@ -1,0 +1,27 @@
+compiler/rustc_target/src/spec/mipsel_unknown_linux_musl.rs
+===========================================================
+
+Last edited: 2023-03-30 20:35:59
+
+Contents:
+
+.. code-block:: rs
+
+    use crate::spec::{Target, TargetOptions};
+
+pub fn target() -> Target {
+    let mut base = super::linux_musl_base::opts();
+    base.cpu = "mips32r2".into();
+    base.features = "+mips32r2,+soft-float".into();
+    base.max_atomic_width = Some(32);
+    base.crt_static_default = false;
+    Target {
+        llvm_target: "mipsel-unknown-linux-musl".into(),
+        pointer_width: 32,
+        data_layout: "e-m:m-p:32:32-i8:8:32-i16:16:32-i64:64-n32-S64".into(),
+        arch: "mips".into(),
+        options: TargetOptions { mcount: "_mcount".into(), ..base },
+    }
+}
+
+

@@ -1,0 +1,32 @@
+tests/run-pass-valgrind/dst-dtor-2.rs
+=====================================
+
+Last edited: 2023-03-30 20:35:59
+
+Contents:
+
+.. code-block:: rs
+
+    static mut DROP_RAN: isize = 0;
+
+struct Foo;
+impl Drop for Foo {
+    fn drop(&mut self) {
+        unsafe { DROP_RAN += 1; }
+    }
+}
+
+struct Fat<T: ?Sized> {
+    f: T
+}
+
+pub fn main() {
+    {
+        let _x: Box<Fat<[Foo]>> = Box::<Fat<[Foo; 3]>>::new(Fat { f: [Foo, Foo, Foo] });
+    }
+    unsafe {
+        assert_eq!(DROP_RAN, 3);
+    }
+}
+
+

@@ -1,0 +1,19 @@
+tests/ui/mismatched_types/binops.rs
+===================================
+
+Last edited: 2023-03-30 20:35:59
+
+Contents:
+
+.. code-block:: rs
+
+    fn main() {
+    1 + Some(1); //~ ERROR cannot add `Option<{integer}>` to `{integer}`
+    2 as usize - Some(1); //~ ERROR cannot subtract `Option<{integer}>` from `usize`
+    3 * (); //~ ERROR cannot multiply `{integer}` by `()`
+    4 / ""; //~ ERROR cannot divide `{integer}` by `&str`
+    5 < String::new(); //~ ERROR can't compare `{integer}` with `String`
+    6 == Ok(1); //~ ERROR can't compare `{integer}` with `Result<{integer}, _>`
+}
+
+

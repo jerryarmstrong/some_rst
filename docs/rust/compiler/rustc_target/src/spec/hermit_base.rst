@@ -1,0 +1,32 @@
+compiler/rustc_target/src/spec/hermit_base.rs
+=============================================
+
+Last edited: 2023-03-30 20:35:59
+
+Contents:
+
+.. code-block:: rs
+
+    use crate::spec::{Cc, LinkerFlavor, Lld, PanicStrategy, TargetOptions, TlsModel};
+
+pub fn opts() -> TargetOptions {
+    let pre_link_args = TargetOptions::link_args(
+        LinkerFlavor::Gnu(Cc::No, Lld::No),
+        &["--build-id", "--hash-style=gnu", "--Bstatic"],
+    );
+
+    TargetOptions {
+        os: "hermit".into(),
+        linker_flavor: LinkerFlavor::Gnu(Cc::No, Lld::Yes),
+        linker: Some("rust-lld".into()),
+        has_thread_local: true,
+        pre_link_args,
+        panic_strategy: PanicStrategy::Abort,
+        position_independent_executables: true,
+        static_position_independent_executables: true,
+        tls_model: TlsModel::InitialExec,
+        ..Default::default()
+    }
+}
+
+

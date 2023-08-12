@@ -1,0 +1,33 @@
+tests/ui/generic-associated-types/issue-68649-pass.rs
+=====================================================
+
+Last edited: 2023-03-30 20:35:59
+
+Contents:
+
+.. code-block:: rs
+
+    // check-pass
+
+trait Fun {
+    type F<'a>;
+
+    fn identity<'a>(t: Self::F<'a>) -> Self::F<'a> { t }
+}
+
+impl <T> Fun for T {
+    type F<'a> = Self;
+}
+
+fn bug<'a, T: Fun<F<'a> = T>>(t: T) -> T::F<'a> {
+    T::identity(t)
+}
+
+
+fn main() {
+    let x = 10;
+
+    bug(x);
+}
+
+

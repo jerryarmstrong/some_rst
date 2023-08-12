@@ -1,0 +1,38 @@
+tests/ui/iterators/iter-sum-overflow-overflow-checks.rs
+=======================================================
+
+Last edited: 2023-03-30 20:35:59
+
+Contents:
+
+.. code-block:: rs
+
+    // run-pass
+// needs-unwind
+// compile-flags: -C overflow-checks
+
+use std::panic;
+
+fn main() {
+    let r = panic::catch_unwind(|| {
+        [1, i32::MAX].iter().sum::<i32>();
+    });
+    assert!(r.is_err());
+
+    let r = panic::catch_unwind(|| {
+        [2, i32::MAX].iter().product::<i32>();
+    });
+    assert!(r.is_err());
+
+    let r = panic::catch_unwind(|| {
+        [1, i32::MAX].iter().cloned().sum::<i32>();
+    });
+    assert!(r.is_err());
+
+    let r = panic::catch_unwind(|| {
+        [2, i32::MAX].iter().cloned().product::<i32>();
+    });
+    assert!(r.is_err());
+}
+
+

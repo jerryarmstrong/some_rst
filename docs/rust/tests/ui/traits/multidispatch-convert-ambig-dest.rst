@@ -1,0 +1,42 @@
+tests/ui/traits/multidispatch-convert-ambig-dest.rs
+===================================================
+
+Last edited: 2023-03-30 20:35:59
+
+Contents:
+
+.. code-block:: rs
+
+    // Check that we get an error in a multidisptach scenario where the
+// set of impls is ambiguous.
+
+trait Convert<Target> {
+    fn convert(&self) -> Target;
+}
+
+impl Convert<i8> for i32 {
+    fn convert(&self) -> i8 {
+        *self as i8
+    }
+}
+
+impl Convert<i16> for i32 {
+    fn convert(&self) -> i16 {
+        *self as i16
+    }
+}
+
+fn test<T,U>(_: T, _: U)
+where T : Convert<U>
+{
+}
+
+fn a() {
+    test(22, std::default::Default::default());
+    //~^ ERROR type annotations needed
+    //~| ERROR type annotations needed
+}
+
+fn main() {}
+
+

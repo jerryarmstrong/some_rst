@@ -1,0 +1,38 @@
+tests/ui/consts/const-eval/const-eval-overflow-3.rs
+===================================================
+
+Last edited: 2023-03-30 20:35:59
+
+Contents:
+
+.. code-block:: rs
+
+    // Evaluation of constants in array-elem count goes through different
+// compiler control-flow paths.
+//
+// This test is checking the count in an array expression.
+
+
+
+
+
+
+
+#![allow(unused_imports)]
+
+use std::fmt;
+
+const A_I8_I
+    : [u32; (i8::MAX as usize) + 1]
+    = [0; (i8::MAX + 1) as usize];
+//~^ ERROR evaluation of constant value failed
+
+fn main() {
+    foo(&A_I8_I[..]);
+}
+
+fn foo<T:fmt::Debug>(x: T) {
+    println!("{:?}", x);
+}
+
+

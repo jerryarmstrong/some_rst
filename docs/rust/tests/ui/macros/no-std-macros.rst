@@ -1,0 +1,24 @@
+tests/ui/macros/no-std-macros.rs
+================================
+
+Last edited: 2023-03-30 20:35:59
+
+Contents:
+
+.. code-block:: rs
+
+    // compile-flags: --crate-type=lib
+// check-pass
+// issue #55482
+#![no_std]
+
+macro_rules! foo {
+    ($e:expr) => {
+        $crate::core::assert!($e);
+        $crate::core::assert_eq!($e, true);
+    };
+}
+
+pub fn foo() { foo!(true); }
+
+

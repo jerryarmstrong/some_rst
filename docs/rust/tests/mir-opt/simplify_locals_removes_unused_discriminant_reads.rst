@@ -1,0 +1,25 @@
+tests/mir-opt/simplify_locals_removes_unused_discriminant_reads.rs
+==================================================================
+
+Last edited: 2023-03-30 20:35:59
+
+Contents:
+
+.. code-block:: rs
+
+    // unit-test: SimplifyLocals-before-const-prop
+
+fn map(x: Option<Box<()>>) -> Option<Box<()>> {
+    match x {
+        None => None,
+        Some(x) => Some(x),
+    }
+}
+
+fn main() {
+    map(None);
+}
+
+// EMIT_MIR simplify_locals_removes_unused_discriminant_reads.map.SimplifyLocals-before-const-prop.diff
+
+

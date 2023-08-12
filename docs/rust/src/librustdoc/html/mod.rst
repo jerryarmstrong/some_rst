@@ -1,0 +1,26 @@
+src/librustdoc/html/mod.rs
+==========================
+
+Last edited: 2023-03-30 20:35:59
+
+Contents:
+
+.. code-block:: rs
+
+    pub(crate) mod escape;
+pub(crate) mod format;
+pub(crate) mod highlight;
+pub(crate) mod layout;
+mod length_limit;
+// used by the error-index generator, so it needs to be public
+pub mod markdown;
+pub(crate) mod render;
+pub(crate) mod sources;
+pub(crate) mod static_files;
+pub(crate) mod toc;
+mod url_parts_builder;
+
+#[cfg(test)]
+mod tests;
+
+

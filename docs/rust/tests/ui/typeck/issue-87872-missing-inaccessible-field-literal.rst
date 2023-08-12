@@ -1,0 +1,22 @@
+tests/ui/typeck/issue-87872-missing-inaccessible-field-literal.rs
+=================================================================
+
+Last edited: 2023-03-30 20:35:59
+
+Contents:
+
+.. code-block:: rs
+
+    pub mod foo {
+    pub struct Foo {
+        pub you_can_use_this_field: bool,
+        you_cant_use_this_field: bool,
+    }
+}
+
+fn main() {
+    foo::Foo {};
+    //~^ ERROR cannot construct `Foo` with struct literal syntax due to private fields
+}
+
+

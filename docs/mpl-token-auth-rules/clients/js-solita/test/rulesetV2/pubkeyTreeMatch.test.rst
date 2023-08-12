@@ -1,0 +1,42 @@
+clients/js-solita/test/rulesetV2/pubkeyTreeMatch.test.ts
+========================================================
+
+Last edited: 2023-08-01 17:12:05
+
+Contents:
+
+.. code-block:: ts
+
+    import test from 'ava';
+import { deserializeRuleV2, pubkeyTreeMatchV2, serializeRuleV2 } from '../../src';
+import { serializeString32 } from '../../src/revisions/v2/helpers';
+
+test('serialize', async (t) => {
+  const root = new Uint8Array([...Array(32)].map(() => Math.floor(Math.random() * 40)));
+  const rule = pubkeyTreeMatchV2('myAccount', 'myProof', root);
+  const serializedRule = serializeRuleV2(rule).toString('hex');
+  t.is(
+    serializedRule,
+    '10000000' + // Rule type
+      '60000000' + // Rule length
+      serializeString32('myAccount').toString('hex') + // pubkeyField
+      serializeString32('myProof').toString('hex') + // proofField
+      Buffer.from(root).toString('hex'), // root
+  );
+});
+
+test('deserialize', async (t) => {
+  const root = new Uint8Array([...Array(32)].map(() => Math.floor(Math.random() * 40)));
+  const hexBuffer =
+    '10000000' + // Rule type
+    '60000000' + // Rule length
+    serializeString32('myAccount').toString('hex') + // pubkeyField
+    serializeString32('myProof').toString('hex') + // proofField
+    Buffer.from(root).toString('hex'); // root
+
+  const buffer = Buffer.from(hexBuffer, 'hex');
+  const rule = deserializeRuleV2(buffer);
+  t.deepEqual(rule, pubkeyTreeMatchV2('myAccount', 'myProof', root));
+});
+
+

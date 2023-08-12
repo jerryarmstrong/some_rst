@@ -1,0 +1,28 @@
+compiler/rustc_target/src/spec/arm_unknown_linux_gnueabihf.rs
+=============================================================
+
+Last edited: 2023-03-30 20:35:59
+
+Contents:
+
+.. code-block:: rs
+
+    use crate::spec::{Target, TargetOptions};
+
+pub fn target() -> Target {
+    Target {
+        llvm_target: "arm-unknown-linux-gnueabihf".into(),
+        pointer_width: 32,
+        data_layout: "e-m:e-p:32:32-Fi8-i64:64-v128:64:128-a:0:32-n32-S64".into(),
+        arch: "arm".into(),
+        options: TargetOptions {
+            abi: "eabihf".into(),
+            features: "+strict-align,+v6,+vfp2,-d32".into(),
+            max_atomic_width: Some(64),
+            mcount: "\u{1}__gnu_mcount_nc".into(),
+            ..super::linux_gnu_base::opts()
+        },
+    }
+}
+
+

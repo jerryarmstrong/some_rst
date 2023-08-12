@@ -1,0 +1,55 @@
+clients/js-solita/src/revisions/v2/programOwnedTree.ts
+======================================================
+
+Last edited: 2023-08-01 17:12:05
+
+Contents:
+
+.. code-block:: ts
+
+    import { deserializeString32, serializeString32 } from './helpers';
+import { serializeRuleHeaderV2 } from './rule';
+import { RuleTypeV2 } from './ruleType';
+
+export type ProgramOwnedTreeRuleV2 = {
+  type: 'ProgramOwnedTree';
+  pubkeyField: string;
+  proofField: string;
+  root: number[];
+};
+
+export const programOwnedTreeV2 = (
+  pubkeyField: string,
+  proofField: string,
+  root: Uint8Array | number[],
+): ProgramOwnedTreeRuleV2 => ({
+  type: 'ProgramOwnedTree',
+  pubkeyField,
+  proofField,
+  root: [...root],
+});
+
+export const serializeProgramOwnedTreeV2 = (rule: ProgramOwnedTreeRuleV2): Buffer => {
+  return Buffer.concat([
+    serializeRuleHeaderV2(RuleTypeV2.ProgramOwnedTree, 96),
+    serializeString32(rule.pubkeyField),
+    serializeString32(rule.proofField),
+    new Uint8Array(rule.root),
+  ]);
+};
+
+export const deserializeProgramOwnedTreeV2 = (
+  buffer: Buffer,
+  offset = 0,
+): ProgramOwnedTreeRuleV2 => {
+  offset += 8; // Skip rule header.
+  const pubkeyField = deserializeString32(buffer, offset);
+  offset += 32;
+  const proofField = deserializeString32(buffer, offset);
+  offset += 32;
+  const root = new Uint8Array(buffer.subarray(offset, offset + 32));
+
+  return programOwnedTreeV2(pubkeyField, proofField, root);
+};
+
+

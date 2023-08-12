@@ -1,0 +1,28 @@
+packages/umi-web3js-adapters/src/Keypair.ts
+===========================================
+
+Last edited: 2023-07-27 15:49:41
+
+Contents:
+
+.. code-block:: ts
+
+    import { Keypair, publicKeyBytes } from '@metaplex-foundation/umi';
+import { Keypair as Web3JsKeypair } from '@solana/web3.js';
+import { fromWeb3JsPublicKey } from './PublicKey';
+
+export function fromWeb3JsKeypair(keypair: Web3JsKeypair): Keypair {
+  return {
+    publicKey: fromWeb3JsPublicKey(keypair.publicKey),
+    secretKey: keypair.secretKey,
+  };
+}
+
+export function toWeb3JsKeypair(keypair: Keypair): Web3JsKeypair {
+  return new Web3JsKeypair({
+    publicKey: publicKeyBytes(keypair.publicKey),
+    secretKey: keypair.secretKey,
+  });
+}
+
+

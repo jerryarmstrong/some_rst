@@ -1,0 +1,29 @@
+token/js/test/unit/decode.test.ts
+=================================
+
+Last edited: 2022-07-07 18:10:20
+
+Contents:
+
+.. code-block:: ts
+
+    import { Keypair } from '@solana/web3.js';
+import chai, { expect } from 'chai';
+import chaiAsPromised from 'chai-as-promised';
+import { createInitializeMintCloseAuthorityInstruction, TOKEN_2022_PROGRAM_ID } from '../../src';
+
+chai.use(chaiAsPromised);
+
+describe('spl-token-2022 instructions', () => {
+    it('InitializeMintCloseAuthority', () => {
+        const ix = createInitializeMintCloseAuthorityInstruction(
+            Keypair.generate().publicKey,
+            Keypair.generate().publicKey,
+            TOKEN_2022_PROGRAM_ID
+        );
+        expect(ix.programId).to.eql(TOKEN_2022_PROGRAM_ID);
+        expect(ix.keys).to.have.length(1);
+    });
+});
+
+

@@ -1,0 +1,30 @@
+tests/ui/imports/issue-99695-b.rs
+=================================
+
+Last edited: 2023-03-30 20:35:59
+
+Contents:
+
+.. code-block:: rs
+
+    // run-rustfix
+#![allow(unused, nonstandard_style)]
+mod m {
+
+    mod p {
+        #[macro_export]
+        macro_rules! nu {
+            {} => {};
+        }
+
+        pub struct other_item;
+    }
+
+    pub use self::p::{nu, other_item as _};
+    //~^ ERROR unresolved import `self::p::nu` [E0432]
+    //~| HELP a macro with this name exists at the root of the crate
+}
+
+fn main() {}
+
+

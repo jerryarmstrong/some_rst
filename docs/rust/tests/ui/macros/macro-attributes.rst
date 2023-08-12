@@ -1,0 +1,34 @@
+tests/ui/macros/macro-attributes.rs
+===================================
+
+Last edited: 2023-03-30 20:35:59
+
+Contents:
+
+.. code-block:: rs
+
+    // run-pass
+
+macro_rules! compiles_fine {
+    (#[$at:meta]) => {
+        // test that the different types of attributes work
+        #[attribute]
+        /// Documentation!
+        #[$at]
+
+        // check that the attributes are recognised by requiring this
+        // to be removed to avoid a compile error
+        #[cfg(always_remove)]
+        static MISTYPED: () = "foo";
+    }
+}
+
+// item
+compiles_fine!(#[foo]);
+
+pub fn main() {
+    // statement
+    compiles_fine!(#[bar]);
+}
+
+
